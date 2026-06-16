@@ -178,7 +178,7 @@ impl Creature {
         // still pays the movement cost for the effort it tried to make. Thrust
         // comes through the Locomotor seam, scaled by how well the body's
         // appendages suit the medium it's in (fins in water, legs on land).
-        let thrust = self.pheno.locomotion(medium).thrust;
+        let thrust = self.pheno.locomotion(medium, action.drive).thrust;
         let intent = drive * thrust * speed_mult * age_mult;
         let speed = intent * move_mult;
         let dir = Vec2::new(self.heading.cos(), self.heading.sin());

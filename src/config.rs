@@ -233,8 +233,15 @@ pub const GENOME_MAX_LEN: usize = GENOME_LEN * 2;
 // heard-signal, own energy, bias.
 pub const NN_INPUTS: usize = 12;
 pub const NN_HIDDEN: usize = 7;
-// Outputs: throttle, turn, signal (emitted call loudness).
-pub const NN_OUTPUTS: usize = 3;
+// Outputs: throttle, turn, signal (call loudness), then three appendage
+// *actuator drives* (fin / leg / wing). A drive modulates how hard the brain
+// works that appendage in locomotion: neutral output -> drive 1.0 (the body's
+// full capability, as before), so the brain can learn to boost it (sprint) or
+// idle it (rest) — body-grown actuators wired to brain output (co-evolution).
+pub const NN_OUTPUTS: usize = 6;
+pub const OUT_FIN_DRIVE: usize = 3;
+pub const OUT_LEG_DRIVE: usize = 4;
+pub const OUT_WING_DRIVE: usize = 5;
 /// Decoded weights are mapped into [-WEIGHT_SCALE, WEIGHT_SCALE].
 pub const WEIGHT_SCALE: f32 = 4.0;
 

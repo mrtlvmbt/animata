@@ -229,12 +229,22 @@ arthropod clade), not just a wobbling mean speed.
 >   gives an interior optimum (rebate below founder width). Result: brain width
 >   evolves *down* to ~3.5 (founder 7 was over-provisioned for the task); 8/8-ish
 >   seeds healthy, niches + species intact; `avg_hidden` stat (panel + headless).
-> - **NEXT options:** (1) Phase 5.2 — body-grown actuator/sensor ports: an
->   appendage registers its own NN port by tag and the brain's output drives that
->   appendage's locomotion (true body↔brain co-evolution; the last keystone bit,
->   couples brain output back into the Locomotor); (2) richer layers — in-life
->   movement + positioned benthic/aquatic food; (3) balance/visual polish (needs
->   GUI). Joint physics (fork 2) + isometry/3D remain far-future.
+> - **Phase 5.2 DONE — brain-driven appendage actuators.** Branch
+>   `phase-5.2-body-ports`. NN_OUTPUTS 3→6: three actuator-drive outputs (fin/leg/
+>   wing). `Locomotor::locomotion` takes an `AppendageDrive`; the brain's output
+>   scales each appendage's locomotor benefit, mapped so a neutral output = drive
+>   1.0 (exactly the old passive capability) — so founders are preserved and the
+>   brain *modulates* (sprint up to 1.5, idle to 0) from there. Crucially, layer
+>   membership is by appendage *presence* (`primary_layer`), not drive, so the
+>   vertical niches can't break. Verified: strata intact (und ~45–59 / air ~24–33
+>   at step 5000), appendaged 76–94%, populations 6–8k, brain ~3.6. Body↔brain
+>   co-evolution loop now closed: an appendage's value depends on the brain wiring
+>   that drives it.
+> - **NEXT options:** (1) richer layers — in-life layer movement + positioned
+>   benthic/aquatic food (give fins a spatial purpose); (2) Morphological
+>   Innovation Protection (shield fresh body mutants so controllers re-adapt);
+>   (3) balance/visual polish — needs a GUI pass. Joint physics (fork 2) and
+>   isometry/3D remain far-future.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),
