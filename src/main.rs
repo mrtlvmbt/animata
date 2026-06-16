@@ -951,7 +951,8 @@ fn draw_inspector(c: &creature::Creature, anc: &phylo::Ancestry) {
 /// positive weights, orange for negative, with opacity by magnitude.
 fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
     let nh = c.pheno.n_hidden;
-    let cols = [NN_INPUTS, nh, NN_OUTPUTS];
+    let no = c.pheno.n_outputs;
+    let cols = [NN_INPUTS, nh, no];
     let col_x = [x, x + w * 0.5, x + w];
     let node = |col: usize, i: usize| -> Vec2 {
         let n = cols[col];
@@ -962,7 +963,7 @@ fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
     // Rebuild the dense weight matrices from the synapse list (same routing as
     // the brain builder) so the inspector can draw the connection strengths.
     let mut w_ih = vec![0.0f32; NN_INPUTS * nh];
-    let mut w_ho = vec![0.0f32; nh * NN_OUTPUTS];
+    let mut w_ho = vec![0.0f32; nh * no];
     for s in &c.pheno.synapses {
         let (src, dst) = (s.src as usize, s.dst as usize);
         if src < NN_INPUTS {
@@ -991,7 +992,7 @@ fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
         }
     }
     // hidden -> output
-    for out in 0..NN_OUTPUTS {
+    for out in 0..no {
         for hdn in 0..nh {
             let a = node(1, hdn);
             let bn = node(2, out);

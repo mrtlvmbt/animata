@@ -7,7 +7,6 @@
 //! To add a new variant: implement [`Behavior`], add a [`BehaviorKind`] arm, and
 //! wire it into [`BehaviorKind::build`]. Nothing else needs to change.
 
-use crate::body::AppendageDrive;
 use crate::brain::Brain;
 use crate::config::*;
 use crate::genome::{Phenotype, Synapse};
@@ -49,8 +48,9 @@ pub struct Action {
     pub turn: f32,
     /// Emitted signal loudness this step, `0..=1` (a "call" others can hear).
     pub signal: f32,
-    /// Per-appendage actuator drive (neutral 1.0); modulates locomotion.
-    pub drive: AppendageDrive,
+    /// Per-appendage-segment actuator drive (neutral 1.0), indexed by appendage
+    /// order in the body chain; entries past the body's appendage count are unused.
+    pub drives: [f32; MAX_SEGMENTS],
     /// Vertical migration intent, `-1..1`: positive climbs toward the air,
     /// negative descends underground (gated by morphology; see `OUT_ASCEND`).
     pub vertical: f32,
@@ -80,9 +80,12 @@ impl BehaviorKind {
     /// Construct the behavior for a decoded genome.
     pub fn build(self, pheno: &Phenotype) -> Box<dyn Behavior + Send> {
         match self {
-            BehaviorKind::Neural => {
-                Box::new(NeuralBehavior::new(&pheno.synapses, pheno.leak, pheno.n_hidden))
-            }
+            BehaviorKind::Neural => Box::new(NeuralBehavior::new(
+                &pheno.synapses,
+                pheno.leak,
+                pheno.n_hidden,
+                pheno.n_outputs,
+            )),
             BehaviorKind::Rule => Box::new(RuleBehavior::new(&pheno.synapses)),
         }
     }
@@ -126,9 +129,9 @@ struct NeuralBehavior {
 }
 
 impl NeuralBehavior {
-    fn new(synapses: &[Synapse], leak: f32, n_hidden: usize) -> Self {
+    fn new(synapses: &[Synapse], leak: f32, n_hidden: usize, n_outputs: usize) -> Self {
         NeuralBehavior {
-            brain: Brain::from_synapses(synapses, leak, n_hidden),
+            brain: Brain::from_synapses(synapses, leak, n_hidden, n_outputs),
         }
     }
 }
@@ -149,20 +152,20 @@ impl Behavior for NeuralBehavior {
             s.heard, s.energy, 1.0,
         ];
         let out = self.brain.forward(&inputs);
-        let [throttle, turn, signal] = [out[0], out[1], out[2]];
         // Actuator drives: map a tanh output (-1..1) to a drive around 1.0, so a
-        // neutral brain leaves appendages at full capability and a trained one can
-        // sprint (up to 1.5) or idle (down to 0) a given limb.
+        // neutral (or unwired) port leaves an appendage at full capability and a
+        // trained one can sprint (up to 1.5) or idle (down to 0) that one limb.
         let drive = |o: f32| (1.0 + 0.5 * o).clamp(0.0, 1.5);
+        let mut drives = [1.0f32; MAX_SEGMENTS];
+        let n_app = out.len() - NN_BASE_OUTPUTS;
+        for (k, d) in drives.iter_mut().enumerate().take(n_app.min(MAX_SEGMENTS)) {
+            *d = drive(out[NN_BASE_OUTPUTS + k]);
+        }
         Action {
-            throttle,
-            turn,
-            signal: signal.max(0.0),
-            drive: AppendageDrive {
-                fin: drive(out[OUT_FIN_DRIVE]),
-                leg: drive(out[OUT_LEG_DRIVE]),
-                wing: drive(out[OUT_WING_DRIVE]),
-            },
+            throttle: out[OUT_THROTTLE],
+            turn: out[OUT_TURN],
+            signal: out[OUT_SIGNAL].max(0.0),
+            drives,
             vertical: out[OUT_ASCEND],
         }
     }
@@ -208,7 +211,7 @@ impl Behavior for RuleBehavior {
                 throttle: 1.0,
                 turn: (-away / PI * self.steer_gain).clamp(-1.0, 1.0),
                 signal: if s.threat_rel_angle.is_some() { 1.0 } else { 0.0 },
-                drive: AppendageDrive::full(),
+                drives: [1.0; MAX_SEGMENTS],
                 vertical: 0.0,
             };
         }
@@ -217,14 +220,14 @@ impl Behavior for RuleBehavior {
                 throttle: 1.0,
                 turn: (rel / PI * self.steer_gain).clamp(-1.0, 1.0),
                 signal: 0.0,
-                drive: AppendageDrive::full(),
+                drives: [1.0; MAX_SEGMENTS],
                 vertical: 0.0,
             },
             None => Action {
                 throttle: self.hunger_throttle,
                 turn: gen_range(-self.wander, self.wander),
                 signal: 0.0,
-                drive: AppendageDrive::full(),
+                drives: [1.0; MAX_SEGMENTS],
                 vertical: 0.0,
             },
         }

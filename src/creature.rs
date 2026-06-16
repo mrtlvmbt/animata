@@ -177,8 +177,15 @@ impl Creature {
         // Terrain drag scales the distance actually covered, but the creature
         // still pays the movement cost for the effort it tried to make. Thrust
         // comes through the Locomotor seam, scaled by how well the body's
-        // appendages suit the medium it's in (fins in water, legs on land).
-        let thrust = self.pheno.locomotion(medium, action.drive).thrust;
+        // appendages suit the medium it's in (fins in water, legs on land). Each
+        // appendage segment has its own brain-driven actuator port (drives[k]).
+        let n_app = self
+            .pheno
+            .segments
+            .iter()
+            .filter(|s| s.appendage != Appendage::None)
+            .count();
+        let thrust = self.pheno.locomotion(medium, &action.drives[..n_app]).thrust;
         let intent = drive * thrust * speed_mult * age_mult;
         let speed = intent * move_mult;
         let dir = Vec2::new(self.heading.cos(), self.heading.sin());
@@ -215,16 +222,10 @@ impl Creature {
         // and appendage adds upkeep, so a longer/limbed body must earn its keep
         // through locomotion — the brake that keeps chain length at an interior
         // optimum (a finless single-segment founder pays neither term).
-        let n_app = self
-            .pheno
-            .segments
-            .iter()
-            .filter(|s| s.appendage != Appendage::None)
-            .count() as f32;
         let body = 1.0
             + self.pheno.radius * 0.08
             + SEGMENT_UPKEEP * self.pheno.segments.len() as f32
-            + APPENDAGE_UPKEEP * n_app
+            + APPENDAGE_UPKEEP * n_app as f32
             + NEURON_UPKEEP * (self.pheno.n_hidden as f32 - FOUNDER_HIDDEN as f32);
         let diet_mult = lerp(1.0, PREDATOR_METAB_MULT, c);
         // A showy ornament is a survival handicap (extra upkeep). Squared so the
