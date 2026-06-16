@@ -26,6 +26,17 @@ impl SpatialGrid {
     /// Refill the grid for a new point set, reusing existing cell allocations
     /// (clear-and-push) so the per-step grid build does no fresh heap allocation.
     pub fn rebuild(&mut self, points: &[Vec2], width: f32, height: f32, cell: f32) {
+        self.begin(width, height, cell);
+        for (i, &p) in points.iter().enumerate() {
+            self.push_point(i, p);
+        }
+    }
+
+    /// Reset grid dimensions and clear all cell lists (keeping allocations).
+    /// Follow with [`SpatialGrid::push_point`] per point. Lets a caller spread one
+    /// point set across several grids (e.g. one food grid per vertical layer) in a
+    /// single pass instead of rescanning the points for each grid.
+    pub fn begin(&mut self, width: f32, height: f32, cell: f32) {
         self.cols = ((width / cell).ceil() as i32).max(1);
         self.rows = ((height / cell).ceil() as i32).max(1);
         self.cell = cell;
@@ -34,10 +45,12 @@ impl SpatialGrid {
         for c in &mut self.cells {
             c.clear();
         }
-        for (i, &p) in points.iter().enumerate() {
-            let (cx, cy) = self.cell_of(p);
-            self.cells[(cy * self.cols + cx) as usize].push(i);
-        }
+    }
+
+    /// Insert point `idx` (at world position `p`) into its cell.
+    pub fn push_point(&mut self, idx: usize, p: Vec2) {
+        let (cx, cy) = self.cell_of(p);
+        self.cells[(cy * self.cols + cx) as usize].push(idx);
     }
 
     fn cell_of(&self, p: Vec2) -> (i32, i32) {
@@ -184,6 +197,25 @@ impl SpatialGrid {
                 }
                 for &idx in &self.cells[(gy * self.cols + gx) as usize] {
                     f(idx);
+                }
+            }
+        }
+    }
+
+    /// Like [`for_each_near`], but `f` returns `true` to stop the scan early.
+    /// Lets a "first match within reach" query (eat / hunt) quit as soon as it
+    /// finds its target instead of visiting the whole 3x3 block.
+    pub fn for_each_near_until(&self, from: Vec2, mut f: impl FnMut(usize) -> bool) {
+        let (cx, cy) = self.cell_of(from);
+        for gy in (cy - 1)..=(cy + 1) {
+            for gx in (cx - 1)..=(cx + 1) {
+                if gx < 0 || gy < 0 || gx >= self.cols || gy >= self.rows {
+                    continue;
+                }
+                for &idx in &self.cells[(gy * self.cols + gx) as usize] {
+                    if f(idx) {
+                        return;
+                    }
                 }
             }
         }

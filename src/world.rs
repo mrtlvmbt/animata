@@ -75,7 +75,9 @@ pub struct World {
     /// Per-phase timing accumulators for profiling.
     pub profile: Profile,
     // Reusable per-step scratch (pooled to avoid heap churn each step).
-    pub g_food: SpatialGrid,
+    /// One food grid per vertical layer, so a creature scans only pellets on its
+    /// own layer (eat/sense) instead of filtering out the other layers' pellets.
+    pub g_food: Vec<SpatialGrid>,
     pub g_cre: SpatialGrid,
     pub buf_cpos: Vec<Vec2>,
     pub buf_carns: Vec<f32>,
@@ -169,7 +171,7 @@ impl World {
             drought_until: 0,
             circulating_strain,
             profile: Profile::default(),
-            g_food: SpatialGrid::default(),
+            g_food: Vec::new(),
             g_cre: SpatialGrid::default(),
             buf_cpos: Vec::new(),
             buf_carns: Vec::new(),
@@ -226,7 +228,7 @@ impl World {
 
         // Take pooled scratch out of `self` so the phase methods can borrow `self`
         // freely; everything is returned at the end of the step (no per-step alloc).
-        let mut food_grid = std::mem::take(&mut self.g_food);
+        let mut food_grids = std::mem::take(&mut self.g_food);
         let mut cgrid = std::mem::take(&mut self.g_cre);
         let mut cpos = std::mem::take(&mut self.buf_cpos);
         let mut carns = std::mem::take(&mut self.buf_carns);
@@ -239,15 +241,23 @@ impl World {
         // Vertical layer of each creature (its morphological stratum): sensing,
         // eating and hunting are gated to a creature's own layer.
         let clayers: Vec<u8> = self.creatures.iter().map(|c| c.layer).collect();
-        food_grid.rebuild(&self.food, WORLD_W, WORLD_H, GRID_CELL);
+        // One food grid per layer, filled in a single pass over the pellets (each
+        // grid still indexes into the global `food`/`flavor` vectors).
+        food_grids.resize_with(N_LAYERS, SpatialGrid::default);
+        for g in &mut food_grids {
+            g.begin(WORLD_W, WORLD_H, GRID_CELL);
+        }
+        for (i, &p) in self.food.iter().enumerate() {
+            food_grids[self.food_layer[i] as usize].push_point(i, p);
+        }
         cgrid.rebuild(&cpos, WORLD_W, WORLD_H, GRID_CELL);
         lap(&mut self.profile.grids);
 
-        self.sense_into(&mut targets, &food_grid, &cgrid, &cpos, &carns, &clayers);
+        self.sense_into(&mut targets, &food_grids, &cgrid, &cpos, &carns, &clayers);
         lap(&mut self.profile.query);
         self.act_all(&targets);
         lap(&mut self.profile.act);
-        self.eat_food(&food_grid);
+        self.eat_food(&food_grids);
         lap(&mut self.profile.eat);
         let killed = self.hunt(&cgrid, &cpos, &carns, &clayers);
         lap(&mut self.profile.hunt);
@@ -261,7 +271,7 @@ impl World {
         self.profile.steps += 1;
 
         // Return pooled scratch for reuse next step.
-        self.g_food = food_grid;
+        self.g_food = food_grids;
         self.g_cre = cgrid;
         self.buf_cpos = cpos;
         self.buf_carns = carns;
@@ -347,7 +357,7 @@ impl World {
     fn sense_into(
         &self,
         out: &mut Vec<([Option<Vec2>; 3], f32)>,
-        food_grid: &SpatialGrid,
+        food_grids: &[SpatialGrid],
         cgrid: &SpatialGrid,
         cpos: &[Vec2],
         carns: &[f32],
@@ -361,7 +371,6 @@ impl World {
         let niches: Vec<f32> = self.creatures.iter().map(|c| c.pheno.diet_niche).collect();
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
-        let food_layers: &[u8] = &self.food_layer;
         // |flavor - niche| beyond this digests below MIN_EAT_EFF -> ignore it.
         let max_flavor_d2 = -2.0 * DIET_WIDTH * DIET_WIDTH * (MIN_EAT_EFF as f32).ln();
 
@@ -386,14 +395,13 @@ impl World {
                 );
                 let food = if ci < 0.5 {
                     // Herbivores sense the nearest digestible pellet *on their own
-                    // layer* — foraging is spatial on every layer.
+                    // layer* — its grid only holds that layer's pellets, so the
+                    // predicate just checks digestibility (no layer filtering).
                     let niche = niches[i];
-                    food_grid
+                    food_grids[li as usize]
                         .nearest_within(pellets, pos, sense, |j| {
-                            food_layers[j] == li && {
-                                let d = flavors[j] - niche;
-                                d * d <= max_flavor_d2
-                            }
+                            let d = flavors[j] - niche;
+                            d * d <= max_flavor_d2
                         })
                         .map(|j| pellets[j] - pos)
                 } else {
@@ -442,10 +450,9 @@ impl World {
     /// Any creature eats a pellet within reach (one per step), gaining energy
     /// scaled by its herbivory `(1 - carnivory)`. Near-pure carnivores ignore
     /// pellets so they don't waste them.
-    fn eat_food(&mut self, grid: &SpatialGrid) {
+    fn eat_food(&mut self, grids: &[SpatialGrid]) {
         let food = &self.food;
         let flavor = &self.flavor;
-        let food_layer = &self.food_layer;
         let mut eaten = vec![false; food.len()];
         for c in &mut self.creatures {
             let herbivory = 1.0 - c.carnivory();
@@ -455,18 +462,18 @@ impl World {
             let reach = c.pheno.radius + FOOD_RADIUS;
             let reach2 = reach * reach;
             let pos = c.pos;
-            let layer = c.layer;
-            // Nearest uneaten pellet within reach, on this creature's layer, that
-            // it can digest.
+            // Nearest uneaten pellet within reach that it can digest — its layer's
+            // grid only holds that layer's pellets, so no layer filtering needed.
             let mut got: Option<usize> = None;
-            grid.for_each_near(pos, |idx| {
-                if got.is_none()
-                    && !eaten[idx]
-                    && food_layer[idx] == layer
+            grids[c.layer as usize].for_each_near_until(pos, |idx| {
+                if !eaten[idx]
                     && (food[idx] - pos).length_squared() <= reach2
                     && c.pheno.diet_efficiency(flavor[idx]) >= MIN_EAT_EFF
                 {
                     got = Some(idx);
+                    true // found it — stop scanning
+                } else {
+                    false
                 }
             });
             if let Some(idx) = got {
@@ -510,15 +517,17 @@ impl World {
             let reach = self.creatures[i].pheno.radius + PREDATOR_CATCH_PAD;
             let reach2 = reach * reach;
             let mut victim: Option<usize> = None;
-            cgrid.for_each_near(pos, |k| {
-                if victim.is_none()
-                    && k != i
+            cgrid.for_each_near_until(pos, |k| {
+                if k != i
                     && !killed[k]
                     && clayers[k] == li
                     && carns[k] <= ci - PREY_MARGIN
                     && (cpos[k] - pos).length_squared() <= reach2
                 {
                     victim = Some(k);
+                    true
+                } else {
+                    false
                 }
             });
             if let Some(k) = victim {
