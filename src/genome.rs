@@ -15,7 +15,22 @@ pub struct Genome {
     pub nt: Vec<u8>,
 }
 
-/// Decoded, ready-to-use traits plus raw neural-network weights.
+/// One decoded synapse. Ports are *tags* (indices into the port space), not
+/// array offsets, so body-grown ports can be added later without disturbing
+/// existing connections.
+///
+/// `src` indexes the source port space (`0..SRC_PORTS`): values below
+/// `NN_INPUTS` are input ports, the rest are hidden units (`src - NN_INPUTS`).
+/// `dst` indexes the destination space (`0..DST_PORTS`): values below
+/// `NN_HIDDEN` are hidden units, the rest are output ports (`dst - NN_HIDDEN`).
+#[derive(Clone, Copy)]
+pub struct Synapse {
+    pub src: u8,
+    pub dst: u8,
+    pub w: f32,
+}
+
+/// Decoded, ready-to-use traits plus the brain's synapse list.
 #[derive(Clone)]
 pub struct Phenotype {
     pub radius: f32,
@@ -37,12 +52,43 @@ pub struct Phenotype {
     pub diet_niche: f32,
     /// Memory-leak γ (LEAK_RANGE) for the leaky-integrator hidden state.
     pub leak: f32,
-    pub weights: Vec<f32>,
+    /// Brain wiring: marker-decoded synapses (variable count).
+    pub synapses: Vec<Synapse>,
 }
 
 impl Genome {
+    /// A founder genome: a random body-gene block followed by a *constructed*
+    /// dense brain — one synapse record for every input->hidden, hidden->hidden
+    /// and hidden->output connection, each with a random weight. Random nucleotides
+    /// alone would rarely contain enough start codons to wire a working brain, so
+    /// founders are built explicitly; mutation then sparsifies/rewires from there.
     pub fn random() -> Self {
-        let nt = (0..GENOME_LEN).map(|_| gen_range(0u32, 4) as u8).collect();
+        let mut nt = Vec::with_capacity(GENOME_LEN);
+        // Body-gene block (the world later pokes specific body genes by index).
+        for _ in 0..BODY_GENES * NT_PER_GENE {
+            nt.push(gen_range(0u32, 4) as u8);
+        }
+        let mut emit = |src: usize, dst: usize| {
+            nt.extend_from_slice(&SYNAPSE_START);
+            nt.extend_from_slice(&gene_nt(src as u32));
+            nt.extend_from_slice(&gene_nt(dst as u32));
+            nt.extend_from_slice(&gene_nt(gen_range(0u32, 256)));
+        };
+        for i in 0..NN_INPUTS {
+            for h in 0..NN_HIDDEN {
+                emit(i, h); // input i -> hidden h
+            }
+        }
+        for p in 0..NN_HIDDEN {
+            for h in 0..NN_HIDDEN {
+                emit(NN_INPUTS + p, h); // hidden p -> hidden h (recurrent)
+            }
+        }
+        for p in 0..NN_HIDDEN {
+            for o in 0..NN_OUTPUTS {
+                emit(NN_INPUTS + p, NN_HIDDEN + o); // hidden p -> output o
+            }
+        }
         Genome { nt }
     }
 
@@ -84,17 +130,33 @@ impl Genome {
         Genome { nt: clamp_len(nt) }
     }
 
-    /// Read the gene at `index` as a base-4 number in `0..=255`. Nucleotides
-    /// past the end of a (possibly shortened) genome read as 0, so decoding
-    /// always yields a full phenotype regardless of length.
+    /// Read the body gene at `index` as a base-4 number in `0..=255`.
     fn gene_u8(&self, index: usize) -> u8 {
-        let start = index * NT_PER_GENE;
-        let mut v: u32 = 0;
-        for i in 0..NT_PER_GENE {
-            v = v * 4 + self.nt.get(start + i).copied().unwrap_or(0) as u32;
+        gene_at(&self.nt, index * NT_PER_GENE)
+    }
+
+    /// Scan the genome for marker-delimited synapse records and decode them.
+    /// The scan is at nt granularity (any reading frame), so an indel only adds,
+    /// drops or shifts individual records — it never frameshifts every weight.
+    fn scan_synapses(&self) -> Vec<Synapse> {
+        let nt = &self.nt;
+        let mut syn = Vec::new();
+        let mut i = 0usize;
+        while i + SYNAPSE_RECORD_NT <= nt.len() {
+            if nt[i] == SYNAPSE_START[0]
+                && nt[i + 1] == SYNAPSE_START[1]
+                && nt[i + 2] == SYNAPSE_START[2]
+            {
+                let src = (gene_at(nt, i + 3) as usize % SRC_PORTS) as u8;
+                let dst = (gene_at(nt, i + 3 + NT_PER_GENE) as usize % DST_PORTS) as u8;
+                let wv = gene_at(nt, i + 3 + 2 * NT_PER_GENE) as f32 / 255.0;
+                syn.push(Synapse { src, dst, w: (wv * 2.0 - 1.0) * WEIGHT_SCALE });
+                i += SYNAPSE_RECORD_NT;
+            } else {
+                i += 1;
+            }
         }
-        // NT_PER_GENE == 4 -> 0..=255; clamp defensively for other configs.
-        v.min(255) as u8
+        syn
     }
 
     pub fn decode(&self) -> Phenotype {
@@ -113,12 +175,7 @@ impl Genome {
         let diet_niche = g(12);
         let leak = lerp(LEAK_RANGE, g(13));
 
-        let weights = (0..NN_WEIGHTS)
-            .map(|w| {
-                let v = g(BODY_GENES + w); // 0..1
-                (v * 2.0 - 1.0) * WEIGHT_SCALE // -SCALE..SCALE
-            })
-            .collect();
+        let synapses = self.scan_synapses();
 
         Phenotype {
             radius,
@@ -133,7 +190,7 @@ impl Genome {
             resistance,
             diet_niche,
             leak,
-            weights,
+            synapses,
         }
     }
 
@@ -172,12 +229,43 @@ impl Phenotype {
     }
 
     pub fn recurrent_gain(&self) -> f32 {
-        let ih = NN_INPUTS * NN_HIDDEN;
-        let hh = NN_HIDDEN * NN_HIDDEN;
-        let slice = &self.weights[ih..ih + hh];
-        let ss: f32 = slice.iter().map(|w| w * w).sum();
-        ((ss / hh as f32).sqrt() / WEIGHT_SCALE).min(1.0)
+        // RMS magnitude of the recurrent (hidden->hidden) synapses, normalized.
+        let mut ss = 0.0f32;
+        let mut n = 0usize;
+        for s in &self.synapses {
+            if s.src as usize >= NN_INPUTS && (s.dst as usize) < NN_HIDDEN {
+                ss += s.w * s.w;
+                n += 1;
+            }
+        }
+        if n == 0 {
+            0.0
+        } else {
+            ((ss / n as f32).sqrt() / WEIGHT_SCALE).min(1.0)
+        }
     }
+}
+
+/// Read `NT_PER_GENE` nucleotides starting at nt offset `pos` as a base-4 number
+/// in `0..=255`. Reads past the end yield 0, so decoding tolerates short genomes.
+fn gene_at(nt: &[u8], pos: usize) -> u8 {
+    let mut v: u32 = 0;
+    for k in 0..NT_PER_GENE {
+        v = v * 4 + nt.get(pos + k).copied().unwrap_or(0) as u32;
+    }
+    v.min(255) as u8
+}
+
+/// Encode `v` as `NT_PER_GENE` base-4 nucleotides (big-endian), the inverse of
+/// [`gene_at`] for values in `0..=255`. Used to construct founder genomes.
+fn gene_nt(v: u32) -> [u8; NT_PER_GENE] {
+    let mut out = [0u8; NT_PER_GENE];
+    let mut x = v;
+    for k in (0..NT_PER_GENE).rev() {
+        out[k] = (x % 4) as u8;
+        x /= 4;
+    }
+    out
 }
 
 /// Map `t` in `0..=1` into the inclusive range `(lo, hi)`.
@@ -228,10 +316,12 @@ mod tests {
         let g = Genome::random();
         let p = g.decode();
         let p2 = g.decode();
-        assert_eq!(p.weights.len(), NN_WEIGHTS);
+        // A founder constructs the dense connection set (a stray start codon in
+        // the random body block can decode to a few extra synapses — harmless).
+        assert!(p.synapses.len() >= FOUNDER_SYNAPSES);
         // Deterministic for same genome.
         assert_eq!(p.radius, p2.radius);
-        assert_eq!(p.weights, p2.weights);
+        assert_eq!(p.synapses.len(), p2.synapses.len());
         // Traits within configured ranges.
         assert!(p.radius >= RADIUS_RANGE.0 && p.radius <= RADIUS_RANGE.1);
         assert!(p.max_speed >= SPEED_RANGE.0 && p.max_speed <= SPEED_RANGE.1);
@@ -239,8 +329,9 @@ mod tests {
         assert!(p.metabolism >= METAB_RANGE.0 && p.metabolism <= METAB_RANGE.1);
         assert!(p.prime >= LONGEVITY_RANGE.0 && p.prime <= LONGEVITY_RANGE.1);
         assert!((0.0..=1.0).contains(&p.carnivory));
-        for &w in &p.weights {
-            assert!(w >= -WEIGHT_SCALE && w <= WEIGHT_SCALE);
+        for s in &p.synapses {
+            assert!(s.w >= -WEIGHT_SCALE && s.w <= WEIGHT_SCALE);
+            assert!((s.src as usize) < SRC_PORTS && (s.dst as usize) < DST_PORTS);
         }
     }
 
@@ -284,10 +375,11 @@ mod tests {
     #[test]
     fn decode_handles_short_genome() {
         // A genome far shorter than the canonical length still decodes fully:
-        // missing nucleotides read as 0, weights count is exact.
+        // body traits read (missing nt as 0); too short to hold any synapse
+        // record, so the brain is simply empty rather than a decode failure.
         let g = Genome { nt: vec![1, 2, 3, 0, 2] };
         let p = g.decode();
-        assert_eq!(p.weights.len(), NN_WEIGHTS);
+        assert!(p.synapses.is_empty());
         assert!(p.radius >= RADIUS_RANGE.0 && p.radius <= RADIUS_RANGE.1);
         assert!(p.max_speed >= SPEED_RANGE.0 && p.max_speed <= SPEED_RANGE.1);
     }

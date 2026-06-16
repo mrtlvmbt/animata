@@ -219,7 +219,8 @@ mod tests {
         assert_eq!(a.genome.nt, b.genome.nt);
         assert_eq!(a.generation, b.generation);
         assert_eq!(a.pos, b.pos);
-        assert_eq!(a.pheno.weights, b.pheno.weights);
+        // Phenotype (incl. the marker-decoded brain) re-derives from the genome.
+        assert_eq!(a.pheno.synapses.len(), b.pheno.synapses.len());
 
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(tree_path(path));

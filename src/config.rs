@@ -241,9 +241,32 @@ pub const WEIGHT_SCALE: f32 = 4.0;
 /// Body-trait genes: radius, speed, sense, metabolism, R, G, B, longevity,
 /// carnivory, ornament, preference, resistance, diet_niche, memory-leak γ.
 pub const BODY_GENES: usize = 14;
-// input->hidden + recurrent hidden->hidden + hidden->output.
-pub const NN_WEIGHTS: usize =
-    NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS;
-/// Total genome length in nucleotides.
-pub const GENOME_GENES: usize = BODY_GENES + NN_WEIGHTS;
-pub const GENOME_LEN: usize = GENOME_GENES * NT_PER_GENE;
+
+// ---- Brain wiring: marker/tag synapse encoding ----
+// The brain is no longer a fixed contiguous weight block. After the body genes,
+// the genome holds a variable list of *synapse records*, each delimited by a
+// start codon. A record names a source port and a destination port (by tag) plus
+// a weight. The brain is assembled by routing each record's weight into a dense
+// matrix slot for its (src,dst) pair — so the hot-loop forward pass stays a dense
+// matmul, but the genome representation is indel-robust (an insertion/deletion
+// shifts or drops whole records instead of frameshifting every weight) and ready
+// for body-grown ports (new sensors/actuators register new tags) in Phase 2.
+//
+/// Source ports a synapse may read from: the inputs, then the hidden units.
+pub const SRC_PORTS: usize = NN_INPUTS + NN_HIDDEN; // 19
+/// Destination ports a synapse may drive: the hidden units, then the outputs.
+pub const DST_PORTS: usize = NN_HIDDEN + NN_OUTPUTS; // 10
+/// Start codon (nt triplet) marking the head of a synapse record. The genome is
+/// scanned at nt granularity (any frame), so indels add/drop whole synapses.
+pub const SYNAPSE_START: [u8; 3] = [3, 3, 2]; // T,T,G
+/// nt consumed by one synapse record: start(3) + src gene + dst gene + weight gene.
+pub const SYNAPSE_RECORD_NT: usize = 3 + 3 * NT_PER_GENE; // 15
+/// Founder brain = a dense connection set (every input->hidden, hidden->hidden,
+/// hidden->output) emitted as that many synapse records.
+pub const FOUNDER_SYNAPSES: usize =
+    NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS; // 154
+
+/// Canonical genome length (nt): fixed body-gene block + the founder's synapse
+/// records. Indels then push length around within the clamp band below.
+pub const GENOME_LEN: usize =
+    BODY_GENES * NT_PER_GENE + FOUNDER_SYNAPSES * SYNAPSE_RECORD_NT;

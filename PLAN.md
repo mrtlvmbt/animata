@@ -158,11 +158,20 @@ arthropod clade), not just a wobbling mean speed.
 >   `Medium`/`LocomotionStats`/`Locomotor` trait; `creature.rs` movement routes
 >   thrust through `pheno.locomotion(Medium::Ground)`. Byte-identical (seed 6
 >   reproduces 1536/2933/8212/11835 exactly), 23 tests green, bin clean.
-> - **NEXT — Phase 1 sub-step 2: marker/tag genome (the keystone).** Big delicate
->   rewrite of `genome.rs` decode + `brain.rs` assembly: start-codon-delimited
->   segment/neuron/synapse records, dynamic brain ports wired by tag, founders
->   decoding byte-identical to today's 12→7→3 brain. Deserves its own focused
->   pass.
+> - **Phase 1 sub-step 2 DONE — marker/tag genome (the keystone).** Branch
+>   `phase-1-marker-genome`. Brain weights are no longer a fixed contiguous block:
+>   the genome holds start-codon-delimited **synapse records** (`SYNAPSE_START`,
+>   src/dst port tags + weight), nt-scanned at any frame so indels add/drop whole
+>   synapses instead of frameshifting every weight. `Brain::from_synapses` routes
+>   records into dense matrices (forward stays a matmul). Founders constructed via
+>   `Genome::random()` (dense 154-conn brain). Encoding change re-rolls the
+>   RNG→genome map, so exact trajectory numbers differ (expected). Validated: 8/8
+>   seeds survive 4000 steps (pop 1.5k–11.8k, predators evolve, species 83–419,
+>   mem ~0.48), 23 tests green, bin clean.
+> - **NOT YET (still Phase 1/2 keystone work):** *dynamic* ports from body-grown
+>   sensors/actuators (currently fixed 12/7/3 port set); evolvable hidden-neuron
+>   count; segment chain in the genome. These land with Phase 2 bodies.
+> - **NEXT — Phase 2: segmented bodies + appendages + medium physics + layers.**
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),
