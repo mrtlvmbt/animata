@@ -1,58 +1,57 @@
-//! Lightweight species detection by clustering creatures in normalized
-//! phenotype space (leader / threshold clustering — adaptive species count, no
-//! fixed k). Run periodically, not every step. Species ids are stable across
-//! updates as long as a cluster persists; the UI colors creatures by species id.
+//! Species detection grounded in the **Biological Species Concept**: a species
+//! is a group that shares gene flow, i.e. whose members can interbreed. We label
+//! it with exactly the reproductive-isolation barriers that
+//! [`crate::world::World::reproduce`] enforces when choosing a mate — so the
+//! cluster is a real gene-flow group, not a post-hoc morphological cluster:
+//!   * **architecture** ([`plan_key`]): different body plans can't interbreed
+//!     (a mechanical/genetic prezygotic barrier) — a hard partition.
+//!   * **mate-recognition traits** ([`feature`]): diet assortment (carnivory)
+//!     and the sexual display (ornament) that gate who mates with whom.
+//! Ecological traits that *don't* isolate (speed, size, metabolism) are
+//! deliberately absent: two creatures that differ only in size still interbreed,
+//! so by the BSC they are one species. Leader/threshold clustering (adaptive
+//! count, no fixed k), run periodically; the UI colours creatures by species id.
 
 use crate::config::*;
 use crate::creature::Creature;
 use crate::genome::{Appendage, Phenotype};
 
-/// Number of phenotype features used for clustering: 9 classic traits + 5
-/// morphological ones (segment count + appendage composition), so two creatures
-/// with the same speed/size/colour but different *body plans* (e.g. a legged
-/// walker vs a winged flier) cluster as distinct species. Baseline circular
-/// bodies score 0 on the morphology axes, so they cluster exactly as before.
-const K: usize = 14;
-/// Max distance (in normalized feature space) to count as the same species.
-/// Raised from the pre-morphology 0.34: the 5 added body-plan axes partition the
-/// population (a flier and a walker can't share a species), which multiplies the
-/// cluster count, so the base radius is widened to keep species at the level of
-/// interpretable macro-classes rather than fine trait micro-clusters. Binary
-/// appendage axes sit 1.0 apart, far beyond this, so body plans still separate.
-const THRESHOLD: f32 = 0.5;
+/// Mate-recognition features used for soft clustering *within* a body plan: the
+/// continuous traits that gate who interbreeds — diet (carnivory) and the sexual
+/// display (ornament). The architecture is a hard partition (see [`plan_key`]),
+/// so these axes only separate creatures that already share a body plan.
+const K: usize = 2;
+/// Max distance (in mate-recognition space) to count as the same species, given
+/// the same body plan. Sized to the diet barrier ([`MATE_CARN_WINDOW`]) so the
+/// label matches who actually interbreeds.
+const THRESHOLD: f32 = 0.28;
 
-/// Normalized phenotype feature vector (each component ~0..1).
-fn feature(p: &Phenotype) -> [f32; K] {
-    let n = |v: f32, r: (f32, f32)| ((v - r.0) / (r.1 - r.0)).clamp(0.0, 1.0);
-    // Appendage *presence* (not fraction): a body plan is "has legs / has fins /
-    // …", so two creatures with the same kind of limb cluster together regardless
-    // of how many — separating major plans without fragmenting on limb count.
-    let has = |kind: Appendage| {
-        if p.segments.iter().any(|s| s.appendage == kind) {
-            1.0
-        } else {
-            0.0
+/// Discrete signature of a body's **gross architecture** — the reproductive
+/// barrier level. It is the set of appendage kinds the body *has* (presence, not
+/// order or count) plus a coarse body-elongation bucket. So a winged flier, a
+/// burrowing digger, a finned swimmer and a long appendage-less worm are each
+/// their own architecture and can't interbreed, but two bodies that both "have
+/// legs and fins" share it regardless of limb order or how many of each — because
+/// limb order/count is not a real mating barrier, gross plan is. Founders (no
+/// segment records) all map to key 0. Two species with different keys never merge.
+pub fn plan_key(p: &Phenotype) -> u64 {
+    // Bit per appendage kind that is present anywhere in the chain.
+    let mut mask = 0u64;
+    for s in &p.segments {
+        if s.appendage != Appendage::None {
+            mask |= 1 << (s.appendage as u64);
         }
-    };
-    // Coarse complexity bucket so a 2-segment and 3-segment body don't split, but
-    // a worm-length chain reads as a different plan.
-    let complexity = (p.segments.len() as f32 / MAX_SEGMENTS as f32).min(1.0);
-    [
-        n(p.max_speed, SPEED_RANGE),
-        n(p.sense_range, SENSE_RANGE),
-        n(p.radius, RADIUS_RANGE),
-        n(p.metabolism, METAB_RANGE),
-        p.carnivory,
-        n(p.prime, LONGEVITY_RANGE),
-        p.color.0,
-        p.color.1,
-        p.color.2,
-        (complexity * 3.0).round() / 3.0,
-        has(Appendage::Fin),
-        has(Appendage::Leg),
-        has(Appendage::Wing),
-        has(Appendage::Burrow),
-    ]
+    }
+    // Coarse body-length bucket distinguishes a long multi-segment chain (a worm)
+    // from a compact body without splitting on every added segment.
+    let bucket = (p.segments.len() / 2).min(4) as u64;
+    mask * 5 + bucket
+}
+
+/// Mate-recognition feature vector (each component 0..1): the traits mating
+/// actually selects on — diet assortment and the sexual display.
+fn feature(p: &Phenotype) -> [f32; K] {
+    [p.carnivory, p.ornament]
 }
 
 fn dist2(a: &[f32; K], b: &[f32; K]) -> f32 {
@@ -61,6 +60,9 @@ fn dist2(a: &[f32; K], b: &[f32; K]) -> f32 {
 
 struct Species {
     id: u32,
+    /// Topological body-plan key; a creature can only join a species with the
+    /// same plan, so species are partitioned by architecture first.
+    plan: u64,
     centroid: [f32; K],
     count: usize,
 }
@@ -97,26 +99,32 @@ impl Speciation {
         let keep2 = (THRESHOLD * 1.4).powi(2);
         for c in creatures.iter_mut() {
             let f = feature(&c.pheno);
-            // Nearest existing species.
+            let pk = plan_key(&c.pheno);
+            // Nearest existing species *of the same body plan* (architecture is a
+            // hard partition — a flier and a walker never share a species).
             let mut best = (usize::MAX, f32::INFINITY);
             for (i, s) in self.species.iter().enumerate() {
+                if s.plan != pk {
+                    continue;
+                }
                 let d = dist2(&f, &s.centroid);
                 if d < best.1 {
                     best = (i, d);
                 }
             }
-            // Stay in the inherited species if it still exists and is in range.
+            // Stay in the inherited species if it still exists, shares this body
+            // plan, and is in range (a creature whose plan mutated must leave).
             let inherited = self
                 .species
                 .iter()
-                .position(|s| s.id == c.species_id)
+                .position(|s| s.id == c.species_id && s.plan == pk)
                 .filter(|&i| dist2(&f, &self.species[i].centroid) <= keep2);
             let idx = if let Some(i) = inherited {
                 i
             } else if best.1 <= thr2 {
                 best.0
             } else {
-                self.species.push(Species { id: self.next_id, centroid: f, count: 0 });
+                self.species.push(Species { id: self.next_id, plan: pk, centroid: f, count: 0 });
                 sums.push([0.0; K]);
                 self.next_id = self.next_id.wrapping_add(1);
                 self.species.len() - 1
@@ -138,15 +146,16 @@ impl Speciation {
             for k in 0..K {
                 cen[k] = sums[i][k] / s.count as f32;
             }
-            kept.push(Species { id: s.id, centroid: cen, count: s.count });
+            kept.push(Species { id: s.id, plan: s.plan, centroid: cen, count: s.count });
         }
         // Merge species whose centroids drifted close together (keep the lower id).
+        // Only same-plan species may merge — body plans stay separate taxa.
         let merge2 = (THRESHOLD * 0.6).powi(2);
         let mut i = 0;
         while i < kept.len() {
             let mut j = i + 1;
             while j < kept.len() {
-                if dist2(&kept[i].centroid, &kept[j].centroid) < merge2 {
+                if kept[i].plan == kept[j].plan && dist2(&kept[i].centroid, &kept[j].centroid) < merge2 {
                     if kept[j].id < kept[i].id {
                         kept[i].id = kept[j].id;
                     }
