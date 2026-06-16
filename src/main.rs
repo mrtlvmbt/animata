@@ -587,7 +587,7 @@ fn draw_panel(world: &World) {
     let gh = PANEL_H - pad * 2.0;
 
     // Normalized trait curves (0..1) + populations scaled to caps.
-    let series: [(Color, fn(&Snapshot) -> f32); 21] = [
+    let series: [(Color, fn(&Snapshot) -> f32); 22] = [
         (Color::new(0.9, 0.9, 0.9, 1.0), |s| {
             (s.herbivores as f32 / POP_CAP as f32).min(1.0)
         }),
@@ -641,6 +641,8 @@ fn draw_panel(world: &World) {
         (Color::new(0.85, 0.9, 1.0, 1.0), |s| s.frac_air),
         // Mean hidden-neuron count, scaled to the cap: evolved brain width.
         (Color::new(0.95, 0.75, 0.9, 1.0), |s| (s.avg_hidden / MAX_HIDDEN as f32).min(1.0)),
+        // Fraction bearing a fin: the aquatic-forager niche.
+        (Color::new(0.3, 0.7, 0.95, 1.0), |s| s.frac_finned),
     ];
 
     let n = hist.len();

@@ -70,10 +70,14 @@ pub const BARRIER_LATTICE: f32 = 560.0;
 /// Half-width (in noise units) of the contour band classed as water. The band
 /// |noise - 0.5| < this forms connected curves crossing the map.
 pub const BARRIER_BAND: f32 = 0.055;
-/// Movement multiplier inside water (very sluggish, near-impassable).
-pub const WATER_MOVE_MULT: f32 = 0.12;
+/// Movement multiplier inside water: sluggish for a finless body (a soft
+/// barrier), but finned bodies recover most of it via Medium::Water thrust.
+pub const WATER_MOVE_MULT: f32 = 0.35;
 /// Metabolic penalty for being in water (cost of swimming/wading).
 pub const WATER_METAB_MULT: f32 = 1.5;
+/// Food density of the water biome (aquatic forage). Non-zero so water rewards
+/// swimmers, but below the land biomes so it stays a marginal, fin-gated niche.
+pub const WATER_FOOD_MULT: f32 = 0.6;
 /// Largest `food_mult` across biomes; used to normalize rejection sampling.
 pub const BIOME_MAX_FOOD_MULT: f32 = 1.8;
 /// Fertility thresholds separating desert | plains | forest | swamp.

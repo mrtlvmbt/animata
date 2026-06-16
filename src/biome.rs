@@ -73,7 +73,12 @@ impl Biome {
                 tint: (0.18, 0.34, 0.40),
             },
             Biome::Water => BiomeProps {
-                food_mult: 0.0,
+                // Water is now an aquatic foraging habitat, not a dead barrier: it
+                // grows its own (aquatic-flavoured) food, but stays sluggish and
+                // costly to a finless body — so swimming there only pays once fins
+                // evolve (Medium::Water gives finned bodies the speed to forage it).
+                // It still soft-partitions the land (cost + slow) for allopatry.
+                food_mult: WATER_FOOD_MULT,
                 move_mult: WATER_MOVE_MULT,
                 metab_mult: WATER_METAB_MULT,
                 flavor: 0.5,

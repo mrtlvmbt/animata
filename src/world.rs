@@ -690,6 +690,7 @@ impl World {
         let mut n_under = 0u32;
         let mut n_air = 0u32;
         let mut hidden = 0.0;
+        let mut finned = 0u32;
         // Sums of squares of *normalized* traits, for the diversity (std-dev) metric.
         let mut sq = [0.0f32; 4];
         let mut sum_n = [0.0f32; 4];
@@ -723,6 +724,9 @@ impl World {
                 _ => {}
             }
             hidden += c.pheno.n_hidden as f32;
+            if c.pheno.segments.iter().any(|s| s.appendage == Appendage::Fin) {
+                finned += 1;
+            }
             let dn = c.pheno.diet_niche;
             niche += dn;
             niche_sq += dn * dn;
@@ -779,6 +783,7 @@ impl World {
             frac_underground: n_under as f32 / n,
             frac_air: n_air as f32 / n,
             avg_hidden: hidden / n,
+            frac_finned: finned as f32 / n,
             avg_niche: niche / n,
             niche_spread: (niche_sq / n - (niche / n) * (niche / n)).max(0.0).sqrt(),
             diversity: std_sum / 4.0,

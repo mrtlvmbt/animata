@@ -38,6 +38,8 @@ pub struct Snapshot {
     pub frac_air: f32,
     /// Mean hidden-neuron count (evolvable brain width).
     pub avg_hidden: f32,
+    /// Fraction of the population bearing a fin (the aquatic-forager niche).
+    pub frac_finned: f32,
     /// Std-dev of diet niche: rises and goes bimodal as the population splits
     /// into food specialists — the live signal of ecological speciation.
     pub niche_spread: f32,
