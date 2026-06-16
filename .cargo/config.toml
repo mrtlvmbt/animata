@@ -6,3 +6,9 @@
 play = "run --release"
 prof = "run --release --example headless --"
 sweep = "run --release --example sweep --"
+
+# The sim uses macroquad's *global* RNG (srand/gen_range), so tests that seed it
+# interfere when run in parallel (flaky determinism failures). Force the test
+# harness single-threaded so the suite is reliable.
+[env]
+RUST_TEST_THREADS = "1"

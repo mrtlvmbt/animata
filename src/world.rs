@@ -50,6 +50,9 @@ pub struct World {
     pub food: Vec<Vec2>,
     /// Per-pellet flavor (0..1 niche axis), in lockstep with `food`.
     pub flavor: Vec<f32>,
+    /// Per-pellet vertical layer, in lockstep with `food`. A creature can only
+    /// sense/eat pellets on its own layer.
+    pub food_layer: Vec<u8>,
     pub tick: u64,
     pub stats: Stats,
     pub behavior: BehaviorKind,
@@ -114,11 +117,26 @@ impl World {
         for c in creatures.iter_mut().take(n_inf) {
             c.infection = Some((circulating_strain + gen_range(-STRAIN_MUT, STRAIN_MUT)).clamp(0.0, 1.0));
         }
-        let (mut food, mut flavor) = (Vec::with_capacity(START_FOOD), Vec::with_capacity(START_FOOD));
+        let (mut food, mut flavor, mut food_layer) =
+            (Vec::with_capacity(START_FOOD), Vec::with_capacity(START_FOOD), Vec::new());
         for _ in 0..START_FOOD {
             let p = land_pos(&biome);
             flavor.push(pellet_flavor(&biome, p));
             food.push(p);
+            food_layer.push(LAYER_SURFACE);
+        }
+        // Seed the non-surface pools (biome flavor — a spatial niche, not a diet one).
+        for _ in 0..BENTHIC_START_FOOD {
+            let p = land_pos(&biome);
+            food.push(p);
+            flavor.push(pellet_flavor(&biome, p));
+            food_layer.push(LAYER_UNDERGROUND);
+        }
+        for _ in 0..AERIAL_START_FOOD {
+            let p = land_pos(&biome);
+            food.push(p);
+            flavor.push(pellet_flavor(&biome, p));
+            food_layer.push(LAYER_AIR);
         }
         // Found the population with a spread of adult ages (not all newborns),
         // so reproduction starts immediately instead of stalling for a whole
@@ -138,6 +156,7 @@ impl World {
             creatures,
             food,
             flavor,
+            food_layer,
             tick: 0,
             stats: Stats::new(),
             behavior,
@@ -217,13 +236,9 @@ impl World {
         cpos.extend(self.creatures.iter().map(|c| c.pos));
         carns.clear();
         carns.extend(self.creatures.iter().map(|c| c.carnivory()));
-        // Vertical layer of each creature (its morphological stratum), plus the
-        // per-layer population for density-split foraging on the non-surface tiers.
+        // Vertical layer of each creature (its morphological stratum): sensing,
+        // eating and hunting are gated to a creature's own layer.
         let clayers: Vec<u8> = self.creatures.iter().map(|c| c.layer).collect();
-        let mut layer_pop = [0u32; N_LAYERS];
-        for &l in &clayers {
-            layer_pop[l as usize] += 1;
-        }
         food_grid.rebuild(&self.food, WORLD_W, WORLD_H, GRID_CELL);
         cgrid.rebuild(&cpos, WORLD_W, WORLD_H, GRID_CELL);
         lap(&mut self.profile.grids);
@@ -232,7 +247,7 @@ impl World {
         lap(&mut self.profile.query);
         self.act_all(&targets);
         lap(&mut self.profile.act);
-        self.eat_food(&food_grid, layer_pop);
+        self.eat_food(&food_grid);
         lap(&mut self.profile.eat);
         let killed = self.hunt(&cgrid, &cpos, &carns, &clayers);
         lap(&mut self.profile.hunt);
@@ -272,19 +287,41 @@ impl World {
     }
 
     fn spawn_food(&mut self) {
-        // Probabilistic count so non-integer rates work; scaled by season/drought.
-        let rate = self.params.food_per_step * self.env_food_mult();
-        let mut to_add = rate.floor() as i32;
-        if gen_range(0.0, 1.0) < rate.fract() {
-            to_add += 1;
+        let mult = self.env_food_mult();
+        let mut have = [0usize; N_LAYERS];
+        for &l in &self.food_layer {
+            have[l as usize] += 1;
         }
-        for _ in 0..to_add {
-            if self.food.len() >= FOOD_CAP {
+        // Surface: biome-flavoured pellets at fertile land positions (unchanged).
+        for _ in 0..prob_count(self.params.food_per_step * mult) {
+            if have[LAYER_SURFACE as usize] >= FOOD_CAP {
                 break;
             }
             let p = self.fertile_pos();
-            self.flavor.push(pellet_flavor(&self.biome, p));
             self.food.push(p);
+            self.flavor.push(pellet_flavor(&self.biome, p));
+            self.food_layer.push(LAYER_SURFACE);
+            have[LAYER_SURFACE as usize] += 1;
+        }
+        for _ in 0..prob_count(BENTHIC_FOOD_PER_STEP * mult) {
+            if have[LAYER_UNDERGROUND as usize] >= BENTHIC_FOOD_CAP {
+                break;
+            }
+            let p = land_pos(&self.biome);
+            self.food.push(p);
+            self.flavor.push(pellet_flavor(&self.biome, p));
+            self.food_layer.push(LAYER_UNDERGROUND);
+            have[LAYER_UNDERGROUND as usize] += 1;
+        }
+        for _ in 0..prob_count(AERIAL_FOOD_PER_STEP * mult) {
+            if have[LAYER_AIR as usize] >= AERIAL_FOOD_CAP {
+                break;
+            }
+            let p = land_pos(&self.biome);
+            self.food.push(p);
+            self.flavor.push(pellet_flavor(&self.biome, p));
+            self.food_layer.push(LAYER_AIR);
+            have[LAYER_AIR as usize] += 1;
         }
     }
 
@@ -324,6 +361,7 @@ impl World {
         let niches: Vec<f32> = self.creatures.iter().map(|c| c.pheno.diet_niche).collect();
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
+        let food_layers: &[u8] = &self.food_layer;
         // |flavor - niche| beyond this digests below MIN_EAT_EFF -> ignore it.
         let max_flavor_d2 = -2.0 * DIET_WIDTH * DIET_WIDTH * (MIN_EAT_EFF as f32).ln();
 
@@ -347,20 +385,17 @@ impl World {
                     |k| k != i && clayers[k] == li && (carns[k] - ci).abs() < 0.15,
                 );
                 let food = if ci < 0.5 {
-                    // Positioned pellets exist only on the surface; non-surface
-                    // herbivores forage their layer's capacity (see eat_food) and
-                    // sense no pellets.
-                    if li == LAYER_SURFACE {
-                        let niche = niches[i];
-                        food_grid
-                            .nearest_within(pellets, pos, sense, |j| {
+                    // Herbivores sense the nearest digestible pellet *on their own
+                    // layer* — foraging is spatial on every layer.
+                    let niche = niches[i];
+                    food_grid
+                        .nearest_within(pellets, pos, sense, |j| {
+                            food_layers[j] == li && {
                                 let d = flavors[j] - niche;
                                 d * d <= max_flavor_d2
-                            })
-                            .map(|j| pellets[j] - pos)
-                    } else {
-                        None
-                    }
+                            }
+                        })
+                        .map(|j| pellets[j] - pos)
                 } else {
                     cgrid
                         .nearest_within(cpos, pos, sense, |k| {
@@ -407,47 +442,39 @@ impl World {
     /// Any creature eats a pellet within reach (one per step), gaining energy
     /// scaled by its herbivory `(1 - carnivory)`. Near-pure carnivores ignore
     /// pellets so they don't waste them.
-    fn eat_food(&mut self, grid: &SpatialGrid, layer_pop: [u32; N_LAYERS]) {
-        // Per-occupant foraging yield on the non-surface layers: a fixed capacity
-        // split among everyone currently there (density-dependent, self-limiting).
-        let benthic_yield = BENTHIC_CAPACITY / layer_pop[LAYER_UNDERGROUND as usize].max(1) as f32;
-        let aerial_yield = AERIAL_CAPACITY / layer_pop[LAYER_AIR as usize].max(1) as f32;
-
+    fn eat_food(&mut self, grid: &SpatialGrid) {
         let food = &self.food;
         let flavor = &self.flavor;
+        let food_layer = &self.food_layer;
         let mut eaten = vec![false; food.len()];
         for c in &mut self.creatures {
             let herbivory = 1.0 - c.carnivory();
             if herbivory < 0.1 {
                 continue;
             }
-            // Off the surface there are no positioned pellets — forage the layer's
-            // shared capacity instead (scaled by herbivory, like grazing).
-            if c.layer != LAYER_SURFACE {
-                let y = if c.layer == LAYER_UNDERGROUND { benthic_yield } else { aerial_yield };
-                c.energy += y * herbivory;
-                continue;
-            }
             let reach = c.pheno.radius + FOOD_RADIUS;
             let reach2 = reach * reach;
             let pos = c.pos;
-            // Pick the nearest pellet within reach that this creature can
-            // actually digest (efficiency above the threshold); it leaves food
-            // outside its niche for the specialists that can use it.
-            let mut got: Option<(usize, f32)> = None;
+            let layer = c.layer;
+            // Nearest uneaten pellet within reach, on this creature's layer, that
+            // it can digest.
+            let mut got: Option<usize> = None;
             grid.for_each_near(pos, |idx| {
-                if got.is_none() && !eaten[idx] && (food[idx] - pos).length_squared() <= reach2 {
-                    let eff = c.pheno.diet_efficiency(flavor[idx]);
-                    if eff >= MIN_EAT_EFF {
-                        got = Some((idx, eff));
-                    }
+                if got.is_none()
+                    && !eaten[idx]
+                    && food_layer[idx] == layer
+                    && (food[idx] - pos).length_squared() <= reach2
+                    && c.pheno.diet_efficiency(flavor[idx]) >= MIN_EAT_EFF
+                {
+                    got = Some(idx);
                 }
             });
-            if let Some((idx, eff)) = got {
-                c.energy += FOOD_ENERGY * herbivory * eff;
+            if let Some(idx) = got {
+                c.energy += FOOD_ENERGY * herbivory * c.pheno.diet_efficiency(flavor[idx]);
                 eaten[idx] = true;
             }
         }
+        // Drop eaten pellets from all three lockstep vectors.
         let mut j = 0;
         self.food.retain(|_| {
             let keep = !eaten[j];
@@ -458,6 +485,12 @@ impl World {
         self.flavor.retain(|_| {
             let keep = !eaten[k];
             k += 1;
+            keep
+        });
+        let mut m = 0;
+        self.food_layer.retain(|_| {
+            let keep = !eaten[m];
+            m += 1;
             keep
         });
     }
@@ -794,17 +827,29 @@ impl World {
         self.stats.push(snap, top);
     }
 
-    /// Add a food pellet at an arbitrary point (used by mouse input).
+    /// Add a surface food pellet at an arbitrary point (used by mouse input).
     pub fn add_food_at(&mut self, p: Vec2) {
-        if self.food.len() < FOOD_CAP {
-            self.flavor.push(pellet_flavor(&self.biome, p));
-            self.food.push(p);
-        }
+        self.flavor.push(pellet_flavor(&self.biome, p));
+        self.food.push(p);
+        self.food_layer.push(LAYER_SURFACE);
     }
 }
 
 fn rand_pos() -> Vec2 {
     Vec2::new(gen_range(0.0, WORLD_W), gen_range(0.0, WORLD_H))
+}
+
+/// Probabilistic integer count from a fractional rate (floor + a chance at the
+/// fractional part), so non-integer per-step spawn rates work.
+fn prob_count(rate: f32) -> i32 {
+    if rate <= 0.0 {
+        return 0;
+    }
+    let mut n = rate.floor() as i32;
+    if gen_range(0.0, 1.0) < rate.fract() {
+        n += 1;
+    }
+    n
 }
 
 /// Write `value` (0..1) into gene `index` of a genome, encoding it base-4 across
@@ -854,7 +899,8 @@ mod tests {
         // food bounded, and a few generations have passed (reproduction works).
         assert!(!w.creatures.is_empty(), "population went extinct");
         assert!(w.creatures.len() <= POP_CAP);
-        assert!(w.food.len() <= FOOD_CAP);
+        // Food now spans three per-layer pools, each with its own cap.
+        assert!(w.food.len() <= FOOD_CAP + BENTHIC_FOOD_CAP + AERIAL_FOOD_CAP);
         assert!(w.stats.latest().max_generation >= 1, "no reproduction occurred");
     }
 

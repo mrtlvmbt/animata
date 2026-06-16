@@ -35,8 +35,8 @@ pub fn save(world: &World, path: &str) -> Result<()> {
     let _ = writeln!(s, "biome {}", world.biome_seed);
     let _ = writeln!(s, "tick {}", world.tick);
     let _ = writeln!(s, "food {}", world.food.len());
-    for (f, fl) in world.food.iter().zip(&world.flavor) {
-        let _ = writeln!(s, "{} {} {}", f.x, f.y, fl);
+    for ((f, fl), layer) in world.food.iter().zip(&world.flavor).zip(&world.food_layer) {
+        let _ = writeln!(s, "{} {} {} {}", f.x, f.y, fl, layer);
     }
     let _ = writeln!(s, "creatures {}", world.creatures.len());
     for c in &world.creatures {
@@ -90,15 +90,18 @@ pub fn load(path: &str) -> Result<World> {
     let food_n: usize = tagged(lines.next(), "food")?.parse().map_err(|_| bad("bad food count"))?;
     let mut food = Vec::with_capacity(food_n);
     let mut flavor = Vec::with_capacity(food_n);
+    let mut food_layer = Vec::with_capacity(food_n);
     for _ in 0..food_n {
         let line = lines.next().ok_or_else(|| bad("truncated food"))?;
         let mut t = line.split_whitespace();
         let x = next_f32(&mut t)?;
         let y = next_f32(&mut t)?;
-        // Flavor column is optional (older saves omit it -> neutral 0.5).
+        // Flavor + layer columns are optional (older saves omit them).
         let fl = t.next().and_then(|s| s.parse().ok()).unwrap_or(0.5);
+        let layer = t.next().and_then(|s| s.parse().ok()).unwrap_or(crate::config::LAYER_SURFACE);
         food.push(Vec2::new(x, y));
         flavor.push(fl);
+        food_layer.push(layer);
     }
 
     let cre_n: usize =
@@ -155,6 +158,7 @@ pub fn load(path: &str) -> Result<World> {
         creatures,
         food,
         flavor,
+        food_layer,
         tick,
         stats: Stats::new(),
         behavior,

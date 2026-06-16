@@ -309,11 +309,18 @@ pub const N_LAYERS: usize = 3;
 pub const LAYER_UNDERGROUND: u8 = 0;
 pub const LAYER_SURFACE: u8 = 1;
 pub const LAYER_AIR: u8 = 2;
-/// Total benthic (underground) foraging energy available per step, split among
-/// the creatures currently underground (reachable only with a burrow appendage).
-pub const BENTHIC_CAPACITY: f32 = 900.0;
-/// Total aerial foraging energy per step, split among winged occupants.
-pub const AERIAL_CAPACITY: f32 = 450.0;
+// Non-surface layers grow their own *positioned* food pellets (additive — surface
+// food unchanged). A creature must spatially forage its layer's pellets (biome
+// flavor, like surface), so a layer is a spatial niche, not a diet barrier. The
+// niches are kept food-RICH (same density as the surface): a sparse niche is a
+// marginal sink that destabilizes the population, while a rich one rewards
+// colonization, so body plans steadily evolve into all three strata.
+pub const BENTHIC_FOOD_CAP: usize = FOOD_CAP;
+pub const AERIAL_FOOD_CAP: usize = FOOD_CAP;
+pub const BENTHIC_FOOD_PER_STEP: f32 = FOOD_PER_STEP;
+pub const AERIAL_FOOD_PER_STEP: f32 = FOOD_PER_STEP;
+pub const BENTHIC_START_FOOD: usize = START_FOOD;
+pub const AERIAL_START_FOOD: usize = START_FOOD;
 
 // ---- Body morphology (segment chain) ----
 // A body is a chain of segments decoded from segment records. Founders emit none
