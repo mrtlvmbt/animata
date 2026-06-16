@@ -30,10 +30,27 @@ pub struct LocomotionStats {
     pub thrust: f32,
 }
 
+/// Brain-set drive for each appendage kind (how hard it's being worked this
+/// step). Neutral is 1.0 (full capability); the brain can boost or idle each.
+#[derive(Clone, Copy)]
+pub struct AppendageDrive {
+    pub fin: f32,
+    pub leg: f32,
+    pub wing: f32,
+}
+
+impl AppendageDrive {
+    /// Full drive on every appendage — the capability model with no brain
+    /// modulation (used by non-neural behaviors).
+    pub fn full() -> Self {
+        AppendageDrive { fin: 1.0, leg: 1.0, wing: 1.0 }
+    }
+}
+
 /// Turns body morphology into locomotion capability. Capability implementation
 /// now; a joint-physics implementation can replace it behind this trait (fork 2).
 pub trait Locomotor {
-    fn locomotion(&self, medium: Medium) -> LocomotionStats;
+    fn locomotion(&self, medium: Medium, drive: AppendageDrive) -> LocomotionStats;
 }
 
 impl Locomotor for Phenotype {
@@ -42,7 +59,7 @@ impl Locomotor for Phenotype {
     /// drive walking, wings flying; the wrong appendage (or none) leaves a body
     /// sluggish in that medium. A finless single-segment founder scores exactly
     /// 1.0 on the ground (movement unchanged) and poorly in water.
-    fn locomotion(&self, medium: Medium) -> LocomotionStats {
+    fn locomotion(&self, medium: Medium, drive: AppendageDrive) -> LocomotionStats {
         let (mut fins, mut legs, mut wings) = (0.0f32, 0.0f32, 0.0f32);
         for s in &self.segments {
             match s.appendage {
@@ -54,16 +71,16 @@ impl Locomotor for Phenotype {
         }
         // Diminishing returns: a few well-suited appendages give most of the
         // benefit, so there's no incentive to fill every segment with limbs — the
-        // chain settles at an interior optimum once per-segment upkeep bites.
-        let legs_eff = legs.min(3.0);
-        let fins_eff = fins.min(3.0);
-        let wings_eff = wings.min(3.0);
+        // chain settles at an interior optimum once per-segment upkeep bites. The
+        // brain's per-kind drive scales the benefit (neutral drive 1.0 == the old
+        // passive capability), so a body must also learn to work its limbs.
+        let legs_eff = legs.min(3.0) * drive.leg;
+        let fins_eff = fins.min(3.0) * drive.fin;
+        let wings_eff = wings.min(3.0) * drive.wing;
         // A finless, legless body scores 1.0 in both ground and water (water's
-        // sluggishness still comes from the biome's move_mult, as before), so the
-        // medium change doesn't turn rivers into death traps before there's any
-        // aquatic food to reward fins (that arrives with Phase 2.3 niches). The
-        // right appendage adds a bonus; the wrong one a mild penalty. Air stays
-        // gated on wings (no air layer exists to enter yet).
+        // sluggishness still comes from the biome's move_mult), so the medium
+        // change doesn't turn rivers into death traps. The right appendage adds a
+        // bonus; the wrong one a mild (drive-independent) penalty.
         let factor = match medium {
             Medium::Ground => (1.0 + 0.30 * legs_eff - 0.10 * fins).clamp(0.30, 1.9),
             Medium::Water => (1.0 + 0.45 * fins_eff - 0.10 * legs).clamp(0.30, 1.9),

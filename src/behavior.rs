@@ -7,6 +7,7 @@
 //! To add a new variant: implement [`Behavior`], add a [`BehaviorKind`] arm, and
 //! wire it into [`BehaviorKind::build`]. Nothing else needs to change.
 
+use crate::body::AppendageDrive;
 use crate::brain::Brain;
 use crate::config::*;
 use crate::genome::{Phenotype, Synapse};
@@ -48,6 +49,8 @@ pub struct Action {
     pub turn: f32,
     /// Emitted signal loudness this step, `0..=1` (a "call" others can hear).
     pub signal: f32,
+    /// Per-appendage actuator drive (neutral 1.0); modulates locomotion.
+    pub drive: AppendageDrive,
 }
 
 /// Strategy turning [`Senses`] into an [`Action`].
@@ -142,9 +145,22 @@ impl Behavior for NeuralBehavior {
             s.neighbor_prox, nsin, ncos,
             s.heard, s.energy, 1.0,
         ];
-        let [throttle, turn, signal] = self.brain.forward(&inputs);
-        // Signal is an emitted loudness in 0..1.
-        Action { throttle, turn, signal: signal.max(0.0) }
+        let out = self.brain.forward(&inputs);
+        let [throttle, turn, signal] = [out[0], out[1], out[2]];
+        // Actuator drives: map a tanh output (-1..1) to a drive around 1.0, so a
+        // neutral brain leaves appendages at full capability and a trained one can
+        // sprint (up to 1.5) or idle (down to 0) a given limb.
+        let drive = |o: f32| (1.0 + 0.5 * o).clamp(0.0, 1.5);
+        Action {
+            throttle,
+            turn,
+            signal: signal.max(0.0),
+            drive: AppendageDrive {
+                fin: drive(out[OUT_FIN_DRIVE]),
+                leg: drive(out[OUT_LEG_DRIVE]),
+                wing: drive(out[OUT_WING_DRIVE]),
+            },
+        }
     }
 
     fn memory_use(&self) -> f32 {
@@ -188,6 +204,7 @@ impl Behavior for RuleBehavior {
                 throttle: 1.0,
                 turn: (-away / PI * self.steer_gain).clamp(-1.0, 1.0),
                 signal: if s.threat_rel_angle.is_some() { 1.0 } else { 0.0 },
+                drive: AppendageDrive::full(),
             };
         }
         match s.food_rel_angle {
@@ -195,11 +212,13 @@ impl Behavior for RuleBehavior {
                 throttle: 1.0,
                 turn: (rel / PI * self.steer_gain).clamp(-1.0, 1.0),
                 signal: 0.0,
+                drive: AppendageDrive::full(),
             },
             None => Action {
                 throttle: self.hunger_throttle,
                 turn: gen_range(-self.wander, self.wander),
                 signal: 0.0,
+                drive: AppendageDrive::full(),
             },
         }
     }
