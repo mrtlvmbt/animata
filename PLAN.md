@@ -240,10 +240,19 @@ arthropod clade), not just a wobbling mean speed.
 >   at step 5000), appendaged 76–94%, populations 6–8k, brain ~3.6. Body↔brain
 >   co-evolution loop now closed: an appendage's value depends on the brain wiring
 >   that drives it.
-> - **NEXT options:** (1) richer layers — in-life layer movement + positioned
->   benthic/aquatic food (give fins a spatial purpose); (2) Morphological
->   Innovation Protection (shield fresh body mutants so controllers re-adapt);
->   (3) balance/visual polish — needs a GUI pass. Joint physics (fork 2) and
+> - **Phase 6 (start) DONE — aquatic foraging niche (fins gain purpose).** Branch
+>   `phase-6-richer-layers`. The Water biome was a dead barrier (food_mult 0); now
+>   it grows aquatic food (`WATER_FOOD_MULT`) and is less sluggish
+>   (`WATER_MOVE_MULT` 0.12→0.35) — still costly/slow to a finless body (soft
+>   allopatry barrier intact), but finned bodies recover speed via `Medium::Water`
+>   and can forage it. Reuses all existing food machinery (no food-vector/save
+>   change). `frac_finned` stat added. Result: fins go from near-neutral to a real
+>   rising niche (~8→14% and climbing); strata/species/pop unaffected.
+> - **NEXT options:** (1) in-life layer movement (brain-actuated; carries
+>   morphological-innovation-fragility risk → pair with MIP); (2) Morphological
+>   Innovation Protection — shield fresh body mutants so controllers re-adapt;
+>   (3) positioned benthic/aerial food (replace density-split with pellets);
+>   (4) balance/visual polish — needs a GUI pass. Joint physics (fork 2) and
 >   isometry/3D remain far-future.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
