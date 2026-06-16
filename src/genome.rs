@@ -6,6 +6,7 @@
 //! neural-network weight.
 
 use crate::config::*;
+use macroquad::math::Vec2;
 use macroquad::rand::{gen_range, srand};
 
 pub const NUCLEOTIDES: [char; 4] = ['A', 'C', 'G', 'T'];
@@ -28,6 +29,39 @@ pub struct Synapse {
     pub src: u8,
     pub dst: u8,
     pub w: f32,
+}
+
+/// An appendage on a body segment. Drives medium locomotion and layer access in
+/// later Phase-2 sub-steps (fins → swim, wings → fly, legs → walk, burrow → dig).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Appendage {
+    None,
+    Fin,
+    Wing,
+    Leg,
+    Burrow,
+}
+
+impl Appendage {
+    fn from_tag(tag: u8) -> Self {
+        match tag % APPENDAGE_KINDS as u8 {
+            0 => Appendage::None,
+            1 => Appendage::Fin,
+            2 => Appendage::Wing,
+            3 => Appendage::Leg,
+            _ => Appendage::Burrow,
+        }
+    }
+}
+
+/// One body segment in the chain (head → tail).
+#[derive(Clone, Copy)]
+pub struct Segment {
+    pub length: f32,
+    pub width: f32,
+    pub appendage: Appendage,
+    /// How freely this segment bends relative to the previous one (0..1).
+    pub flexibility: f32,
 }
 
 /// Decoded, ready-to-use traits plus the brain's synapse list.
@@ -54,6 +88,9 @@ pub struct Phenotype {
     pub leak: f32,
     /// Brain wiring: marker-decoded synapses (variable count).
     pub synapses: Vec<Synapse>,
+    /// Body plan: marker-decoded segment chain (empty == a single implicit
+    /// segment sized by the radius gene, i.e. the original circular body).
+    pub segments: Vec<Segment>,
 }
 
 impl Genome {
@@ -69,7 +106,8 @@ impl Genome {
             nt.push(gen_range(0u32, 4) as u8);
         }
         let mut emit = |src: usize, dst: usize| {
-            nt.extend_from_slice(&SYNAPSE_START);
+            nt.extend_from_slice(&RECORD_START);
+            nt.extend_from_slice(&gene_nt(REC_SYNAPSE as u32));
             nt.extend_from_slice(&gene_nt(src as u32));
             nt.extend_from_slice(&gene_nt(dst as u32));
             nt.extend_from_slice(&gene_nt(gen_range(0u32, 256)));
@@ -135,34 +173,57 @@ impl Genome {
         gene_at(&self.nt, index * NT_PER_GENE)
     }
 
-    /// Scan the genome for marker-delimited synapse records and decode them.
-    /// The scan is at nt granularity (any reading frame), so an indel only adds,
-    /// drops or shifts individual records — it never frameshifts every weight.
-    fn scan_synapses(&self) -> Vec<Synapse> {
+    /// Scan the genome's record stream once and decode every record into the
+    /// brain's synapses and the body's segment chain. The scan is at nt
+    /// granularity (any reading frame); after a record matches, it advances past
+    /// the whole record, so a record's interior can never spawn a nested record.
+    /// An indel therefore only adds, drops or shifts whole records.
+    fn scan_records(&self) -> (Vec<Synapse>, Vec<Segment>) {
         let nt = &self.nt;
         let mut syn = Vec::new();
+        let mut seg = Vec::new();
         let mut i = 0usize;
-        while i + SYNAPSE_RECORD_NT <= nt.len() {
-            if nt[i] == SYNAPSE_START[0]
-                && nt[i + 1] == SYNAPSE_START[1]
-                && nt[i + 2] == SYNAPSE_START[2]
+        // The start codon + type gene are common; need at least that much to read.
+        while i + 3 + NT_PER_GENE <= nt.len() {
+            if !(nt[i] == RECORD_START[0]
+                && nt[i + 1] == RECORD_START[1]
+                && nt[i + 2] == RECORD_START[2])
             {
-                let src = (gene_at(nt, i + 3) as usize % SRC_PORTS) as u8;
-                let dst = (gene_at(nt, i + 3 + NT_PER_GENE) as usize % DST_PORTS) as u8;
-                let wv = gene_at(nt, i + 3 + 2 * NT_PER_GENE) as f32 / 255.0;
-                syn.push(Synapse { src, dst, w: (wv * 2.0 - 1.0) * WEIGHT_SCALE });
-                i += SYNAPSE_RECORD_NT;
-            } else {
                 i += 1;
+                continue;
+            }
+            // Field reader, relative to the first field gene (after start+type).
+            let f = |k: usize| gene_at(nt, i + 3 + NT_PER_GENE + k * NT_PER_GENE);
+            let kind = (gene_at(nt, i + 3) % RECORD_TYPES as u8) as u8;
+            match kind {
+                REC_SYNAPSE if i + SYNAPSE_RECORD_NT <= nt.len() => {
+                    let src = (f(0) as usize % SRC_PORTS) as u8;
+                    let dst = (f(1) as usize % DST_PORTS) as u8;
+                    let wv = f(2) as f32 / 255.0;
+                    syn.push(Synapse { src, dst, w: (wv * 2.0 - 1.0) * WEIGHT_SCALE });
+                    i += SYNAPSE_RECORD_NT;
+                }
+                REC_SEGMENT if i + SEGMENT_RECORD_NT <= nt.len() && seg.len() < MAX_SEGMENTS => {
+                    seg.push(Segment {
+                        length: lerp(SEG_LEN_RANGE, f(0) as f32 / 255.0),
+                        width: lerp(SEG_WIDTH_RANGE, f(1) as f32 / 255.0),
+                        appendage: Appendage::from_tag(f(2)),
+                        flexibility: f(3) as f32 / 255.0,
+                    });
+                    i += SEGMENT_RECORD_NT;
+                }
+                // Type known but record runs off the end (or segment cap hit):
+                // skip this start codon and keep scanning.
+                _ => i += 1,
             }
         }
-        syn
+        (syn, seg)
     }
 
     pub fn decode(&self) -> Phenotype {
         let g = |i| self.gene_u8(i) as f32 / 255.0;
 
-        let radius = lerp(RADIUS_RANGE, g(0));
+        let radius_gene = lerp(RADIUS_RANGE, g(0));
         let max_speed = lerp(SPEED_RANGE, g(1));
         let sense_range = lerp(SENSE_RANGE, g(2));
         let metabolism = lerp(METAB_RANGE, g(3));
@@ -175,7 +236,8 @@ impl Genome {
         let diet_niche = g(12);
         let leak = lerp(LEAK_RANGE, g(13));
 
-        let synapses = self.scan_synapses();
+        let (synapses, segments) = self.scan_records();
+        let radius = body_radius(&segments, radius_gene);
 
         Phenotype {
             radius,
@@ -191,6 +253,7 @@ impl Genome {
             diet_niche,
             leak,
             synapses,
+            segments,
         }
     }
 
@@ -226,6 +289,24 @@ impl Phenotype {
     pub fn diet_efficiency(&self, flavor: f32) -> f32 {
         let d = flavor - self.diet_niche;
         (-(d * d) / (2.0 * DIET_WIDTH * DIET_WIDTH)).exp()
+    }
+
+    /// World-space layout of the body segments for rendering: `(center, radius,
+    /// appendage)` per segment, with the head at `pos` and the chain trailing
+    /// opposite `heading`, gently curved by each joint's flexibility. Empty when
+    /// the body is a single implicit segment (drawn as the original shape).
+    pub fn segment_layout(&self, pos: Vec2, heading: f32) -> Vec<(Vec2, f32, Appendage)> {
+        let mut out = Vec::with_capacity(self.segments.len());
+        let mut cur = pos;
+        let mut dir = heading + std::f32::consts::PI; // tail points behind the head
+        for s in &self.segments {
+            let step = Vec2::new(dir.cos(), dir.sin());
+            cur += step * (s.length * 0.5);
+            out.push((cur, s.width * 0.5, s.appendage));
+            cur += step * (s.length * 0.5);
+            dir += (s.flexibility - 0.5) * 0.6; // flex curves the chain
+        }
+        out
     }
 
     pub fn recurrent_gain(&self) -> f32 {
@@ -266,6 +347,18 @@ fn gene_nt(v: u32) -> [u8; NT_PER_GENE] {
         x /= 4;
     }
     out
+}
+
+/// Bounding radius used for collision / sensing / metabolism. With no segments
+/// it's just the radius gene (the original circle); with a segment chain it's
+/// derived from the body's extent, clamped so long worms stay tractable.
+fn body_radius(segments: &[Segment], radius_gene: f32) -> f32 {
+    if segments.is_empty() {
+        return radius_gene;
+    }
+    let total_len: f32 = segments.iter().map(|s| s.length).sum();
+    let max_w = segments.iter().map(|s| s.width).fold(0.0, f32::max);
+    (0.5 * total_len).max(max_w).clamp(RADIUS_RANGE.0, RADIUS_RANGE.1 * 2.0)
 }
 
 /// Map `t` in `0..=1` into the inclusive range `(lo, hi)`.
@@ -370,6 +463,26 @@ mod tests {
         let parent = Genome::random();
         let changed = (0..200).any(|_| parent.mutated(MUTATION_RATE).nt.len() != GENOME_LEN);
         assert!(changed, "indels never altered genome length");
+    }
+
+    #[test]
+    fn segment_record_decodes_and_sizes_body() {
+        // A body-gene block of zeros (no stray start codon) plus one segment
+        // record decodes to exactly one segment, and the body radius derives
+        // from it rather than the (zero) radius gene.
+        let mut nt = vec![0u8; BODY_GENES * NT_PER_GENE];
+        nt.extend_from_slice(&RECORD_START);
+        nt.extend_from_slice(&gene_nt(REC_SEGMENT as u32));
+        nt.extend_from_slice(&gene_nt(255)); // length
+        nt.extend_from_slice(&gene_nt(128)); // width
+        nt.extend_from_slice(&gene_nt(1)); // appendage tag -> Fin
+        nt.extend_from_slice(&gene_nt(200)); // flexibility
+        let g = Genome { nt };
+        let p = g.decode();
+        assert_eq!(p.segments.len(), 1);
+        assert_eq!(p.segments[0].appendage, Appendage::Fin);
+        assert!(p.segments[0].length >= SEG_LEN_RANGE.0 && p.segments[0].length <= SEG_LEN_RANGE.1);
+        assert!(p.radius >= RADIUS_RANGE.0);
     }
 
     #[test]

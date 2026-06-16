@@ -171,7 +171,23 @@ arthropod clade), not just a wobbling mean speed.
 > - **NOT YET (still Phase 1/2 keystone work):** *dynamic* ports from body-grown
 >   sensors/actuators (currently fixed 12/7/3 port set); evolvable hidden-neuron
 >   count; segment chain in the genome. These land with Phase 2 bodies.
-> - **NEXT — Phase 2: segmented bodies + appendages + medium physics + layers.**
+> - **Phase 2.1 DONE — segment-chain genome + render.** Branch
+>   `phase-2-segmented-bodies`. Refactored the marker stream to **unified typed
+>   records** (`RECORD_START` + type gene: `REC_SYNAPSE`/`REC_SEGMENT`), one scan
+>   that skips record interiors — fixes cross-talk (a synapse record's bytes can't
+>   spawn a spurious segment). `Segment`/`Appendage` decode into
+>   `Phenotype.segments`; body bounding radius derives from the chain
+>   (`body_radius`); founders emit zero segments (== old circle). Render draws the
+>   segment chain as a quad row with appendage tints (`segment_layout`,
+>   `appendage_tint`). Validated: 8/8 seeds survive, 24 tests green, bin clean.
+>   *Caveat:* segments are currently selectively neutral/costly, so morphotypes
+>   won't emerge until 2.2 gives appendages locomotor payoff. Flaky giant-world
+>   sim test seen once (borderline threshold) — watch.
+> - **NEXT — Phase 2.2: medium physics + appendage locomotion.** Biome → `Medium`
+>   (Ground/Water/Air); `Locomotor` uses segments+appendages so fins pay in water,
+>   legs on land, etc. — the selection pressure that makes body plans diverge.
+> - **THEN — Phase 2.3: vertical layers** (stack, per-animal `layer_access` mask
+>   gated by morphology) + tiered food.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),

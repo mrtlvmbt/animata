@@ -483,6 +483,26 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
             drawn += 1;
             continue;
         }
+        // Segmented body: draw the chain as a row of quads (one per segment),
+        // appendage-bearing segments tinted. Empty chain falls through to the
+        // original heading triangle (single implicit segment).
+        if !cr.pheno.segments.is_empty() {
+            for (wc, wr, app) in cr.pheno.segment_layout(cr.pos, cr.heading) {
+                let sc = view.world_to_screen(wc);
+                let r = (wr * view.scale).max(1.0);
+                let seg_color = appendage_tint(color, app);
+                if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
+                    flush(&mut mesh);
+                }
+                let base = mesh.vertices.len() as u16;
+                for (dx, dy) in [(-r, -r), (r, -r), (r, r), (-r, r)] {
+                    mesh.vertices.push(Vertex::new(sc.x + dx, sc.y + dy, 0.0, uv.x, uv.y, seg_color));
+                }
+                mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+            drawn += 1;
+            continue;
+        }
         let nose = center + Vec2::from_angle(cr.heading) * size;
         let back_l = center + Vec2::from_angle(cr.heading + 2.4) * size * 0.8;
         let back_r = center + Vec2::from_angle(cr.heading - 2.4) * size * 0.8;
@@ -499,6 +519,24 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
 
     flush(&mut mesh);
     drawn
+}
+
+/// Blend a creature's base color toward an appendage's signature tint, so a body
+/// plan reads at a glance (fins aquatic-blue, wings pale, legs earthy, burrow dark).
+fn appendage_tint(base: Color, app: genome::Appendage) -> Color {
+    let (t, w) = match app {
+        genome::Appendage::None => return base,
+        genome::Appendage::Fin => ((0.30, 0.60, 0.95), 0.45),
+        genome::Appendage::Wing => ((0.95, 0.95, 0.98), 0.45),
+        genome::Appendage::Leg => ((0.70, 0.50, 0.30), 0.40),
+        genome::Appendage::Burrow => ((0.35, 0.28, 0.22), 0.45),
+    };
+    Color::new(
+        base.r + (t.0 - base.r) * w,
+        base.g + (t.1 - base.g) * w,
+        base.b + (t.2 - base.b) * w,
+        1.0,
+    )
 }
 
 /// Faint ring around creatures emitting a loud signal (a visible "call").
