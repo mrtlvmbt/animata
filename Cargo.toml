@@ -7,6 +7,14 @@ description = "DNA-based artificial life simulation with neural-net brains, muta
 [dependencies]
 macroquad = "0.4"
 rayon = "1"
+tiny_http = { version = "0.12", optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+# Runtime control/inspection bridge for autonomous verification (see DEV_BRIDGE.md).
+# Off by default, so the shipped build pulls neither dep and is byte-for-byte
+# unchanged. Run with: cargo run --features dev
+dev = ["dep:tiny_http", "dep:serde_json"]
 
 [profile.release]
 opt-level = 3
