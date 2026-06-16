@@ -604,6 +604,11 @@ impl World {
         let mut carn = Vec::new();
         let mut ornament = Vec::new();
         let mut preference = Vec::new();
+        // Reproductive-isolation keys: body plan (architecture) and current layer
+        // (habitat). Mating requires both to match — the prezygotic barriers that
+        // make species real gene-flow groups (see speciation.rs / the BSC).
+        let mut plan = Vec::new();
+        let mut layer = Vec::new();
         for (i, c) in self.creatures.iter().enumerate() {
             if c.wants_to_reproduce() {
                 pos.push(c.pos);
@@ -611,6 +616,8 @@ impl World {
                 carn.push(c.carnivory());
                 ornament.push(c.pheno.ornament);
                 preference.push(c.pheno.preference);
+                plan.push(crate::speciation::plan_key(&c.pheno));
+                layer.push(c.layer);
             }
         }
         if pos.is_empty() {
@@ -625,14 +632,21 @@ impl World {
             if mated[a] || self.creatures.len() + babies.len() >= POP_CAP {
                 continue;
             }
-            // Mate choice: among fertile, unmated, similar-diet candidates in
-            // range, pick by sexual-selection score = chooser's preference ×
-            // candidate's ornament (minus a tiny distance term as tiebreak). With
-            // low preference this reduces to "nearest" — driving Fisherian runaway.
+            // Mate choice: among fertile, unmated, reproductively-compatible
+            // candidates in range, pick by sexual-selection score = chooser's
+            // preference × candidate's ornament (minus a tiny distance tiebreak).
+            // Compatibility = same body plan (architecture), same layer (habitat)
+            // and similar diet — the isolation barriers that delimit a species.
             let (ca, pref) = (carn[a], preference[a]);
+            let (plan_a, layer_a) = (plan[a], layer[a]);
             let mut best: Option<(usize, f32)> = None;
             grid.for_each_near(pos[a], |k| {
-                if k == a || mated[k] || (carn[k] - ca).abs() >= 0.25 {
+                if k == a
+                    || mated[k]
+                    || plan[k] != plan_a
+                    || layer[k] != layer_a
+                    || (carn[k] - ca).abs() >= MATE_CARN_WINDOW
+                {
                     return;
                 }
                 let d2 = (pos[k] - pos[a]).length_squared();

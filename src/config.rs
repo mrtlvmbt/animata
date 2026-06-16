@@ -217,6 +217,10 @@ pub const MAX_TURN: f32 = 0.3;
 /// Max distance to a fertile same-species partner for sexual reproduction.
 /// If none is in range, the creature clones itself (asexual fallback).
 pub const MATE_RANGE: f32 = 32.0;
+/// Reproductive isolation by diet: two creatures whose carnivory differs by at
+/// least this can't interbreed (an ecological/behavioural prezygotic barrier).
+/// This same window labels species, so a "species" is a gene-flow group (BSC).
+pub const MATE_CARN_WINDOW: f32 = 0.25;
 
 // ---- Genome ----
 /// Nucleotides consumed per decoded value (4 -> base-4 number 0..=255).
