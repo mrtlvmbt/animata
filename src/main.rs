@@ -8,6 +8,8 @@ mod behavior;
 mod biome;
 mod body;
 mod brain;
+#[cfg(feature = "dev")]
+mod dev_bridge;
 mod config;
 mod creature;
 mod genome;
@@ -145,6 +147,12 @@ async fn main() {
     let mut biome_tex: Option<Texture2D> = None;
     let mut biome_tex_seed = u64::MAX;
 
+    // Dev bridge: localhost JSON-RPC for autonomous verification (see DEV_BRIDGE.md).
+    #[cfg(feature = "dev")]
+    let bridge = dev_bridge::spawn(8127);
+    #[cfg(feature = "dev")]
+    let mut pending_shots: Vec<(String, std::sync::mpsc::Sender<serde_json::Value>)> = Vec::new();
+
     loop {
         // ---- Input ----
         if is_key_pressed(KeyCode::Space) {
@@ -261,6 +269,92 @@ async fn main() {
             draw_tuning(&mut params);
         }
         world.params = params;
+
+        // ---- Dev bridge: service queued commands at the frame boundary ----
+        #[cfg(feature = "dev")]
+        for req in dev_bridge::take(&bridge) {
+            use dev_bridge::Cmd;
+            let reply = match req.cmd {
+                Cmd::Status => {
+                    dev_bridge::status_json(&world, paused, speed, view.scale, view.center)
+                }
+                Cmd::Inspect { id, at } => dev_bridge::inspect_json(&world, id, at),
+                Cmd::Histogram => dev_bridge::histogram_json(&world),
+                Cmd::SetPause(p) => {
+                    paused = p;
+                    serde_json::json!({ "paused": paused })
+                }
+                Cmd::SetSpeed(n) => {
+                    speed = n.clamp(1, 40);
+                    serde_json::json!({ "speed": speed })
+                }
+                Cmd::Step(n) => {
+                    for _ in 0..n {
+                        if world.creatures.is_empty() {
+                            break;
+                        }
+                        world.step();
+                    }
+                    serde_json::json!({ "tick": world.tick })
+                }
+                Cmd::Reset { seed } => {
+                    if let Some(s) = seed {
+                        seed_counter = s;
+                    }
+                    world = World::new(seed_counter, behavior);
+                    serde_json::json!({ "seed": seed_counter })
+                }
+                Cmd::SetView { scale, cx, cy } => {
+                    if let Some(s) = scale {
+                        view.scale = s;
+                    }
+                    if let Some(x) = cx {
+                        view.center.x = x;
+                    }
+                    if let Some(y) = cy {
+                        view.center.y = y;
+                    }
+                    view.clamp();
+                    serde_json::json!({ "scale": view.scale, "cx": view.center.x, "cy": view.center.y })
+                }
+                Cmd::SetColor(m) => {
+                    color_mode = m;
+                    serde_json::json!({ "ok": true })
+                }
+                Cmd::Select { id, at } => {
+                    selected = id.or_else(|| at.and_then(|p| pick_creature(&world, p)));
+                    serde_json::json!({ "selected": selected })
+                }
+                Cmd::SetParam { name, value } => {
+                    match name.as_str() {
+                        "food_per_step" => params.food_per_step = value as f32,
+                        "predator_gain" => params.predator_gain = value as f32,
+                        "mutation_rate" => params.mutation_rate = value,
+                        _ => {}
+                    }
+                    world.params = params;
+                    serde_json::json!({ "ok": true })
+                }
+                Cmd::Save(path) => {
+                    serde_json::json!({ "ok": save::save(&world, &path).is_ok() })
+                }
+                Cmd::Load(path) => match save::load(&path) {
+                    Ok(w) => {
+                        behavior = w.behavior;
+                        world = w;
+                        serde_json::json!({ "ok": true })
+                    }
+                    Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+                },
+                Cmd::Screenshot(path) => {
+                    // Deferred: the framebuffer is captured after this frame draws.
+                    pending_shots.push((path, req.reply));
+                    continue;
+                }
+            };
+            let _ = req.reply.send(reply);
+        }
+
         if !paused {
             for _ in 0..speed {
                 world.step();
@@ -332,6 +426,14 @@ async fn main() {
             } else {
                 notice = None;
             }
+        }
+
+        // Dev bridge: service deferred screenshots now the frame is fully drawn.
+        #[cfg(feature = "dev")]
+        for (path, reply) in pending_shots.drain(..) {
+            let img = get_screen_data();
+            img.export_png(&path);
+            let _ = reply.send(serde_json::json!({ "saved": path }));
         }
 
         next_frame().await;
