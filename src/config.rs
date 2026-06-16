@@ -237,10 +237,20 @@ pub const GENOME_MIN_LEN: usize = GENOME_LEN / 2;
 pub const GENOME_MAX_LEN: usize = GENOME_LEN * 2;
 
 // ---- Neural network topology ----
-// Inputs: food prox/sin/cos, threat prox/sin/cos, neighbor prox/sin/cos,
-// heard-signal, own energy, bias.
-pub const NN_INPUTS: usize = 12;
+// Inputs come in two groups, mirroring the outputs. The first NN_BASE_INPUTS are
+// body-agnostic senses every creature has: food prox/sin/cos, threat prox/sin/cos,
+// neighbor prox/sin/cos, heard-signal, own energy, bias. AFTER them, each appendage
+// segment grows its OWN proprioceptive *pacemaker* (CPG) input port — a gene-tuned
+// internal oscillator that gives the recurrent brain a rhythm to phase locomotion.
+// So the input count is variable per creature (NN_BASE_INPUTS + appendage count),
+// body-derived just like the actuator outputs. Founders (no limbs) have exactly
+// the base senses, so the baseline brain is unchanged.
+pub const NN_BASE_INPUTS: usize = 12;
 pub const NN_HIDDEN: usize = 7;
+/// Base angular rate of a limb pacemaker (cycles/step), scaled per-limb by the
+/// segment's `flexibility` gene so the rhythm is evolvable; limbs are phase-
+/// staggered so a multi-limb body gets a gait-like travelling wave.
+pub const OSC_FREQ_BASE: f32 = 0.06;
 // Outputs come in two groups. The first NN_BASE_OUTPUTS are body-agnostic
 // controls every creature has: throttle, turn, signal (call loudness), and a
 // vertical-migration intent (its sign drives the creature up toward the air or
@@ -306,7 +316,7 @@ pub const MAX_HIDDEN: usize = 16;
 /// Founder brain = a dense connection set (every input->hidden, hidden->hidden,
 /// hidden->output) emitted as that many synapse records.
 pub const FOUNDER_SYNAPSES: usize =
-    NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_HIDDEN + NN_HIDDEN * NN_BASE_OUTPUTS;
+    NN_BASE_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_HIDDEN + NN_HIDDEN * NN_BASE_OUTPUTS;
 
 // ---- Vertical layers ----
 // The world has a small stack of layers. A creature's layer is its morphological

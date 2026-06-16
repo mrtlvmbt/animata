@@ -952,7 +952,8 @@ fn draw_inspector(c: &creature::Creature, anc: &phylo::Ancestry) {
 fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
     let nh = c.pheno.n_hidden;
     let no = c.pheno.n_outputs;
-    let cols = [NN_INPUTS, nh, no];
+    let ni = c.pheno.n_inputs;
+    let cols = [ni, nh, no];
     let col_x = [x, x + w * 0.5, x + w];
     let node = |col: usize, i: usize| -> Vec2 {
         let n = cols[col];
@@ -962,16 +963,16 @@ fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
 
     // Rebuild the dense weight matrices from the synapse list (same routing as
     // the brain builder) so the inspector can draw the connection strengths.
-    let mut w_ih = vec![0.0f32; NN_INPUTS * nh];
+    let mut w_ih = vec![0.0f32; ni * nh];
     let mut w_ho = vec![0.0f32; nh * no];
     for s in &c.pheno.synapses {
         let (src, dst) = (s.src as usize, s.dst as usize);
-        if src < NN_INPUTS {
+        if src < ni {
             if dst < nh {
-                w_ih[dst * NN_INPUTS + src] += s.w;
+                w_ih[dst * ni + src] += s.w;
             }
-        } else if dst >= nh && (src - NN_INPUTS) < nh {
-            w_ho[(dst - nh) * nh + (src - NN_INPUTS)] += s.w;
+        } else if dst >= nh && (src - ni) < nh {
+            w_ho[(dst - nh) * nh + (src - ni)] += s.w;
         }
     }
     let edge = |wgt: f32| {
@@ -985,10 +986,10 @@ fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
 
     // input -> hidden
     for hdn in 0..nh {
-        for inp in 0..NN_INPUTS {
+        for inp in 0..ni {
             let a = node(0, inp);
             let bn = node(1, hdn);
-            draw_line(a.x, a.y, bn.x, bn.y, 1.0, edge(w_ih[hdn * NN_INPUTS + inp]));
+            draw_line(a.x, a.y, bn.x, bn.y, 1.0, edge(w_ih[hdn * ni + inp]));
         }
     }
     // hidden -> output

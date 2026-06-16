@@ -262,6 +262,22 @@ impl Creature {
         let (food_rel_angle, food_prox) = channel(nearest_food);
         let (threat_rel_angle, threat_prox) = channel(nearest_threat);
         let (neighbor_rel_angle, neighbor_prox) = channel(nearest_neighbor);
+        // Proprioceptive pacemakers: one CPG oscillator per appendage segment, in
+        // body order. Each runs at a gene-tuned rate (segment flexibility) and is
+        // phase-staggered by its position, so a multi-limb body feels a travelling
+        // rhythm it can wire into gait. Founders (no limbs) get none.
+        let mut proprioception = [0.0f32; MAX_SEGMENTS];
+        let mut n_sensors = 0usize;
+        for seg in self.pheno.segments.iter() {
+            if seg.appendage == Appendage::None || n_sensors >= MAX_SEGMENTS {
+                continue;
+            }
+            let freq = OSC_FREQ_BASE * (0.5 + seg.flexibility);
+            let stagger = n_sensors as f32 * 0.25; // quarter-cycle between limbs
+            let phase = self.age as f32 * freq + stagger;
+            proprioception[n_sensors] = (phase * std::f32::consts::TAU).sin();
+            n_sensors += 1;
+        }
         Senses {
             food_rel_angle,
             food_prox,
@@ -271,6 +287,8 @@ impl Creature {
             neighbor_prox,
             heard,
             energy: (self.energy / REPRO_ENERGY).min(1.0),
+            proprioception,
+            n_sensors,
         }
     }
 

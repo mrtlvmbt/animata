@@ -38,6 +38,11 @@ pub struct Senses {
     pub heard: f32,
     /// Own energy normalized to the reproduction threshold, `0..=1`.
     pub energy: f32,
+    /// Per-appendage proprioceptive pacemaker (CPG) readings, `-1..1`, indexed by
+    /// appendage order; the first `n_sensors` entries are live.
+    pub proprioception: [f32; MAX_SEGMENTS],
+    /// Number of live pacemaker inputs (== appendage-segment count).
+    pub n_sensors: usize,
 }
 
 /// A creature's chosen action.
@@ -84,6 +89,7 @@ impl BehaviorKind {
                 &pheno.synapses,
                 pheno.leak,
                 pheno.n_hidden,
+                pheno.n_inputs,
                 pheno.n_outputs,
             )),
             BehaviorKind::Rule => Box::new(RuleBehavior::new(&pheno.synapses)),
@@ -129,9 +135,15 @@ struct NeuralBehavior {
 }
 
 impl NeuralBehavior {
-    fn new(synapses: &[Synapse], leak: f32, n_hidden: usize, n_outputs: usize) -> Self {
+    fn new(
+        synapses: &[Synapse],
+        leak: f32,
+        n_hidden: usize,
+        n_inputs: usize,
+        n_outputs: usize,
+    ) -> Self {
         NeuralBehavior {
-            brain: Brain::from_synapses(synapses, leak, n_hidden, n_outputs),
+            brain: Brain::from_synapses(synapses, leak, n_hidden, n_inputs, n_outputs),
         }
     }
 }
@@ -145,13 +157,20 @@ impl Behavior for NeuralBehavior {
         let (fsin, fcos) = dir(s.food_rel_angle);
         let (tsin, tcos) = dir(s.threat_rel_angle);
         let (nsin, ncos) = dir(s.neighbor_rel_angle);
-        let inputs = [
+        // Base senses first, then one pacemaker input per appendage (body-grown
+        // sensor ports). Built into a stack buffer sliced to this body's input
+        // count — no per-step allocation.
+        let mut inbuf = [0.0f32; NN_BASE_INPUTS + MAX_SEGMENTS];
+        inbuf[..NN_BASE_INPUTS].copy_from_slice(&[
             s.food_prox, fsin, fcos,
             s.threat_prox, tsin, tcos,
             s.neighbor_prox, nsin, ncos,
             s.heard, s.energy, 1.0,
-        ];
-        let out = self.brain.forward(&inputs);
+        ]);
+        for k in 0..s.n_sensors.min(MAX_SEGMENTS) {
+            inbuf[NN_BASE_INPUTS + k] = s.proprioception[k];
+        }
+        let out = self.brain.forward(&inbuf[..NN_BASE_INPUTS + s.n_sensors.min(MAX_SEGMENTS)]);
         // Actuator drives: map a tanh output (-1..1) to a drive around 1.0, so a
         // neutral (or unwired) port leaves an appendage at full capability and a
         // trained one can sprint (up to 1.5) or idle (down to 0) that one limb.
