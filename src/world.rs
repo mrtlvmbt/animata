@@ -4,7 +4,7 @@ use crate::behavior::BehaviorKind;
 use crate::biome::{Biome, BiomeMap};
 use crate::config::*;
 use crate::creature::Creature;
-use crate::genome::{seed, Genome};
+use crate::genome::{seed, Appendage, Genome};
 use crate::grid::SpatialGrid;
 use crate::phylo::Ancestry;
 use crate::speciation::Speciation;
@@ -370,15 +370,17 @@ impl World {
         let biome = &self.biome;
         if matches!(self.behavior, BehaviorKind::Neural) {
             self.creatures.par_iter_mut().enumerate().for_each(|(i, c)| {
-                let bp = biome.props_at(c.pos);
+                let b = biome.at(c.pos);
+                let bp = b.props();
                 let ([food, threat, neighbor], heard) = targets[i];
-                c.think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult);
+                c.think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult, b.medium());
             });
         } else {
             for i in 0..self.creatures.len() {
-                let bp = biome.props_at(self.creatures[i].pos);
+                let b = biome.at(self.creatures[i].pos);
+                let bp = b.props();
                 let ([food, threat, neighbor], heard) = targets[i];
-                self.creatures[i].think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult);
+                self.creatures[i].think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult, b.medium());
             }
         }
     }
@@ -650,6 +652,8 @@ impl World {
         let mut memory = 0.0;
         let mut niche = 0.0;
         let mut niche_sq = 0.0;
+        let mut segments = 0.0;
+        let mut appendaged = 0u32;
         // Sums of squares of *normalized* traits, for the diversity (std-dev) metric.
         let mut sq = [0.0f32; 4];
         let mut sum_n = [0.0f32; 4];
@@ -673,6 +677,10 @@ impl World {
                 infected += 1;
             }
             memory += c.memory_use();
+            segments += c.pheno.segments.len() as f32;
+            if c.pheno.segments.iter().any(|s| s.appendage != Appendage::None) {
+                appendaged += 1;
+            }
             let dn = c.pheno.diet_niche;
             niche += dn;
             niche_sq += dn * dn;
@@ -724,6 +732,8 @@ impl World {
             avg_resistance: resistance / n,
             infected_frac: infected as f32 / n,
             avg_memory: memory / n,
+            avg_segments: segments / n,
+            appendaged_frac: appendaged as f32 / n,
             avg_niche: niche / n,
             niche_spread: (niche_sq / n - (niche / n) * (niche / n)).max(0.0).sqrt(),
             diversity: std_sum / 4.0,

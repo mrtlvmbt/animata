@@ -107,7 +107,7 @@ impl Genome {
         }
         let mut emit = |src: usize, dst: usize| {
             nt.extend_from_slice(&RECORD_START);
-            nt.extend_from_slice(&gene_nt(REC_SYNAPSE as u32));
+            nt.extend_from_slice(&gene_nt(0)); // type gene below SEGMENT_TYPE_MIN -> synapse
             nt.extend_from_slice(&gene_nt(src as u32));
             nt.extend_from_slice(&gene_nt(dst as u32));
             nt.extend_from_slice(&gene_nt(gen_range(0u32, 256)));
@@ -194,16 +194,9 @@ impl Genome {
             }
             // Field reader, relative to the first field gene (after start+type).
             let f = |k: usize| gene_at(nt, i + 3 + NT_PER_GENE + k * NT_PER_GENE);
-            let kind = (gene_at(nt, i + 3) % RECORD_TYPES as u8) as u8;
-            match kind {
-                REC_SYNAPSE if i + SYNAPSE_RECORD_NT <= nt.len() => {
-                    let src = (f(0) as usize % SRC_PORTS) as u8;
-                    let dst = (f(1) as usize % DST_PORTS) as u8;
-                    let wv = f(2) as f32 / 255.0;
-                    syn.push(Synapse { src, dst, w: (wv * 2.0 - 1.0) * WEIGHT_SCALE });
-                    i += SYNAPSE_RECORD_NT;
-                }
-                REC_SEGMENT if i + SEGMENT_RECORD_NT <= nt.len() && seg.len() < MAX_SEGMENTS => {
+            let is_segment = gene_at(nt, i + 3) >= SEGMENT_TYPE_MIN;
+            if is_segment {
+                if i + SEGMENT_RECORD_NT <= nt.len() && seg.len() < MAX_SEGMENTS {
                     seg.push(Segment {
                         length: lerp(SEG_LEN_RANGE, f(0) as f32 / 255.0),
                         width: lerp(SEG_WIDTH_RANGE, f(1) as f32 / 255.0),
@@ -211,10 +204,17 @@ impl Genome {
                         flexibility: f(3) as f32 / 255.0,
                     });
                     i += SEGMENT_RECORD_NT;
+                } else {
+                    i += 1; // record runs off the end, or segment cap reached
                 }
-                // Type known but record runs off the end (or segment cap hit):
-                // skip this start codon and keep scanning.
-                _ => i += 1,
+            } else if i + SYNAPSE_RECORD_NT <= nt.len() {
+                let src = (f(0) as usize % SRC_PORTS) as u8;
+                let dst = (f(1) as usize % DST_PORTS) as u8;
+                let wv = f(2) as f32 / 255.0;
+                syn.push(Synapse { src, dst, w: (wv * 2.0 - 1.0) * WEIGHT_SCALE });
+                i += SYNAPSE_RECORD_NT;
+            } else {
+                i += 1;
             }
         }
         (syn, seg)
@@ -356,9 +356,11 @@ fn body_radius(segments: &[Segment], radius_gene: f32) -> f32 {
     if segments.is_empty() {
         return radius_gene;
     }
-    let total_len: f32 = segments.iter().map(|s| s.length).sum();
+    // Width drives the bounding radius (used for collision / sensing / eating
+    // reach), not chain length — otherwise a long body would win free eating
+    // reach and segments would run away to the cap regardless of locomotion.
     let max_w = segments.iter().map(|s| s.width).fold(0.0, f32::max);
-    (0.5 * total_len).max(max_w).clamp(RADIUS_RANGE.0, RADIUS_RANGE.1 * 2.0)
+    max_w.clamp(RADIUS_RANGE.0, RADIUS_RANGE.1)
 }
 
 /// Map `t` in `0..=1` into the inclusive range `(lo, hi)`.
@@ -472,7 +474,7 @@ mod tests {
         // from it rather than the (zero) radius gene.
         let mut nt = vec![0u8; BODY_GENES * NT_PER_GENE];
         nt.extend_from_slice(&RECORD_START);
-        nt.extend_from_slice(&gene_nt(REC_SEGMENT as u32));
+        nt.extend_from_slice(&gene_nt(255)); // type gene >= SEGMENT_TYPE_MIN -> segment
         nt.extend_from_slice(&gene_nt(255)); // length
         nt.extend_from_slice(&gene_nt(128)); // width
         nt.extend_from_slice(&gene_nt(1)); // appendage tag -> Fin

@@ -26,6 +26,12 @@ pub struct Snapshot {
     pub avg_memory: f32,
     /// Mean diet niche (0..1): the food flavor the population digests best.
     pub avg_niche: f32,
+    /// Mean body-segment count (0 == single implicit segment); rises as evolvable
+    /// morphologies grow chains.
+    pub avg_segments: f32,
+    /// Fraction of the population carrying at least one appendage (fin/wing/leg/
+    /// burrow) — the share that has moved off the plain circular body plan.
+    pub appendaged_frac: f32,
     /// Std-dev of diet niche: rises and goes bimodal as the population splits
     /// into food specialists — the live signal of ecological speciation.
     pub niche_spread: f32,

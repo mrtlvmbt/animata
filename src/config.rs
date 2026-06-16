@@ -253,10 +253,12 @@ pub const BODY_GENES: usize = 14;
 //
 /// Start codon (nt triplet) marking the head of any record.
 pub const RECORD_START: [u8; 3] = [3, 3, 2]; // T,T,G
-/// Record type tags (read from the gene right after the start codon, mod this).
-pub const RECORD_TYPES: usize = 2;
-pub const REC_SYNAPSE: u8 = 0;
-pub const REC_SEGMENT: u8 = 1;
+/// The gene right after the start codon selects the record type. A *segment*
+/// record needs that gene at or above this high threshold; everything else is a
+/// *synapse*. Segments are therefore a rare slice of type-gene space, so a body
+/// plan only changes by a rare macro-mutation (and never by a synapse record's
+/// type gene drifting one step) — selection then has to amplify it.
+pub const SEGMENT_TYPE_MIN: u8 = 240; // ~6% of type-gene values
 /// nt consumed by a synapse record: start(3) + type + src + dst + weight.
 pub const SYNAPSE_RECORD_NT: usize = 3 + NT_PER_GENE + 3 * NT_PER_GENE; // 19
 /// nt consumed by a segment record: start(3) + type + length + width + appendage
@@ -285,6 +287,12 @@ pub const SEG_LEN_RANGE: (f32, f32) = (2.0, 7.0);
 pub const SEG_WIDTH_RANGE: (f32, f32) = (1.5, 5.0);
 /// Number of appendage kinds (None, Fin, Wing, Leg, Burrow).
 pub const APPENDAGE_KINDS: usize = 5;
+/// Metabolic upkeep added per body segment, as a fraction of the body cost
+/// multiplier. Counterweight to the locomotor benefit of extra segments, so the
+/// evolved chain length settles at an interior optimum instead of the cap.
+pub const SEGMENT_UPKEEP: f32 = 0.10;
+/// Extra upkeep per appendage (fins/wings/legs cost to grow and carry).
+pub const APPENDAGE_UPKEEP: f32 = 0.08;
 
 /// Canonical genome length (nt): fixed body-gene block + the founder's synapse
 /// records. Indels then push length around within the clamp band below.

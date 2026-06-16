@@ -575,7 +575,7 @@ fn draw_panel(world: &World) {
     let gh = PANEL_H - pad * 2.0;
 
     // Normalized trait curves (0..1) + populations scaled to caps.
-    let series: [(Color, fn(&Snapshot) -> f32); 16] = [
+    let series: [(Color, fn(&Snapshot) -> f32); 18] = [
         (Color::new(0.9, 0.9, 0.9, 1.0), |s| {
             (s.herbivores as f32 / POP_CAP as f32).min(1.0)
         }),
@@ -619,6 +619,10 @@ fn draw_panel(world: &World) {
         // Diet-niche spread (std-dev, ×3 to fill the panel): rises/goes bimodal
         // as the population splits into food specialists (ecological speciation).
         (Color::new(0.5, 0.9, 0.6, 1.0), |s| (s.niche_spread * 3.0).min(1.0)),
+        // Mean body-segment count, scaled to the cap: morphological complexity.
+        (Color::new(0.8, 0.6, 0.4, 1.0), |s| (s.avg_segments / MAX_SEGMENTS as f32).min(1.0)),
+        // Fraction of the population carrying an appendage (off the plain circle).
+        (Color::new(0.5, 0.75, 0.95, 1.0), |s| s.appendaged_frac),
     ];
 
     let n = hist.len();

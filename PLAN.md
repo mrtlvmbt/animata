@@ -183,11 +183,24 @@ arthropod clade), not just a wobbling mean speed.
 >   *Caveat:* segments are currently selectively neutral/costly, so morphotypes
 >   won't emerge until 2.2 gives appendages locomotor payoff. Flaky giant-world
 >   sim test seen once (borderline threshold) — watch.
-> - **NEXT — Phase 2.2: medium physics + appendage locomotion.** Biome → `Medium`
->   (Ground/Water/Air); `Locomotor` uses segments+appendages so fins pay in water,
->   legs on land, etc. — the selection pressure that makes body plans diverge.
-> - **THEN — Phase 2.3: vertical layers** (stack, per-animal `layer_access` mask
->   gated by morphology) + tiered food.
+> - **Phase 2.2 DONE — medium physics + appendage locomotion.** Biome → `Medium`
+>   (`biome.medium()`); `Locomotor::locomotion(medium)` scales thrust by how the
+>   body's appendages suit the medium (legs→ground, fins→water, wings→air) with
+>   diminishing returns; per-segment/appendage upkeep (`SEGMENT_UPKEEP`,
+>   `APPENDAGE_UPKEEP`) gives an interior optimum. Two balance fixes that mattered:
+>   (a) segments are a *rare* type-gene band (`SEGMENT_TYPE_MIN`) so body plans
+>   change by rare macro-mutation, not a mutational flood that slams the cap;
+>   (b) bounding radius derives from segment *width* only, not chain length, so
+>   long bodies don't win free eating reach. Stats `avg_segments`/`appendaged_frac`
+>   added (panel + headless). Result: 8/8 seeds survive (pop 5.9k–10.8k), legs
+>   evolve from zero to ~40–59% adoption at avg ~1 segment — genuine selection, no
+>   runaway, no collapse. 24 tests green; bin clean. Branch
+>   `phase-2-segmented-bodies` (2.1 already merged to main).
+>   *Note:* fins/wings have capability but little purpose until aquatic/aerial food
+>   exists — that's 2.3.
+> - **NEXT — Phase 2.3: vertical layers** (stack, per-animal `layer_access` mask
+>   gated by morphology) + tiered food (benthic/canopy/nectar) — the multi-niche
+>   pressure that makes fins/wings/burrow pay and body plans truly diverge.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),
