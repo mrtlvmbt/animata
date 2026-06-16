@@ -1,5 +1,5 @@
 [package]
-name = "life"
+name = "animata"
 version = "0.1.0"
 edition = "2021"
 description = "DNA-based artificial life simulation with neural-net brains, mutation and natural selection"

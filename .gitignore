@@ -8,10 +8,10 @@
 .claude/settings.local.json
 
 # Generated simulation outputs (saves, stat/tree dumps, sweeps)
-/life_save.txt
-/life_save.txt.tree
-/life_stats.csv
-/life_tree.csv
+/animata_save.txt
+/animata_save.txt.tree
+/animata_stats.csv
+/animata_tree.csv
 /sweep.csv
 
 # Dev-bridge screenshots

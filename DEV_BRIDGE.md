@@ -7,7 +7,7 @@ GUI and emergent behaviour without a human watching the display.
 > **Status:** phases 1–4 implemented (`src/dev_bridge.rs`, `--features dev`).
 > Verified live end-to-end: `cargo run --features dev` opens the window, binds
 > `127.0.0.1:8127`, and every method answers — status/inspect/histogram, the
-> controls, and `life/screenshot` (PNG an agent can then view). Note: `inspect`
+> controls, and `animata/screenshot` (PNG an agent can then view). Note: `inspect`
 > and `select` take the world point as **top-level** `{"x":…,"y":…}` (not nested).
 > Phase 5 (Python qa-agent + YAML scenarios) is still TODO.
 
@@ -105,27 +105,27 @@ Screenshot is the one command serviced after `draw_*`/`next_frame`:
 ## 3. Method catalogue (maps to existing state)
 
 **Read** (no mutation):
-- `life/status` → `tick, paused, speed, behavior, drought,` the whole latest
+- `animata/status` → `tick, paused, speed, behavior, drought,` the whole latest
   `Snapshot` (pop, herbivores, predators, species, lineages, max_generation,
   avg_speed/sense/radius/metabolism/carnivory/ornament, diversity, niche_spread,
   avg_memory, **avg_segments, appendaged_frac, frac_underground, frac_air,
   avg_hidden, frac_finned**), plus `view{scale,center}`.
-- `life/inspect {id?|at?}` → one creature: `id, pos, layer, energy, age,
+- `animata/inspect {id?|at?}` → one creature: `id, pos, layer, energy, age,
   generation, carnivory, primary_layer, n_hidden, synapse_count,
   segments:[{length,width,appendage,flexibility}], radius, max_speed, lineage,
   species_id`.
-- `life/histogram` → population distributions for richer asserts: counts per
+- `animata/histogram` → population distributions for richer asserts: counts per
   layer, per appendage kind, segment-count buckets, hidden-width buckets.
 
 **Control** (mutate the `main()` locals):
-- `life/set_pause {paused}` · `life/set_speed {steps}` · `life/step {n}`
-  (advance while paused) · `life/reset {seed?}` · `life/set_view
-  {scale?,cx?,cy?}` · `life/set_color {mode}` · `life/select {id?|at?}` ·
-  `life/set_param {name, value}` (food_per_step|predator_gain|mutation_rate —
-  the live sliders) · `life/save {path}` · `life/load {path}`.
+- `animata/set_pause {paused}` · `animata/set_speed {steps}` · `animata/step {n}`
+  (advance while paused) · `animata/reset {seed?}` · `animata/set_view
+  {scale?,cx?,cy?}` · `animata/set_color {mode}` · `animata/select {id?|at?}` ·
+  `animata/set_param {name, value}` (food_per_step|predator_gain|mutation_rate —
+  the live sliders) · `animata/save {path}` · `animata/load {path}`.
 
 **Capture**:
-- `life/screenshot {path}` → PNG of the current frame (serviced post-draw).
+- `animata/screenshot {path}` → PNG of the current frame (serviced post-draw).
 
 Controls are few and semantic, so — unlike GRAV — there's no need to synthesize
 keystrokes; each hot-key has a direct method. (A generic `life/key {code}` could
@@ -167,10 +167,10 @@ Direct (what unblocks *me* — I can view PNGs):
 ```sh
 cargo run --features dev &                                   # launch with bridge
 J(){ curl -s 127.0.0.1:8127 -d '{"jsonrpc":"2.0","id":1,"method":"'"$1"'","params":'"${2:-null}"'}'; }
-J life/reset '{"seed":6}'
-J life/set_speed '{"steps":8}'; sleep 20                     # let it evolve
-J life/status                                                # assert strata numerically
-J life/set_view '{"scale":12}'; J life/screenshot '{"path":"shot.png"}'
+J animata/reset '{"seed":6}'
+J animata/set_speed '{"steps":8}'; sleep 20                     # let it evolve
+J animata/status                                                # assert strata numerically
+J animata/set_view '{"scale":12}'; J animata/screenshot '{"path":"shot.png"}'
 # → then Read shot.png to eyeball strata tint / segmented bodies / brain inspector
 ```
 
@@ -199,9 +199,9 @@ asserts:
 ## 7. Implementation phases
 
 1. **Skeleton** — `dev` feature, `dev_bridge` module, tiny_http thread, the
-   queue + `drain()`, and `life/status` + `life/set_pause`. Prove curl round-trip.
+   queue + `drain()`, and `animata/status` + `animata/set_pause`. Prove curl round-trip.
 2. **Control** — reset/step/speed/view/color/select/set_param/save/load.
-3. **Capture** — `life/screenshot` (post-draw `get_screen_data().export_png`).
+3. **Capture** — `animata/screenshot` (post-draw `get_screen_data().export_png`).
 4. **Inspect/histogram** — per-creature + distribution readouts.
 5. **(optional) qa-agent** — Python client + 3–4 scenarios (strata, fins,
    brain-shrink, survival) for CI-runnable regression of the *emergent* claims.

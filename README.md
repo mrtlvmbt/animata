@@ -1,4 +1,4 @@
-# life — DNA evolution sim
+# animata — DNA evolution sim
 
 Small artificial-life simulation in Rust + macroquad. Each creature carries an
 **ACGT genome** that decodes into body traits (size, speed, sense range,
@@ -55,10 +55,10 @@ Convenience aliases (`.cargo/config.toml`): `cargo play` (release GUI),
 | `R` | reset with a new random seed |
 | `B` | swap behavior strategy (neural-net ⇄ rule-based) |
 | `T` | toggle the live tuning panel (sliders) |
-| `S` / `L` | save / load the world to `life_save.txt` |
-| `O` | toggle CSV stats logging to `life_stats.csv` |
+| `S` / `L` | save / load the world to `animata_save.txt` |
+| `O` | toggle CSV stats logging to `animata_stats.csv` |
 | `G` | cycle creature coloring: diet → lineage → species |
-| `Y` | export the ancestry tree to `life_tree.csv` |
+| `Y` | export the ancestry tree to `animata_tree.csv` |
 | `P` | toggle the in-app phylogeny tree overlay |
 | `D` | toggle the per-diet trait breakdown panel |
 | `M` | toggle the Muller plot (lineage shares over time) |
@@ -75,7 +75,7 @@ collapse as the population converges on a winning genome, or stay high when
 biomes/niches keep distinct sub-populations alive.
 
 `S` writes the whole world (every creature's genome + state, all food, the tick,
-the behavior mode) to `life_save.txt` in the working directory; `L` reloads it,
+the behavior mode) to `animata_save.txt` in the working directory; `L` reloads it,
 so you can resume an evolved population across sessions. Phenotypes and brains
 are re-derived from the saved genomes.
 
@@ -98,7 +98,7 @@ you can watch clades compete and spread spatially; the inspector shows a
 creature's lineage id and its **ancestor chain** (nearest parents first) plus its
 full depth, walked from a complete birth/death log (`phylo.rs`) that records every
 creature — living and dead. Press `Y` to export that whole tree as an edge list
-(`life_tree.csv`: id, parent, birth, death, lineage) to render in an external
+(`animata_tree.csv`: id, parent, birth, death, lineage) to render in an external
 phylogenetics tool. The log is kept bounded by periodic pruning (it only retains
 ancestors of living creatures) and isn't saved with the world — on load the
 current population becomes the founders of a fresh tree, which then grows again
@@ -130,7 +130,7 @@ herbivore / omnivore / carnivore, so you can see e.g. whether carnivores evolved
 faster or larger than herbivores.
 
 **CSV logging.** Press `O` to start appending one row per recorded snapshot
-(every 5 ticks) to `life_stats.csv` — tick, population, herbivore/carnivore
+(every 5 ticks) to `animata_stats.csv` — tick, population, herbivore/carnivore
 counts, average traits, average carnivory, diversity, max generation. Open it in
 any plotting tool to chart a long run (including per-diet population split).
 Press `O` again to stop.

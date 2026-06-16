@@ -22,28 +22,28 @@ J() {
 }
 
 # ── reads ────────────────────────────────────────────────────────────────────
-bstatus()  { J life/status; }                       # full stats snapshot + controls
-bhist()    { J life/histogram; }                    # per-layer / appendage / segment / hidden spreads
-binspect() { J life/inspect "{\"x\":${1:-4400},\"y\":${2:-3040}}"; }  # nearest creature to a world point
-binspectid() { J life/inspect "{\"id\":$1}"; }      # a specific creature by id
-bping()    { curl -s -m 2 "http://${BRIDGE_HOST}:${BRIDGE_PORT}" -d '{"jsonrpc":"2.0","id":1,"method":"life/status"}' >/dev/null && echo up || echo down; }
+bstatus()  { J animata/status; }                       # full stats snapshot + controls
+bhist()    { J animata/histogram; }                    # per-layer / appendage / segment / hidden spreads
+binspect() { J animata/inspect "{\"x\":${1:-4400},\"y\":${2:-3040}}"; }  # nearest creature to a world point
+binspectid() { J animata/inspect "{\"id\":$1}"; }      # a specific creature by id
+bping()    { curl -s -m 2 "http://${BRIDGE_HOST}:${BRIDGE_PORT}" -d '{"jsonrpc":"2.0","id":1,"method":"animata/status"}' >/dev/null && echo up || echo down; }
 
 # one numeric field out of status (needs jq): bget frac_underground
-bget()     { J life/status | jq -r ".result.$1"; }
+bget()     { J animata/status | jq -r ".result.$1"; }
 
 # ── controls ─────────────────────────────────────────────────────────────────
-bpause()   { J life/set_pause '{"paused":true}'; }
-bresume()  { J life/set_pause '{"paused":false}'; }
-bspeed()   { J life/set_speed "{\"steps\":${1:-8}}"; }
-bstep()    { J life/step "{\"n\":${1:-1}}"; }        # advance n steps (works while paused)
-breset()   { J life/reset "{\"seed\":${1:-6}}"; }
-bview()    { J life/set_view "{\"scale\":${1:-9},\"cx\":${2:-4400},\"cy\":${3:-3040}}"; }
-bcolor()   { J life/set_color "{\"mode\":\"${1:-species}\"}"; }   # diet|lineage|species
-bselect()  { J life/select "{\"x\":${1:-4400},\"y\":${2:-3040}}"; }
-bparam()   { J life/set_param "{\"name\":\"$1\",\"value\":$2}"; } # food_per_step|predator_gain|mutation_rate
-bsave()    { J life/save "{\"path\":\"${1:-life_save.txt}\"}"; }
-bload()    { J life/load "{\"path\":\"${1:-life_save.txt}\"}"; }
-bshot()    { J life/screenshot "{\"path\":\"${1:-shot.png}\"}"; } # PNG to repo dir; then Read it
+bpause()   { J animata/set_pause '{"paused":true}'; }
+bresume()  { J animata/set_pause '{"paused":false}'; }
+bspeed()   { J animata/set_speed "{\"steps\":${1:-8}}"; }
+bstep()    { J animata/step "{\"n\":${1:-1}}"; }        # advance n steps (works while paused)
+breset()   { J animata/reset "{\"seed\":${1:-6}}"; }
+bview()    { J animata/set_view "{\"scale\":${1:-9},\"cx\":${2:-4400},\"cy\":${3:-3040}}"; }
+bcolor()   { J animata/set_color "{\"mode\":\"${1:-species}\"}"; }   # diet|lineage|species
+bselect()  { J animata/select "{\"x\":${1:-4400},\"y\":${2:-3040}}"; }
+bparam()   { J animata/set_param "{\"name\":\"$1\",\"value\":$2}"; } # food_per_step|predator_gain|mutation_rate
+bsave()    { J animata/save "{\"path\":\"${1:-animata_save.txt}\"}"; }
+bload()    { J animata/load "{\"path\":\"${1:-animata_save.txt}\"}"; }
+bshot()    { J animata/screenshot "{\"path\":\"${1:-shot.png}\"}"; } # PNG to repo dir; then Read it
 
 # ── combos ───────────────────────────────────────────────────────────────────
 # brun <seed> <steps> <wait_s> — reset, run at speed, wait, then print status.

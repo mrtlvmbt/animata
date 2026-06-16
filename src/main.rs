@@ -55,9 +55,9 @@ impl ColorMode {
         }
     }
 }
-const SAVE_PATH: &str = "life_save.txt";
-const CSV_PATH: &str = "life_stats.csv";
-const TREE_PATH: &str = "life_tree.csv";
+const SAVE_PATH: &str = "animata_save.txt";
+const CSV_PATH: &str = "animata_stats.csv";
+const TREE_PATH: &str = "animata_tree.csv";
 /// LOD threshold: a creature rendering smaller than this many on-screen pixels is
 /// drawn as a fixed-size dot instead of a heading triangle (overview/giant-map).
 const LOD_POINT_PX: f32 = 2.5;
@@ -106,7 +106,7 @@ impl View {
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: "life — DNA evolution sim".to_owned(),
+        window_title: "animata — DNA evolution sim".to_owned(),
         window_width: VIEW_W as i32,
         window_height: (VIEW_H + PANEL_H) as i32,
         high_dpi: true,

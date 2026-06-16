@@ -2,7 +2,7 @@
 //!
 //! Format (whitespace-separated):
 //! ```text
-//! life-save v1
+//! animata-save v1
 //! behavior n
 //! biome 314159
 //! tick 12345
@@ -30,7 +30,7 @@ use std::io::{Error, ErrorKind, Result};
 
 pub fn save(world: &World, path: &str) -> Result<()> {
     let mut s = String::new();
-    let _ = writeln!(s, "life-save v1");
+    let _ = writeln!(s, "animata-save v1");
     let _ = writeln!(s, "behavior {}", world.behavior.code());
     let _ = writeln!(s, "biome {}", world.biome_seed);
     let _ = writeln!(s, "tick {}", world.tick);
@@ -72,8 +72,9 @@ pub fn load(path: &str) -> Result<World> {
     let mut lines = text.lines();
 
     let header = lines.next().unwrap_or_default();
-    if !header.starts_with("life-save") {
-        return Err(bad("not a life-save file"));
+    // Accept the legacy "life-save" magic too, so pre-rename saves still load.
+    if !(header.starts_with("animata-save") || header.starts_with("life-save")) {
+        return Err(bad("not an animata-save file"));
     }
 
     let behavior_code = tagged(lines.next(), "behavior")?;

@@ -8,7 +8,7 @@
 //!
 //! ```sh
 //! curl -s 127.0.0.1:8127 \
-//!   -d '{"jsonrpc":"2.0","id":1,"method":"life/status","params":null}'
+//!   -d '{"jsonrpc":"2.0","id":1,"method":"animata/status","params":null}'
 //! ```
 
 use std::collections::VecDeque;
@@ -115,21 +115,21 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
         _ => None,
     };
     match method {
-        "life/status" => Ok(Cmd::Status),
-        "life/histogram" => Ok(Cmd::Histogram),
-        "life/inspect" => Ok(Cmd::Inspect { id: u("id"), at: at() }),
-        "life/set_pause" => Ok(Cmd::SetPause(
+        "animata/status" => Ok(Cmd::Status),
+        "animata/histogram" => Ok(Cmd::Histogram),
+        "animata/inspect" => Ok(Cmd::Inspect { id: u("id"), at: at() }),
+        "animata/set_pause" => Ok(Cmd::SetPause(
             p.get("paused").and_then(Value::as_bool).ok_or("paused must be bool")?,
         )),
-        "life/set_speed" => Ok(Cmd::SetSpeed(u("steps").ok_or("steps must be uint")? as u32)),
-        "life/step" => Ok(Cmd::Step(u("n").unwrap_or(1) as u32)),
-        "life/reset" => Ok(Cmd::Reset { seed: u("seed") }),
-        "life/set_view" => Ok(Cmd::SetView {
+        "animata/set_speed" => Ok(Cmd::SetSpeed(u("steps").ok_or("steps must be uint")? as u32)),
+        "animata/step" => Ok(Cmd::Step(u("n").unwrap_or(1) as u32)),
+        "animata/reset" => Ok(Cmd::Reset { seed: u("seed") }),
+        "animata/set_view" => Ok(Cmd::SetView {
             scale: f("scale").map(|v| v as f32),
             cx: f("cx").map(|v| v as f32),
             cy: f("cy").map(|v| v as f32),
         }),
-        "life/set_color" => {
+        "animata/set_color" => {
             let mode = match s("mode").ok_or("mode must be string")?.as_str() {
                 "diet" => ColorMode::Diet,
                 "lineage" => ColorMode::Lineage,
@@ -138,14 +138,14 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             };
             Ok(Cmd::SetColor(mode))
         }
-        "life/select" => Ok(Cmd::Select { id: u("id"), at: at() }),
-        "life/set_param" => Ok(Cmd::SetParam {
+        "animata/select" => Ok(Cmd::Select { id: u("id"), at: at() }),
+        "animata/set_param" => Ok(Cmd::SetParam {
             name: s("name").ok_or("name must be string")?,
             value: f("value").ok_or("value must be number")?,
         }),
-        "life/save" => Ok(Cmd::Save(s("path").unwrap_or_else(|| "life_save.txt".into()))),
-        "life/load" => Ok(Cmd::Load(s("path").unwrap_or_else(|| "life_save.txt".into()))),
-        "life/screenshot" => Ok(Cmd::Screenshot(s("path").unwrap_or_else(|| "shot.png".into()))),
+        "animata/save" => Ok(Cmd::Save(s("path").unwrap_or_else(|| "animata_save.txt".into()))),
+        "animata/load" => Ok(Cmd::Load(s("path").unwrap_or_else(|| "animata_save.txt".into()))),
+        "animata/screenshot" => Ok(Cmd::Screenshot(s("path").unwrap_or_else(|| "shot.png".into()))),
         other => Err(format!("unknown method: {other}")),
     }
 }
