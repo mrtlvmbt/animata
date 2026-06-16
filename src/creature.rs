@@ -33,6 +33,10 @@ pub struct Creature {
     /// Current infection's pathogen strain (0..1), or `None` if healthy.
     pub infection: Option<f32>,
     pub pos: Vec2,
+    /// Vertical layer the creature currently occupies (default surface). Sensing,
+    /// eating and hunting happen within a layer; morphology gates which layers it
+    /// can reach (see [`Phenotype::layer_access`]).
+    pub layer: u8,
     pub heading: f32,
     pub energy: f32,
     pub age: u32,
@@ -61,6 +65,7 @@ impl Creature {
             signal: 0.0,
             infection: None,
             pos,
+            layer: pheno.primary_layer(),
             heading: gen_range(0.0, std::f32::consts::TAU),
             energy,
             age: 0,
@@ -103,6 +108,7 @@ impl Creature {
             signal: 0.0,
             infection: None,
             pos,
+            layer: pheno.primary_layer(),
             heading,
             energy,
             age,
@@ -123,6 +129,7 @@ impl Creature {
     pub fn memory_use(&self) -> f32 {
         self.mind.memory_use()
     }
+
 
     /// Coarse diet class for coloring/stats.
     pub fn diet(&self) -> Diet {

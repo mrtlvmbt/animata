@@ -198,9 +198,23 @@ arthropod clade), not just a wobbling mean speed.
 >   `phase-2-segmented-bodies` (2.1 already merged to main).
 >   *Note:* fins/wings have capability but little purpose until aquatic/aerial food
 >   exists — that's 2.3.
-> - **NEXT — Phase 2.3: vertical layers** (stack, per-animal `layer_access` mask
->   gated by morphology) + tiered food (benthic/canopy/nectar) — the multi-niche
->   pressure that makes fins/wings/burrow pay and body plans truly diverge.
+> - **Phase 2.3 DONE — vertical layers + tiered foraging.** 3 layers
+>   (underground/surface/air); a creature's layer is its morphological stratum
+>   (`Phenotype::primary_layer`: wings→air, burrow→underground, else surface).
+>   Surface keeps positioned pellets (baseline untouched); non-surface layers offer
+>   a fixed foraging **capacity split among occupants** (`BENTHIC_CAPACITY`,
+>   `AERIAL_CAPACITY`) — density-dependent, self-limiting, no food-vector/save
+>   churn. Sensing/eating/hunting gated to a creature's layer (so a stratum is a
+>   predator refuge) via grid predicates on `clayers`. Stats `frac_underground`/
+>   `frac_air` (panel + headless); creatures tinted by layer. Result: three strata
+>   coexist (~57% surface / ~27% burrowers / ~16% fliers), population thriving
+>   (caps 12k), 400+ species — genuine vertical niche divergence, no collapse.
+>   *Simplifications to revisit:* layer is fixed by morphology (no in-life movement
+>   between layers yet); mating/infection not layer-gated; non-surface food is
+>   abstract yield, not positioned pellets.
+> - **NEXT — Phase 2 wrap / Phase 4: topological speciation** (cluster by body
+>   plan, not flat traits) + macroevolution stats; then optional richer layer
+>   movement / aquatic pellets.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),

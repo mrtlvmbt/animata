@@ -275,6 +275,26 @@ pub const DST_PORTS: usize = NN_HIDDEN + NN_OUTPUTS; // 10
 pub const FOUNDER_SYNAPSES: usize =
     NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS; // 154
 
+// ---- Vertical layers ----
+// The world has a small stack of layers. A creature's layer is its morphological
+// stratum: wings put it in the air, a burrow appendage underground, otherwise the
+// surface. Surface dwellers forage the positioned food pellets exactly as before
+// (baseline carrying capacity unchanged). Each non-surface layer instead offers a
+// fixed foraging *capacity* split among its current occupants — density-dependent,
+// so the niche self-limits (rich when sparse, poor when crowded) and can't run
+// away. Sensing/eating/hunting are gated to a creature's layer, so a non-surface
+// layer is also a refuge from surface predators. This is the selection pressure
+// that finally makes the burrow/wing appendages pay.
+pub const N_LAYERS: usize = 3;
+pub const LAYER_UNDERGROUND: u8 = 0;
+pub const LAYER_SURFACE: u8 = 1;
+pub const LAYER_AIR: u8 = 2;
+/// Total benthic (underground) foraging energy available per step, split among
+/// the creatures currently underground (reachable only with a burrow appendage).
+pub const BENTHIC_CAPACITY: f32 = 900.0;
+/// Total aerial foraging energy per step, split among winged occupants.
+pub const AERIAL_CAPACITY: f32 = 450.0;
+
 // ---- Body morphology (segment chain) ----
 // A body is a chain of segments decoded from segment records. Founders emit none
 // (a single implicit segment sized by the radius gene == the old circle); chains

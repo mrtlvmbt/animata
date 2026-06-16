@@ -309,6 +309,28 @@ impl Phenotype {
         out
     }
 
+    /// The vertical stratum this body lives in, from its appendages: the air if
+    /// it has wings, else underground if it has a burrow appendage, else the
+    /// surface. (Wings win ties — a flier doesn't also dig.)
+    pub fn primary_layer(&self) -> u8 {
+        let mut wings = false;
+        let mut burrow = false;
+        for s in &self.segments {
+            match s.appendage {
+                Appendage::Wing => wings = true,
+                Appendage::Burrow => burrow = true,
+                _ => {}
+            }
+        }
+        if wings {
+            LAYER_AIR
+        } else if burrow {
+            LAYER_UNDERGROUND
+        } else {
+            LAYER_SURFACE
+        }
+    }
+
     pub fn recurrent_gain(&self) -> f32 {
         // RMS magnitude of the recurrent (hidden->hidden) synapses, normalized.
         let mut ss = 0.0f32;

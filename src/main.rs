@@ -465,6 +465,18 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
                 1.0,
             ),
         };
+        // Tint by vertical layer so strata read at a glance: underground darker,
+        // air lighter; surface unchanged.
+        let color = match cr.layer {
+            LAYER_UNDERGROUND => Color::new(color.r * 0.5, color.g * 0.5, color.b * 0.55, 1.0),
+            LAYER_AIR => Color::new(
+                (color.r + 1.0) * 0.5,
+                (color.g + 1.0) * 0.5,
+                (color.b + 1.0) * 0.5,
+                1.0,
+            ),
+            _ => color,
+        };
         let size = cr.pheno.radius * lerp(1.7, 2.2, c) * view.scale;
         // LOD: below ~LOD_POINT_PX a heading triangle is sub-pixel (invisible) and
         // costs trig per creature. At overview/giant-map zoom draw a fixed-size dot
@@ -575,7 +587,7 @@ fn draw_panel(world: &World) {
     let gh = PANEL_H - pad * 2.0;
 
     // Normalized trait curves (0..1) + populations scaled to caps.
-    let series: [(Color, fn(&Snapshot) -> f32); 18] = [
+    let series: [(Color, fn(&Snapshot) -> f32); 20] = [
         (Color::new(0.9, 0.9, 0.9, 1.0), |s| {
             (s.herbivores as f32 / POP_CAP as f32).min(1.0)
         }),
@@ -623,6 +635,10 @@ fn draw_panel(world: &World) {
         (Color::new(0.8, 0.6, 0.4, 1.0), |s| (s.avg_segments / MAX_SEGMENTS as f32).min(1.0)),
         // Fraction of the population carrying an appendage (off the plain circle).
         (Color::new(0.5, 0.75, 0.95, 1.0), |s| s.appendaged_frac),
+        // Fraction living underground (burrowers): a vertical niche.
+        (Color::new(0.55, 0.4, 0.25, 1.0), |s| s.frac_underground),
+        // Fraction living in the air (fliers): the other vertical niche.
+        (Color::new(0.85, 0.9, 1.0, 1.0), |s| s.frac_air),
     ];
 
     let n = hist.len();
