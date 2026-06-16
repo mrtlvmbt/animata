@@ -15,8 +15,12 @@ pub struct Brain {
     w_ih: Vec<f32>,
     /// recurrent hidden->hidden weights, length n_hidden * n_hidden.
     w_hh: Vec<f32>,
-    /// hidden->output weights, length n_hidden * NN_OUTPUTS.
+    /// hidden->output weights, length n_hidden * n_outputs.
     w_ho: Vec<f32>,
+    /// Output-port count (base controls + one per appendage; variable per body).
+    n_outputs: usize,
+    /// Reused output buffer (avoids per-step allocation), length n_outputs.
+    out: Vec<f32>,
     /// Leaky-integrator rate γ (LEAK_RANGE): the fraction of the new candidate
     /// activation blended in each step. γ=1 -> plain Elman; low γ -> slow memory.
     leak: f32,
@@ -40,11 +44,12 @@ impl Brain {
     /// Synapse tags are already resolved against `n_hidden` at decode time:
     /// `src < NN_INPUTS` is an input else hidden `src-NN_INPUTS`; `dst < n_hidden`
     /// is hidden else output `dst-n_hidden`.
-    pub fn from_synapses(synapses: &[Synapse], leak: f32, n_hidden: usize) -> Self {
+    pub fn from_synapses(synapses: &[Synapse], leak: f32, n_hidden: usize, n_outputs: usize) -> Self {
         let nh = n_hidden.max(1);
+        let no = n_outputs.max(1);
         let mut w_ih = vec![0.0f32; NN_INPUTS * nh];
         let mut w_hh = vec![0.0f32; nh * nh];
-        let mut w_ho = vec![0.0f32; nh * NN_OUTPUTS];
+        let mut w_ho = vec![0.0f32; nh * no];
         for s in synapses {
             let (src, dst) = (s.src as usize, s.dst as usize);
             if src < NN_INPUTS {
@@ -67,6 +72,8 @@ impl Brain {
             w_ih,
             w_hh,
             w_ho,
+            n_outputs: no,
+            out: vec![0.0; no],
             leak,
             n_hidden: nh,
             state: vec![0.0; nh],
@@ -76,8 +83,9 @@ impl Brain {
     }
 
     /// Run one recurrent forward pass, updating the memory. `inputs` must be
-    /// length NN_INPUTS. Returns `[throttle, turn, signal]`, each in `-1..=1`.
-    pub fn forward(&mut self, inputs: &[f32; NN_INPUTS]) -> [f32; NN_OUTPUTS] {
+    /// length NN_INPUTS. Returns the `n_outputs` output activations (each in
+    /// `-1..=1`): the base controls first, then one drive per appendage port.
+    pub fn forward(&mut self, inputs: &[f32; NN_INPUTS]) -> &[f32] {
         let nh = self.n_hidden;
         let mut in_abs = 0.0f32; // total |input contribution| across hidden units
         let mut rec_abs = 0.0f32; // total |recurrent contribution|
@@ -102,14 +110,13 @@ impl Brain {
         let frac = rec_abs / (in_abs + rec_abs + 1e-6);
         self.mem_use += 0.04 * (frac - self.mem_use);
 
-        let mut out = [0.0f32; NN_OUTPUTS];
-        for o in 0..NN_OUTPUTS {
+        for o in 0..self.n_outputs {
             let mut sum = 0.0;
             for h in 0..nh {
                 sum += self.state[h] * self.w_ho[o * nh + h];
             }
-            out[o] = sum.tanh();
+            self.out[o] = sum.tanh();
         }
-        out
+        &self.out
     }
 }

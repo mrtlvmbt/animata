@@ -237,20 +237,21 @@ pub const GENOME_MAX_LEN: usize = GENOME_LEN * 2;
 // heard-signal, own energy, bias.
 pub const NN_INPUTS: usize = 12;
 pub const NN_HIDDEN: usize = 7;
-// Outputs: throttle, turn, signal (call loudness), then three appendage
-// *actuator drives* (fin / leg / wing). A drive modulates how hard the brain
-// works that appendage in locomotion: neutral output -> drive 1.0 (the body's
-// full capability, as before), so the brain can learn to boost it (sprint) or
-// idle it (rest) — body-grown actuators wired to brain output (co-evolution).
-// The last output is a *vertical migration* intent: its sign drives the creature
-// up (air) or down (underground) one stratum per step, gated by which layers its
-// morphology can reach (wings -> air, burrow -> underground; surface always). A
-// surface-only body can't migrate, so founders are unaffected.
-pub const NN_OUTPUTS: usize = 7;
-pub const OUT_FIN_DRIVE: usize = 3;
-pub const OUT_LEG_DRIVE: usize = 4;
-pub const OUT_WING_DRIVE: usize = 5;
-pub const OUT_ASCEND: usize = 6;
+// Outputs come in two groups. The first NN_BASE_OUTPUTS are body-agnostic
+// controls every creature has: throttle, turn, signal (call loudness), and a
+// vertical-migration intent (its sign drives the creature up toward the air or
+// down underground one stratum per step, gated by morphology; a surface-only
+// body can't migrate). AFTER them, each appendage segment grows its OWN actuator
+// output port — a body-derived brain port whose wiring co-evolves with the limb.
+// The port count is therefore variable per creature (NN_BASE_OUTPUTS + number of
+// appendage segments). A freshly grown limb gets an unwired port = neutral drive
+// 1.0 (work-by-default, full capability), which selection can then tune (sprint
+// up to 1.5 or idle to 0). This is the body<->brain port-growth keystone.
+pub const NN_BASE_OUTPUTS: usize = 4;
+pub const OUT_THROTTLE: usize = 0;
+pub const OUT_TURN: usize = 1;
+pub const OUT_SIGNAL: usize = 2;
+pub const OUT_ASCEND: usize = 3;
 /// Vertical output magnitude below this is "stay put" — a deadzone so a creature
 /// doesn't thrash between strata every step on brain noise.
 pub const LAYER_SWITCH_DEADZONE: f32 = 0.5;
@@ -301,7 +302,7 @@ pub const MAX_HIDDEN: usize = 16;
 /// Founder brain = a dense connection set (every input->hidden, hidden->hidden,
 /// hidden->output) emitted as that many synapse records.
 pub const FOUNDER_SYNAPSES: usize =
-    NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_HIDDEN + NN_HIDDEN * NN_OUTPUTS; // 154
+    NN_INPUTS * NN_HIDDEN + NN_HIDDEN * NN_HIDDEN + NN_HIDDEN * NN_BASE_OUTPUTS;
 
 // ---- Vertical layers ----
 // The world has a small stack of layers. A creature's layer is its morphological

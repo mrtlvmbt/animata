@@ -92,6 +92,9 @@ pub struct Phenotype {
     /// Hidden-layer width, evolved via neuron records (clamped to the brain-size
     /// bounds). Founders are `FOUNDER_HIDDEN`.
     pub n_hidden: usize,
+    /// Output-port count: `NN_BASE_OUTPUTS` body-agnostic controls plus one
+    /// actuator port per appendage segment (body-derived; founders have none).
+    pub n_outputs: usize,
     /// Body plan: marker-decoded segment chain (empty == a single implicit
     /// segment sized by the radius gene, i.e. the original circular body).
     pub segments: Vec<Segment>,
@@ -132,8 +135,9 @@ impl Genome {
                 emit(NN_INPUTS + p, h); // hidden p -> hidden h (recurrent)
             }
         }
+        // Founders have no appendages, so only the base output ports exist.
         for p in 0..NN_HIDDEN {
-            for o in 0..NN_OUTPUTS {
+            for o in 0..NN_BASE_OUTPUTS {
                 emit(NN_INPUTS + p, NN_HIDDEN + o); // hidden p -> output o
             }
         }
@@ -254,11 +258,15 @@ impl Genome {
         let (raw_syn, segments, n_neurons) = self.scan_records();
         // Hidden width = neuron-record count, clamped to the brain-size bounds.
         let n_hidden = n_neurons.clamp(MIN_HIDDEN, MAX_HIDDEN);
+        // Output ports = base controls + one actuator per appendage segment, so a
+        // body that grows a limb grows a brain port the wiring can reach.
+        let n_app = segments.iter().filter(|s| s.appendage != Appendage::None).count();
+        let n_outputs = NN_BASE_OUTPUTS + n_app;
         // Resolve each synapse's raw src/dst genes against this brain's port space:
         // sources are the inputs then the hidden units; destinations the hidden
         // units then the outputs.
         let src_ports = NN_INPUTS + n_hidden;
-        let dst_ports = n_hidden + NN_OUTPUTS;
+        let dst_ports = n_hidden + n_outputs;
         let synapses: Vec<Synapse> = raw_syn
             .into_iter()
             .map(|(sg, dg, w)| Synapse {
@@ -284,6 +292,7 @@ impl Genome {
             leak,
             synapses,
             n_hidden,
+            n_outputs,
             segments,
         }
     }
@@ -497,7 +506,7 @@ mod tests {
         for s in &p.synapses {
             assert!(s.w >= -WEIGHT_SCALE && s.w <= WEIGHT_SCALE);
             assert!((s.src as usize) < NN_INPUTS + p.n_hidden);
-            assert!((s.dst as usize) < p.n_hidden + NN_OUTPUTS);
+            assert!((s.dst as usize) < p.n_hidden + p.n_outputs);
         }
     }
 

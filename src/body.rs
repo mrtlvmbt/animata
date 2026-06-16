@@ -30,27 +30,13 @@ pub struct LocomotionStats {
     pub thrust: f32,
 }
 
-/// Brain-set drive for each appendage kind (how hard it's being worked this
-/// step). Neutral is 1.0 (full capability); the brain can boost or idle each.
-#[derive(Clone, Copy)]
-pub struct AppendageDrive {
-    pub fin: f32,
-    pub leg: f32,
-    pub wing: f32,
-}
-
-impl AppendageDrive {
-    /// Full drive on every appendage — the capability model with no brain
-    /// modulation (used by non-neural behaviors).
-    pub fn full() -> Self {
-        AppendageDrive { fin: 1.0, leg: 1.0, wing: 1.0 }
-    }
-}
-
 /// Turns body morphology into locomotion capability. Capability implementation
 /// now; a joint-physics implementation can replace it behind this trait (fork 2).
 pub trait Locomotor {
-    fn locomotion(&self, medium: Medium, drive: AppendageDrive) -> LocomotionStats;
+    /// `drives` holds the brain-set actuator drive for each appendage segment, in
+    /// body-chain order (neutral 1.0 == full capability). A body-derived port per
+    /// limb, so the brain can work each appendage independently.
+    fn locomotion(&self, medium: Medium, drives: &[f32]) -> LocomotionStats;
 }
 
 impl Locomotor for Phenotype {
@@ -59,24 +45,31 @@ impl Locomotor for Phenotype {
     /// drive walking, wings flying; the wrong appendage (or none) leaves a body
     /// sluggish in that medium. A finless single-segment founder scores exactly
     /// 1.0 on the ground (movement unchanged) and poorly in water.
-    fn locomotion(&self, medium: Medium, drive: AppendageDrive) -> LocomotionStats {
+    fn locomotion(&self, medium: Medium, drives: &[f32]) -> LocomotionStats {
+        // Each appendage segment has its own drive port (in body-chain order); a
+        // limb's contribution to its kind's pool is its drive (neutral 1.0). An
+        // idled limb (drive 0) adds nothing; a driven one up to 1.5.
         let (mut fins, mut legs, mut wings) = (0.0f32, 0.0f32, 0.0f32);
+        let mut k = 0;
         for s in &self.segments {
+            if s.appendage == Appendage::None {
+                continue;
+            }
+            let d = drives.get(k).copied().unwrap_or(1.0);
+            k += 1;
             match s.appendage {
-                Appendage::Fin => fins += 1.0,
-                Appendage::Leg => legs += 1.0,
-                Appendage::Wing => wings += 1.0,
-                Appendage::None | Appendage::Burrow => {}
+                Appendage::Fin => fins += d,
+                Appendage::Leg => legs += d,
+                Appendage::Wing => wings += d,
+                _ => {} // Burrow: has a port but no locomotion contribution
             }
         }
         // Diminishing returns: a few well-suited appendages give most of the
         // benefit, so there's no incentive to fill every segment with limbs — the
-        // chain settles at an interior optimum once per-segment upkeep bites. The
-        // brain's per-kind drive scales the benefit (neutral drive 1.0 == the old
-        // passive capability), so a body must also learn to work its limbs.
-        let legs_eff = legs.min(3.0) * drive.leg;
-        let fins_eff = fins.min(3.0) * drive.fin;
-        let wings_eff = wings.min(3.0) * drive.wing;
+        // chain settles at an interior optimum once per-segment upkeep bites.
+        let legs_eff = legs.min(3.0);
+        let fins_eff = fins.min(3.0);
+        let wings_eff = wings.min(3.0);
         // A finless, legless body scores 1.0 in both ground and water (water's
         // sluggishness still comes from the biome's move_mult), so the medium
         // change doesn't turn rivers into death traps. The right appendage adds a
