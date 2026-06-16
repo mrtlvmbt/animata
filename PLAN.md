@@ -212,9 +212,19 @@ arthropod clade), not just a wobbling mean speed.
 >   *Simplifications to revisit:* layer is fixed by morphology (no in-life movement
 >   between layers yet); mating/infection not layer-gated; non-surface food is
 >   abstract yield, not positioned pellets.
-> - **NEXT — Phase 2 wrap / Phase 4: topological speciation** (cluster by body
->   plan, not flat traits) + macroevolution stats; then optional richer layer
->   movement / aquatic pellets.
+> - **Phase 4 DONE — morphology-aware speciation.** Branch
+>   `phase-4-topological-speciation`. `speciation.rs` feature vector 9→14: coarse
+>   segment-complexity bucket + binary appendage presence, so body plans separate
+>   into distinct clades (flier ≠ walker); THRESHOLD 0.34→0.5 to keep counts
+>   interpretable (~650 vs ~1235). Baseline circular bodies unchanged. 24 tests
+>   green. (Macroevolution-over-time view already covered by `frac_underground`/
+>   `frac_air`/`avg_segments`/`appendaged` stats.)
+> - **NEXT options:** (1) dynamic brain ports — body-grown sensors/actuators
+>   auto-register NN ports by tag + evolvable hidden-neuron count (the deepest
+>   remaining keystone piece; brain still fixed 12→7→3); (2) richer layers —
+>   in-life layer movement + aquatic/benthic *positioned* food so fins gain
+>   purpose; (3) balance/visual polish (needs GUI). Joint physics (fork 2) and
+>   isometry/3D remain far-future.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),

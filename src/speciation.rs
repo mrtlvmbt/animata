@@ -5,16 +5,38 @@
 
 use crate::config::*;
 use crate::creature::Creature;
-use crate::genome::Phenotype;
+use crate::genome::{Appendage, Phenotype};
 
-/// Number of phenotype features used for clustering.
-const K: usize = 9;
+/// Number of phenotype features used for clustering: 9 classic traits + 5
+/// morphological ones (segment count + appendage composition), so two creatures
+/// with the same speed/size/colour but different *body plans* (e.g. a legged
+/// walker vs a winged flier) cluster as distinct species. Baseline circular
+/// bodies score 0 on the morphology axes, so they cluster exactly as before.
+const K: usize = 14;
 /// Max distance (in normalized feature space) to count as the same species.
-const THRESHOLD: f32 = 0.34;
+/// Raised from the pre-morphology 0.34: the 5 added body-plan axes partition the
+/// population (a flier and a walker can't share a species), which multiplies the
+/// cluster count, so the base radius is widened to keep species at the level of
+/// interpretable macro-classes rather than fine trait micro-clusters. Binary
+/// appendage axes sit 1.0 apart, far beyond this, so body plans still separate.
+const THRESHOLD: f32 = 0.5;
 
 /// Normalized phenotype feature vector (each component ~0..1).
 fn feature(p: &Phenotype) -> [f32; K] {
     let n = |v: f32, r: (f32, f32)| ((v - r.0) / (r.1 - r.0)).clamp(0.0, 1.0);
+    // Appendage *presence* (not fraction): a body plan is "has legs / has fins /
+    // …", so two creatures with the same kind of limb cluster together regardless
+    // of how many — separating major plans without fragmenting on limb count.
+    let has = |kind: Appendage| {
+        if p.segments.iter().any(|s| s.appendage == kind) {
+            1.0
+        } else {
+            0.0
+        }
+    };
+    // Coarse complexity bucket so a 2-segment and 3-segment body don't split, but
+    // a worm-length chain reads as a different plan.
+    let complexity = (p.segments.len() as f32 / MAX_SEGMENTS as f32).min(1.0);
     [
         n(p.max_speed, SPEED_RANGE),
         n(p.sense_range, SENSE_RANGE),
@@ -25,6 +47,11 @@ fn feature(p: &Phenotype) -> [f32; K] {
         p.color.0,
         p.color.1,
         p.color.2,
+        (complexity * 3.0).round() / 3.0,
+        has(Appendage::Fin),
+        has(Appendage::Leg),
+        has(Appendage::Wing),
+        has(Appendage::Burrow),
     ]
 }
 
