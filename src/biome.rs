@@ -2,6 +2,7 @@
 //! classified into biomes that bundle food density, movement cost, metabolism
 //! and a display tint.
 
+use crate::body::Medium;
 use crate::config::*;
 use macroquad::math::Vec2;
 
@@ -32,6 +33,15 @@ pub struct BiomeProps {
 }
 
 impl Biome {
+    /// Physical medium creatures move through here: water in rivers/lakes, ground
+    /// everywhere else. (Air arrives with vertical layers in Phase 2.3.)
+    pub fn medium(self) -> Medium {
+        match self {
+            Biome::Water => Medium::Water,
+            _ => Medium::Ground,
+        }
+    }
+
     pub fn props(self) -> BiomeProps {
         match self {
             Biome::Desert => BiomeProps {

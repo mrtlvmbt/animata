@@ -4,7 +4,7 @@
 use crate::behavior::{Behavior, BehaviorKind, Senses};
 use crate::body::{Locomotor, Medium};
 use crate::config::*;
-use crate::genome::{Genome, Phenotype};
+use crate::genome::{Appendage, Genome, Phenotype};
 use macroquad::math::Vec2;
 use macroquad::rand::gen_range;
 
@@ -33,6 +33,10 @@ pub struct Creature {
     /// Current infection's pathogen strain (0..1), or `None` if healthy.
     pub infection: Option<f32>,
     pub pos: Vec2,
+    /// Vertical layer the creature currently occupies (default surface). Sensing,
+    /// eating and hunting happen within a layer; morphology gates which layers it
+    /// can reach (see [`Phenotype::layer_access`]).
+    pub layer: u8,
     pub heading: f32,
     pub energy: f32,
     pub age: u32,
@@ -61,6 +65,7 @@ impl Creature {
             signal: 0.0,
             infection: None,
             pos,
+            layer: pheno.primary_layer(),
             heading: gen_range(0.0, std::f32::consts::TAU),
             energy,
             age: 0,
@@ -103,6 +108,7 @@ impl Creature {
             signal: 0.0,
             infection: None,
             pos,
+            layer: pheno.primary_layer(),
             heading,
             energy,
             age,
@@ -123,6 +129,7 @@ impl Creature {
     pub fn memory_use(&self) -> f32 {
         self.mind.memory_use()
     }
+
 
     /// Coarse diet class for coloring/stats.
     pub fn diet(&self) -> Diet {
@@ -151,6 +158,7 @@ impl Creature {
         heard: f32,
         move_mult: f32,
         metab_mult: f32,
+        medium: Medium,
     ) {
         let senses = self.sense(nearest_food, nearest_threat, nearest_neighbor, heard);
         let action = self.mind.decide(&senses);
@@ -168,8 +176,9 @@ impl Creature {
         let age_mult = 1.0 - SENESCENCE_SPEED_DROP * self.senescence();
         // Terrain drag scales the distance actually covered, but the creature
         // still pays the movement cost for the effort it tried to make. Thrust
-        // comes through the Locomotor seam (Phase 1: == max_speed on Ground).
-        let thrust = self.pheno.locomotion(Medium::Ground).thrust;
+        // comes through the Locomotor seam, scaled by how well the body's
+        // appendages suit the medium it's in (fins in water, legs on land).
+        let thrust = self.pheno.locomotion(medium).thrust;
         let intent = drive * thrust * speed_mult * age_mult;
         let speed = intent * move_mult;
         let dir = Vec2::new(self.heading.cos(), self.heading.sin());
@@ -180,8 +189,20 @@ impl Creature {
         self.pos.y = self.pos.y.rem_euclid(WORLD_H);
 
         // Energy upkeep: metabolism (climate-scaled) + movement effort, scaled by
-        // body size and (for predators) a species multiplier.
-        let body = 1.0 + self.pheno.radius * 0.08;
+        // body size and (for predators) a species multiplier. Each body segment
+        // and appendage adds upkeep, so a longer/limbed body must earn its keep
+        // through locomotion — the brake that keeps chain length at an interior
+        // optimum (a finless single-segment founder pays neither term).
+        let n_app = self
+            .pheno
+            .segments
+            .iter()
+            .filter(|s| s.appendage != Appendage::None)
+            .count() as f32;
+        let body = 1.0
+            + self.pheno.radius * 0.08
+            + SEGMENT_UPKEEP * self.pheno.segments.len() as f32
+            + APPENDAGE_UPKEEP * n_app;
         let diet_mult = lerp(1.0, PREDATOR_METAB_MULT, c);
         // A showy ornament is a survival handicap (extra upkeep). Squared so the
         // marginal cost rises with size — a nonlinear brake on Fisherian runaway.

@@ -183,11 +183,38 @@ arthropod clade), not just a wobbling mean speed.
 >   *Caveat:* segments are currently selectively neutral/costly, so morphotypes
 >   won't emerge until 2.2 gives appendages locomotor payoff. Flaky giant-world
 >   sim test seen once (borderline threshold) — watch.
-> - **NEXT — Phase 2.2: medium physics + appendage locomotion.** Biome → `Medium`
->   (Ground/Water/Air); `Locomotor` uses segments+appendages so fins pay in water,
->   legs on land, etc. — the selection pressure that makes body plans diverge.
-> - **THEN — Phase 2.3: vertical layers** (stack, per-animal `layer_access` mask
->   gated by morphology) + tiered food.
+> - **Phase 2.2 DONE — medium physics + appendage locomotion.** Biome → `Medium`
+>   (`biome.medium()`); `Locomotor::locomotion(medium)` scales thrust by how the
+>   body's appendages suit the medium (legs→ground, fins→water, wings→air) with
+>   diminishing returns; per-segment/appendage upkeep (`SEGMENT_UPKEEP`,
+>   `APPENDAGE_UPKEEP`) gives an interior optimum. Two balance fixes that mattered:
+>   (a) segments are a *rare* type-gene band (`SEGMENT_TYPE_MIN`) so body plans
+>   change by rare macro-mutation, not a mutational flood that slams the cap;
+>   (b) bounding radius derives from segment *width* only, not chain length, so
+>   long bodies don't win free eating reach. Stats `avg_segments`/`appendaged_frac`
+>   added (panel + headless). Result: 8/8 seeds survive (pop 5.9k–10.8k), legs
+>   evolve from zero to ~40–59% adoption at avg ~1 segment — genuine selection, no
+>   runaway, no collapse. 24 tests green; bin clean. Branch
+>   `phase-2-segmented-bodies` (2.1 already merged to main).
+>   *Note:* fins/wings have capability but little purpose until aquatic/aerial food
+>   exists — that's 2.3.
+> - **Phase 2.3 DONE — vertical layers + tiered foraging.** 3 layers
+>   (underground/surface/air); a creature's layer is its morphological stratum
+>   (`Phenotype::primary_layer`: wings→air, burrow→underground, else surface).
+>   Surface keeps positioned pellets (baseline untouched); non-surface layers offer
+>   a fixed foraging **capacity split among occupants** (`BENTHIC_CAPACITY`,
+>   `AERIAL_CAPACITY`) — density-dependent, self-limiting, no food-vector/save
+>   churn. Sensing/eating/hunting gated to a creature's layer (so a stratum is a
+>   predator refuge) via grid predicates on `clayers`. Stats `frac_underground`/
+>   `frac_air` (panel + headless); creatures tinted by layer. Result: three strata
+>   coexist (~57% surface / ~27% burrowers / ~16% fliers), population thriving
+>   (caps 12k), 400+ species — genuine vertical niche divergence, no collapse.
+>   *Simplifications to revisit:* layer is fixed by morphology (no in-life movement
+>   between layers yet); mating/infection not layer-gated; non-surface food is
+>   abstract yield, not positioned pellets.
+> - **NEXT — Phase 2 wrap / Phase 4: topological speciation** (cluster by body
+>   plan, not flat traits) + macroevolution stats; then optional richer layer
+>   movement / aquatic pellets.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),

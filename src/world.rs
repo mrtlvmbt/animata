@@ -4,7 +4,7 @@ use crate::behavior::BehaviorKind;
 use crate::biome::{Biome, BiomeMap};
 use crate::config::*;
 use crate::creature::Creature;
-use crate::genome::{seed, Genome};
+use crate::genome::{seed, Appendage, Genome};
 use crate::grid::SpatialGrid;
 use crate::phylo::Ancestry;
 use crate::speciation::Speciation;
@@ -217,17 +217,24 @@ impl World {
         cpos.extend(self.creatures.iter().map(|c| c.pos));
         carns.clear();
         carns.extend(self.creatures.iter().map(|c| c.carnivory()));
+        // Vertical layer of each creature (its morphological stratum), plus the
+        // per-layer population for density-split foraging on the non-surface tiers.
+        let clayers: Vec<u8> = self.creatures.iter().map(|c| c.layer).collect();
+        let mut layer_pop = [0u32; N_LAYERS];
+        for &l in &clayers {
+            layer_pop[l as usize] += 1;
+        }
         food_grid.rebuild(&self.food, WORLD_W, WORLD_H, GRID_CELL);
         cgrid.rebuild(&cpos, WORLD_W, WORLD_H, GRID_CELL);
         lap(&mut self.profile.grids);
 
-        self.sense_into(&mut targets, &food_grid, &cgrid, &cpos, &carns);
+        self.sense_into(&mut targets, &food_grid, &cgrid, &cpos, &carns, &clayers);
         lap(&mut self.profile.query);
         self.act_all(&targets);
         lap(&mut self.profile.act);
-        self.eat_food(&food_grid);
+        self.eat_food(&food_grid, layer_pop);
         lap(&mut self.profile.eat);
-        let killed = self.hunt(&cgrid, &cpos, &carns);
+        let killed = self.hunt(&cgrid, &cpos, &carns, &clayers);
         lap(&mut self.profile.hunt);
         // Disease spread runs while grid indices still match `self.creatures`
         // (before cull removes anyone).
@@ -307,6 +314,7 @@ impl World {
         cgrid: &SpatialGrid,
         cpos: &[Vec2],
         carns: &[f32],
+        clayers: &[u8],
     ) {
         // Precompute sense ranges + emitted signals so the parallel closure
         // captures only `Sync` data (not `self`/`Creature`, which holds a
@@ -327,26 +335,37 @@ impl World {
                 let pos = cpos[i];
                 let ci = carns[i];
                 let sense = senses[i];
+                let li = clayers[i];
 
-                // Threat + neighbour share one creature-grid traversal.
+                // Interactions are within a layer: only same-layer creatures are
+                // threats, neighbours or prey, so a non-surface stratum is a refuge.
                 let (threat_i, neighbor_i) = cgrid.nearest2_within(
                     cpos,
                     pos,
                     sense,
-                    |k| k != i && carns[k] >= ci + PREY_MARGIN,
-                    |k| k != i && (carns[k] - ci).abs() < 0.15,
+                    |k| k != i && clayers[k] == li && carns[k] >= ci + PREY_MARGIN,
+                    |k| k != i && clayers[k] == li && (carns[k] - ci).abs() < 0.15,
                 );
                 let food = if ci < 0.5 {
-                    let niche = niches[i];
-                    food_grid
-                        .nearest_within(pellets, pos, sense, |j| {
-                            let d = flavors[j] - niche;
-                            d * d <= max_flavor_d2
-                        })
-                        .map(|j| pellets[j] - pos)
+                    // Positioned pellets exist only on the surface; non-surface
+                    // herbivores forage their layer's capacity (see eat_food) and
+                    // sense no pellets.
+                    if li == LAYER_SURFACE {
+                        let niche = niches[i];
+                        food_grid
+                            .nearest_within(pellets, pos, sense, |j| {
+                                let d = flavors[j] - niche;
+                                d * d <= max_flavor_d2
+                            })
+                            .map(|j| pellets[j] - pos)
+                    } else {
+                        None
+                    }
                 } else {
                     cgrid
-                        .nearest_within(cpos, pos, sense, |k| k != i && carns[k] <= ci - PREY_MARGIN)
+                        .nearest_within(cpos, pos, sense, |k| {
+                            k != i && clayers[k] == li && carns[k] <= ci - PREY_MARGIN
+                        })
                         .map(|k| cpos[k] - pos)
                 };
                 // Hear the nearest neighbor's emitted signal.
@@ -370,15 +389,17 @@ impl World {
         let biome = &self.biome;
         if matches!(self.behavior, BehaviorKind::Neural) {
             self.creatures.par_iter_mut().enumerate().for_each(|(i, c)| {
-                let bp = biome.props_at(c.pos);
+                let b = biome.at(c.pos);
+                let bp = b.props();
                 let ([food, threat, neighbor], heard) = targets[i];
-                c.think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult);
+                c.think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult, b.medium());
             });
         } else {
             for i in 0..self.creatures.len() {
-                let bp = biome.props_at(self.creatures[i].pos);
+                let b = biome.at(self.creatures[i].pos);
+                let bp = b.props();
                 let ([food, threat, neighbor], heard) = targets[i];
-                self.creatures[i].think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult);
+                self.creatures[i].think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult, b.medium());
             }
         }
     }
@@ -386,13 +407,25 @@ impl World {
     /// Any creature eats a pellet within reach (one per step), gaining energy
     /// scaled by its herbivory `(1 - carnivory)`. Near-pure carnivores ignore
     /// pellets so they don't waste them.
-    fn eat_food(&mut self, grid: &SpatialGrid) {
+    fn eat_food(&mut self, grid: &SpatialGrid, layer_pop: [u32; N_LAYERS]) {
+        // Per-occupant foraging yield on the non-surface layers: a fixed capacity
+        // split among everyone currently there (density-dependent, self-limiting).
+        let benthic_yield = BENTHIC_CAPACITY / layer_pop[LAYER_UNDERGROUND as usize].max(1) as f32;
+        let aerial_yield = AERIAL_CAPACITY / layer_pop[LAYER_AIR as usize].max(1) as f32;
+
         let food = &self.food;
         let flavor = &self.flavor;
         let mut eaten = vec![false; food.len()];
         for c in &mut self.creatures {
             let herbivory = 1.0 - c.carnivory();
             if herbivory < 0.1 {
+                continue;
+            }
+            // Off the surface there are no positioned pellets — forage the layer's
+            // shared capacity instead (scaled by herbivory, like grazing).
+            if c.layer != LAYER_SURFACE {
+                let y = if c.layer == LAYER_UNDERGROUND { benthic_yield } else { aerial_yield };
+                c.energy += y * herbivory;
                 continue;
             }
             let reach = c.pheno.radius + FOOD_RADIUS;
@@ -432,7 +465,7 @@ impl World {
     /// Carnivory-driven hunting: a hunter catches a nearby creature lower on the
     /// food chain (carnivory at least `PREY_MARGIN` below its own), gaining energy
     /// scaled by its carnivory. Returns a per-creature "killed this step" mask.
-    fn hunt(&mut self, cgrid: &SpatialGrid, cpos: &[Vec2], carns: &[f32]) -> Vec<bool> {
+    fn hunt(&mut self, cgrid: &SpatialGrid, cpos: &[Vec2], carns: &[f32], clayers: &[u8]) -> Vec<bool> {
         let mut killed = vec![false; self.creatures.len()];
         for i in 0..self.creatures.len() {
             let ci = carns[i];
@@ -440,6 +473,7 @@ impl World {
                 continue;
             }
             let pos = self.creatures[i].pos;
+            let li = clayers[i];
             let reach = self.creatures[i].pheno.radius + PREDATOR_CATCH_PAD;
             let reach2 = reach * reach;
             let mut victim: Option<usize> = None;
@@ -447,6 +481,7 @@ impl World {
                 if victim.is_none()
                     && k != i
                     && !killed[k]
+                    && clayers[k] == li
                     && carns[k] <= ci - PREY_MARGIN
                     && (cpos[k] - pos).length_squared() <= reach2
                 {
@@ -650,6 +685,10 @@ impl World {
         let mut memory = 0.0;
         let mut niche = 0.0;
         let mut niche_sq = 0.0;
+        let mut segments = 0.0;
+        let mut appendaged = 0u32;
+        let mut n_under = 0u32;
+        let mut n_air = 0u32;
         // Sums of squares of *normalized* traits, for the diversity (std-dev) metric.
         let mut sq = [0.0f32; 4];
         let mut sum_n = [0.0f32; 4];
@@ -673,6 +712,15 @@ impl World {
                 infected += 1;
             }
             memory += c.memory_use();
+            segments += c.pheno.segments.len() as f32;
+            if c.pheno.segments.iter().any(|s| s.appendage != Appendage::None) {
+                appendaged += 1;
+            }
+            match c.layer {
+                LAYER_UNDERGROUND => n_under += 1,
+                LAYER_AIR => n_air += 1,
+                _ => {}
+            }
             let dn = c.pheno.diet_niche;
             niche += dn;
             niche_sq += dn * dn;
@@ -724,6 +772,10 @@ impl World {
             avg_resistance: resistance / n,
             infected_frac: infected as f32 / n,
             avg_memory: memory / n,
+            avg_segments: segments / n,
+            appendaged_frac: appendaged as f32 / n,
+            frac_underground: n_under as f32 / n,
+            frac_air: n_air as f32 / n,
             avg_niche: niche / n,
             niche_spread: (niche_sq / n - (niche / n) * (niche / n)).max(0.0).sqrt(),
             diversity: std_sum / 4.0,
