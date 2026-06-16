@@ -3,10 +3,12 @@
 //! Topology: NN_INPUTS + recurrent NN_HIDDEN -> NN_HIDDEN (tanh) -> NN_OUTPUTS.
 //! The hidden layer reads its own previous activation, and the new state is a
 //! leaky blend `(1-γ)·old + γ·tanh(...)` (γ = the `leak` gene): with low γ the
-//! state changes slowly and carries memory over many steps. Weights come from
-//! the decoded genome in order: input->hidden, hidden->hidden, hidden->output.
+//! state changes slowly and carries memory over many steps. Weights are assembled
+//! from the genome's marker-decoded [`Synapse`] list into dense matrices (see
+//! [`Brain::from_synapses`]), so the forward pass stays a plain matmul.
 
 use crate::config::*;
+use crate::genome::Synapse;
 
 pub struct Brain {
     /// input->hidden weights, length NN_INPUTS * NN_HIDDEN.
@@ -27,14 +29,34 @@ pub struct Brain {
 }
 
 impl Brain {
-    pub fn from_weights(weights: &[f32], leak: f32) -> Self {
-        debug_assert_eq!(weights.len(), NN_WEIGHTS);
-        let ih = NN_INPUTS * NN_HIDDEN;
-        let hh = NN_HIDDEN * NN_HIDDEN;
+    /// Assemble the brain from a tag-based synapse list into dense weight
+    /// matrices, so the forward pass stays a plain matmul. Each record routes by
+    /// its (src,dst) port kinds; multiple records to the same slot accumulate,
+    /// and unconnected slots stay zero. Input->output records (no direct path in
+    /// this topology) are ignored.
+    pub fn from_synapses(synapses: &[Synapse], leak: f32) -> Self {
+        let mut w_ih = vec![0.0f32; NN_INPUTS * NN_HIDDEN];
+        let mut w_hh = vec![0.0f32; NN_HIDDEN * NN_HIDDEN];
+        let mut w_ho = vec![0.0f32; NN_HIDDEN * NN_OUTPUTS];
+        for s in synapses {
+            let (src, dst) = (s.src as usize, s.dst as usize);
+            if src < NN_INPUTS {
+                if dst < NN_HIDDEN {
+                    w_ih[dst * NN_INPUTS + src] += s.w; // input -> hidden
+                }
+            } else {
+                let p = src - NN_INPUTS; // hidden source unit
+                if dst < NN_HIDDEN {
+                    w_hh[dst * NN_HIDDEN + p] += s.w; // hidden -> hidden (recurrent)
+                } else {
+                    w_ho[(dst - NN_HIDDEN) * NN_HIDDEN + p] += s.w; // hidden -> output
+                }
+            }
+        }
         Brain {
-            w_ih: weights[..ih].to_vec(),
-            w_hh: weights[ih..ih + hh].to_vec(),
-            w_ho: weights[ih + hh..].to_vec(),
+            w_ih,
+            w_hh,
+            w_ho,
             leak,
             state: [0.0; NN_HIDDEN],
             mem_use: 0.0,

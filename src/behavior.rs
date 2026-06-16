@@ -9,7 +9,7 @@
 
 use crate::brain::Brain;
 use crate::config::*;
-use crate::genome::Phenotype;
+use crate::genome::{Phenotype, Synapse};
 use macroquad::rand::gen_range;
 use std::f32::consts::PI;
 
@@ -74,8 +74,8 @@ impl BehaviorKind {
     /// Construct the behavior for a decoded genome.
     pub fn build(self, pheno: &Phenotype) -> Box<dyn Behavior + Send> {
         match self {
-            BehaviorKind::Neural => Box::new(NeuralBehavior::new(&pheno.weights, pheno.leak)),
-            BehaviorKind::Rule => Box::new(RuleBehavior::new(&pheno.weights)),
+            BehaviorKind::Neural => Box::new(NeuralBehavior::new(&pheno.synapses, pheno.leak)),
+            BehaviorKind::Rule => Box::new(RuleBehavior::new(&pheno.synapses)),
         }
     }
 
@@ -118,9 +118,9 @@ struct NeuralBehavior {
 }
 
 impl NeuralBehavior {
-    fn new(weights: &[f32], leak: f32) -> Self {
+    fn new(synapses: &[Synapse], leak: f32) -> Self {
         NeuralBehavior {
-            brain: Brain::from_weights(weights, leak),
+            brain: Brain::from_synapses(synapses, leak),
         }
     }
 }
@@ -161,9 +161,13 @@ struct RuleBehavior {
 }
 
 impl RuleBehavior {
-    fn new(weights: &[f32]) -> Self {
-        // weights are -WEIGHT_SCALE..=WEIGHT_SCALE; map a few to useful ranges.
-        let u = |i: usize| (weights[i] / WEIGHT_SCALE + 1.0) * 0.5; // 0..=1
+    fn new(synapses: &[Synapse]) -> Self {
+        // Read the first few synapse weights (-WEIGHT_SCALE..=WEIGHT_SCALE) as the
+        // gains, so the rule behavior still mutates and evolves with the genome.
+        let u = |i: usize| {
+            let w = synapses.get(i).map_or(0.0, |s| s.w);
+            (w / WEIGHT_SCALE + 1.0) * 0.5 // 0..=1
+        };
         RuleBehavior {
             steer_gain: 0.5 + u(0) * 1.5,       // 0.5..=2.0
             wander: u(1) * 0.6,                 // 0..=0.6
