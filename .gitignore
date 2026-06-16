@@ -1,0 +1,15 @@
+# Build artifacts
+/target
+
+# OS junk
+.DS_Store
+
+# Local Claude settings
+.claude/settings.local.json
+
+# Generated simulation outputs (saves, stat/tree dumps, sweeps)
+/life_save.txt
+/life_save.txt.tree
+/life_stats.csv
+/life_tree.csv
+/sweep.csv

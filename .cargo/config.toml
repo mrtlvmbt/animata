@@ -1,0 +1,8 @@
+# Convenience aliases.
+#   cargo play          -> run the optimized (release) GUI
+#   cargo prof <seed> <steps>  -> headless per-phase profiling, e.g. `cargo prof neural 1 40000`
+#   cargo sweep [steps] [seeds] -> parameter sweep -> sweep.csv
+[alias]
+play = "run --release"
+prof = "run --release --example headless --"
+sweep = "run --release --example sweep --"

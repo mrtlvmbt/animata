@@ -1,0 +1,13 @@
+[package]
+name = "life"
+version = "0.1.0"
+edition = "2021"
+description = "DNA-based artificial life simulation with neural-net brains, mutation and natural selection"
+
+[dependencies]
+macroquad = "0.4"
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
