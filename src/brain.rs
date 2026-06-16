@@ -1,6 +1,6 @@
 //! Fixed-topology recurrent neural network (leaky-integrator Elman / CTRNN-style).
 //!
-//! Topology: NN_INPUTS + recurrent NN_HIDDEN -> NN_HIDDEN (tanh) -> NN_OUTPUTS.
+//! Topology: n_inputs + recurrent n_hidden -> n_hidden (tanh) -> n_outputs.
 //! The hidden layer reads its own previous activation, and the new state is a
 //! leaky blend `(1-γ)·old + γ·tanh(...)` (γ = the `leak` gene): with low γ the
 //! state changes slowly and carries memory over many steps. Weights are assembled
@@ -11,8 +11,10 @@ use crate::config::*;
 use crate::genome::Synapse;
 
 pub struct Brain {
-    /// input->hidden weights, length NN_INPUTS * n_hidden.
+    /// input->hidden weights, length n_inputs * n_hidden.
     w_ih: Vec<f32>,
+    /// Input-port count (base senses + one pacemaker per appendage; per-body).
+    n_inputs: usize,
     /// recurrent hidden->hidden weights, length n_hidden * n_hidden.
     w_hh: Vec<f32>,
     /// hidden->output weights, length n_hidden * n_outputs.
@@ -42,22 +44,29 @@ impl Brain {
     /// plain matmul. Each record routes by its (src,dst) port kinds; multiple
     /// records to the same slot accumulate, and unconnected slots stay zero.
     /// Synapse tags are already resolved against `n_hidden` at decode time:
-    /// `src < NN_INPUTS` is an input else hidden `src-NN_INPUTS`; `dst < n_hidden`
+    /// `src < n_inputs` is an input else hidden `src-n_inputs`; `dst < n_hidden`
     /// is hidden else output `dst-n_hidden`.
-    pub fn from_synapses(synapses: &[Synapse], leak: f32, n_hidden: usize, n_outputs: usize) -> Self {
+    pub fn from_synapses(
+        synapses: &[Synapse],
+        leak: f32,
+        n_hidden: usize,
+        n_inputs: usize,
+        n_outputs: usize,
+    ) -> Self {
         let nh = n_hidden.max(1);
+        let ni = n_inputs.max(1);
         let no = n_outputs.max(1);
-        let mut w_ih = vec![0.0f32; NN_INPUTS * nh];
+        let mut w_ih = vec![0.0f32; ni * nh];
         let mut w_hh = vec![0.0f32; nh * nh];
         let mut w_ho = vec![0.0f32; nh * no];
         for s in synapses {
             let (src, dst) = (s.src as usize, s.dst as usize);
-            if src < NN_INPUTS {
+            if src < ni {
                 if dst < nh {
-                    w_ih[dst * NN_INPUTS + src] += s.w; // input -> hidden
+                    w_ih[dst * ni + src] += s.w; // input -> hidden
                 }
             } else {
-                let p = src - NN_INPUTS; // hidden source unit
+                let p = src - ni; // hidden source unit
                 if p >= nh {
                     continue;
                 }
@@ -70,6 +79,7 @@ impl Brain {
         }
         Brain {
             w_ih,
+            n_inputs: ni,
             w_hh,
             w_ho,
             n_outputs: no,
@@ -83,16 +93,18 @@ impl Brain {
     }
 
     /// Run one recurrent forward pass, updating the memory. `inputs` must be
-    /// length NN_INPUTS. Returns the `n_outputs` output activations (each in
-    /// `-1..=1`): the base controls first, then one drive per appendage port.
-    pub fn forward(&mut self, inputs: &[f32; NN_INPUTS]) -> &[f32] {
+    /// length `n_inputs` (base senses then one pacemaker per appendage). Returns
+    /// the `n_outputs` output activations (each in `-1..=1`): the base controls
+    /// first, then one drive per appendage port.
+    pub fn forward(&mut self, inputs: &[f32]) -> &[f32] {
         let nh = self.n_hidden;
+        let ni = self.n_inputs;
         let mut in_abs = 0.0f32; // total |input contribution| across hidden units
         let mut rec_abs = 0.0f32; // total |recurrent contribution|
         for h in 0..nh {
             let mut sum = 0.0;
-            for i in 0..NN_INPUTS {
-                sum += inputs[i] * self.w_ih[h * NN_INPUTS + i];
+            for i in 0..ni {
+                sum += inputs[i] * self.w_ih[h * ni + i];
             }
             let in_part = sum; // input contribution before the recurrent term
             // Recurrent term: previous hidden state feeds back in.

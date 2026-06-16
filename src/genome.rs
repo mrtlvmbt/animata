@@ -20,8 +20,8 @@ pub struct Genome {
 /// array offsets, so body-grown ports can be added later without disturbing
 /// existing connections.
 ///
-/// `src` indexes the source port space (`0..SRC_PORTS`): values below
-/// `NN_INPUTS` are input ports, the rest are hidden units (`src - NN_INPUTS`).
+/// `src` indexes the source port space (`0..SRC_PORTS`): values below the
+/// creature's input count are input ports, the rest are hidden units.
 /// `dst` indexes the destination space (`0..DST_PORTS`): values below
 /// `NN_HIDDEN` are hidden units, the rest are output ports (`dst - NN_HIDDEN`).
 #[derive(Clone, Copy)]
@@ -92,6 +92,9 @@ pub struct Phenotype {
     /// Hidden-layer width, evolved via neuron records (clamped to the brain-size
     /// bounds). Founders are `FOUNDER_HIDDEN`.
     pub n_hidden: usize,
+    /// Input-port count: `NN_BASE_INPUTS` body-agnostic senses plus one pacemaker
+    /// port per appendage segment (body-derived; founders have just the senses).
+    pub n_inputs: usize,
     /// Output-port count: `NN_BASE_OUTPUTS` body-agnostic controls plus one
     /// actuator port per appendage segment (body-derived; founders have none).
     pub n_outputs: usize,
@@ -125,20 +128,21 @@ impl Genome {
             nt.extend_from_slice(&gene_nt(dst as u32));
             nt.extend_from_slice(&gene_nt(gen_range(0u32, 256)));
         };
-        for i in 0..NN_INPUTS {
+        // Founders have no appendages, so only the base sensory inputs exist.
+        for i in 0..NN_BASE_INPUTS {
             for h in 0..NN_HIDDEN {
                 emit(i, h); // input i -> hidden h
             }
         }
         for p in 0..NN_HIDDEN {
             for h in 0..NN_HIDDEN {
-                emit(NN_INPUTS + p, h); // hidden p -> hidden h (recurrent)
+                emit(NN_BASE_INPUTS + p, h); // hidden p -> hidden h (recurrent)
             }
         }
         // Founders have no appendages, so only the base output ports exist.
         for p in 0..NN_HIDDEN {
             for o in 0..NN_BASE_OUTPUTS {
-                emit(NN_INPUTS + p, NN_HIDDEN + o); // hidden p -> output o
+                emit(NN_BASE_INPUTS + p, NN_HIDDEN + o); // hidden p -> output o
             }
         }
         Genome { nt }
@@ -258,14 +262,16 @@ impl Genome {
         let (raw_syn, segments, n_neurons) = self.scan_records();
         // Hidden width = neuron-record count, clamped to the brain-size bounds.
         let n_hidden = n_neurons.clamp(MIN_HIDDEN, MAX_HIDDEN);
-        // Output ports = base controls + one actuator per appendage segment, so a
-        // body that grows a limb grows a brain port the wiring can reach.
+        // Ports grow with the body: each appendage segment adds both a sensory
+        // pacemaker INPUT and an actuator OUTPUT, so a limb the body grows is
+        // reachable by the brain wiring from both sides.
         let n_app = segments.iter().filter(|s| s.appendage != Appendage::None).count();
+        let n_inputs = NN_BASE_INPUTS + n_app;
         let n_outputs = NN_BASE_OUTPUTS + n_app;
         // Resolve each synapse's raw src/dst genes against this brain's port space:
         // sources are the inputs then the hidden units; destinations the hidden
         // units then the outputs.
-        let src_ports = NN_INPUTS + n_hidden;
+        let src_ports = n_inputs + n_hidden;
         let dst_ports = n_hidden + n_outputs;
         let synapses: Vec<Synapse> = raw_syn
             .into_iter()
@@ -292,6 +298,7 @@ impl Genome {
             leak,
             synapses,
             n_hidden,
+            n_inputs,
             n_outputs,
             segments,
         }
@@ -392,7 +399,7 @@ impl Phenotype {
         let mut ss = 0.0f32;
         let mut n = 0usize;
         for s in &self.synapses {
-            if s.src as usize >= NN_INPUTS && (s.dst as usize) < self.n_hidden {
+            if s.src as usize >= self.n_inputs && (s.dst as usize) < self.n_hidden {
                 ss += s.w * s.w;
                 n += 1;
             }
@@ -505,7 +512,7 @@ mod tests {
         assert_eq!(p.n_hidden, FOUNDER_HIDDEN); // founders emit FOUNDER_HIDDEN neurons
         for s in &p.synapses {
             assert!(s.w >= -WEIGHT_SCALE && s.w <= WEIGHT_SCALE);
-            assert!((s.src as usize) < NN_INPUTS + p.n_hidden);
+            assert!((s.src as usize) < p.n_inputs + p.n_hidden);
             assert!((s.dst as usize) < p.n_hidden + p.n_outputs);
         }
     }
