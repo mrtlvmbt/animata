@@ -362,6 +362,22 @@ impl Phenotype {
         }
     }
 
+    /// Bitmask of vertical strata this body can occupy (bit `1 << layer`). The
+    /// surface is always reachable; wings unlock the air, a burrow appendage the
+    /// underground. A body with both can roam all three; a plain body is stuck on
+    /// the surface. Drives in-life vertical migration (see `OUT_ASCEND`).
+    pub fn layer_access(&self) -> u8 {
+        let mut mask = 1u8 << LAYER_SURFACE;
+        for s in &self.segments {
+            match s.appendage {
+                Appendage::Wing => mask |= 1 << LAYER_AIR,
+                Appendage::Burrow => mask |= 1 << LAYER_UNDERGROUND,
+                _ => {}
+            }
+        }
+        mask
+    }
+
     pub fn recurrent_gain(&self) -> f32 {
         // RMS magnitude of the recurrent (hidden->hidden) synapses, normalized.
         let mut ss = 0.0f32;

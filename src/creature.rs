@@ -188,6 +188,28 @@ impl Creature {
         self.pos.x = self.pos.x.rem_euclid(WORLD_W);
         self.pos.y = self.pos.y.rem_euclid(WORLD_H);
 
+        // Vertical migration: the brain can climb (toward air) or descend (toward
+        // underground) one stratum per step, gated by which layers the body can
+        // reach. A surface-only body (no wings/burrow) can't move — so founders
+        // stay put and the baseline is preserved; a winged or burrowing body can
+        // exploit two strata, foraging where its layer is richest.
+        let step = if action.vertical > LAYER_SWITCH_DEADZONE {
+            1
+        } else if action.vertical < -LAYER_SWITCH_DEADZONE {
+            -1
+        } else {
+            0
+        };
+        if step != 0 {
+            let target = self.layer as i32 + step;
+            if (0..N_LAYERS as i32).contains(&target) {
+                let target = target as u8;
+                if self.pheno.layer_access() & (1 << target) != 0 {
+                    self.layer = target;
+                }
+            }
+        }
+
         // Energy upkeep: metabolism (climate-scaled) + movement effort, scaled by
         // body size and (for predators) a species multiplier. Each body segment
         // and appendage adds upkeep, so a longer/limbed body must earn its keep

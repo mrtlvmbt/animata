@@ -242,10 +242,18 @@ pub const NN_HIDDEN: usize = 7;
 // works that appendage in locomotion: neutral output -> drive 1.0 (the body's
 // full capability, as before), so the brain can learn to boost it (sprint) or
 // idle it (rest) — body-grown actuators wired to brain output (co-evolution).
-pub const NN_OUTPUTS: usize = 6;
+// The last output is a *vertical migration* intent: its sign drives the creature
+// up (air) or down (underground) one stratum per step, gated by which layers its
+// morphology can reach (wings -> air, burrow -> underground; surface always). A
+// surface-only body can't migrate, so founders are unaffected.
+pub const NN_OUTPUTS: usize = 7;
 pub const OUT_FIN_DRIVE: usize = 3;
 pub const OUT_LEG_DRIVE: usize = 4;
 pub const OUT_WING_DRIVE: usize = 5;
+pub const OUT_ASCEND: usize = 6;
+/// Vertical output magnitude below this is "stay put" — a deadzone so a creature
+/// doesn't thrash between strata every step on brain noise.
+pub const LAYER_SWITCH_DEADZONE: f32 = 0.5;
 /// Decoded weights are mapped into [-WEIGHT_SCALE, WEIGHT_SCALE].
 pub const WEIGHT_SCALE: f32 = 4.0;
 

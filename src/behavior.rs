@@ -51,6 +51,9 @@ pub struct Action {
     pub signal: f32,
     /// Per-appendage actuator drive (neutral 1.0); modulates locomotion.
     pub drive: AppendageDrive,
+    /// Vertical migration intent, `-1..1`: positive climbs toward the air,
+    /// negative descends underground (gated by morphology; see `OUT_ASCEND`).
+    pub vertical: f32,
 }
 
 /// Strategy turning [`Senses`] into an [`Action`].
@@ -160,6 +163,7 @@ impl Behavior for NeuralBehavior {
                 leg: drive(out[OUT_LEG_DRIVE]),
                 wing: drive(out[OUT_WING_DRIVE]),
             },
+            vertical: out[OUT_ASCEND],
         }
     }
 
@@ -205,6 +209,7 @@ impl Behavior for RuleBehavior {
                 turn: (-away / PI * self.steer_gain).clamp(-1.0, 1.0),
                 signal: if s.threat_rel_angle.is_some() { 1.0 } else { 0.0 },
                 drive: AppendageDrive::full(),
+                vertical: 0.0,
             };
         }
         match s.food_rel_angle {
@@ -213,12 +218,14 @@ impl Behavior for RuleBehavior {
                 turn: (rel / PI * self.steer_gain).clamp(-1.0, 1.0),
                 signal: 0.0,
                 drive: AppendageDrive::full(),
+                vertical: 0.0,
             },
             None => Action {
                 throttle: self.hunger_throttle,
                 turn: gen_range(-self.wander, self.wander),
                 signal: 0.0,
                 drive: AppendageDrive::full(),
+                vertical: 0.0,
             },
         }
     }
