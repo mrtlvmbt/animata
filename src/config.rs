@@ -259,17 +259,26 @@ pub const RECORD_START: [u8; 3] = [3, 3, 2]; // T,T,G
 /// plan only changes by a rare macro-mutation (and never by a synapse record's
 /// type gene drifting one step) — selection then has to amplify it.
 pub const SEGMENT_TYPE_MIN: u8 = 240; // ~6% of type-gene values
+/// Type-gene band for *neuron* records (hidden-unit count): values in
+/// `[NEURON_TYPE_MIN, SEGMENT_TYPE_MIN)`. Rare, like segments, so brain width
+/// changes by macro-mutation. Below this band is a synapse.
+pub const NEURON_TYPE_MIN: u8 = 224; // neuron band ~6%, synapse < this ~88%
 /// nt consumed by a synapse record: start(3) + type + src + dst + weight.
 pub const SYNAPSE_RECORD_NT: usize = 3 + NT_PER_GENE + 3 * NT_PER_GENE; // 19
 /// nt consumed by a segment record: start(3) + type + length + width + appendage
 /// + flexibility.
 pub const SEGMENT_RECORD_NT: usize = 3 + NT_PER_GENE + 4 * NT_PER_GENE; // 23
+/// nt consumed by a neuron record: start(3) + type. Its presence adds one hidden
+/// unit (it carries no payload yet), so the hidden-layer width is the neuron-record
+/// count, clamped to [MIN_HIDDEN, MAX_HIDDEN].
+pub const NEURON_RECORD_NT: usize = 3 + NT_PER_GENE; // 7
 
-// Brain port tags.
-/// Source ports a synapse may read from: the inputs, then the hidden units.
-pub const SRC_PORTS: usize = NN_INPUTS + NN_HIDDEN; // 19
-/// Destination ports a synapse may drive: the hidden units, then the outputs.
-pub const DST_PORTS: usize = NN_HIDDEN + NN_OUTPUTS; // 10
+// Brain hidden-layer width (evolvable, per creature).
+/// Founder hidden width = the historical fixed count; founders emit this many
+/// neuron records so their brain is the original 12->7->3.
+pub const FOUNDER_HIDDEN: usize = NN_HIDDEN;
+pub const MIN_HIDDEN: usize = 2;
+pub const MAX_HIDDEN: usize = 16;
 /// Founder brain = a dense connection set (every input->hidden, hidden->hidden,
 /// hidden->output) emitted as that many synapse records.
 pub const FOUNDER_SYNAPSES: usize =
@@ -313,8 +322,15 @@ pub const APPENDAGE_KINDS: usize = 5;
 pub const SEGMENT_UPKEEP: f32 = 0.10;
 /// Extra upkeep per appendage (fins/wings/legs cost to grow and carry).
 pub const APPENDAGE_UPKEEP: f32 = 0.08;
+/// Upkeep per hidden neuron *relative to the founder width*, as a fraction of the
+/// body cost multiplier: a bigger brain must earn its keep, a smaller one is
+/// cheaper (the term is negative below `FOUNDER_HIDDEN`), so brain width settles
+/// at an interior optimum rather than drifting to the cap.
+pub const NEURON_UPKEEP: f32 = 0.03;
 
-/// Canonical genome length (nt): fixed body-gene block + the founder's synapse
-/// records. Indels then push length around within the clamp band below.
-pub const GENOME_LEN: usize =
-    BODY_GENES * NT_PER_GENE + FOUNDER_SYNAPSES * SYNAPSE_RECORD_NT;
+/// Canonical genome length (nt): fixed body-gene block + the founder's neuron
+/// records + its synapse records. Indels then push length around within the clamp
+/// band below.
+pub const GENOME_LEN: usize = BODY_GENES * NT_PER_GENE
+    + FOUNDER_HIDDEN * NEURON_RECORD_NT
+    + FOUNDER_SYNAPSES * SYNAPSE_RECORD_NT;

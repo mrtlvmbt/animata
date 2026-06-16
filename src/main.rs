@@ -587,7 +587,7 @@ fn draw_panel(world: &World) {
     let gh = PANEL_H - pad * 2.0;
 
     // Normalized trait curves (0..1) + populations scaled to caps.
-    let series: [(Color, fn(&Snapshot) -> f32); 20] = [
+    let series: [(Color, fn(&Snapshot) -> f32); 21] = [
         (Color::new(0.9, 0.9, 0.9, 1.0), |s| {
             (s.herbivores as f32 / POP_CAP as f32).min(1.0)
         }),
@@ -639,6 +639,8 @@ fn draw_panel(world: &World) {
         (Color::new(0.55, 0.4, 0.25, 1.0), |s| s.frac_underground),
         // Fraction living in the air (fliers): the other vertical niche.
         (Color::new(0.85, 0.9, 1.0, 1.0), |s| s.frac_air),
+        // Mean hidden-neuron count, scaled to the cap: evolved brain width.
+        (Color::new(0.95, 0.75, 0.9, 1.0), |s| (s.avg_hidden / MAX_HIDDEN as f32).min(1.0)),
     ];
 
     let n = hist.len();
@@ -844,7 +846,8 @@ fn draw_inspector(c: &creature::Creature, anc: &phylo::Ancestry) {
 /// Node-link diagram of the brain using the decoded weights. Lines are teal for
 /// positive weights, orange for negative, with opacity by magnitude.
 fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
-    let cols = [NN_INPUTS, NN_HIDDEN, NN_OUTPUTS];
+    let nh = c.pheno.n_hidden;
+    let cols = [NN_INPUTS, nh, NN_OUTPUTS];
     let col_x = [x, x + w * 0.5, x + w];
     let node = |col: usize, i: usize| -> Vec2 {
         let n = cols[col];
@@ -854,16 +857,16 @@ fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
 
     // Rebuild the dense weight matrices from the synapse list (same routing as
     // the brain builder) so the inspector can draw the connection strengths.
-    let mut w_ih = vec![0.0f32; NN_INPUTS * NN_HIDDEN];
-    let mut w_ho = vec![0.0f32; NN_HIDDEN * NN_OUTPUTS];
+    let mut w_ih = vec![0.0f32; NN_INPUTS * nh];
+    let mut w_ho = vec![0.0f32; nh * NN_OUTPUTS];
     for s in &c.pheno.synapses {
         let (src, dst) = (s.src as usize, s.dst as usize);
         if src < NN_INPUTS {
-            if dst < NN_HIDDEN {
+            if dst < nh {
                 w_ih[dst * NN_INPUTS + src] += s.w;
             }
-        } else if dst >= NN_HIDDEN {
-            w_ho[(dst - NN_HIDDEN) * NN_HIDDEN + (src - NN_INPUTS)] += s.w;
+        } else if dst >= nh && (src - NN_INPUTS) < nh {
+            w_ho[(dst - nh) * nh + (src - NN_INPUTS)] += s.w;
         }
     }
     let edge = |wgt: f32| {
@@ -876,7 +879,7 @@ fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
     };
 
     // input -> hidden
-    for hdn in 0..NN_HIDDEN {
+    for hdn in 0..nh {
         for inp in 0..NN_INPUTS {
             let a = node(0, inp);
             let bn = node(1, hdn);
@@ -885,10 +888,10 @@ fn draw_brain(c: &creature::Creature, x: f32, y: f32, w: f32, h: f32) {
     }
     // hidden -> output
     for out in 0..NN_OUTPUTS {
-        for hdn in 0..NN_HIDDEN {
+        for hdn in 0..nh {
             let a = node(1, hdn);
             let bn = node(2, out);
-            draw_line(a.x, a.y, bn.x, bn.y, 1.0, edge(w_ho[out * NN_HIDDEN + hdn]));
+            draw_line(a.x, a.y, bn.x, bn.y, 1.0, edge(w_ho[out * nh + hdn]));
         }
     }
     // nodes on top

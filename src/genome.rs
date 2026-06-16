@@ -86,8 +86,12 @@ pub struct Phenotype {
     pub diet_niche: f32,
     /// Memory-leak γ (LEAK_RANGE) for the leaky-integrator hidden state.
     pub leak: f32,
-    /// Brain wiring: marker-decoded synapses (variable count).
+    /// Brain wiring: marker-decoded synapses (variable count), with src/dst
+    /// already resolved against `n_hidden`.
     pub synapses: Vec<Synapse>,
+    /// Hidden-layer width, evolved via neuron records (clamped to the brain-size
+    /// bounds). Founders are `FOUNDER_HIDDEN`.
+    pub n_hidden: usize,
     /// Body plan: marker-decoded segment chain (empty == a single implicit
     /// segment sized by the radius gene, i.e. the original circular body).
     pub segments: Vec<Segment>,
@@ -104,6 +108,12 @@ impl Genome {
         // Body-gene block (the world later pokes specific body genes by index).
         for _ in 0..BODY_GENES * NT_PER_GENE {
             nt.push(gen_range(0u32, 4) as u8);
+        }
+        // Hidden layer: one neuron record per founder hidden unit (type gene in
+        // the neuron band). These define the brain width the synapses below wire.
+        for _ in 0..FOUNDER_HIDDEN {
+            nt.extend_from_slice(&RECORD_START);
+            nt.extend_from_slice(&gene_nt(NEURON_TYPE_MIN as u32));
         }
         let mut emit = |src: usize, dst: usize| {
             nt.extend_from_slice(&RECORD_START);
@@ -173,15 +183,18 @@ impl Genome {
         gene_at(&self.nt, index * NT_PER_GENE)
     }
 
-    /// Scan the genome's record stream once and decode every record into the
-    /// brain's synapses and the body's segment chain. The scan is at nt
-    /// granularity (any reading frame); after a record matches, it advances past
-    /// the whole record, so a record's interior can never spawn a nested record.
-    /// An indel therefore only adds, drops or shifts whole records.
-    fn scan_records(&self) -> (Vec<Synapse>, Vec<Segment>) {
+    /// Scan the genome's record stream once into raw synapse genes, the segment
+    /// chain, and a hidden-neuron count. The scan is at nt granularity (any
+    /// reading frame); after a record matches it advances past the whole record,
+    /// so a record's interior can never spawn a nested record, and an indel only
+    /// adds, drops or shifts whole records. Synapse src/dst genes are kept *raw*
+    /// here because resolving them to port indices needs the hidden width, which
+    /// is only known once all neuron records are counted (see `decode`).
+    fn scan_records(&self) -> (Vec<(u8, u8, f32)>, Vec<Segment>, usize) {
         let nt = &self.nt;
         let mut syn = Vec::new();
         let mut seg = Vec::new();
+        let mut neurons = 0usize;
         let mut i = 0usize;
         // The start codon + type gene are common; need at least that much to read.
         while i + 3 + NT_PER_GENE <= nt.len() {
@@ -194,8 +207,8 @@ impl Genome {
             }
             // Field reader, relative to the first field gene (after start+type).
             let f = |k: usize| gene_at(nt, i + 3 + NT_PER_GENE + k * NT_PER_GENE);
-            let is_segment = gene_at(nt, i + 3) >= SEGMENT_TYPE_MIN;
-            if is_segment {
+            let tg = gene_at(nt, i + 3);
+            if tg >= SEGMENT_TYPE_MIN {
                 if i + SEGMENT_RECORD_NT <= nt.len() && seg.len() < MAX_SEGMENTS {
                     seg.push(Segment {
                         length: lerp(SEG_LEN_RANGE, f(0) as f32 / 255.0),
@@ -207,17 +220,19 @@ impl Genome {
                 } else {
                     i += 1; // record runs off the end, or segment cap reached
                 }
+            } else if tg >= NEURON_TYPE_MIN {
+                // Neuron record: its presence adds one hidden unit (no payload).
+                neurons += 1;
+                i += NEURON_RECORD_NT;
             } else if i + SYNAPSE_RECORD_NT <= nt.len() {
-                let src = (f(0) as usize % SRC_PORTS) as u8;
-                let dst = (f(1) as usize % DST_PORTS) as u8;
                 let wv = f(2) as f32 / 255.0;
-                syn.push(Synapse { src, dst, w: (wv * 2.0 - 1.0) * WEIGHT_SCALE });
+                syn.push((f(0), f(1), (wv * 2.0 - 1.0) * WEIGHT_SCALE));
                 i += SYNAPSE_RECORD_NT;
             } else {
                 i += 1;
             }
         }
-        (syn, seg)
+        (syn, seg, neurons)
     }
 
     pub fn decode(&self) -> Phenotype {
@@ -236,7 +251,22 @@ impl Genome {
         let diet_niche = g(12);
         let leak = lerp(LEAK_RANGE, g(13));
 
-        let (synapses, segments) = self.scan_records();
+        let (raw_syn, segments, n_neurons) = self.scan_records();
+        // Hidden width = neuron-record count, clamped to the brain-size bounds.
+        let n_hidden = n_neurons.clamp(MIN_HIDDEN, MAX_HIDDEN);
+        // Resolve each synapse's raw src/dst genes against this brain's port space:
+        // sources are the inputs then the hidden units; destinations the hidden
+        // units then the outputs.
+        let src_ports = NN_INPUTS + n_hidden;
+        let dst_ports = n_hidden + NN_OUTPUTS;
+        let synapses: Vec<Synapse> = raw_syn
+            .into_iter()
+            .map(|(sg, dg, w)| Synapse {
+                src: (sg as usize % src_ports) as u8,
+                dst: (dg as usize % dst_ports) as u8,
+                w,
+            })
+            .collect();
         let radius = body_radius(&segments, radius_gene);
 
         Phenotype {
@@ -253,6 +283,7 @@ impl Genome {
             diet_niche,
             leak,
             synapses,
+            n_hidden,
             segments,
         }
     }
@@ -336,7 +367,7 @@ impl Phenotype {
         let mut ss = 0.0f32;
         let mut n = 0usize;
         for s in &self.synapses {
-            if s.src as usize >= NN_INPUTS && (s.dst as usize) < NN_HIDDEN {
+            if s.src as usize >= NN_INPUTS && (s.dst as usize) < self.n_hidden {
                 ss += s.w * s.w;
                 n += 1;
             }
@@ -446,9 +477,11 @@ mod tests {
         assert!(p.metabolism >= METAB_RANGE.0 && p.metabolism <= METAB_RANGE.1);
         assert!(p.prime >= LONGEVITY_RANGE.0 && p.prime <= LONGEVITY_RANGE.1);
         assert!((0.0..=1.0).contains(&p.carnivory));
+        assert_eq!(p.n_hidden, FOUNDER_HIDDEN); // founders emit FOUNDER_HIDDEN neurons
         for s in &p.synapses {
             assert!(s.w >= -WEIGHT_SCALE && s.w <= WEIGHT_SCALE);
-            assert!((s.src as usize) < SRC_PORTS && (s.dst as usize) < DST_PORTS);
+            assert!((s.src as usize) < NN_INPUTS + p.n_hidden);
+            assert!((s.dst as usize) < p.n_hidden + NN_OUTPUTS);
         }
     }
 

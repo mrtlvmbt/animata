@@ -74,7 +74,9 @@ impl BehaviorKind {
     /// Construct the behavior for a decoded genome.
     pub fn build(self, pheno: &Phenotype) -> Box<dyn Behavior + Send> {
         match self {
-            BehaviorKind::Neural => Box::new(NeuralBehavior::new(&pheno.synapses, pheno.leak)),
+            BehaviorKind::Neural => {
+                Box::new(NeuralBehavior::new(&pheno.synapses, pheno.leak, pheno.n_hidden))
+            }
             BehaviorKind::Rule => Box::new(RuleBehavior::new(&pheno.synapses)),
         }
     }
@@ -118,9 +120,9 @@ struct NeuralBehavior {
 }
 
 impl NeuralBehavior {
-    fn new(synapses: &[Synapse], leak: f32) -> Self {
+    fn new(synapses: &[Synapse], leak: f32, n_hidden: usize) -> Self {
         NeuralBehavior {
-            brain: Brain::from_synapses(synapses, leak),
+            brain: Brain::from_synapses(synapses, leak, n_hidden),
         }
     }
 }
