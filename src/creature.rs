@@ -202,7 +202,8 @@ impl Creature {
         let body = 1.0
             + self.pheno.radius * 0.08
             + SEGMENT_UPKEEP * self.pheno.segments.len() as f32
-            + APPENDAGE_UPKEEP * n_app;
+            + APPENDAGE_UPKEEP * n_app
+            + NEURON_UPKEEP * (self.pheno.n_hidden as f32 - FOUNDER_HIDDEN as f32);
         let diet_mult = lerp(1.0, PREDATOR_METAB_MULT, c);
         // A showy ornament is a survival handicap (extra upkeep). Squared so the
         // marginal cost rises with size — a nonlinear brake on Fisherian runaway.

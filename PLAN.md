@@ -219,12 +219,22 @@ arthropod clade), not just a wobbling mean speed.
 >   interpretable (~650 vs ~1235). Baseline circular bodies unchanged. 24 tests
 >   green. (Macroevolution-over-time view already covered by `frac_underground`/
 >   `frac_air`/`avg_segments`/`appendaged` stats.)
-> - **NEXT options:** (1) dynamic brain ports — body-grown sensors/actuators
->   auto-register NN ports by tag + evolvable hidden-neuron count (the deepest
->   remaining keystone piece; brain still fixed 12→7→3); (2) richer layers —
->   in-life layer movement + aquatic/benthic *positioned* food so fins gain
->   purpose; (3) balance/visual polish (needs GUI). Joint physics (fork 2) and
->   isometry/3D remain far-future.
+> - **Phase 5.1 DONE — evolvable hidden-neuron count.** Branch
+>   `phase-5-dynamic-brain-ports`. Third record type (`NEURON_TYPE_MIN` band):
+>   each neuron record adds one hidden unit, so brain width is genetic, clamped
+>   `[MIN_HIDDEN, MAX_HIDDEN]`. Brain is now variable-width (`brain.rs` dense
+>   matrices sized per creature, reused scratch buffer so the hot loop still
+>   doesn't allocate); synapse tags resolved against `n_hidden` at decode.
+>   Founders emit `FOUNDER_HIDDEN` (7) neurons → original 12→7→3. `NEURON_UPKEEP`
+>   gives an interior optimum (rebate below founder width). Result: brain width
+>   evolves *down* to ~3.5 (founder 7 was over-provisioned for the task); 8/8-ish
+>   seeds healthy, niches + species intact; `avg_hidden` stat (panel + headless).
+> - **NEXT options:** (1) Phase 5.2 — body-grown actuator/sensor ports: an
+>   appendage registers its own NN port by tag and the brain's output drives that
+>   appendage's locomotion (true body↔brain co-evolution; the last keystone bit,
+>   couples brain output back into the Locomotor); (2) richer layers — in-life
+>   movement + positioned benthic/aquatic food; (3) balance/visual polish (needs
+>   GUI). Joint physics (fork 2) + isometry/3D remain far-future.
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),
