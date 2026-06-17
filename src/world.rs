@@ -6,6 +6,7 @@ use crate::config::*;
 use crate::creature::Creature;
 use crate::genome::{seed, Appendage, Genome, Receptor};
 use crate::grid::SpatialGrid;
+use crate::marker::MarkerField;
 use crate::phylo::Ancestry;
 use crate::speciation::Speciation;
 use crate::stats::{Snapshot, Stats};
@@ -83,6 +84,9 @@ pub struct World {
     pub circulating_strain: f32,
     /// Per-phase timing accumulators for profiling.
     pub profile: Profile,
+    /// Stigmergic scent field (per layer × channel): creatures emit into it
+    /// (brain-gated) and sense it via evolved receptor organs. Meaning is emergent.
+    pub markers: MarkerField,
     // Reusable per-step scratch (pooled to avoid heap churn each step).
     /// One food grid per vertical layer, so a creature scans only pellets on its
     /// own layer (eat/sense) instead of filtering out the other layers' pellets.
@@ -180,6 +184,7 @@ impl World {
             drought_until: 0,
             circulating_strain,
             profile: Profile::default(),
+            markers: MarkerField::new(WORLD_W, WORLD_H, MARKER_CELL),
             g_food: Vec::new(),
             g_cre: SpatialGrid::default(),
             buf_cpos: Vec::new(),
@@ -265,6 +270,15 @@ impl World {
         self.sense_into(&mut targets, &food_grids, &cgrid, &cpos, &carns, &clayers);
         lap(&mut self.profile.query);
         self.act_all(&targets);
+        // Update the scent field for next step: fade + spread last step's marks,
+        // then deposit this step's emissions (creatures still all alive here, so
+        // indices match). The field a creature sensed this step is last step's, a
+        // one-step lag exactly like the signal/heard channel.
+        self.markers.decay();
+        self.markers.diffuse();
+        for c in &self.creatures {
+            self.markers.deposit(c.layer, c.pos, &c.marker_out);
+        }
         lap(&mut self.profile.act);
         self.eat_food(&food_grids);
         lap(&mut self.profile.eat);
@@ -381,6 +395,7 @@ impl World {
         // Per-creature sense organs (gene-encoded function); each yields one
         // exteroceptive input reading, computed below from the world grids.
         let recs: Vec<&[Receptor]> = self.creatures.iter().map(|c| c.pheno.receptors.as_slice()).collect();
+        let markers = &self.markers; // read-only field sample (Sync), for marker receptors
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
         // |flavor - niche| beyond this digests below MIN_EAT_EFF -> ignore it.
@@ -455,11 +470,19 @@ impl World {
                             })
                             .map_or(0.0, |k| prox(cpos[k] - pos)),
                         // 3: nearest similar-diet creature (kin/shoal) on the stratum.
-                        _ => cgrid
+                        3 => cgrid
                             .nearest_within(cpos, pos, sense, |k| {
                                 k != i && clayers[k] == tl && (carns[k] - ci).abs() < 0.15
                             })
                             .map_or(0.0, |k| prox(cpos[k] - pos)),
+                        // 4 (MODALITY_MARKER): a scent channel of the marker field —
+                        // a sense whose meaning is not coded but emergent. `tuning`
+                        // picks the channel; reads the local field on the stratum.
+                        _ => {
+                            let ch = ((r.tuning * N_MARKER_CHANNELS as f32) as usize)
+                                .min(N_MARKER_CHANNELS - 1);
+                            markers.sample(tl, pos, ch).min(1.0)
+                        }
                     };
                 }
                 Percept {

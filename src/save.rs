@@ -172,6 +172,11 @@ pub fn load(path: &str) -> Result<World> {
         drought_until: 0,
         circulating_strain: macroquad::rand::gen_range(0.0f32, 1.0),
         profile: Profile::default(),
+        markers: crate::marker::MarkerField::new(
+            crate::config::WORLD_W,
+            crate::config::WORLD_H,
+            crate::config::MARKER_CELL,
+        ),
         g_food: Default::default(),
         g_cre: Default::default(),
         buf_cpos: Vec::new(),

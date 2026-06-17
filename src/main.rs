@@ -14,6 +14,7 @@ mod config;
 mod creature;
 mod genome;
 mod grid;
+mod marker;
 mod phylo;
 mod save;
 mod speciation;

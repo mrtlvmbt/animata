@@ -30,6 +30,8 @@ pub struct Creature {
     pub species_id: u32,
     /// Signal loudness emitted this step (0..1), heard by nearby creatures.
     pub signal: f32,
+    /// Per-channel scent emitted this step, deposited into the marker field.
+    pub marker_out: [f32; N_MARKER_CHANNELS],
     /// Current infection's pathogen strain (0..1), or `None` if healthy.
     pub infection: Option<f32>,
     pub pos: Vec2,
@@ -63,6 +65,7 @@ impl Creature {
             lineage: 0,
             species_id: 0,
             signal: 0.0,
+            marker_out: [0.0; N_MARKER_CHANNELS],
             infection: None,
             pos,
             layer: pheno.primary_layer(),
@@ -106,6 +109,7 @@ impl Creature {
             lineage,
             species_id: 0,
             signal: 0.0,
+            marker_out: [0.0; N_MARKER_CHANNELS],
             infection: None,
             pos,
             layer: pheno.primary_layer(),
@@ -164,6 +168,7 @@ impl Creature {
         let senses = self.sense(nearest_food, nearest_threat, nearest_neighbor, heard, receptors);
         let action = self.mind.decide(&senses);
         self.signal = action.signal; // emit this step's call (heard next step)
+        self.marker_out = action.markers; // scent laid this step (deposited post-act)
 
         // Turning is coupled to forward drive: a creature can only steer while
         // moving (like a car). This kills frantic spinning-in-place when idle.
@@ -235,7 +240,10 @@ impl Creature {
         let ornament_cost = 1.0 + ORNAMENT_COST * o * o;
         let upkeep = BASE_METABOLISM * self.pheno.metabolism * body * metab_mult * ornament_cost;
         let move_cost = MOVE_COST * intent * body;
-        self.energy -= (upkeep + move_cost) * diet_mult;
+        // Costly signalling: emitting scent burns a little energy, so a channel is
+        // only kept on where it pays — the brake against gratuitous noise.
+        let emit_cost = MARKER_EMIT_COST * action.markers.iter().sum::<f32>();
+        self.energy -= (upkeep + move_cost) * diet_mult + emit_cost;
         self.age += 1;
     }
 

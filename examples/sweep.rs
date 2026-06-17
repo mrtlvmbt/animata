@@ -19,6 +19,8 @@ mod behavior;
 mod genome;
 #[path = "../src/grid.rs"]
 mod grid;
+#[path = "../src/marker.rs"]
+mod marker;
 #[path = "../src/phylo.rs"]
 mod phylo;
 #[path = "../src/speciation.rs"]
