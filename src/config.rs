@@ -208,6 +208,11 @@ pub const BACKGROUND_INFECT: f64 = 0.0004;
 /// Reproduction maturity = prime * this fraction. Long-lived creatures mature
 /// later, the cost that keeps the longevity gene from being free.
 pub const MATURITY_FRAC: f32 = 0.1;
+/// Early-life window (steps) for the morpho-fragility metric: a death before this
+/// age counts as "infant mortality". Spans the juvenile phase (maturity is
+/// prime*MATURITY_FRAC ≈ 20–120 steps) where a fresh body plan, driven by a brain
+/// not yet adapted to it, would starve or be caught if it is a death-trap.
+pub const INFANT_WINDOW: u32 = 60;
 /// Steps from prime to full decline (senescence factor reaches 1.0).
 pub const SENESCENCE_SCALE: f32 = 400.0;
 /// Speed lost at full senescence (0.6 -> down to 40% of gene speed).

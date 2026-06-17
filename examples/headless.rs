@@ -63,4 +63,16 @@ fn main() {
         }
     }
     println!("{}", w.profile.report());
+
+    // Morpho-fragility gate: do fresh body-plan mutants die in early life more
+    // often than their peers? A novel/baseline ratio well above 1 (with adequate
+    // novel N) is the evidence that would justify MIP.
+    let m = w.morpho;
+    let nm = m.novel_mortality() * 100.0;
+    let bm = m.baseline_mortality() * 100.0;
+    let r = if bm > 0.0 { nm / bm } else { f32::NAN };
+    println!(
+        "morpho-fragility: novel infant mortality {:.1}% ({}/{}), baseline {:.1}% ({}/{}), ratio {:.2}",
+        nm, m.died_young_novel, m.born_novel, bm, m.died_young_normal, m.born_normal, r
+    );
 }
