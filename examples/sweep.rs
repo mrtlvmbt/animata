@@ -5,6 +5,10 @@
 //! Run: `cargo run --release --example sweep [steps] [seeds]`
 //!   e.g. `cargo run --release --example sweep 20000 5`
 
+// This harness re-includes the full `src/` module tree but exercises only the
+// headless slice of it, so much of the shared API is legitimately unused here.
+#![allow(dead_code)]
+
 #[path = "../src/config.rs"]
 mod config;
 #[path = "../src/biome.rs"]

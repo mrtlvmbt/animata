@@ -2,6 +2,10 @@
 
 const HISTORY: usize = 600;
 
+// Observability DTO: every field is populated each tick, but some are consumed
+// only by the `dev` JSON bridge (`dev_bridge`) and the headless tuning example,
+// not by the default windowed build — so the default bin sees them as write-only.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Default)]
 pub struct Snapshot {
     pub population: usize,

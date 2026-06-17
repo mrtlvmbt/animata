@@ -16,6 +16,18 @@ pub struct Genome {
     pub nt: Vec<u8>,
 }
 
+/// Raw output of [`Genome::scan_records`]: (raw synapse genes, segment chain,
+/// hidden-neuron count, receptors). Synapse src/dst are still nt-raw here.
+type ScanRecords = (Vec<(u8, u8, f32)>, Vec<Segment>, usize, Vec<Receptor>);
+
+impl std::fmt::Display for Genome {
+    /// Human-readable ACGT string (for debugging / inspection / saving).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s: String = self.nt.iter().map(|&b| NUCLEOTIDES[b as usize]).collect();
+        f.write_str(&s)
+    }
+}
+
 /// One decoded synapse. Ports are *tags* (indices into the port space), not
 /// array offsets, so body-grown ports can be added later without disturbing
 /// existing connections.
@@ -212,7 +224,7 @@ impl Genome {
     /// adds, drops or shifts whole records. Synapse src/dst genes are kept *raw*
     /// here because resolving them to port indices needs the hidden width, which
     /// is only known once all neuron records are counted (see `decode`).
-    fn scan_records(&self) -> (Vec<(u8, u8, f32)>, Vec<Segment>, usize, Vec<Receptor>) {
+    fn scan_records(&self) -> ScanRecords {
         let nt = &self.nt;
         let mut syn = Vec::new();
         let mut seg = Vec::new();
@@ -336,10 +348,6 @@ impl Genome {
         }
     }
 
-    /// Human-readable ACGT string (for debugging / inspection / saving).
-    pub fn to_string(&self) -> String {
-        self.nt.iter().map(|&b| NUCLEOTIDES[b as usize]).collect()
-    }
 
     /// Parse an ACGT string back into a genome (any non-ACGT char is skipped).
     pub fn from_acgt(s: &str) -> Genome {
