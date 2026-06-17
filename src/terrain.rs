@@ -45,9 +45,11 @@ const RIDGE_OCTAVES: u32 = 4;
 const WARP_LATTICE: f32 = 55.0 * MAP_SCALE as f32;
 const WARP_AMP: f32 = 0.6;
 /// Macro elevation at which ridges start to bite (below this the land stays rolling).
-const RIDGE_ONSET: f32 = 0.55;
+/// Kept fairly high so ridges (and the rock band they lift into) stay LOCAL to genuine
+/// highlands rather than spreading mountains across the map.
+const RIDGE_ONSET: f32 = 0.62;
 /// Ridge amplitude in normalised `[0,1]` elevation units (crest lift / trough carve).
-const RIDGE_WEIGHT: f32 = 0.42;
+const RIDGE_WEIGHT: f32 = 0.32;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -330,6 +332,31 @@ impl VoxelTerrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guard the "mountains are LOCAL" invariant: rock + snow must stay a minority of
+    /// the land, so added worldgen complexity (ridged noise now; tectonics/erosion
+    /// later) can't quietly turn the map into one mountain mess. Prints the fraction.
+    #[test]
+    fn mountains_are_a_minority() {
+        for seed in 1..4 {
+            let t = VoxelTerrain::new(seed);
+            let (mut land, mut high) = (0u64, 0u64);
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    if t.is_water(x, y) {
+                        continue;
+                    }
+                    land += 1;
+                    if matches!(t.biome_at(x, y), BiomeKind::Mountain | BiomeKind::Snow) {
+                        high += 1;
+                    }
+                }
+            }
+            let frac = high as f64 / land.max(1) as f64;
+            eprintln!("seed {seed}: mountain+snow = {:.1}% of land", frac * 100.0);
+            assert!(frac < 0.35, "mountains dominate the land for seed {seed}: {:.1}%", frac * 100.0);
+        }
+    }
 
     #[test]
     fn bit_pack_roundtrips() {
