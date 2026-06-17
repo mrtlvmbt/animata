@@ -1,0 +1,1 @@
+../../.claude-dev-kit/plugin/hooks/agent-metrics-record.sh
