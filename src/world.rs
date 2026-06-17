@@ -396,6 +396,20 @@ impl World {
         // exteroceptive input reading, computed below from the world grids.
         let recs: Vec<&[Receptor]> = self.creatures.iter().map(|c| c.pheno.receptors.as_slice()).collect();
         let headings: Vec<f32> = self.creatures.iter().map(|c| c.heading).collect();
+        // Per-creature visibility (0..1): how detectable a body is, from how much its
+        // colour contrasts with the local biome tint. A biome-matched body is cryptic
+        // (seen only up close); a mismatched one is conspicuous. Gates how far others
+        // detect THIS creature, so colour becomes adaptive camouflage.
+        let vis: Vec<f32> = self
+            .creatures
+            .iter()
+            .map(|c| {
+                let (cr, cg, cb) = c.pheno.color;
+                let (tr, tg, tb) = self.biome.props_at(c.pos).tint;
+                let contrast = ((cr - tr).powi(2) + (cg - tg).powi(2) + (cb - tb).powi(2)).sqrt();
+                (VIS_MIN + VIS_GAIN * contrast).clamp(VIS_MIN, 1.0)
+            })
+            .collect();
         let markers = &self.markers; // read-only field sample (Sync), for marker receptors
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
@@ -412,13 +426,18 @@ impl World {
                 let sense = senses[i];
                 let li = clayers[i];
 
+                // A candidate k is only detected within k's own visibility-scaled
+                // range (crypsis): a biome-matched body must be much closer to be seen.
+                let seen = |k: usize| (cpos[k] - pos).length_squared() <= (sense * vis[k]).powi(2);
                 // Interactions are within a layer: only same-layer creatures are
                 // threats, neighbours or prey, so a non-surface stratum is a refuge.
                 let (threat_i, neighbor_i) = cgrid.nearest2_within(
                     cpos,
                     pos,
                     sense,
-                    |k| k != i && clayers[k] == li && carns[k] >= ci + PREY_MARGIN,
+                    |k| k != i && clayers[k] == li && carns[k] >= ci + PREY_MARGIN && seen(k),
+                    // Neighbour/mate detection is NOT crypsis-gated: camouflage is
+                    // anti-predator only, not penalised by mate-finding.
                     |k| k != i && clayers[k] == li && (carns[k] - ci).abs() < 0.15,
                 );
                 let food = if ci < 0.5 {
@@ -435,7 +454,7 @@ impl World {
                 } else {
                     cgrid
                         .nearest_within(cpos, pos, sense, |k| {
-                            k != i && clayers[k] == li && carns[k] <= ci - PREY_MARGIN
+                            k != i && clayers[k] == li && carns[k] <= ci - PREY_MARGIN && seen(k)
                         })
                         .map(|k| cpos[k] - pos)
                 };
@@ -908,6 +927,8 @@ impl World {
         // food<->channel correlation isn't washed out by pooling across niches.
         let mut emit_sum = 0.0f64;
         let mut listeners = 0u32;
+        let mut contrast_sum = 0.0f64;
+        let (mut contrast_pred_sum, mut pred_n) = (0.0f64, 0u32);
         let (mut cn, mut sx, mut sy, mut sxx, mut syy, mut sxy) = (
             [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
             [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
@@ -916,6 +937,14 @@ impl World {
             emit_sum += c.marker_out.iter().sum::<f32>() as f64;
             if c.pheno.receptors.iter().any(|r| r.modality == MODALITY_MARKER) {
                 listeners += 1;
+            }
+            let (cr, cg, cb) = c.pheno.color;
+            let (tr, tg, tb) = self.biome.props_at(c.pos).tint;
+            let contrast = ((cr - tr).powi(2) + (cg - tg).powi(2) + (cb - tb).powi(2)).sqrt() as f64;
+            contrast_sum += contrast;
+            if c.carnivory() >= 0.5 {
+                contrast_pred_sum += contrast;
+                pred_n += 1;
             }
             let ch = ((c.pheno.diet_niche * N_MARKER_CHANNELS as f32) as usize).min(N_MARKER_CHANNELS - 1);
             let x = self.markers.sample(c.layer, c.pos, ch) as f64;
@@ -967,6 +996,8 @@ impl World {
             marker_emit: (emit_sum / nn) as f32,
             marker_listener_frac: listeners as f32 / n,
             channel_meaning,
+            avg_color_contrast: (contrast_sum / nn) as f32,
+            avg_color_contrast_pred: if pred_n > 0 { (contrast_pred_sum / pred_n as f64) as f32 } else { 0.0 },
         };
         self.stats.push(snap, top);
     }
