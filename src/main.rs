@@ -578,6 +578,14 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         if !on_screen(s) {
             continue;
         }
+        // Surface food, zoomed in enough, grows as standing vegetation (trees and
+        // shrubs); otherwise (overview, or the benthic/aerial strata) it's a flat
+        // flavour-tinted quad at its layer height.
+        if flayer == LAYER_SURFACE && fr >= 3.5 {
+            draw_plant(&mut mesh, MAX_V, MAX_I, view, *f, fl, fr);
+            drawn += 1;
+            continue;
+        }
         let food_c = flavor_color(fl);
         if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
             flush(&mut mesh);
@@ -590,9 +598,21 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         drawn += 1;
     }
 
-    // Creatures: triangles, colored by diet / lineage / species.
+    // Creatures: triangles, colored by diet / lineage / species. Drawn back-to-
+    // front in iso depth (x+y into the screen, with the layer as a tiebreak so a
+    // flier sits over the body beneath it) so nearer creatures overlap farther
+    // ones correctly. Food stays drawn first (flat on the ground, underneath).
+    let mut order: Vec<usize> = (0..world.creatures.len()).collect();
+    order.sort_unstable_by(|&a, &b| {
+        let ca = &world.creatures[a];
+        let cb = &world.creatures[b];
+        let ka = ca.pos.x + ca.pos.y + ca.layer as f32 * 0.5;
+        let kb = cb.pos.x + cb.pos.y + cb.layer as f32 * 0.5;
+        ka.total_cmp(&kb)
+    });
     let lerp = |a: f32, t: f32, w: f32| a + (t - a) * w;
-    for cr in &world.creatures {
+    for &ci in &order {
+        let cr = &world.creatures[ci];
         let h = layer_height(cr.layer);
         let center = view.project(cr.pos, h);
         if !on_screen(center) {
@@ -748,6 +768,54 @@ fn mesh_tri(mesh: &mut Mesh, max_v: usize, max_i: usize, a: Vec2, b: Vec2, c: Ve
     mesh.vertices.push(Vertex::new(b.x, b.y, 0.0, 0.0, 0.0, col));
     mesh.vertices.push(Vertex::new(c.x, c.y, 0.0, 0.0, 0.0, col));
     mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+}
+
+/// Stable per-pellet pseudo-random in 0..1 (so a plant keeps its size/shape).
+fn plant_hash(p: Vec2) -> f32 {
+    let h = (p.x * 12.9898 + p.y * 4.1414).sin() * 43758.547;
+    h - h.floor()
+}
+
+/// Filled n-gon (triangle fan) centred at `c`, radius `rw`×`rh`, for leafy blobs.
+fn mesh_blob(mesh: &mut Mesh, max_v: usize, max_i: usize, c: Vec2, rw: f32, rh: f32, col: Color) {
+    const N: usize = 7;
+    let mut prev = vec2(c.x + rw, c.y);
+    for k in 1..=N {
+        let a = k as f32 / N as f32 * std::f32::consts::TAU;
+        let p = vec2(c.x + a.cos() * rw, c.y + a.sin() * rh);
+        mesh_tri(mesh, max_v, max_i, c, prev, p, col);
+        prev = p;
+    }
+}
+
+/// Draw a surface food pellet as standing vegetation: a brown trunk rising from
+/// the ground with a rounded leafy canopy on top. Because height only shifts the
+/// iso screen-y, the plant stands straight up, so the surface stratum reads at a
+/// glance. About half the pellets grow into tall trees, the rest low shrubs;
+/// forest-flavour pellets grow taller and the canopy keeps a hint of the biome
+/// colour over a leafy green.
+fn draw_plant(mesh: &mut Mesh, max_v: usize, max_i: usize, view: &View, pos: Vec2, flavor: f32, fr: f32) {
+    let rnd = plant_hash(pos);
+    let tree = plant_hash(pos + vec2(7.3, 1.9)) > 0.45;
+    let ht = if tree {
+        10.0 + flavor * 14.0 + rnd * 6.0
+    } else {
+        4.0 + flavor * 4.0 + rnd * 3.0
+    };
+    let ground = view.world_to_screen(pos);
+    // Trunk: a brown vertical quad from the ground up to the canopy base.
+    let trunk_h = ht * if tree { 0.5 } else { 0.55 };
+    let ttop = view.project(pos, trunk_h);
+    let tw = (fr * (if tree { 0.34 } else { 0.28 })).max(1.0);
+    let brown = Color::new(0.34, 0.24, 0.16, 1.0);
+    mesh_tri(mesh, max_v, max_i, vec2(ground.x - tw, ground.y), vec2(ground.x + tw, ground.y), vec2(ttop.x + tw, ttop.y), brown);
+    mesh_tri(mesh, max_v, max_i, vec2(ground.x - tw, ground.y), vec2(ttop.x + tw, ttop.y), vec2(ttop.x - tw, ttop.y), brown);
+    // Canopy: a rounded leafy blob, biome colour blended toward green.
+    let c = view.project(pos, ht * if tree { 0.8 } else { 0.92 });
+    let cw = fr * if tree { 2.3 } else { 1.6 };
+    let f = flavor_color(flavor);
+    let leaf = Color::new(f.r * 0.55, (f.g * 0.6 + 0.45).min(1.0), f.b * 0.5, 1.0);
+    mesh_blob(mesh, max_v, max_i, c, cw, cw * 0.82, leaf);
 }
 
 /// Draw an appendage as a shape attached to a segment at screen point `sc`, with
