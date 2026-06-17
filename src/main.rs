@@ -72,10 +72,30 @@ struct View {
     center: Vec2,
 }
 
+/// Isometric projection of the ground plane: the x/y axes splay into a diamond
+/// (KX wide, KY tall — a gentle ~2:1.8 tilt) and a vertical layer height lifts a
+/// point off the plane. Tuned so the world reads as a tilted table with the three
+/// strata stacked in height.
+const ISO_KX: f32 = 0.72;
+const ISO_KY: f32 = 0.40;
+/// Height (world units) the air layer sits above the surface and the underground
+/// below it; scaled by zoom at projection time, so the overview stays flat.
+const LAYER_LIFT: f32 = 22.0;
+
+/// World height of a vertical layer (air up, underground down, surface flat).
+fn layer_height(layer: u8) -> f32 {
+    match layer {
+        LAYER_AIR => LAYER_LIFT,
+        LAYER_UNDERGROUND => -LAYER_LIFT * 0.7,
+        _ => 0.0,
+    }
+}
+
 impl View {
-    /// Scale at which the entire world fits inside the viewport.
+    /// Scale at which the whole (iso-projected) world diamond fits the viewport.
     fn fit_scale() -> f32 {
-        (VIEW_W / WORLD_W).min(VIEW_H / WORLD_H)
+        let span = WORLD_W + WORLD_H;
+        (VIEW_W / (span * ISO_KX)).min(VIEW_H / (span * ISO_KY)) * 0.98
     }
 
     fn new() -> Self {
@@ -86,21 +106,34 @@ impl View {
         vec2(VIEW_W * 0.5, VIEW_H * 0.5)
     }
 
+    /// Project a world point at the given world `height` above the ground into the
+    /// isometric viewport.
+    fn project(&self, w: Vec2, height: f32) -> Vec2 {
+        let v = w - self.center;
+        let sx = (v.x - v.y) * ISO_KX;
+        let sy = (v.x + v.y) * ISO_KY - height;
+        Self::viewport_half() + vec2(sx, sy) * self.scale
+    }
+
     fn world_to_screen(&self, w: Vec2) -> Vec2 {
-        (w - self.center) * self.scale + Self::viewport_half()
+        self.project(w, 0.0)
     }
 
+    /// Inverse of [`world_to_screen`] onto the ground plane (height 0), used for
+    /// mouse picking and panning — layer is ambiguous, so it resolves to surface.
     fn screen_to_world(&self, s: Vec2) -> Vec2 {
-        (s - Self::viewport_half()) / self.scale + self.center
+        let d = (s - Self::viewport_half()) / self.scale;
+        let a = d.x / ISO_KX; // v.x - v.y
+        let b = d.y / ISO_KY; // v.x + v.y
+        self.center + vec2((a + b) * 0.5, (b - a) * 0.5)
     }
 
-    /// Clamp zoom to [fit, 12] and keep the visible rectangle inside the world.
+    /// Clamp zoom to [fit, 12] and keep the centre within the world (approximate
+    /// for the iso diamond — prevents wild panning without exact edge math).
     fn clamp(&mut self) {
         self.scale = self.scale.clamp(Self::fit_scale(), 12.0);
-        let hx = VIEW_W * 0.5 / self.scale;
-        let hy = VIEW_H * 0.5 / self.scale;
-        self.center.x = if hx * 2.0 >= WORLD_W { WORLD_W * 0.5 } else { self.center.x.clamp(hx, WORLD_W - hx) };
-        self.center.y = if hy * 2.0 >= WORLD_H { WORLD_H * 0.5 } else { self.center.y.clamp(hy, WORLD_H - hy) };
+        self.center.x = self.center.x.clamp(0.0, WORLD_W);
+        self.center.y = self.center.y.clamp(0.0, WORLD_H);
     }
 }
 
@@ -230,7 +263,8 @@ async fn main() {
         }
         if is_mouse_button_down(MouseButton::Middle) && mouse.y < VIEW_H {
             if let Some(prev) = pan_anchor {
-                view.center -= (mouse - prev) / view.scale;
+                // Drag in iso space: map the screen delta back through the inverse.
+                view.center -= view.screen_to_world(mouse) - view.screen_to_world(prev);
                 view.clamp();
             }
             pan_anchor = Some(mouse);
@@ -460,19 +494,26 @@ fn build_biome_texture(world: &World) -> Texture2D {
     tex
 }
 
-/// One textured quad for the whole biome map, transformed by the camera.
+/// The whole biome map as a single iso-sheared textured quad: the world's four
+/// corners projected onto the ground plane, with the biome texture mapped across
+/// (so the ground reads as a tilted plane the creatures stand on).
 fn draw_biome_texture(tex: &Texture2D, view: &View) {
-    let origin = view.world_to_screen(vec2(0.0, 0.0));
-    draw_texture_ex(
-        tex,
-        origin.x,
-        origin.y,
-        Color::new(1.0, 1.0, 1.0, 0.5), // same translucency as before
-        DrawTextureParams {
-            dest_size: Some(vec2(WORLD_W * view.scale, WORLD_H * view.scale)),
-            ..Default::default()
-        },
-    );
+    let col = Color::new(1.0, 1.0, 1.0, 0.5); // same translucency as before
+    let corner = |w: Vec2, u: f32, v: f32| {
+        let s = view.world_to_screen(w);
+        Vertex::new(s.x, s.y, 0.0, u, v, col)
+    };
+    let mesh = Mesh {
+        vertices: vec![
+            corner(vec2(0.0, 0.0), 0.0, 0.0),
+            corner(vec2(WORLD_W, 0.0), 1.0, 0.0),
+            corner(vec2(WORLD_W, WORLD_H), 1.0, 1.0),
+            corner(vec2(0.0, WORLD_H), 0.0, 1.0),
+        ],
+        indices: vec![0, 1, 2, 0, 2, 3],
+        texture: Some(tex.clone()),
+    };
+    draw_mesh(&mesh);
 }
 
 /// Draw all food + creatures as a single batched mesh (one draw call). Food are
@@ -529,10 +570,11 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         }
     };
 
-    // Food: small quads, tinted by flavor (the niche/food-type map).
+    // Food: small quads, tinted by flavor (the niche/food-type map), placed on
+    // their own layer's height so benthic/aerial pellets sit with their stratum.
     let fr = (FOOD_RADIUS * view.scale).max(1.0);
-    for (f, &fl) in world.food.iter().zip(&world.flavor) {
-        let s = view.world_to_screen(*f);
+    for ((f, &fl), &flayer) in world.food.iter().zip(&world.flavor).zip(&world.food_layer) {
+        let s = view.project(*f, layer_height(flayer));
         if !on_screen(s) {
             continue;
         }
@@ -551,7 +593,8 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
     // Creatures: triangles, colored by diet / lineage / species.
     let lerp = |a: f32, t: f32, w: f32| a + (t - a) * w;
     for cr in &world.creatures {
-        let center = view.world_to_screen(cr.pos);
+        let h = layer_height(cr.layer);
+        let center = view.project(cr.pos, h);
         if !on_screen(center) {
             continue;
         }
@@ -579,17 +622,11 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
             ),
             _ => color,
         };
-        // Pseudo-depth: lift air-layer bodies above the ground and sink the
-        // underground ones, scaled with zoom (no separation on the overview), with
-        // a soft shadow cast under a flier so the three strata read as height.
-        let alt = (cr.pheno.radius * 2.2 * view.scale).min(60.0);
-        let lay_off = match cr.layer {
-            LAYER_AIR => Vec2::new(0.0, -alt),
-            LAYER_UNDERGROUND => Vec2::new(0.0, alt * 0.5),
-            _ => Vec2::ZERO,
-        };
-        if cr.layer == LAYER_AIR && alt > 1.0 {
-            // Shadow at the ground position (pushed before the body, so it floats over it).
+        // A flier casts a soft shadow on the ground (height 0) below its lifted
+        // body, so the air stratum reads even in the iso view. Pushed before the
+        // body so the body floats over it.
+        if cr.layer == LAYER_AIR && view.scale * LAYER_LIFT > 2.0 {
+            let ground = view.project(cr.pos, 0.0);
             let sr = (cr.pheno.radius * view.scale).max(1.5);
             let shadow = Color::new(0.0, 0.0, 0.0, 0.28);
             if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
@@ -597,11 +634,10 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
             }
             let base = mesh.vertices.len() as u16;
             for (dx, dy) in [(-sr, -sr * 0.6), (sr, -sr * 0.6), (sr, sr * 0.6), (-sr, sr * 0.6)] {
-                mesh.vertices.push(Vertex::new(center.x + dx, center.y + dy, 0.0, uv.x, uv.y, shadow));
+                mesh.vertices.push(Vertex::new(ground.x + dx, ground.y + dy, 0.0, uv.x, uv.y, shadow));
             }
             mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
-        let center = center + lay_off;
         let size = cr.pheno.radius * lerp(1.7, 2.2, c) * view.scale;
         // LOD: below ~LOD_POINT_PX a heading triangle is sub-pixel (invisible) and
         // costs trig per creature. At overview/giant-map zoom draw a fixed-size dot
@@ -628,26 +664,27 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         if !cr.pheno.segments.is_empty() {
             let layout = cr.pheno.segment_layout(cr.pos, cr.heading);
             let age = cr.age as f32;
-            let mut prev = cr.pos;
+            // Work in screen space after the iso projection, so the body axis and
+            // its perpendicular are correct in the tilted view.
+            let mut prev_sc = view.project(cr.pos, h);
             for (i, ((wc, wr, app), seg)) in layout.iter().zip(&cr.pheno.segments).enumerate() {
                 let (wc, wr, app) = (*wc, *wr, *app);
-                // Local body axis from the static layout (the wiggle below is a
-                // visual displacement, so directions stay stable along the chain).
-                let dw = wc - prev;
-                let dir = if dw.length_squared() > 1e-6 {
-                    dw.normalize()
+                let sc0 = view.project(wc, h);
+                let dscr = sc0 - prev_sc;
+                let dir = if dscr.length_squared() > 1e-6 {
+                    dscr.normalize()
                 } else {
                     Vec2::from_angle(cr.heading)
                 };
                 let perp = Vec2::new(-dir.y, dir.x);
-                prev = wc;
+                prev_sc = sc0;
                 // CPG rhythm (render-only): a travelling lateral wave down the body
                 // at the segment's pacemaker rate (the same flexibility-tuned clock
                 // the brain feels), so a moving body undulates and its limbs beat.
                 let osc =
                     (std::f32::consts::TAU * (age * OSC_FREQ_BASE * (0.5 + seg.flexibility) - i as f32 * 0.18)).sin();
                 let r = (wr * view.scale).max(1.0);
-                let sc = view.world_to_screen(wc) + lay_off + perp * (osc * r * 0.5);
+                let sc = sc0 + perp * (osc * r * 0.5);
                 let seg_color = appendage_tint(color, app);
                 if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
                     flush(&mut mesh);
@@ -776,7 +813,7 @@ fn appendage_tint(base: Color, app: genome::Appendage) -> Color {
 /// Faint ring around creatures emitting a loud signal (a visible "call").
 fn draw_signals(world: &World, view: &View) {
     for c in &world.creatures {
-        let s = view.world_to_screen(c.pos);
+        let s = view.project(c.pos, layer_height(c.layer));
         if s.x < 0.0 || s.x > VIEW_W || s.y < 0.0 || s.y > VIEW_H {
             continue;
         }
@@ -979,7 +1016,7 @@ fn pick_creature(world: &World, p: Vec2) -> Option<u64> {
 
 fn draw_selection_ring(c: &creature::Creature, view: &View) {
     let shape = 1.7 + 0.5 * c.carnivory();
-    let center = view.world_to_screen(c.pos);
+    let center = view.project(c.pos, layer_height(c.layer));
     let r = c.pheno.radius * shape * view.scale + 5.0;
     draw_circle_lines(center.x, center.y, r, 2.0, Color::new(1.0, 0.95, 0.4, 1.0));
 }
