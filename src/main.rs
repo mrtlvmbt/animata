@@ -76,6 +76,14 @@ async fn main() {
     let mut terrain = VoxelTerrain::new(seed);
     let mut meshes = build_chunk_meshes(&terrain);
 
+    // The scene is rendered into this offscreen target every frame, then blitted to
+    // the window. A screenshot reads the target's texture directly — i.e. the
+    // finished pixels *before* the window present — so capture is decoupled from the
+    // window back-buffer (GRAV-style framebuffer read) instead of `get_screen_data`,
+    // which only sees the throttled front buffer of a foregrounded window.
+    let mut scene_rt = render_target(screen_width() as u32, screen_height() as u32);
+    scene_rt.texture.set_filter(FilterMode::Nearest);
+
     // Frame timing (EMA-smoothed) + an on-screen readout toggle (`I`).
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
@@ -180,12 +188,36 @@ async fn main() {
         }
 
         // ---- Render ----
+        // Keep the offscreen target matched to the (possibly resized) window.
+        if scene_rt.texture.width() != screen_width()
+            || scene_rt.texture.height() != screen_height()
+        {
+            scene_rt = render_target(screen_width() as u32, screen_height() as u32);
+            scene_rt.texture.set_filter(FilterMode::Nearest);
+        }
+
+        // Pass 1: draw the scene into the offscreen target.
+        let mut scene_cam = cam.camera();
+        scene_cam.render_target = Some(scene_rt.clone());
+        set_camera(&scene_cam);
         clear_background(Color::new(0.53, 0.62, 0.78, 1.0)); // sky
-        set_camera(&cam.camera());
         for m in &meshes {
             draw_mesh(m);
         }
         set_default_camera();
+
+        // Pass 2: blit the offscreen scene to the window (render targets are y-flipped).
+        draw_texture_ex(
+            &scene_rt.texture,
+            0.0,
+            0.0,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(screen_width(), screen_height())),
+                flip_y: true,
+                ..Default::default()
+            },
+        );
 
         // Minimal debug readout (toggle `I`): fps + frame time. Drawn with a 1px
         // shadow so it stays legible over any terrain colour.
@@ -196,15 +228,34 @@ async fn main() {
         }
 
         // Dev bridge: service deferred screenshots now the frame is fully drawn.
+        // Read the offscreen target (fresh, pre-present) rather than the window
+        // back-buffer, so capture doesn't need the window foregrounded.
         #[cfg(feature = "dev")]
         for (path, reply) in pending_shots.drain(..) {
-            let img = get_screen_data();
+            let img = capture_target(&scene_rt);
             img.export_png(&path);
             let _ = reply.send(serde_json::json!({"saved": path}));
         }
 
         next_frame().await;
     }
+}
+
+/// Read an offscreen render target's pixels into an `Image` ready for PNG export.
+/// GPU render targets are stored bottom-up, so the rows are flipped back.
+#[cfg(feature = "dev")]
+fn capture_target(rt: &RenderTarget) -> Image {
+    let mut img = rt.texture.get_texture_data();
+    let (w, h) = (img.width as usize, img.height as usize);
+    let row = w * 4;
+    let bytes = &mut img.bytes;
+    for y in 0..h / 2 {
+        let (top, bot) = (y * row, (h - 1 - y) * row);
+        for i in 0..row {
+            bytes.swap(top + i, bot + i);
+        }
+    }
+    img
 }
 
 // ---- Render-side palette (representation; kept out of the generator) ----
