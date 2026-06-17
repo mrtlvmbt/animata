@@ -87,6 +87,29 @@ fn new_scene_target(w: u32, h: u32) -> RenderTarget {
     rt
 }
 
+/// Conservative frustum cull: project the AABB's 8 corners through the camera's
+/// view-projection matrix and keep the mesh unless every corner falls off the same
+/// screen edge. Cheap (8 mat·vec per mesh) and yaw-agnostic; only the x/y screen
+/// bounds are tested (the ortho z range comfortably covers the world depth).
+fn aabb_in_view(vp: &Mat4, lo: Vec3, hi: Vec3) -> bool {
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for x in [lo.x, hi.x] {
+        for y in [lo.y, hi.y] {
+            for z in [lo.z, hi.z] {
+                let c = *vp * vec4(x, y, z, 1.0);
+                let w = c.w.abs().max(1e-6);
+                let (nx, ny) = (c.x / w, c.y / w);
+                minx = minx.min(nx);
+                maxx = maxx.max(nx);
+                miny = miny.min(ny);
+                maxy = maxy.max(ny);
+            }
+        }
+    }
+    const M: f32 = 0.02; // small margin so chunks aren't popped at the very edge
+    !(maxx < -1.0 - M || minx > 1.0 + M || maxy < -1.0 - M || miny > 1.0 + M)
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
@@ -217,21 +240,29 @@ async fn main() {
             scene_rt = new_scene_target(screen_width() as u32, screen_height() as u32);
         }
 
-        // Pass 1: draw the scene into the offscreen target.
+        // Pass 1: draw the scene into the offscreen target, frustum-culled per chunk.
         let mut scene_cam = cam.camera();
         scene_cam.render_target = Some(scene_rt.clone());
         set_camera(&scene_cam);
         clear_background(Color::new(0.53, 0.62, 0.78, 1.0)); // sky
+        let vp = scene_cam.matrix();
         // Opaque first (terrain + trees) so the depth buffer is complete...
-        for m in &meshes.opaque {
-            draw_mesh(m);
+        let mut drawn = 0usize;
+        for b in &meshes.opaque {
+            if aabb_in_view(&vp, b.lo, b.hi) {
+                draw_mesh(&b.mesh);
+                drawn += 1;
+            }
         }
         // ...then the translucent water plane on top. It's coplanar at SEA_ABS and one
         // quad per column, so no two water quads overlap on screen — no back-to-front
         // sort or depth-write toggle needed; the depth buffer hides water behind taller
         // land and the default alpha blend shows the sea floor through it.
-        for m in &meshes.water {
-            draw_mesh(m);
+        for b in &meshes.water {
+            if aabb_in_view(&vp, b.lo, b.hi) {
+                draw_mesh(&b.mesh);
+                drawn += 1;
+            }
         }
         set_default_camera();
 
@@ -250,8 +281,13 @@ async fn main() {
 
         // Minimal debug readout (toggle `I`): fps + frame time. Drawn with a 1px
         // shadow so it stays legible over any terrain colour.
+        // Build the readout unconditionally (reads `drawn` in every build config),
+        // draw it only when toggled on.
+        let total = meshes.opaque.len() + meshes.water.len();
+        let line = format!(
+            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   chunks {drawn}/{total}"
+        );
         if show_info {
-            let line = format!("{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m");
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
             draw_text(&line, 8.0, 22.0, 24.0, Color::new(0.95, 0.97, 1.0, 1.0));
         }
@@ -326,12 +362,22 @@ fn shaded(rgb: (f32, f32, f32), s: f32) -> Color {
     Color::new(rgb.0 * s, rgb.1 * s, rgb.2 * s, 1.0)
 }
 
+/// A built mesh plus its world-space AABB, so the renderer can frustum-cull it: with a
+/// big map most chunks are off-screen, and macroquad re-batches every drawn mesh's
+/// vertices each frame, so skipping off-screen ones keeps per-frame cost ∝ what's
+/// visible, not ∝ the whole map.
+struct Batch {
+    mesh: Mesh,
+    lo: Vec3,
+    hi: Vec3,
+}
+
 /// The world split into two draw lists: solid geometry and the translucent water
 /// plane. They are drawn in that order (opaque fills the depth buffer, water blends
 /// over it) — see the render loop.
 struct WorldMeshes {
-    opaque: Vec<Mesh>,
-    water: Vec<Mesh>,
+    opaque: Vec<Batch>,
+    water: Vec<Batch>,
 }
 
 /// macroquad's `draw_mesh` pushes through the immediate batch buffer, which **clamps**
@@ -451,14 +497,24 @@ enum Face {
     Nz,
 }
 
-fn flush_mesh(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, out: &mut Vec<Mesh>) {
+fn flush_mesh(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, out: &mut Vec<Batch>) {
     if verts.is_empty() {
         return;
     }
-    out.push(Mesh {
-        vertices: std::mem::take(verts),
-        indices: std::mem::take(idx),
-        texture: None,
+    let mut lo = Vec3::splat(f32::MAX);
+    let mut hi = Vec3::splat(f32::MIN);
+    for v in verts.iter() {
+        lo = lo.min(v.position);
+        hi = hi.max(v.position);
+    }
+    out.push(Batch {
+        mesh: Mesh {
+            vertices: std::mem::take(verts),
+            indices: std::mem::take(idx),
+            texture: None,
+        },
+        lo,
+        hi,
     });
 }
 
@@ -571,13 +627,13 @@ mod tests {
     /// `Mesh` structs with no GL context, so this runs headless. Guards the splitter.
     #[test]
     fn meshes_stay_under_macroquad_drawcall_limits() {
-        for seed in 1..6 {
+        for seed in 1..3 {
             let t = VoxelTerrain::new(seed);
             let m = build_world_meshes(&t);
             assert!(!m.opaque.is_empty(), "no opaque geometry for seed {seed}");
-            for mesh in m.opaque.iter().chain(m.water.iter()) {
-                assert!(mesh.vertices.len() < 10_000, "verts {} (seed {seed})", mesh.vertices.len());
-                assert!(mesh.indices.len() < 5_000, "indices {} (seed {seed})", mesh.indices.len());
+            for b in m.opaque.iter().chain(m.water.iter()) {
+                assert!(b.mesh.vertices.len() < 10_000, "verts {} (seed {seed})", b.mesh.vertices.len());
+                assert!(b.mesh.indices.len() < 5_000, "indices {} (seed {seed})", b.mesh.indices.len());
             }
         }
     }

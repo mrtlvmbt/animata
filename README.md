@@ -22,8 +22,10 @@ Controls: `WASD`/arrows pan, mouse wheel zoom, `Q`/`E` rotate the iso view 90°,
 Dev bridge: `cargo run --features dev` adds a localhost JSON-RPC server (drive the
 camera, reseed, capture screenshots) — see `DEV_BRIDGE.md`.
 
-Scale: **1 voxel = 1 m³**; the base map is 138×95 m. `MAP_SCALE` (in `config.rs`)
-scales it (×16 per side is the eventual target, needs chunk streaming).
+Scale: **1 voxel = 1 m³**; the base map is 138×95 m, scaled by `MAP_SCALE` (in
+`config.rs`, currently **×8** → 1104×760 m). Chunk meshes are frustum-culled, so only
+on-screen chunks cost anything per frame (the readout shows `chunks drawn/total`). The
+whole mesh set still lives in RAM (~0.7 GB at ×8); true ×16 needs chunk *streaming*.
 
 ## Status
 
@@ -31,7 +33,8 @@ scales it (×16 per side is the eventual target, needs chunk streaming).
   bit-packed, ghost-padded `VoxelTerrain` (7 biomes + heights); rendered as batched
   per-chunk meshes (exposed top + cliff side faces, strata bands, baked per-face
   shading) on the GPU depth buffer; voxel trees on forest/plains columns; a translucent
-  water plane at sea level (opaque pass then water pass — sea floor shows through).
+  water plane at sea level (opaque pass then water pass — sea floor shows through);
+  tall mountains (peaks ~8 blocks over the plains) on a giant frustum-culled map.
 - Next: data-driven `BiomeDef` biomes (swamps, mountain lakes, rivers).
 
 See the working plan for the full phase breakdown.
