@@ -228,8 +228,13 @@ pub fn inspect_json(world: &World, id: Option<u64>, at: Option<Vec2>) -> Value {
         "max_speed": c.pheno.max_speed,
         "primary_layer": c.pheno.primary_layer(),
         "n_hidden": c.pheno.n_hidden,
+        "n_inputs": c.pheno.n_inputs,
+        "n_outputs": c.pheno.n_outputs,
         "synapse_count": c.pheno.synapses.len(),
         "segments": segs,
+        "receptors": c.pheno.receptors.iter().map(|r| json!({
+            "modality": r.modality, "layer_rel": r.layer_rel, "tuning": r.tuning,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -238,9 +243,11 @@ pub fn inspect_json(world: &World, id: Option<u64>, at: Option<Vec2>) -> Value {
 pub fn histogram_json(world: &World) -> Value {
     use crate::genome::Appendage;
     let mut layers = [0u32; 3];
-    let mut app = [0u32; 6]; // none, fin, wing, leg, burrow, eye
+    let mut app = [0u32; 5]; // none, fin, wing, leg, burrow
     let mut seg_counts = [0u32; 9]; // 0..=8
     let mut hidden = [0u32; 17]; // 0..=16
+    let mut with_receptor = 0u32; // bodies carrying >=1 sense organ
+    let mut modality = [0u32; crate::config::RECEPTOR_MODALITIES]; // receptor modality mix
     for c in &world.creatures {
         layers[(c.layer as usize).min(2)] += 1;
         seg_counts[c.pheno.segments.len().min(8)] += 1;
@@ -252,7 +259,6 @@ pub fn histogram_json(world: &World) -> Value {
                 Appendage::Wing => app[2] += 1,
                 Appendage::Leg => app[3] += 1,
                 Appendage::Burrow => app[4] += 1,
-                Appendage::Eye => app[5] += 1,
                 Appendage::None => {}
             }
             if s.appendage != Appendage::None {
@@ -262,11 +268,18 @@ pub fn histogram_json(world: &World) -> Value {
         if !any {
             app[0] += 1;
         }
+        if !c.pheno.receptors.is_empty() {
+            with_receptor += 1;
+        }
+        for r in &c.pheno.receptors {
+            modality[(r.modality as usize).min(crate::config::RECEPTOR_MODALITIES - 1)] += 1;
+        }
     }
     json!({
         "population": world.creatures.len(),
         "layer": { "underground": layers[0], "surface": layers[1], "air": layers[2] },
-        "appendage": { "none_bodies": app[0], "fin": app[1], "wing": app[2], "leg": app[3], "burrow": app[4], "eye": app[5] },
+        "appendage": { "none_bodies": app[0], "fin": app[1], "wing": app[2], "leg": app[3], "burrow": app[4] },
+        "receptors": { "bodies_with_organ": with_receptor, "by_modality": modality },
         "segment_counts": seg_counts,
         "hidden_widths": hidden,
     })

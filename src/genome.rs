@@ -40,10 +40,6 @@ pub enum Appendage {
     Wing,
     Leg,
     Burrow,
-    /// A sensory organ (no locomotion): its brain input port carries an
-    /// exteroceptive reading — nearest food on an adjacent reachable layer — so a
-    /// body can "see" the stratum above/below and migrate toward it on purpose.
-    Eye,
 }
 
 impl Appendage {
@@ -53,16 +49,21 @@ impl Appendage {
             1 => Appendage::Fin,
             2 => Appendage::Wing,
             3 => Appendage::Leg,
-            4 => Appendage::Burrow,
-            _ => Appendage::Eye,
+            _ => Appendage::Burrow,
         }
     }
+}
 
-    /// True for a sensory organ whose brain input is an exteroceptive reading
-    /// rather than a locomotion pacemaker.
-    pub fn is_sensor(self) -> bool {
-        matches!(self, Appendage::Eye)
-    }
+/// A body-grown sense organ. Its *function* is gene-encoded, so what a body can
+/// perceive evolves: `modality` selects the primitive it responds to, `layer_rel`
+/// the stratum it looks at relative to the body's own (below / same / above), and
+/// `tuning` a continuous parameter that modality interprets (e.g. a preferred food
+/// flavour). One receptor adds one brain input port carrying its reading.
+#[derive(Clone, Copy)]
+pub struct Receptor {
+    pub modality: u8,
+    pub layer_rel: i8,
+    pub tuning: f32,
 }
 
 /// One body segment in the chain (head → tail).
@@ -112,6 +113,8 @@ pub struct Phenotype {
     /// Body plan: marker-decoded segment chain (empty == a single implicit
     /// segment sized by the radius gene, i.e. the original circular body).
     pub segments: Vec<Segment>,
+    /// Sense organs (gene-encoded function), one exteroceptive input port each.
+    pub receptors: Vec<Receptor>,
 }
 
 impl Genome {
@@ -209,10 +212,11 @@ impl Genome {
     /// adds, drops or shifts whole records. Synapse src/dst genes are kept *raw*
     /// here because resolving them to port indices needs the hidden width, which
     /// is only known once all neuron records are counted (see `decode`).
-    fn scan_records(&self) -> (Vec<(u8, u8, f32)>, Vec<Segment>, usize) {
+    fn scan_records(&self) -> (Vec<(u8, u8, f32)>, Vec<Segment>, usize, Vec<Receptor>) {
         let nt = &self.nt;
         let mut syn = Vec::new();
         let mut seg = Vec::new();
+        let mut rec = Vec::new();
         let mut neurons = 0usize;
         let mut i = 0usize;
         // The start codon + type gene are common; need at least that much to read.
@@ -239,6 +243,21 @@ impl Genome {
                 } else {
                     i += 1; // record runs off the end, or segment cap reached
                 }
+            } else if tg >= RECEPTOR_TYPE_MIN {
+                if i + RECEPTOR_RECORD_NT <= nt.len() && rec.len() < MAX_RECEPTORS {
+                    rec.push(Receptor {
+                        modality: f(0) % RECEPTOR_MODALITIES as u8,
+                        layer_rel: match f(1) % 3 {
+                            0 => -1,
+                            1 => 0,
+                            _ => 1,
+                        },
+                        tuning: f(2) as f32 / 255.0,
+                    });
+                    i += RECEPTOR_RECORD_NT;
+                } else {
+                    i += 1;
+                }
             } else if tg >= NEURON_TYPE_MIN {
                 // Neuron record: its presence adds one hidden unit (no payload).
                 neurons += 1;
@@ -251,7 +270,7 @@ impl Genome {
                 i += 1;
             }
         }
-        (syn, seg, neurons)
+        (syn, seg, neurons, rec)
     }
 
     pub fn decode(&self) -> Phenotype {
@@ -270,14 +289,15 @@ impl Genome {
         let diet_niche = g(12);
         let leak = lerp(LEAK_RANGE, g(13));
 
-        let (raw_syn, segments, n_neurons) = self.scan_records();
+        let (raw_syn, segments, n_neurons, receptors) = self.scan_records();
         // Hidden width = neuron-record count, clamped to the brain-size bounds.
         let n_hidden = n_neurons.clamp(MIN_HIDDEN, MAX_HIDDEN);
-        // Ports grow with the body: each appendage segment adds both a sensory
-        // pacemaker INPUT and an actuator OUTPUT, so a limb the body grows is
-        // reachable by the brain wiring from both sides.
+        // Ports grow with the body. Each limb adds both a pacemaker INPUT and an
+        // actuator OUTPUT; each receptor organ adds one more (exteroceptive) INPUT
+        // whose function is gene-encoded. So input ports = base senses + one per
+        // limb + one per receptor; output ports = base controls + one per limb.
         let n_app = segments.iter().filter(|s| s.appendage != Appendage::None).count();
-        let n_inputs = NN_BASE_INPUTS + n_app;
+        let n_inputs = NN_BASE_INPUTS + n_app + receptors.len();
         let n_outputs = NN_BASE_OUTPUTS + n_app;
         // Resolve each synapse's raw src/dst genes against this brain's port space:
         // sources are the inputs then the hidden units; destinations the hidden
@@ -312,6 +332,7 @@ impl Genome {
             n_inputs,
             n_outputs,
             segments,
+            receptors,
         }
     }
 
