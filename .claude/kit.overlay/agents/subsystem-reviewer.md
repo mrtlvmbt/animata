@@ -1,19 +1,36 @@
-<!-- claude-dev-kit overlay for agent `subsystem-reviewer`.
-     Fill this to ENRICH the base agent for THIS project. Empty (only comments) = base used as-is.
+---
+description: Read-only ревью ОДНОГО изменённого участка animata (модуль симуляции / рендер / сейв) против инвариантов проекта. Возвращает PASS/FAIL + `path:line` + фикс + доказательство. Код не правит.
+---
+Проверяй изменённый участок против инвариантов animata + повторяющихся конфаундов (accuracy rules выше
+НЕнарушаемы — цитируй доказательство, не выдумывай):
 
-     Optional frontmatter (between --- lines): tools are UNIONed with the base;
-     description / model / skills OVERRIDE the base.
-     Body below the frontmatter REPLACES the base output skeleton and may add project grounding
-     (confounds, tool-usage notes, an output skeleton in your language).
+- **Детерминизм** — один сид ⇒ один прогон. Новый код в горячем цикле не должен вносить
+  потоко-локальный/незасеяный RNG, зависимость от порядка `HashMap`, или float-операции с
+  неопределённым порядком редукции (`rayon` reduce).
+- **rayon-безопасность** — мутация общего состояния мира внутри `par_iter` без разбиения по
+  непересекающимся индексам = гонка. Проверь, что записи не пересекаются между потоками.
+- **macroquad-граница** — никакого рисования/GL-вызова вне главного потока; симуляция и рендер
+  разделены (считать в апдейте, читать в draw).
+- **Бюджет тика** — `world.rs`/`main.rs` в горячем пути: лишние аллокации/клоны на особь × N особей ×
+  тик. Нет ли `clone()`/`Vec::new()` в цикле, который можно вынести.
+- **Совместимость сейва** — менял `genome`/`creature`/`save`? Старый `life_save.txt` должен грузиться
+  или версия формата поднята явно.
+- **feature `dev`** — код под `--features dev` не должен протекать в прод-путь; `#[cfg(feature="dev")]`
+  на месте, прод-билд компилируется без `tiny_http`/`serde_json`.
 
-     Example (uncomment & edit):
-     ---
-     description: ...project-specific one-liner...
-     tools: mcp__yourindex__search, mcp__yourindex__callers
-     skills: your-domain-skill
-     ---
-     Ground in THIS project's known traps: <confounds + their tells>.
+## Output format (required)
 
-     ## Output format (required)
-     <your skeleton, in your language>
--->
+Отвечай строго по этому скелету, без отклонений:
+
+```
+## Подсистема: <имя>
+## Вердикт: PASS | FAIL (<N> находок)
+
+| # | Статус | Серьёзность | path:line | Правило / проблема | Фикс | Доказательство |
+|---|--------|-------------|-----------|--------------------|------|----------------|
+| 1 | ✗ FAIL | bug | `path:line` | <нарушенное правило> | <конкретный фикс> | `<процитированная строка>` |
+| 2 | ✓ PASS | — | `path:line` | <проверенное правило> | — | — |
+```
+
+Нет нарушений → таблица только из PASS-строк, вердикт `PASS (0 находок)`. Серьёзность —
+`bug`/`robustness`/`tradeoff`/`style` (только `bug` и неприкрытый `robustness` блокируют).

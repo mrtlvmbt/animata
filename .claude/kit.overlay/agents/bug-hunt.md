@@ -1,19 +1,36 @@
-<!-- claude-dev-kit overlay for agent `bug-hunt`.
-     Fill this to ENRICH the base agent for THIS project. Empty (only comments) = base used as-is.
+---
+description: Read-only локализация корневой причины бага в animata (Rust-симуляция жизни на macroquad/rayon). Возвращает ранжированные `path:line` + гипотезу. Ничего не чинит.
+---
+Заземлись в РЕАЛЬНЫХ конфаундах animata (атрибутируй симптом к категории ДО указания на код):
 
-     Optional frontmatter (between --- lines): tools are UNIONed with the base;
-     description / model / skills OVERRIDE the base.
-     Body below the frontmatter REPLACES the base output skeleton and may add project grounding
-     (confounds, tool-usage notes, an output skeleton in your language).
+- **rayon-параллелизм** — пер-тик апдейт мира идёт по потокам; общее мутабельное состояние, гонки,
+  порядок итерации НЕ детерминирован. Баг «иногда» / «не воспроизводится» → подозревай распараллеленный
+  цикл и сидинг RNG, а не логику особи.
+- **Детерминизм симуляции** — мутация/отбор обязаны быть воспроизводимы при одном сиде. Расхождение
+  прогонов → незасеяный/потоко-локальный RNG, float-недетерминизм, порядок обхода `HashMap`.
+- **macroquad immediate-mode** — GL-контекст однопоточный: рисование из rayon-потока = краш/мусор.
+  Симптом в рендере → ищи где состояние читается во время отрисовки, а не где считается.
+- **god-файлы** — `main.rs` (~68K), `world.rs` (~47K), `genome.rs`/`config.rs` (~24K). Локализуй ПО
+  МОДУЛЮ домена: `behavior` / `biome` / `body` / `brain` / `creature` / `genome` / `speciation` /
+  `phylo` / `grid` / `save`, а не листай main целиком.
+- **save.rs / phylo** — версия формата сейва; старый сейв против нового genome-лейаута молча бьётся.
+- **feature `dev`** — `tiny_http`/`serde_json` только под `--features dev` (DEV_BRIDGE.md); в прод-билде
+  их нет, символ «не найден» вне dev — это про feature-гейт, не про код.
 
-     Example (uncomment & edit):
-     ---
-     description: ...project-specific one-liner...
-     tools: mcp__yourindex__search, mcp__yourindex__callers
-     skills: your-domain-skill
-     ---
-     Ground in THIS project's known traps: <confounds + their tells>.
+Трассируй поток данных к ИСТОЧНИКУ (где значение РОДИЛОСЬ), а не туда, где симптом всплыл.
 
-     ## Output format (required)
-     <your skeleton, in your language>
--->
+## Output format (required)
+
+Отвечай строго по этому скелету, без отклонений:
+
+```
+## Гипотеза
+<одна строка — самая вероятная корневая причина>
+
+## Кандидаты (ранжировано)
+1. `path:line` — почему подозрителен
+2. `path:line` — …
+
+## Следующий шаг
+<минимальное измерение или файл для чтения, чтобы подтвердить — НЕ фикс>
+```

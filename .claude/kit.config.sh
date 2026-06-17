@@ -103,11 +103,12 @@ KIT_SUBREPO_DIR=".claude-dev-kit"
 # Per-agent required output headers, '|'-separated. Lets an overlay localize the skeleton so the
 # metrics drift-check matches your agents' real output. Var name = KIT_AGENT_FMT_<name with - as _>.
 # Defaults (English) live in the hook; override only when your overlay changes the skeleton/language.
-# Example — grav's Russian bug-hunt skeleton:
-# KIT_AGENT_FMT_bug_hunt='## Гипотеза|## Подозреваемые|## Следующий шаг'
-# KIT_AGENT_FMT_subsystem_reviewer='## Subsystem|## Вердикт'
-# KIT_AGENT_FMT_web_research='## Ответ|## Sources'
-# KIT_AGENT_FMT_critic='## Иллюзия|## Точка отказа|## Реальность железа|## Альтернативный паттерн'
+# Russian skeletons — match the animata overlays in .claude/kit.overlay/agents/ (kit talks RU here).
+KIT_AGENT_FMT_bug_hunt='## Гипотеза|## Кандидаты|## Следующий шаг'
+KIT_AGENT_FMT_subsystem_reviewer='## Подсистема|## Вердикт'
+KIT_AGENT_FMT_web_research='## Ответ|## Источники'
+KIT_AGENT_FMT_critic='## Иллюзия|## Точка отказа|## Реальность железа|## Альтернативный паттерн'
+KIT_AGENT_FMT_judge='## Вердикт|## По критериям|VERDICT:'
 
 # ── auto-detected by install.sh (overrides the defaults above) ──
 KIT_LINT_CMD='cargo clippy --all-targets -- -D warnings'

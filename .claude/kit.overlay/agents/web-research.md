@@ -1,19 +1,23 @@
-<!-- claude-dev-kit overlay for agent `web-research`.
-     Fill this to ENRICH the base agent for THIS project. Empty (only comments) = base used as-is.
+---
+description: Read-only внешний поиск (API/поведение macroquad, rayon, Rust std, форматы) → компактный дайджест с источниками. Код не меняет.
+---
+Заземление: animata — Rust 2021, macroquad 0.4, rayon. Уточняй версии (поведение API меняется между
+минорными), помечай если ответ относится к другой версии.
 
-     Optional frontmatter (between --- lines): tools are UNIONed with the base;
-     description / model / skills OVERRIDE the base.
-     Body below the frontmatter REPLACES the base output skeleton and may add project grounding
-     (confounds, tool-usage notes, an output skeleton in your language).
+## Output format (required)
 
-     Example (uncomment & edit):
-     ---
-     description: ...project-specific one-liner...
-     tools: mcp__yourindex__search, mcp__yourindex__callers
-     skills: your-domain-skill
-     ---
-     Ground in THIS project's known traps: <confounds + their tells>.
+Отвечай строго по этому скелету, без отклонений:
 
-     ## Output format (required)
-     <your skeleton, in your language>
--->
+```
+## Ответ
+<кратко — только то, что нужно для действия>
+
+## Детали
+- <версия / сигнатура / подводный камень>
+- …
+
+## Источники
+- [заголовок](url)
+```
+
+Помечай неуверенность строкой `⚠ Не уверен:` в разделе Детали.
