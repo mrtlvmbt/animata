@@ -38,6 +38,16 @@ const DETAIL_WEIGHT: f32 = 0.34;
 /// biome (desert↔plains↔forest). Scaled by `MAP_SCALE` so moisture regions are big.
 const MOIST_LATTICE: f32 = 21.0 * MAP_SCALE as f32;
 const MOIST_OCTAVES: u32 = 3;
+/// Ridged-noise field for mountain ridgelines (belts scale with the map). Domain-warped
+/// by a broader field so ridges flow instead of forming blobs.
+const RIDGE_LATTICE: f32 = 30.0 * MAP_SCALE as f32;
+const RIDGE_OCTAVES: u32 = 4;
+const WARP_LATTICE: f32 = 55.0 * MAP_SCALE as f32;
+const WARP_AMP: f32 = 0.6;
+/// Macro elevation at which ridges start to bite (below this the land stays rolling).
+const RIDGE_ONSET: f32 = 0.55;
+/// Ridge amplitude in normalised `[0,1]` elevation units (crest lift / trough carve).
+const RIDGE_WEIGHT: f32 = 0.42;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -160,7 +170,23 @@ fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
 fn elevation(seed: u64, x: f32, y: f32) -> f32 {
     let macro_e = fbm(seed, x / ELEV_LATTICE, y / ELEV_LATTICE, 1, ELEV_OCTAVES);
     let detail = fbm(seed, x / DETAIL_LATTICE, y / DETAIL_LATTICE, 5, DETAIL_OCTAVES) - 0.5;
-    (macro_e + detail * DETAIL_WEIGHT).clamp(0.0, 1.0)
+
+    // Ridged noise for mountain ridgelines/cliffs, applied only where the macro field
+    // is already high (so lowlands stay rolling). Domain-warp the sample so ridges
+    // flow organically instead of forming round blobs. `1 - |2n-1|` peaks at 1 along
+    // ridgelines: positive lifts crests, negative carves the troughs between them
+    // (which, reaching the sea, read as fjord-like inlets). True long parallel CHAINS
+    // come later from the tectonic layer; this gives ridge texture + sharper relief.
+    let wx = fbm(seed, x / WARP_LATTICE, y / WARP_LATTICE, 11, 2) - 0.5;
+    let wy = fbm(seed, x / WARP_LATTICE, y / WARP_LATTICE, 13, 2) - 0.5;
+    let rx = x / RIDGE_LATTICE + wx * WARP_AMP;
+    let ry = y / RIDGE_LATTICE + wy * WARP_AMP;
+    let rn = fbm(seed, rx, ry, 3, RIDGE_OCTAVES);
+    let ridged = 1.0 - (2.0 * rn - 1.0).abs();
+    let mountainness = ((macro_e - RIDGE_ONSET) / (1.0 - RIDGE_ONSET)).clamp(0.0, 1.0);
+
+    (macro_e + detail * DETAIL_WEIGHT + (ridged - 0.5) * RIDGE_WEIGHT * mountainness)
+        .clamp(0.0, 1.0)
 }
 
 /// Deterministic per-column unit value in `[0, 1)` for placing discrete features
