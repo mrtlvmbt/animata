@@ -749,6 +749,7 @@ fn appendage_color(app: genome::Appendage) -> Color {
         genome::Appendage::Wing => (0.92, 0.92, 1.0),
         genome::Appendage::Leg => (0.72, 0.52, 0.30),
         genome::Appendage::Burrow => (0.42, 0.32, 0.25),
+        genome::Appendage::Eye => (0.95, 0.85, 0.30),
         genome::Appendage::None => return Color::new(1.0, 1.0, 1.0, 0.0),
     };
     Color::new(r, g, b, 0.92)
@@ -823,7 +824,6 @@ fn draw_plant(mesh: &mut Mesh, max_v: usize, max_i: usize, view: &View, pos: Vec
 /// segment screen radius `r`. Fins/wings/legs sweep off both sides (paired limbs);
 /// a burrow claw points forward. Shape and sweep distinguish the kinds at a glance.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn draw_appendage(
     mesh: &mut Mesh,
     max_v: usize,
@@ -843,6 +843,16 @@ fn draw_appendage(
         let b0 = sc + perp * (r * 0.6);
         let b1 = sc - perp * (r * 0.6);
         mesh_tri(mesh, max_v, max_i, tip, b0, b1, col);
+        return;
+    }
+    if let Eye = app {
+        // An eyeball raised on a short stalk above the segment (screen-up).
+        let tip = sc + vec2(0.0, -r * 1.7);
+        let stalk = Color::new(0.5, 0.45, 0.2, 1.0);
+        mesh_tri(mesh, max_v, max_i, vec2(sc.x - 1.0, sc.y), vec2(sc.x + 1.0, sc.y), tip, stalk);
+        let e = r * 0.75;
+        mesh_tri(mesh, max_v, max_i, vec2(tip.x, tip.y - e), vec2(tip.x + e, tip.y), vec2(tip.x, tip.y + e), col);
+        mesh_tri(mesh, max_v, max_i, vec2(tip.x, tip.y - e), vec2(tip.x, tip.y + e), vec2(tip.x - e, tip.y), col);
         return;
     }
     let (span, sweep) = match app {
@@ -869,6 +879,7 @@ fn appendage_tint(base: Color, app: genome::Appendage) -> Color {
         genome::Appendage::Wing => ((0.95, 0.95, 0.98), 0.45),
         genome::Appendage::Leg => ((0.70, 0.50, 0.30), 0.40),
         genome::Appendage::Burrow => ((0.35, 0.28, 0.22), 0.45),
+        genome::Appendage::Eye => ((0.95, 0.85, 0.30), 0.35),
     };
     Color::new(
         base.r + (t.0 - base.r) * w,

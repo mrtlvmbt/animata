@@ -238,7 +238,7 @@ pub fn inspect_json(world: &World, id: Option<u64>, at: Option<Vec2>) -> Value {
 pub fn histogram_json(world: &World) -> Value {
     use crate::genome::Appendage;
     let mut layers = [0u32; 3];
-    let mut app = [0u32; 5]; // none, fin, wing, leg, burrow
+    let mut app = [0u32; 6]; // none, fin, wing, leg, burrow, eye
     let mut seg_counts = [0u32; 9]; // 0..=8
     let mut hidden = [0u32; 17]; // 0..=16
     for c in &world.creatures {
@@ -252,6 +252,7 @@ pub fn histogram_json(world: &World) -> Value {
                 Appendage::Wing => app[2] += 1,
                 Appendage::Leg => app[3] += 1,
                 Appendage::Burrow => app[4] += 1,
+                Appendage::Eye => app[5] += 1,
                 Appendage::None => {}
             }
             if s.appendage != Appendage::None {
@@ -265,7 +266,7 @@ pub fn histogram_json(world: &World) -> Value {
     json!({
         "population": world.creatures.len(),
         "layer": { "underground": layers[0], "surface": layers[1], "air": layers[2] },
-        "appendage": { "none_bodies": app[0], "fin": app[1], "wing": app[2], "leg": app[3], "burrow": app[4] },
+        "appendage": { "none_bodies": app[0], "fin": app[1], "wing": app[2], "leg": app[3], "burrow": app[4], "eye": app[5] },
         "segment_counts": seg_counts,
         "hidden_widths": hidden,
     })
