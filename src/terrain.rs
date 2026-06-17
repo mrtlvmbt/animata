@@ -15,11 +15,17 @@ const GROUND_MIN: u8 = UNDERGROUND_LEVELS;
 /// Absolute level the sea fills to. Columns at or below this are ocean; the water
 /// surface is rendered as a translucent plane at this level (the renderer reads it).
 pub const SEA_ABS: u8 = GROUND_MIN + SEA_LEVEL;
-/// Max surface height (lowlands + mountains).
-const MAX_H: u8 = GROUND_MIN + SURFACE_RANGE;
-/// Noise lattice spacing in columns (bigger → broader features).
-const ELEV_LATTICE: f32 = 26.0;
-const MOIST_LATTICE: f32 = 18.0;
+/// Lowest land level — the shoreline / mountain "foot", one above the water surface.
+const LAND_FOOT: u8 = SEA_ABS + 1;
+/// Tallest peak. Land relief (`SURFACE_RANGE`) is measured up from the foot.
+const MAX_H: u8 = LAND_FOOT + SURFACE_RANGE;
+/// Fraction of the elevation field that lies under the sea — sets how much of the map
+/// is water, independently of how tall the land rises (so taller peaks ≠ less sea).
+const SEA_FRACTION: f32 = 0.42;
+/// Noise lattice spacing in columns (bigger → broader features). Scaled by `MAP_SCALE`
+/// so biomes grow with the map instead of fragmenting into noise on a giant map.
+const ELEV_LATTICE: f32 = 26.0 * MAP_SCALE as f32;
+const MOIST_LATTICE: f32 = 18.0 * MAP_SCALE as f32;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -141,22 +147,29 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
     }
     let (cx, cy) = (x as f32, y as f32);
     let elev = fbm(seed, cx / ELEV_LATTICE, cy / ELEV_LATTICE, 1);
-    let h = (GROUND_MIN as f32 + elev * SURFACE_RANGE as f32).round() as u8;
-    let h = h.clamp(1, MAX_H);
 
-    if h <= SEA_ABS {
-        // Keep the real sea-floor height (not flattened to sea level) so the basin has
-        // depth: the opaque floor sits at `h`, and the renderer floats a translucent
-        // water plane up at `SEA_ABS` above it.
-        return pack_cell(h, BiomeKind::Ocean, FLAG_WATER);
+    if elev < SEA_FRACTION {
+        // Sea floor with real depth (not flattened to sea level): deeper offshore,
+        // shallowing toward the shore. The renderer floats a translucent water plane
+        // at `SEA_ABS` above it.
+        let f = elev / SEA_FRACTION; // 0 deep .. 1 at the shoreline
+        let h = (1.0 + f * (SEA_ABS - 2) as f32).round() as u8;
+        return pack_cell(h.clamp(1, SEA_ABS - 1), BiomeKind::Ocean, FLAG_WATER);
     }
+
+    // Land: map the above-sea elevation onto `LAND_FOOT..=MAX_H` so peaks stand
+    // `SURFACE_RANGE` blocks above the foot.
+    let f = (elev - SEA_FRACTION) / (1.0 - SEA_FRACTION); // 0 foot .. 1 peak
+    let h = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).round() as u8;
+    let h = h.clamp(LAND_FOOT, MAX_H);
+
     let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7);
-    let biome = if h == SEA_ABS + 1 {
+    let biome = if h == LAND_FOOT {
         BiomeKind::Beach
-    } else if h >= MAX_H {
-        BiomeKind::Snow
     } else if h >= MAX_H - 1 {
-        BiomeKind::Mountain
+        BiomeKind::Snow // top 2 levels: snow caps
+    } else if h >= MAX_H - 6 {
+        BiomeKind::Mountain // the tall grey massif below the caps
     } else if moist < 0.35 {
         BiomeKind::Desert
     } else if moist > 0.66 {

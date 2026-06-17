@@ -27,7 +27,7 @@ pub const VOX: f32 = 1.0;
 /// the **eventual target is ×16 per side** (×256 area) — keep at 1 for now, because
 /// `MAP_SCALE = 16` is 2208×1520 ≈ 3.36M columns and will need chunk *streaming*
 /// (don't hold every chunk mesh at once) + aggressive culling, a separate phase.
-pub const MAP_SCALE: usize = 1;
+pub const MAP_SCALE: usize = 8;
 const BASE_COLS: usize = 138;
 const BASE_ROWS: usize = 95;
 
@@ -42,8 +42,11 @@ pub const CHUNK: usize = 16;
 // ---- Vertical level budget (metres) ----
 /// Underground strata shown on cliff/edge cross-sections.
 pub const UNDERGROUND_LEVELS: u8 = 4;
-/// Surface height range above sea level (mountains rise up to this).
-pub const SURFACE_RANGE: u8 = 6;
+/// Land relief in **levels (= metres)** above the shoreline: the tallest peak stands
+/// this many blocks above the lowest land (the "foot"). Mountains tower ~8 blocks over
+/// the plains, snow caps above that. Decoupled from how much of the map is water
+/// (`SEA_FRACTION` in `terrain.rs`), so raising peaks doesn't drain the sea.
+pub const SURFACE_RANGE: u8 = 11;
 /// Water fills columns whose surface sits below this level.
 pub const SEA_LEVEL: u8 = 2;
 
