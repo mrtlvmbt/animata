@@ -192,6 +192,10 @@ pub fn status_json(world: &World, paused: bool, speed: u32, scale: f32, center: 
         "marker_listener_frac": s.marker_listener_frac,
         "channel_meaning": s.channel_meaning,
         "avg_color_contrast": s.avg_color_contrast,
+        "morpho_novel_mortality": world.morpho.novel_mortality(),
+        "morpho_baseline_mortality": world.morpho.baseline_mortality(),
+        "morpho_novel_n": world.morpho.born_novel,
+        "morpho_baseline_n": world.morpho.born_normal,
     })
 }
 

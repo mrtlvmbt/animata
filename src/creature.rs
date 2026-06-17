@@ -50,6 +50,10 @@ pub struct Creature {
     pub pheno: Phenotype,
     /// Which behavior kind this creature uses (kept so children match).
     pub kind: BehaviorKind,
+    /// True if this creature's body plan ([`plan_key`]) differs from its parent's
+    /// — i.e. it is the first bearer of a fresh morphological innovation. Set at
+    /// birth, used only for the morpho-fragility cohort metric (not saved).
+    pub morpho_novel: bool,
     mind: Box<dyn Behavior + Send>,
 }
 
@@ -80,6 +84,7 @@ impl Creature {
             genome,
             pheno,
             kind,
+            morpho_novel: false,
             mind,
         }
     }
@@ -125,6 +130,7 @@ impl Creature {
             genome,
             pheno,
             kind,
+            morpho_novel: false,
             mind,
         }
     }
@@ -364,6 +370,9 @@ impl Creature {
         child.parent_id = Some(self.id);
         child.lineage = self.lineage;
         child.species_id = self.species_id; // refreshed at next speciation update
+        // Flag a fresh body-plan mutant (clone differs from parent's architecture).
+        child.morpho_novel =
+            crate::speciation::plan_key(&child.pheno) != crate::speciation::plan_key(&self.pheno);
         child
     }
 }
@@ -392,5 +401,26 @@ mod tests {
         assert!(!c.wants_to_reproduce(), "newborn should be immature");
         c.age = c.pheno.prime as u32; // well past maturity
         assert!(c.wants_to_reproduce());
+    }
+
+    #[test]
+    fn morpho_novel_tracks_body_plan_change() {
+        use crate::speciation::plan_key;
+        seed(7);
+        let mut parent = Creature::spawn_random(Vec2::ZERO, BehaviorKind::Neural);
+        let parent_plan = plan_key(&parent.pheno);
+        let mut saw_novel = false;
+        let mut saw_same = false;
+        // The flag must always equal "child body plan differs from parent's",
+        // across a spread of mutated children (covers both branches).
+        for _ in 0..300 {
+            let child = parent.reproduce(0.3);
+            let changed = plan_key(&child.pheno) != parent_plan;
+            assert_eq!(child.morpho_novel, changed);
+            saw_novel |= changed;
+            saw_same |= !changed;
+        }
+        assert!(saw_same, "expected some clones to keep the parent body plan");
+        assert!(saw_novel, "expected some mutants to change the body plan");
     }
 }

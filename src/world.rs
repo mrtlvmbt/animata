@@ -46,6 +46,41 @@ impl Profile {
     }
 }
 
+/// Cumulative cohort counters answering: do fresh body-plan mutants (the first
+/// bearer of a new [`plan_key`]) die in early life more often than their peers?
+/// `died_young_*` counts deaths before age [`INFANT_WINDOW`]; divide by `born_*`
+/// for each cohort's infant mortality. A novel/baseline ratio well above 1 is the
+/// evidence that would justify Morphological Innovation Protection (MIP).
+#[derive(Clone, Copy, Default)]
+pub struct MorphoCohort {
+    pub born_novel: u64,
+    pub born_normal: u64,
+    pub died_young_novel: u64,
+    pub died_young_normal: u64,
+}
+
+impl MorphoCohort {
+    /// Infant mortality of fresh body-plan mutants (0..1; 0 if none born yet).
+    #[allow(dead_code)] // read by the headless example / dev_bridge, not the GUI binary
+    pub fn novel_mortality(&self) -> f32 {
+        ratio(self.died_young_novel, self.born_novel)
+    }
+    /// Infant mortality of everyone else — the baseline to compare against.
+    #[allow(dead_code)] // read by the headless example / dev_bridge, not the GUI binary
+    pub fn baseline_mortality(&self) -> f32 {
+        ratio(self.died_young_normal, self.born_normal)
+    }
+}
+
+#[allow(dead_code)] // only reached via the cohort methods above
+fn ratio(num: u64, den: u64) -> f32 {
+    if den == 0 {
+        0.0
+    } else {
+        num as f32 / den as f32
+    }
+}
+
 /// One creature's perception for a step: the three steering offsets (food/threat/
 /// neighbour), the heard signal, and each sense organ's reading (the first
 /// `receptors.len()` entries are live, the rest zero).
@@ -84,6 +119,8 @@ pub struct World {
     pub circulating_strain: f32,
     /// Per-phase timing accumulators for profiling.
     pub profile: Profile,
+    /// Morpho-innovation fragility metric (cumulative over the run).
+    pub morpho: MorphoCohort,
     /// Stigmergic scent field (per layer × channel): creatures emit into it
     /// (brain-gated) and sense it via evolved receptor organs. Meaning is emergent.
     pub markers: MarkerField,
@@ -184,6 +221,7 @@ impl World {
             drought_until: 0,
             circulating_strain,
             profile: Profile::default(),
+            morpho: MorphoCohort::default(),
             markers: MarkerField::new(WORLD_W, WORLD_H, MARKER_CELL),
             g_food: Vec::new(),
             g_cre: SpatialGrid::default(),
@@ -771,6 +809,11 @@ impl World {
         for b in &mut babies {
             b.id = self.fresh_id();
             self.ancestry.record_birth(b.id, b.parent_id, self.tick, b.lineage);
+            if b.morpho_novel {
+                self.morpho.born_novel += 1;
+            } else {
+                self.morpho.born_normal += 1;
+            }
         }
         self.creatures.append(&mut babies);
     }
@@ -795,6 +838,10 @@ impl World {
         child.parent_id = parent_id;
         child.lineage = self.creatures[wa].lineage;
         child.species_id = self.creatures[wa].species_id;
+        // Fresh body-plan mutant: child architecture differs from parent A's (the
+        // parent whose lineage it inherits). Drives the morpho-fragility metric.
+        child.morpho_novel = crate::speciation::plan_key(&child.pheno)
+            != crate::speciation::plan_key(&self.creatures[wa].pheno);
         child
     }
 
@@ -810,8 +857,17 @@ impl World {
             };
             if dead {
                 remove[i] = true;
-                let id = self.creatures[i].id;
-                self.ancestry.record_death(id, self.tick);
+                let c = &self.creatures[i];
+                // Early-life death: feeds the morpho-fragility infant-mortality
+                // ratio (novel body plans vs the rest).
+                if c.age < INFANT_WINDOW {
+                    if c.morpho_novel {
+                        self.morpho.died_young_novel += 1;
+                    } else {
+                        self.morpho.died_young_normal += 1;
+                    }
+                }
+                self.ancestry.record_death(c.id, self.tick);
             }
         }
         let mut i = 0;

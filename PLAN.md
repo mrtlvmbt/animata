@@ -254,6 +254,22 @@ arthropod clade), not just a wobbling mean speed.
 >   (3) positioned benthic/aerial food (replace density-split with pellets);
 >   (4) balance/visual polish — needs a GUI pass. Joint physics (fork 2) and
 >   isometry/3D remain far-future.
+> - **Option 1 (layer movement) DONE — Phase 7 `d2f83fe`.** Brain-driven vertical
+>   migration: `OUT_ASCEND` → `action.vertical` → one stratum/step in
+>   `creature.rs`, gated by `layer_access` (founders can't move, baseline kept).
+> - **Option 2 (MIP) MEASURED → REJECTED.** Before building MIP, measured whether
+>   its premise holds — do fresh body-plan mutants actually die in early life more
+>   than peers? Added a cohort metric (`Creature.morpho_novel`, tagged by
+>   `plan_key` diff vs parent in `reproduce`/`breed`; `MorphoCohort` counters on
+>   `World`; `INFANT_WINDOW`; printed by `examples/headless.rs`, exposed in
+>   dev_bridge `status_json`). 3 seeds × 40k steps: novel/baseline infant-mortality
+>   ratio **0.86–0.96** (novel die slightly *less*), N(novel) 678–1162 ≫ 200. The
+>   death-trap premise is **false** here — Phase 5.2 passive-capability
+>   preservation (neutral actuator output = drive 1.0) means a new appendage gives
+>   immediate baseline locomotion, not pure cost; rare macro-mutations land in
+>   already-fit lineages. **MIP not built**; the metric is kept as cheap permanent
+>   observability that morphology is not valley-trapped. (Branch
+>   `measure/morpho-fragility`, 25 tests green.)
 
 - **Phase 0 — Render decoupling + giant map + LOD (zero sim change).**
   Introduce `project()` seam (top-down now; isometry later = swap one fn),
