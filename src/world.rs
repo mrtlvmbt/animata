@@ -6,6 +6,7 @@ use crate::config::*;
 use crate::creature::Creature;
 use crate::genome::{seed, Appendage, Genome, Receptor};
 use crate::grid::SpatialGrid;
+use crate::marker::MarkerField;
 use crate::phylo::Ancestry;
 use crate::speciation::Speciation;
 use crate::stats::{Snapshot, Stats};
@@ -83,6 +84,9 @@ pub struct World {
     pub circulating_strain: f32,
     /// Per-phase timing accumulators for profiling.
     pub profile: Profile,
+    /// Stigmergic scent field (per layer × channel): creatures emit into it
+    /// (brain-gated) and sense it via evolved receptor organs. Meaning is emergent.
+    pub markers: MarkerField,
     // Reusable per-step scratch (pooled to avoid heap churn each step).
     /// One food grid per vertical layer, so a creature scans only pellets on its
     /// own layer (eat/sense) instead of filtering out the other layers' pellets.
@@ -180,6 +184,7 @@ impl World {
             drought_until: 0,
             circulating_strain,
             profile: Profile::default(),
+            markers: MarkerField::new(WORLD_W, WORLD_H, MARKER_CELL),
             g_food: Vec::new(),
             g_cre: SpatialGrid::default(),
             buf_cpos: Vec::new(),
@@ -265,6 +270,15 @@ impl World {
         self.sense_into(&mut targets, &food_grids, &cgrid, &cpos, &carns, &clayers);
         lap(&mut self.profile.query);
         self.act_all(&targets);
+        // Update the scent field for next step: fade + spread last step's marks,
+        // then deposit this step's emissions (creatures still all alive here, so
+        // indices match). The field a creature sensed this step is last step's, a
+        // one-step lag exactly like the signal/heard channel.
+        self.markers.decay();
+        self.markers.diffuse();
+        for c in &self.creatures {
+            self.markers.deposit(c.layer, c.pos, &c.marker_out);
+        }
         lap(&mut self.profile.act);
         self.eat_food(&food_grids);
         lap(&mut self.profile.eat);
@@ -381,6 +395,8 @@ impl World {
         // Per-creature sense organs (gene-encoded function); each yields one
         // exteroceptive input reading, computed below from the world grids.
         let recs: Vec<&[Receptor]> = self.creatures.iter().map(|c| c.pheno.receptors.as_slice()).collect();
+        let headings: Vec<f32> = self.creatures.iter().map(|c| c.heading).collect();
+        let markers = &self.markers; // read-only field sample (Sync), for marker receptors
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
         // |flavor - niche| beyond this digests below MIN_EAT_EFF -> ignore it.
@@ -407,11 +423,11 @@ impl World {
                 );
                 let food = if ci < 0.5 {
                     // Herbivores sense the nearest digestible pellet *on their own
-                    // layer* — its grid only holds that layer's pellets, so the
-                    // predicate just checks digestibility (no layer filtering).
+                    // layer* — but only within a SHORTER direct-vision range, so
+                    // distant food is found by scent (markers), not sight.
                     let niche = niches[i];
                     food_grids[li as usize]
-                        .nearest_within(pellets, pos, sense, |j| {
+                        .nearest_within(pellets, pos, sense * FOOD_SENSE_FRAC, |j| {
                             let d = flavors[j] - niche;
                             d * d <= max_flavor_d2
                         })
@@ -455,11 +471,22 @@ impl World {
                             })
                             .map_or(0.0, |k| prox(cpos[k] - pos)),
                         // 3: nearest similar-diet creature (kin/shoal) on the stratum.
-                        _ => cgrid
+                        3 => cgrid
                             .nearest_within(cpos, pos, sense, |k| {
                                 k != i && clayers[k] == tl && (carns[k] - ci).abs() < 0.15
                             })
                             .map_or(0.0, |k| prox(cpos[k] - pos)),
+                        // 4 (MODALITY_MARKER): a scent channel of the marker field —
+                        // a sense whose meaning is not coded but emergent. `tuning`
+                        // picks the channel. Sampled *ahead* of the creature (along
+                        // its heading) so the brain gets a followable gradient: as it
+                        // turns, the reading peaks toward stronger scent → chemotaxis.
+                        _ => {
+                            let ch = ((r.tuning * N_MARKER_CHANNELS as f32) as usize)
+                                .min(N_MARKER_CHANNELS - 1);
+                            let dir = Vec2::new(headings[i].cos(), headings[i].sin());
+                            markers.sample(tl, pos + dir * MARKER_SENSE_AHEAD, ch).min(1.0)
+                        }
                     };
                 }
                 Percept {
@@ -872,6 +899,45 @@ impl World {
             let var = (sq[k] / n - mean * mean).max(0.0);
             std_sum += var.sqrt();
         }
+        // Marker-substrate metrics: mean emission, listener fraction, and per-channel
+        // "meaning" = Pearson r between a channel's local intensity and the creature's
+        // food proximity. r climbing above 0 = the channel carries food information,
+        // i.e. self-organised semantics (the emergence readout for the research phase).
+        // channel_meaning[c] is measured *within the niche-group that owns channel c*
+        // (a creature's diet niche maps it to a leak channel), so the seeded
+        // food<->channel correlation isn't washed out by pooling across niches.
+        let mut emit_sum = 0.0f64;
+        let mut listeners = 0u32;
+        let (mut cn, mut sx, mut sy, mut sxx, mut syy, mut sxy) = (
+            [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
+            [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
+        );
+        for c in &self.creatures {
+            emit_sum += c.marker_out.iter().sum::<f32>() as f64;
+            if c.pheno.receptors.iter().any(|r| r.modality == MODALITY_MARKER) {
+                listeners += 1;
+            }
+            let ch = ((c.pheno.diet_niche * N_MARKER_CHANNELS as f32) as usize).min(N_MARKER_CHANNELS - 1);
+            let x = self.markers.sample(c.layer, c.pos, ch) as f64;
+            let y = c.food_prox as f64;
+            cn[ch] += 1.0;
+            sx[ch] += x;
+            sy[ch] += y;
+            sxx[ch] += x * x;
+            syy[ch] += y * y;
+            sxy[ch] += x * y;
+        }
+        let nn = n as f64;
+        let mut channel_meaning = [0.0f32; N_MARKER_CHANNELS];
+        for ch in 0..N_MARKER_CHANNELS {
+            let m = cn[ch];
+            if m < 2.0 {
+                continue;
+            }
+            let cov = sxy[ch] - sx[ch] * sy[ch] / m;
+            let d = ((sxx[ch] - sx[ch] * sx[ch] / m) * (syy[ch] - sy[ch] * sy[ch] / m)).sqrt();
+            channel_meaning[ch] = if d > 1e-9 { (cov / d) as f32 } else { 0.0 };
+        }
         let snap = Snapshot {
             population: self.creatures.len(),
             herbivores: herb as usize,
@@ -898,6 +964,9 @@ impl World {
             lineages,
             species: self.speciation.count(),
             max_generation: gen,
+            marker_emit: (emit_sum / nn) as f32,
+            marker_listener_frac: listeners as f32 / n,
+            channel_meaning,
         };
         self.stats.push(snap, top);
     }

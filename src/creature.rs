@@ -30,6 +30,11 @@ pub struct Creature {
     pub species_id: u32,
     /// Signal loudness emitted this step (0..1), heard by nearby creatures.
     pub signal: f32,
+    /// Per-channel scent emitted this step, deposited into the marker field.
+    pub marker_out: [f32; N_MARKER_CHANNELS],
+    /// Food proximity sensed this step (0..1) — kept so stats can correlate it
+    /// with local marker intensity (the channel-meaning emergence metric).
+    pub food_prox: f32,
     /// Current infection's pathogen strain (0..1), or `None` if healthy.
     pub infection: Option<f32>,
     pub pos: Vec2,
@@ -63,6 +68,8 @@ impl Creature {
             lineage: 0,
             species_id: 0,
             signal: 0.0,
+            marker_out: [0.0; N_MARKER_CHANNELS],
+            food_prox: 0.0,
             infection: None,
             pos,
             layer: pheno.primary_layer(),
@@ -106,6 +113,8 @@ impl Creature {
             lineage,
             species_id: 0,
             signal: 0.0,
+            marker_out: [0.0; N_MARKER_CHANNELS],
+            food_prox: 0.0,
             infection: None,
             pos,
             layer: pheno.primary_layer(),
@@ -164,6 +173,14 @@ impl Creature {
         let senses = self.sense(nearest_food, nearest_threat, nearest_neighbor, heard, receptors);
         let action = self.mind.decide(&senses);
         self.signal = action.signal; // emit this step's call (heard next step)
+        self.marker_out = action.markers; // deliberate brain emission (costly, below)
+        self.food_prox = senses.food_prox; // kept for the channel-meaning metric
+        // Passive food-scent leak (free): involuntarily lay a little scent on the
+        // channel this niche maps to, proportional to food proximity — the bootstrap
+        // that gives a channel exploitable meaning. Added on top of brain emission.
+        let leak_ch = ((self.pheno.diet_niche * N_MARKER_CHANNELS as f32) as usize)
+            .min(N_MARKER_CHANNELS - 1);
+        self.marker_out[leak_ch] += MARKER_FOOD_LEAK * senses.food_prox;
 
         // Turning is coupled to forward drive: a creature can only steer while
         // moving (like a car). This kills frantic spinning-in-place when idle.
@@ -235,7 +252,10 @@ impl Creature {
         let ornament_cost = 1.0 + ORNAMENT_COST * o * o;
         let upkeep = BASE_METABOLISM * self.pheno.metabolism * body * metab_mult * ornament_cost;
         let move_cost = MOVE_COST * intent * body;
-        self.energy -= (upkeep + move_cost) * diet_mult;
+        // Costly signalling: emitting scent burns a little energy, so a channel is
+        // only kept on where it pays — the brake against gratuitous noise.
+        let emit_cost = MARKER_EMIT_COST * action.markers.iter().sum::<f32>();
+        self.energy -= (upkeep + move_cost) * diet_mult + emit_cost;
         self.age += 1;
     }
 

@@ -50,6 +50,16 @@ pub struct Snapshot {
     /// Count of detected phenotype species clusters.
     pub species: usize,
     pub max_generation: u32,
+    // ---- Marker substrate (emergent signalling) instrumentation ----
+    /// Mean total scent emission per creature (is anyone signalling?).
+    pub marker_emit: f32,
+    /// Fraction of the population with at least one marker-tuned receptor organ
+    /// (is anyone *listening*? — the co-evolution indicator).
+    pub marker_listener_frac: f32,
+    /// Per-channel emergent meaning: correlation between a channel's local
+    /// intensity and the creature's food proximity. |r| above ~0 means the channel
+    /// carries information about food — a sign of self-organised semantics.
+    pub channel_meaning: [f32; crate::config::N_MARKER_CHANNELS],
 }
 
 /// Top lineages (id, count) at a snapshot, for the Muller stacked-area plot.

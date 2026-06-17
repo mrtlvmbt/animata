@@ -64,6 +64,8 @@ pub struct Action {
     /// Vertical migration intent, `-1..1`: positive climbs toward the air,
     /// negative descends underground (gated by morphology; see `OUT_ASCEND`).
     pub vertical: f32,
+    /// Per-channel scent emission into the marker field this step, `0..1`.
+    pub markers: [f32; N_MARKER_CHANNELS],
 }
 
 /// Strategy turning [`Senses`] into an [`Action`].
@@ -187,12 +189,18 @@ impl Behavior for NeuralBehavior {
         for (k, d) in drives.iter_mut().enumerate().take(n_app.min(MAX_SEGMENTS)) {
             *d = drive(out[NN_BASE_OUTPUTS + k]);
         }
+        // Marker emission: the brain's chosen scent on each channel (positive part).
+        let mut markers = [0.0f32; N_MARKER_CHANNELS];
+        for (ch, m) in markers.iter_mut().enumerate() {
+            *m = out[OUT_MARKER0 + ch].max(0.0);
+        }
         Action {
             throttle: out[OUT_THROTTLE],
             turn: out[OUT_TURN],
             signal: out[OUT_SIGNAL].max(0.0),
             drives,
             vertical: out[OUT_ASCEND],
+            markers,
         }
     }
 
@@ -239,6 +247,7 @@ impl Behavior for RuleBehavior {
                 signal: if s.threat_rel_angle.is_some() { 1.0 } else { 0.0 },
                 drives: [1.0; MAX_SEGMENTS],
                 vertical: 0.0,
+                markers: [0.0; N_MARKER_CHANNELS],
             };
         }
         match s.food_rel_angle {
@@ -248,6 +257,7 @@ impl Behavior for RuleBehavior {
                 signal: 0.0,
                 drives: [1.0; MAX_SEGMENTS],
                 vertical: 0.0,
+                markers: [0.0; N_MARKER_CHANNELS],
             },
             None => Action {
                 throttle: self.hunger_throttle,
@@ -255,6 +265,7 @@ impl Behavior for RuleBehavior {
                 signal: 0.0,
                 drives: [1.0; MAX_SEGMENTS],
                 vertical: 0.0,
+                markers: [0.0; N_MARKER_CHANNELS],
             },
         }
     }
