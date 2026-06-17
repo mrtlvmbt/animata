@@ -12,6 +12,8 @@
 //! preview. (Macro-culling / streaming come with the ×16 map; ~54 chunks draw fine.)
 
 mod config;
+#[cfg(feature = "dev")]
+mod dev_bridge;
 mod terrain;
 
 use config::*;
@@ -74,10 +76,30 @@ async fn main() {
     let mut terrain = VoxelTerrain::new(seed);
     let mut meshes = build_chunk_meshes(&terrain);
 
+    // Frame timing (EMA-smoothed) + an on-screen readout toggle (`I`).
+    let mut fps = 0.0f32;
+    let mut frame_ms = 0.0f32;
+    let mut show_info = true;
+
+    // Dev bridge: localhost JSON-RPC for driving/inspecting the viewer (see
+    // DEV_BRIDGE.md). Off unless built with `--features dev`.
+    #[cfg(feature = "dev")]
+    let bridge = dev_bridge::spawn(8127);
+    #[cfg(feature = "dev")]
+    let mut pending_shots: Vec<(String, std::sync::mpsc::Sender<serde_json::Value>)> = Vec::new();
+
     loop {
         let dt = get_frame_time();
+        // Smooth the frame-time readout so it doesn't jitter.
+        frame_ms = 0.9 * frame_ms + 0.1 * dt * 1000.0;
+        if dt > 0.0 {
+            fps = 0.9 * fps + 0.1 / dt;
+        }
 
         // ---- Input (no GUI) ----
+        if is_key_pressed(KeyCode::I) {
+            show_info = !show_info;
+        }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
             cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(8.0, 600.0);
@@ -116,6 +138,47 @@ async fn main() {
             meshes = build_chunk_meshes(&terrain);
         }
 
+        // ---- Dev bridge: service queued commands on the main thread ----
+        #[cfg(feature = "dev")]
+        for req in dev_bridge::take(&bridge) {
+            let dev_bridge::Req { cmd, reply } = req;
+            match cmd {
+                dev_bridge::Cmd::Status => {
+                    let _ = reply.send(serde_json::json!({
+                        "fps": fps,
+                        "frame_ms": frame_ms,
+                        "seed": seed,
+                        "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
+                        "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE, "meshes": meshes.len() },
+                    }));
+                }
+                dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
+                    if let Some(v) = cx {
+                        cam.target.x = v;
+                    }
+                    if let Some(v) = cz {
+                        cam.target.z = v;
+                    }
+                    if let Some(v) = zoom {
+                        cam.zoom = v.clamp(8.0, 600.0);
+                    }
+                    if let Some(v) = yaw {
+                        cam.yaw = v;
+                    }
+                    let _ = reply.send(serde_json::json!({"ok": true}));
+                }
+                dev_bridge::Cmd::Reseed { seed: s } => {
+                    seed = s.unwrap_or(seed.wrapping_add(1));
+                    terrain = VoxelTerrain::new(seed);
+                    meshes = build_chunk_meshes(&terrain);
+                    let _ = reply.send(serde_json::json!({"seed": seed}));
+                }
+                dev_bridge::Cmd::Screenshot(path) => {
+                    pending_shots.push((path, reply)); // serviced post-draw below
+                }
+            }
+        }
+
         // ---- Render ----
         clear_background(Color::new(0.53, 0.62, 0.78, 1.0)); // sky
         set_camera(&cam.camera());
@@ -123,6 +186,22 @@ async fn main() {
             draw_mesh(m);
         }
         set_default_camera();
+
+        // Minimal debug readout (toggle `I`): fps + frame time. Drawn with a 1px
+        // shadow so it stays legible over any terrain colour.
+        if show_info {
+            let line = format!("{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m");
+            draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
+            draw_text(&line, 8.0, 22.0, 24.0, Color::new(0.95, 0.97, 1.0, 1.0));
+        }
+
+        // Dev bridge: service deferred screenshots now the frame is fully drawn.
+        #[cfg(feature = "dev")]
+        for (path, reply) in pending_shots.drain(..) {
+            let img = get_screen_data();
+            img.export_png(&path);
+            let _ = reply.send(serde_json::json!({"saved": path}));
+        }
 
         next_frame().await;
     }

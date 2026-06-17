@@ -6,6 +6,14 @@ description = "Voxel isometric world on macroquad-3D — environment viewer"
 
 [dependencies]
 macroquad = "0.4"
+tiny_http = { version = "0.12", optional = true }
+serde_json = { version = "1", optional = true }
+
+[features]
+# Localhost JSON-RPC control/inspection bridge for autonomous verification (drive the
+# camera, reseed, capture screenshots). Off by default. See DEV_BRIDGE.md.
+# Run with: cargo run --features dev
+dev = ["dep:tiny_http", "dep:serde_json"]
 
 [profile.release]
 opt-level = 3
