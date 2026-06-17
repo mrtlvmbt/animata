@@ -317,6 +317,13 @@ struct WorldMeshes {
     water: Vec<Mesh>,
 }
 
+/// macroquad's `draw_mesh` pushes through the immediate batch buffer, which **clamps**
+/// (silently dropping geometry) at `>= 10000` vertices or `>= 5000` indices per call.
+/// Indices bind first (6 per quad vs 4 verts), so we split meshes on the index count,
+/// keeping a margin for the largest single-column burst (top + 4 cliff sides + a tree).
+const MAX_MESH_INDICES: usize = 4800;
+const COLUMN_INDEX_BURST: usize = 768;
+
 /// Build the chunk meshes (one cached `Mesh` per chunk) plus the water plane. Each
 /// land column emits its top quad and, for every lower horizontal neighbour, the
 /// cliff side faces from the neighbour's height up to its own (one quad per level →
@@ -345,9 +352,8 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                     if h == 0 {
                         continue; // air
                     }
-                    // Keep each mesh under the u16 index/vertex ceiling (terrain +
-                    // a possible tree, the largest per-column burst).
-                    if verts.len() + 4 * (h as usize + 1) + 256 > 60_000 {
+                    // Split before macroquad's per-drawcall batch limit (see consts).
+                    if idx.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
                         flush_mesh(&mut verts, &mut idx, &mut opaque);
                     }
                     let biome = cell_biome(cell);
@@ -369,7 +375,7 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                         // Translucent surface only where the basin actually has depth;
                         // coplanar with the floor (h == SEA_ABS) would z-fight.
                         if h < SEA_ABS {
-                            if wv.len() + 4 > 60_000 {
+                            if wi.len() + 6 > MAX_MESH_INDICES {
                                 flush_mesh(&mut wv, &mut wi, &mut water);
                             }
                             push_water_top(&mut wv, &mut wi, gx, gy);
@@ -536,5 +542,26 @@ fn push_side(
             ],
         };
         push_quad(verts, idx, q, col);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every built mesh must stay strictly under macroquad's per-`draw_mesh` batch
+    /// limits (`>= 10000` verts / `>= 5000` indices ⇒ silent clamping). Builds plain
+    /// `Mesh` structs with no GL context, so this runs headless. Guards the splitter.
+    #[test]
+    fn meshes_stay_under_macroquad_drawcall_limits() {
+        for seed in 1..6 {
+            let t = VoxelTerrain::new(seed);
+            let m = build_world_meshes(&t);
+            assert!(!m.opaque.is_empty(), "no opaque geometry for seed {seed}");
+            for mesh in m.opaque.iter().chain(m.water.iter()) {
+                assert!(mesh.vertices.len() < 10_000, "verts {} (seed {seed})", mesh.vertices.len());
+                assert!(mesh.indices.len() < 5_000, "indices {} (seed {seed})", mesh.indices.len());
+            }
+        }
     }
 }
