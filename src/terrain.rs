@@ -72,6 +72,8 @@ pub fn cell_height(c: u16) -> u8 {
 pub fn cell_biome(c: u16) -> BiomeKind {
     BiomeKind::from_id(((c >> 8) & 0xF) as u8)
 }
+/// Used by `is_water` (future-sim query) and the bit-pack test.
+#[allow(dead_code)]
 pub fn cell_flags(c: u16) -> u8 {
     ((c >> 12) & 0xF) as u8
 }
@@ -122,12 +124,15 @@ fn fbm(seed: u64, x: f32, y: f32, salt: u64) -> f32 {
     (base * 0.7 + det * 0.3).clamp(0.0, 1.0)
 }
 
-/// Generate one column's packed cell. Pure function of `(seed, x, y)`; coordinates
-/// outside the world are clamped to the edge (the world boundary repeats, becoming
-/// the thick slab edge). This is what the ghost border samples.
+/// Generate one column's packed cell. Pure function of `(seed, x, y)`. Coordinates
+/// outside the world return **air** (height 0): a boundary column's full side is then
+/// exposed, which is what gives the world its thick slab edge (strata cross-section).
+/// This is also what the ghost border samples.
 fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
-    let cx = x.clamp(0, COLS as i32 - 1) as f32;
-    let cy = y.clamp(0, ROWS as i32 - 1) as f32;
+    if x < 0 || y < 0 || x >= COLS as i32 || y >= ROWS as i32 {
+        return 0; // air
+    }
+    let (cx, cy) = (x as f32, y as f32);
     let elev = fbm(seed, cx / ELEV_LATTICE, cy / ELEV_LATTICE, 1);
     let h = (GROUND_MIN as f32 + elev * SURFACE_RANGE as f32).round() as u8;
     let h = h.clamp(1, MAX_H);
@@ -172,8 +177,7 @@ impl Chunk {
         self.cells[Self::local(lx + 1, ly + 1)]
     }
     /// Any padded cell incl. the ghost ring, `(0..PAD, 0..PAD)`. Used by the
-    /// phase-2 chunk mesher (and the ghost-ring test).
-    #[allow(dead_code)]
+    /// chunk mesher (and the ghost-ring test).
     pub fn padded(&self, plx: usize, ply: usize) -> u16 {
         self.cells[Self::local(plx, ply)]
     }
@@ -182,8 +186,6 @@ impl Chunk {
 /// The whole world: a grid of chunks covering `COLS×ROWS` columns.
 pub struct VoxelTerrain {
     pub chunks_x: usize,
-    /// Iterated by the phase-2 chunk mesher.
-    #[allow(dead_code)]
     pub chunks_y: usize,
     chunks: Vec<Chunk>,
 }
@@ -213,12 +215,17 @@ impl VoxelTerrain {
     pub fn chunk(&self, cx: usize, cy: usize) -> &Chunk {
         &self.chunks[cy * self.chunks_x + cx]
     }
+}
 
+/// Per-column world-space queries. The renderer builds meshes straight from chunk
+/// cells, so these aren't used there — they exist for the tests and the future sim
+/// (which will look up the terrain under a creature's position).
+#[allow(dead_code)]
+impl VoxelTerrain {
     fn cell_at(&self, x: usize, y: usize) -> u16 {
         let (cx, cy) = (x / CHUNK, y / CHUNK);
         self.chunk(cx, cy).interior(x % CHUNK, y % CHUNK)
     }
-
     pub fn height_at(&self, x: usize, y: usize) -> u8 {
         cell_height(self.cell_at(x, y))
     }
