@@ -2,20 +2,21 @@
 //!
 //! Reset from the former a-life simulation (archived at git tag `sim-v1` / branch
 //! `archive/sim-v1`). The simulation and all GUI are intentionally OFF: this is a
-//! bare environment viewer that will grow a Minecraft-like voxel world on
-//! macroquad's 3D pipeline (real cubes + GPU depth buffer).
+//! bare environment viewer that grows a Minecraft-like voxel world on macroquad's
+//! 3D pipeline (real geometry + GPU depth buffer).
 //!
-//! Phase 1: noise worldgen into a chunked `VoxelTerrain` (see `terrain.rs`), drawn
-//! with a simple per-column pillar preview (immediate-mode `draw_cube`, culled to a
-//! window around the camera). The proper batched, exposed-face chunk mesh comes in
-//! phase 2 — this preview only exists to eyeball the generated heights/biomes.
+//! Phase 2: the terrain is rendered as **batched chunk meshes** — one cached `Mesh`
+//! per chunk, built once from exposed faces only (each column's top + the cliff side
+//! faces toward lower neighbours), with shading baked into vertex colours per face
+//! normal. The GPU depth buffer handles all occlusion. Replaces the phase-1 pillar
+//! preview. (Macro-culling / streaming come with the ×16 map; ~54 chunks draw fine.)
 
 mod config;
 mod terrain;
 
 use config::*;
 use macroquad::prelude::*;
-use terrain::{BiomeKind, VoxelTerrain};
+use terrain::{cell_biome, cell_height, BiomeKind, VoxelTerrain};
 
 fn window_conf() -> Conf {
     Conf {
@@ -38,9 +39,8 @@ struct IsoCam {
 impl IsoCam {
     fn new() -> Self {
         IsoCam {
-            // Centre on the world grid.
             target: vec3(COLS as f32 * VOX * 0.5, 0.0, ROWS as f32 * VOX * 0.5),
-            zoom: 48.0,
+            zoom: 170.0, // frames the whole base map
             yaw: 0.0,
         }
     }
@@ -53,7 +53,7 @@ impl IsoCam {
         let azim = 45_f32.to_radians() + self.yaw;
         let dir = vec3(azim.cos() * elev.cos(), elev.sin(), azim.sin() * elev.cos());
         Camera3D {
-            position: self.target + dir * 200.0,
+            position: self.target + dir * 400.0,
             target: self.target,
             up: vec3(0.0, 1.0, 0.0),
             fovy: self.zoom,
@@ -62,7 +62,7 @@ impl IsoCam {
             render_target: None,
             viewport: None,
             z_near: 0.1,
-            z_far: 2000.0,
+            z_far: 3000.0,
         }
     }
 }
@@ -72,6 +72,7 @@ async fn main() {
     let mut cam = IsoCam::new();
     let mut seed: u64 = 1;
     let mut terrain = VoxelTerrain::new(seed);
+    let mut meshes = build_chunk_meshes(&terrain);
 
     loop {
         let dt = get_frame_time();
@@ -79,7 +80,7 @@ async fn main() {
         // ---- Input (no GUI) ----
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
-            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(6.0, 200.0);
+            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(8.0, 600.0);
         }
         // Pan in the ground plane (WASD / arrows), rotated by the current yaw.
         let mut pan = Vec2::ZERO;
@@ -96,7 +97,7 @@ async fn main() {
             pan.y += 1.0;
         }
         if pan != Vec2::ZERO {
-            let speed = cam.zoom * dt; // pan faster when zoomed out
+            let speed = cam.zoom * dt * 0.5; // pan faster when zoomed out
             let (c, s) = (cam.yaw.cos(), cam.yaw.sin());
             cam.target.x += (pan.x * c - pan.y * s) * speed;
             cam.target.z += (pan.x * s + pan.y * c) * speed;
@@ -112,60 +113,199 @@ async fn main() {
         if is_key_pressed(KeyCode::R) {
             seed = seed.wrapping_add(1);
             terrain = VoxelTerrain::new(seed);
+            meshes = build_chunk_meshes(&terrain);
         }
 
         // ---- Render ----
         clear_background(Color::new(0.53, 0.62, 0.78, 1.0)); // sky
         set_camera(&cam.camera());
-        draw_terrain_preview(&terrain, &cam);
+        for m in &meshes {
+            draw_mesh(m);
+        }
         set_default_camera();
 
         next_frame().await;
     }
 }
 
-/// Phase-1 preview: draw each column in a window around the camera as a solid
-/// pillar (one immediate-mode cube from ground to its surface height), coloured by
-/// biome. Bounded by a column radius so immediate mode stays cheap; the real
-/// batched exposed-face chunk mesh replaces this in phase 2.
-fn draw_terrain_preview(t: &VoxelTerrain, cam: &IsoCam) {
-    const R: i32 = 44; // preview window radius in columns
-    let cx = (cam.target.x / VOX).round() as i32;
-    let cy = (cam.target.z / VOX).round() as i32;
-    let x0 = (cx - R).max(0);
-    let x1 = (cx + R).min(COLS as i32);
-    let y0 = (cy - R).max(0);
-    let y1 = (cy + R).min(ROWS as i32);
-    for gy in y0..y1 {
-        for gx in x0..x1 {
-            let (x, y) = (gx as usize, gy as usize);
-            let h = t.height_at(x, y) as f32;
-            let col = if t.is_water(x, y) {
-                Color::new(0.11, 0.30, 0.57, 1.0) // flat sea (real water pass: phase 3)
-            } else {
-                block_color(t.biome_at(x, y), h)
-            };
-            let centre = vec3(gx as f32 * VOX, h * VOX * 0.5, gy as f32 * VOX);
-            let size = vec3(VOX, h * VOX, VOX);
-            draw_cube(centre, size, None, col);
-            draw_cube_wires(centre, size, Color::new(0.0, 0.0, 0.0, 0.12));
-        }
+// ---- Render-side palette (representation; kept out of the generator) ----
+
+/// Surface (top-face) base colour per biome.
+fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
+    match biome {
+        BiomeKind::Ocean => (0.13, 0.32, 0.55),
+        BiomeKind::Beach => (0.84, 0.78, 0.54),
+        BiomeKind::Plains => (0.42, 0.62, 0.30),
+        BiomeKind::Forest => (0.20, 0.46, 0.24),
+        BiomeKind::Desert => (0.80, 0.70, 0.44),
+        BiomeKind::Mountain => (0.48, 0.46, 0.45),
+        BiomeKind::Snow => (0.93, 0.95, 0.98),
     }
 }
 
-/// Render-side palette: map an abstract `BiomeKind` to a colour, with a slight
-/// brighten-by-height so taller terrain reads. (Representation lives here, not in
-/// the generator.)
-fn block_color(biome: BiomeKind, h: f32) -> Color {
-    let (r, g, b) = match biome {
-        BiomeKind::Ocean => (0.13, 0.32, 0.55),
-        BiomeKind::Beach => (0.80, 0.74, 0.50),
-        BiomeKind::Plains => (0.42, 0.62, 0.30),
-        BiomeKind::Forest => (0.20, 0.46, 0.24),
-        BiomeKind::Desert => (0.78, 0.68, 0.42),
-        BiomeKind::Mountain => (0.45, 0.43, 0.42),
-        BiomeKind::Snow => (0.92, 0.94, 0.97),
+/// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin
+/// biome "lip" just under the surface, then topsoil, then stone deeper down.
+fn strata_rgb(gz: u8, h: u8, biome: BiomeKind) -> (f32, f32, f32) {
+    if gz + 1 == h {
+        let (r, g, b) = top_rgb(biome);
+        (r * 0.85, g * 0.85, b * 0.85)
+    } else if gz + 3 >= h {
+        (0.42, 0.31, 0.20) // topsoil
+    } else {
+        (0.40, 0.38, 0.36) // stone
+    }
+}
+
+// Baked directional face shading (fixed "sun"), so volume reads without lighting.
+const SHADE_TOP: f32 = 1.0;
+const SHADE_PX: f32 = 0.86;
+const SHADE_NX: f32 = 0.62;
+const SHADE_PZ: f32 = 0.74;
+const SHADE_NZ: f32 = 0.54;
+
+fn shaded(rgb: (f32, f32, f32), s: f32) -> Color {
+    Color::new(rgb.0 * s, rgb.1 * s, rgb.2 * s, 1.0)
+}
+
+/// Build one cached `Mesh` per chunk from exposed faces only. Each column emits its
+/// top quad plus, for every horizontal neighbour that is lower, the cliff side faces
+/// from the neighbour's height up to its own (one quad per level → strata bands).
+/// Neighbour heights come from the chunk's ghost ring, so this is self-contained.
+fn build_chunk_meshes(t: &VoxelTerrain) -> Vec<Mesh> {
+    let mut out = Vec::new();
+    for cy in 0..t.chunks_y {
+        for cx in 0..t.chunks_x {
+            let ch = t.chunk(cx, cy);
+            let mut verts: Vec<Vertex> = Vec::new();
+            let mut idx: Vec<u16> = Vec::new();
+            for ly in 0..CHUNK {
+                for lx in 0..CHUNK {
+                    let (gx, gy) = (cx * CHUNK + lx, cy * CHUNK + ly);
+                    if gx >= COLS || gy >= ROWS {
+                        continue; // partial edge chunk: outside the world
+                    }
+                    let cell = ch.interior(lx, ly);
+                    let h = cell_height(cell);
+                    if h == 0 {
+                        continue; // air
+                    }
+                    // Keep each mesh under the u16 index/vertex ceiling.
+                    if verts.len() + 4 * (h as usize + 1) > 60_000 {
+                        flush_mesh(&mut verts, &mut idx, &mut out);
+                    }
+                    let biome = cell_biome(cell);
+                    push_top(&mut verts, &mut idx, gx, gy, h, biome);
+                    // Neighbour heights from the ghost ring (padded index = local+1).
+                    let nb = [
+                        (cell_height(ch.padded(lx + 2, ly + 1)), Face::Px),
+                        (cell_height(ch.padded(lx, ly + 1)), Face::Nx),
+                        (cell_height(ch.padded(lx + 1, ly + 2)), Face::Pz),
+                        (cell_height(ch.padded(lx + 1, ly)), Face::Nz),
+                    ];
+                    for (nh, face) in nb {
+                        if nh < h {
+                            push_side(&mut verts, &mut idx, (gx, gy), h, nh, face, biome);
+                        }
+                    }
+                }
+            }
+            flush_mesh(&mut verts, &mut idx, &mut out);
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+enum Face {
+    Px,
+    Nx,
+    Pz,
+    Nz,
+}
+
+fn flush_mesh(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, out: &mut Vec<Mesh>) {
+    if verts.is_empty() {
+        return;
+    }
+    out.push(Mesh {
+        vertices: std::mem::take(verts),
+        indices: std::mem::take(idx),
+        texture: None,
+    });
+}
+
+fn push_quad(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Color) {
+    let base = verts.len() as u16;
+    for p in q {
+        verts.push(Vertex::new(p.x, p.y, p.z, 0.0, 0.0, col));
+    }
+    idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, biome: BiomeKind) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+    let y = h as f32 * VOX;
+    let col = shaded(top_rgb(biome), SHADE_TOP);
+    push_quad(
+        verts,
+        idx,
+        [
+            vec3(x0, y, z0),
+            vec3(x1, y, z0),
+            vec3(x1, y, z1),
+            vec3(x0, y, z1),
+        ],
+        col,
+    );
+}
+
+fn push_side(
+    verts: &mut Vec<Vertex>,
+    idx: &mut Vec<u16>,
+    (gx, gy): (usize, usize),
+    h: u8,
+    nh: u8,
+    face: Face,
+    biome: BiomeKind,
+) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+    let shade = match face {
+        Face::Px => SHADE_PX,
+        Face::Nx => SHADE_NX,
+        Face::Pz => SHADE_PZ,
+        Face::Nz => SHADE_NZ,
     };
-    let s = (0.78 + 0.03 * h).min(1.0);
-    Color::new((r * s).min(1.0), (g * s).min(1.0), (b * s).min(1.0), 1.0)
+    for gz in nh..h {
+        let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
+        let col = shaded(strata_rgb(gz, h, biome), shade);
+        let q = match face {
+            Face::Px => [
+                vec3(x1, y0, z0),
+                vec3(x1, y0, z1),
+                vec3(x1, y1, z1),
+                vec3(x1, y1, z0),
+            ],
+            Face::Nx => [
+                vec3(x0, y0, z1),
+                vec3(x0, y0, z0),
+                vec3(x0, y1, z0),
+                vec3(x0, y1, z1),
+            ],
+            Face::Pz => [
+                vec3(x1, y0, z1),
+                vec3(x0, y0, z1),
+                vec3(x0, y1, z1),
+                vec3(x1, y1, z1),
+            ],
+            Face::Nz => [
+                vec3(x0, y0, z0),
+                vec3(x1, y0, z0),
+                vec3(x1, y1, z0),
+                vec3(x0, y1, z0),
+            ],
+        };
+        push_quad(verts, idx, q, col);
+    }
 }

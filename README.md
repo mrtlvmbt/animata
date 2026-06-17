@@ -16,13 +16,18 @@ voxel position `(gx, gy, gz)`, so the world is 3D-ready by construction.
 cargo run            # environment viewer
 ```
 
-Controls: `WASD`/arrows pan, mouse wheel zoom, `Q`/`E` rotate the iso view 90°.
+Controls: `WASD`/arrows pan, mouse wheel zoom, `Q`/`E` rotate the iso view 90°,
+`R` regenerate with a new seed.
+
+Scale: **1 voxel = 1 m³**; the base map is 138×95 m. `MAP_SCALE` (in `config.rs`)
+scales it (×16 per side is the eventual target, needs chunk streaming).
 
 ## Status
 
-- **Phase 0** (current): orthographic iso `Camera3D` + camera controls + a test
-  height-field of cubes (depth-buffer / camera spike).
-- Next: noise worldgen + chunked `VoxelTerrain` (bit-packed, ghost-padded), exposed
-  -face chunk meshing, biome palette, vegetation, water.
+- **Phase 0–2** (done): orthographic iso `Camera3D`; noise worldgen into a chunked,
+  bit-packed, ghost-padded `VoxelTerrain` (7 biomes + heights); rendered as batched
+  per-chunk meshes (exposed top + cliff side faces, strata bands, baked per-face
+  shading) on the GPU depth buffer.
+- Next: vegetation (voxel trees), translucent water pass, then data-driven biomes.
 
 See the working plan for the full phase breakdown.
