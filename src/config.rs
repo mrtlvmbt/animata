@@ -332,16 +332,30 @@ pub const MODALITY_MARKER: u8 = 4;
 pub const N_MARKER_CHANNELS: usize = 3;
 /// Coarse cell size (world units) of the marker field grid.
 pub const MARKER_CELL: f32 = 160.0;
-/// Per-step multiplicative decay of every field cell (markers fade).
-pub const MARKER_DECAY: f32 = 0.82;
+/// Per-step multiplicative decay of every field cell (markers fade). A little
+/// slower than the first build so trails can linger long enough to be followed.
+pub const MARKER_DECAY: f32 = 0.88;
+/// Passive food-scent leak: a creature involuntarily lays a little scent
+/// (proportional to how close food is) on the channel its diet niche maps to. This
+/// is the bootstrap — it seeds an *exploitable* food↔channel correlation so that
+/// listening can pay, breaking the chicken-and-egg. It is FREE (no emission cost,
+/// like body odour); only deliberate brain emission is costly. What still emerges:
+/// which niche owns which channel, who evolves to listen, and cross-niche
+/// eavesdropping / deception.
+pub const MARKER_FOOD_LEAK: f32 = 0.6;
+/// How far ahead (world units) a marker receptor samples the field — deliberately
+/// *beyond* a typical sense range, so scent carries long-range information the
+/// direct senses can't, giving communication a niche to fill (otherwise a marker
+/// is redundant with the precise short-range food/threat senses).
+pub const MARKER_SENSE_AHEAD: f32 = 520.0;
 /// Share of a cell's value spread to its 4 neighbours each step (blur → gradients
 /// a creature can climb, so trails can form).
 pub const MARKER_DIFFUSE: f32 = 0.18;
 /// Scales a creature's emission as it's deposited into its cell.
 pub const MARKER_DEPOSIT: f32 = 1.0;
-/// Energy charged per unit of total emission (costly signalling: keeps selection
-/// from leaving gratuitous noise on).
-pub const MARKER_EMIT_COST: f32 = 0.02;
+/// Energy charged per unit of *deliberate* (brain) emission (costly signalling:
+/// keeps selection from leaving gratuitous noise on). The passive leak is free.
+pub const MARKER_EMIT_COST: f32 = 0.01;
 /// Cap on sense organs per body (bounds the per-creature extra sense queries).
 pub const MAX_RECEPTORS: usize = 6;
 

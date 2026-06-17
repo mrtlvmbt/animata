@@ -395,6 +395,7 @@ impl World {
         // Per-creature sense organs (gene-encoded function); each yields one
         // exteroceptive input reading, computed below from the world grids.
         let recs: Vec<&[Receptor]> = self.creatures.iter().map(|c| c.pheno.receptors.as_slice()).collect();
+        let headings: Vec<f32> = self.creatures.iter().map(|c| c.heading).collect();
         let markers = &self.markers; // read-only field sample (Sync), for marker receptors
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
@@ -477,11 +478,14 @@ impl World {
                             .map_or(0.0, |k| prox(cpos[k] - pos)),
                         // 4 (MODALITY_MARKER): a scent channel of the marker field —
                         // a sense whose meaning is not coded but emergent. `tuning`
-                        // picks the channel; reads the local field on the stratum.
+                        // picks the channel. Sampled *ahead* of the creature (along
+                        // its heading) so the brain gets a followable gradient: as it
+                        // turns, the reading peaks toward stronger scent → chemotaxis.
                         _ => {
                             let ch = ((r.tuning * N_MARKER_CHANNELS as f32) as usize)
                                 .min(N_MARKER_CHANNELS - 1);
-                            markers.sample(tl, pos, ch).min(1.0)
+                            let dir = Vec2::new(headings[i].cos(), headings[i].sin());
+                            markers.sample(tl, pos + dir * MARKER_SENSE_AHEAD, ch).min(1.0)
                         }
                     };
                 }
@@ -899,32 +903,39 @@ impl World {
         // "meaning" = Pearson r between a channel's local intensity and the creature's
         // food proximity. r climbing above 0 = the channel carries food information,
         // i.e. self-organised semantics (the emergence readout for the research phase).
+        // channel_meaning[c] is measured *within the niche-group that owns channel c*
+        // (a creature's diet niche maps it to a leak channel), so the seeded
+        // food<->channel correlation isn't washed out by pooling across niches.
         let mut emit_sum = 0.0f64;
         let mut listeners = 0u32;
-        let (mut sx, mut sy, mut sxx, mut syy, mut sxy) = (
+        let (mut cn, mut sx, mut sy, mut sxx, mut syy, mut sxy) = (
             [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
-            [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
+            [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
         );
         for c in &self.creatures {
             emit_sum += c.marker_out.iter().sum::<f32>() as f64;
             if c.pheno.receptors.iter().any(|r| r.modality == MODALITY_MARKER) {
                 listeners += 1;
             }
+            let ch = ((c.pheno.diet_niche * N_MARKER_CHANNELS as f32) as usize).min(N_MARKER_CHANNELS - 1);
+            let x = self.markers.sample(c.layer, c.pos, ch) as f64;
             let y = c.food_prox as f64;
-            for ch in 0..N_MARKER_CHANNELS {
-                let x = self.markers.sample(c.layer, c.pos, ch) as f64;
-                sx[ch] += x;
-                sy[ch] += y;
-                sxx[ch] += x * x;
-                syy[ch] += y * y;
-                sxy[ch] += x * y;
-            }
+            cn[ch] += 1.0;
+            sx[ch] += x;
+            sy[ch] += y;
+            sxx[ch] += x * x;
+            syy[ch] += y * y;
+            sxy[ch] += x * y;
         }
         let nn = n as f64;
         let mut channel_meaning = [0.0f32; N_MARKER_CHANNELS];
         for ch in 0..N_MARKER_CHANNELS {
-            let cov = sxy[ch] - sx[ch] * sy[ch] / nn;
-            let d = ((sxx[ch] - sx[ch] * sx[ch] / nn) * (syy[ch] - sy[ch] * sy[ch] / nn)).sqrt();
+            let m = cn[ch];
+            if m < 2.0 {
+                continue;
+            }
+            let cov = sxy[ch] - sx[ch] * sy[ch] / m;
+            let d = ((sxx[ch] - sx[ch] * sx[ch] / m) * (syy[ch] - sy[ch] * sy[ch] / m)).sqrt();
             channel_meaning[ch] = if d > 1e-9 { (cov / d) as f32 } else { 0.0 };
         }
         let snap = Snapshot {

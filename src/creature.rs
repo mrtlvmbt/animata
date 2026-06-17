@@ -173,8 +173,14 @@ impl Creature {
         let senses = self.sense(nearest_food, nearest_threat, nearest_neighbor, heard, receptors);
         let action = self.mind.decide(&senses);
         self.signal = action.signal; // emit this step's call (heard next step)
-        self.marker_out = action.markers; // scent laid this step (deposited post-act)
+        self.marker_out = action.markers; // deliberate brain emission (costly, below)
         self.food_prox = senses.food_prox; // kept for the channel-meaning metric
+        // Passive food-scent leak (free): involuntarily lay a little scent on the
+        // channel this niche maps to, proportional to food proximity — the bootstrap
+        // that gives a channel exploitable meaning. Added on top of brain emission.
+        let leak_ch = ((self.pheno.diet_niche * N_MARKER_CHANNELS as f32) as usize)
+            .min(N_MARKER_CHANNELS - 1);
+        self.marker_out[leak_ch] += MARKER_FOOD_LEAK * senses.food_prox;
 
         // Turning is coupled to forward drive: a creature can only steer while
         // moving (like a car). This kills frantic spinning-in-place when idle.
