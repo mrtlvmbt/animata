@@ -423,11 +423,11 @@ impl World {
                 );
                 let food = if ci < 0.5 {
                     // Herbivores sense the nearest digestible pellet *on their own
-                    // layer* — its grid only holds that layer's pellets, so the
-                    // predicate just checks digestibility (no layer filtering).
+                    // layer* — but only within a SHORTER direct-vision range, so
+                    // distant food is found by scent (markers), not sight.
                     let niche = niches[i];
                     food_grids[li as usize]
-                        .nearest_within(pellets, pos, sense, |j| {
+                        .nearest_within(pellets, pos, sense * FOOD_SENSE_FRAC, |j| {
                             let d = flavors[j] - niche;
                             d * d <= max_flavor_d2
                         })

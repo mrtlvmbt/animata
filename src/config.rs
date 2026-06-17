@@ -348,6 +348,11 @@ pub const MARKER_FOOD_LEAK: f32 = 0.6;
 /// direct senses can't, giving communication a niche to fill (otherwise a marker
 /// is redundant with the precise short-range food/threat senses).
 pub const MARKER_SENSE_AHEAD: f32 = 520.0;
+/// Fraction of the general sense range at which *direct* food is seen. Below 1 it
+/// opens an information gap: food beyond this is invisible to direct vision but its
+/// scent (laid by creatures feeding there) reaches far — so following others'
+/// food-scent (social foraging) can finally pay, the niche emergent comms needs.
+pub const FOOD_SENSE_FRAC: f32 = 0.4;
 /// Share of a cell's value spread to its 4 neighbours each step (blur → gradients
 /// a creature can climb, so trails can form).
 pub const MARKER_DIFFUSE: f32 = 0.18;
