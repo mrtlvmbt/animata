@@ -27,10 +27,11 @@ scales it (×16 per side is the eventual target, needs chunk streaming).
 
 ## Status
 
-- **Phase 0–2** (done): orthographic iso `Camera3D`; noise worldgen into a chunked,
+- **Phase 0–3** (done): orthographic iso `Camera3D`; noise worldgen into a chunked,
   bit-packed, ghost-padded `VoxelTerrain` (7 biomes + heights); rendered as batched
   per-chunk meshes (exposed top + cliff side faces, strata bands, baked per-face
-  shading) on the GPU depth buffer.
-- Next: vegetation (voxel trees), translucent water pass, then data-driven biomes.
+  shading) on the GPU depth buffer; voxel trees on forest/plains columns; a translucent
+  water plane at sea level (opaque pass then water pass — sea floor shows through).
+- Next: data-driven `BiomeDef` biomes (swamps, mountain lakes, rivers).
 
 See the working plan for the full phase breakdown.

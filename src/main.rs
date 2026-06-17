@@ -18,7 +18,9 @@ mod terrain;
 
 use config::*;
 use macroquad::prelude::*;
-use terrain::{cell_biome, cell_height, BiomeKind, VoxelTerrain};
+use terrain::{
+    cell_biome, cell_flags, cell_height, feature_unit, BiomeKind, VoxelTerrain, FLAG_WATER, SEA_ABS,
+};
 
 fn window_conf() -> Conf {
     Conf {
@@ -74,7 +76,7 @@ async fn main() {
     let mut cam = IsoCam::new();
     let mut seed: u64 = 1;
     let mut terrain = VoxelTerrain::new(seed);
-    let mut meshes = build_chunk_meshes(&terrain);
+    let mut meshes = build_world_meshes(&terrain);
 
     // The scene is rendered into this offscreen target every frame, then blitted to
     // the window. A screenshot reads the target's texture directly — i.e. the
@@ -143,7 +145,7 @@ async fn main() {
         if is_key_pressed(KeyCode::R) {
             seed = seed.wrapping_add(1);
             terrain = VoxelTerrain::new(seed);
-            meshes = build_chunk_meshes(&terrain);
+            meshes = build_world_meshes(&terrain);
         }
 
         // ---- Dev bridge: service queued commands on the main thread ----
@@ -157,7 +159,9 @@ async fn main() {
                         "frame_ms": frame_ms,
                         "seed": seed,
                         "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
-                        "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE, "meshes": meshes.len() },
+                        "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
+                                 "meshes": meshes.opaque.len() + meshes.water.len(),
+                                 "water_meshes": meshes.water.len() },
                     }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
@@ -178,7 +182,7 @@ async fn main() {
                 dev_bridge::Cmd::Reseed { seed: s } => {
                     seed = s.unwrap_or(seed.wrapping_add(1));
                     terrain = VoxelTerrain::new(seed);
-                    meshes = build_chunk_meshes(&terrain);
+                    meshes = build_world_meshes(&terrain);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
                 }
                 dev_bridge::Cmd::Screenshot(path) => {
@@ -201,7 +205,15 @@ async fn main() {
         scene_cam.render_target = Some(scene_rt.clone());
         set_camera(&scene_cam);
         clear_background(Color::new(0.53, 0.62, 0.78, 1.0)); // sky
-        for m in &meshes {
+        // Opaque first (terrain + trees) so the depth buffer is complete...
+        for m in &meshes.opaque {
+            draw_mesh(m);
+        }
+        // ...then the translucent water plane on top. It's coplanar at SEA_ABS and one
+        // quad per column, so no two water quads overlap on screen — no back-to-front
+        // sort or depth-write toggle needed; the depth buffer hides water behind taller
+        // land and the default alpha blend shows the sea floor through it.
+        for m in &meshes.water {
             draw_mesh(m);
         }
         set_default_camera();
@@ -297,12 +309,26 @@ fn shaded(rgb: (f32, f32, f32), s: f32) -> Color {
     Color::new(rgb.0 * s, rgb.1 * s, rgb.2 * s, 1.0)
 }
 
-/// Build one cached `Mesh` per chunk from exposed faces only. Each column emits its
-/// top quad plus, for every horizontal neighbour that is lower, the cliff side faces
-/// from the neighbour's height up to its own (one quad per level → strata bands).
-/// Neighbour heights come from the chunk's ghost ring, so this is self-contained.
-fn build_chunk_meshes(t: &VoxelTerrain) -> Vec<Mesh> {
-    let mut out = Vec::new();
+/// The world split into two draw lists: solid geometry and the translucent water
+/// plane. They are drawn in that order (opaque fills the depth buffer, water blends
+/// over it) — see the render loop.
+struct WorldMeshes {
+    opaque: Vec<Mesh>,
+    water: Vec<Mesh>,
+}
+
+/// Build the chunk meshes (one cached `Mesh` per chunk) plus the water plane. Each
+/// land column emits its top quad and, for every lower horizontal neighbour, the
+/// cliff side faces from the neighbour's height up to its own (one quad per level →
+/// strata bands); neighbour heights come from the chunk's ghost ring, so this is
+/// self-contained. Forest/Plains columns also grow a voxel tree. Water columns add a
+/// single translucent surface quad at `SEA_ABS` to the separate water list.
+fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
+    let mut opaque = Vec::new();
+    let mut water = Vec::new();
+    // The water plane is coplanar everywhere, so it batches across chunks freely.
+    let mut wv: Vec<Vertex> = Vec::new();
+    let mut wi: Vec<u16> = Vec::new();
     for cy in 0..t.chunks_y {
         for cx in 0..t.chunks_x {
             let ch = t.chunk(cx, cy);
@@ -319,9 +345,10 @@ fn build_chunk_meshes(t: &VoxelTerrain) -> Vec<Mesh> {
                     if h == 0 {
                         continue; // air
                     }
-                    // Keep each mesh under the u16 index/vertex ceiling.
-                    if verts.len() + 4 * (h as usize + 1) > 60_000 {
-                        flush_mesh(&mut verts, &mut idx, &mut out);
+                    // Keep each mesh under the u16 index/vertex ceiling (terrain +
+                    // a possible tree, the largest per-column burst).
+                    if verts.len() + 4 * (h as usize + 1) + 256 > 60_000 {
+                        flush_mesh(&mut verts, &mut idx, &mut opaque);
                     }
                     let biome = cell_biome(cell);
                     push_top(&mut verts, &mut idx, gx, gy, h, biome);
@@ -337,12 +364,60 @@ fn build_chunk_meshes(t: &VoxelTerrain) -> Vec<Mesh> {
                             push_side(&mut verts, &mut idx, (gx, gy), h, nh, face, biome);
                         }
                     }
+
+                    if cell_flags(cell) & FLAG_WATER != 0 {
+                        // Translucent surface only where the basin actually has depth;
+                        // coplanar with the floor (h == SEA_ABS) would z-fight.
+                        if h < SEA_ABS {
+                            if wv.len() + 4 > 60_000 {
+                                flush_mesh(&mut wv, &mut wi, &mut water);
+                            }
+                            push_water_top(&mut wv, &mut wi, gx, gy);
+                        }
+                    } else if tree_density(biome) > 0.0
+                        && feature_unit(t.seed, gx, gy, 101) < tree_density(biome)
+                    {
+                        push_tree(&mut verts, &mut idx, gx, gy, h, t.seed);
+                    }
                 }
             }
-            flush_mesh(&mut verts, &mut idx, &mut out);
+            flush_mesh(&mut verts, &mut idx, &mut opaque);
         }
     }
-    out
+    flush_mesh(&mut wv, &mut wi, &mut water);
+    WorldMeshes { opaque, water }
+}
+
+/// Fraction of columns of a biome that grow a tree (0 = none).
+fn tree_density(biome: BiomeKind) -> f32 {
+    match biome {
+        BiomeKind::Forest => 0.30,
+        BiomeKind::Plains => 0.04,
+        _ => 0.0,
+    }
+}
+
+/// A voxel tree on column `(gx, gy)` standing on surface height `h`: a brown trunk
+/// (2–3 cubes) topped by a 3×3 leaf canopy and a single cap cube. Per-column hashes
+/// keep it deterministic. Leaves may overhang into neighbour columns (skipped if they
+/// fall outside the world).
+fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, seed: u64) {
+    let trunk = (0.36, 0.26, 0.16);
+    let leaf = (0.16, 0.42, 0.20);
+    let th = 2 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 2 or 3
+    for gz in h..h + th {
+        push_block(verts, idx, gx as i32, gy as i32, gz, trunk);
+    }
+    let top = h + th;
+    for dy in -1i32..=1 {
+        for dx in -1i32..=1 {
+            let (lx, ly) = (gx as i32 + dx, gy as i32 + dy);
+            if (0..COLS as i32).contains(&lx) && (0..ROWS as i32).contains(&ly) {
+                push_block(verts, idx, lx, ly, top, leaf);
+            }
+        }
+    }
+    push_block(verts, idx, gx as i32, gy as i32, top + 1, leaf);
 }
 
 #[derive(Clone, Copy)]
@@ -370,6 +445,30 @@ fn push_quad(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Col
         verts.push(Vertex::new(p.x, p.y, p.z, 0.0, 0.0, col));
     }
     idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+/// A whole standalone cube (top + 4 sides, no hidden bottom) at voxel `(gx, gy, gz)`,
+/// with the same baked per-face shading as the terrain. `gx`/`gy` are `i32` so tree
+/// canopies can overhang into (already bounds-checked) neighbour columns.
+fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz: u8, rgb: (f32, f32, f32)) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+    let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
+    push_quad(verts, idx, [vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1)], shaded(rgb, SHADE_TOP));
+    push_quad(verts, idx, [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)], shaded(rgb, SHADE_PX));
+    push_quad(verts, idx, [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)], shaded(rgb, SHADE_NX));
+    push_quad(verts, idx, [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)], shaded(rgb, SHADE_PZ));
+    push_quad(verts, idx, [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)], shaded(rgb, SHADE_NZ));
+}
+
+/// A translucent water-surface quad at sea level over column `(gx, gy)`. Drawn in the
+/// water pass; the alpha lets the opaque sea floor show through.
+fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+    let y = SEA_ABS as f32 * VOX;
+    let col = Color::new(0.16, 0.40, 0.62, 0.55);
+    push_quad(verts, idx, [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)], col);
 }
 
 fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, biome: BiomeKind) {
