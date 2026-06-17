@@ -12,8 +12,9 @@ use crate::config::*;
 /// Baseline slab thickness in levels: even the lowest land keeps this many levels
 /// below the surface, so cliff/edge cross-sections always show strata.
 const GROUND_MIN: u8 = UNDERGROUND_LEVELS;
-/// Absolute level the sea fills to. Columns at or below this are ocean.
-const SEA_ABS: u8 = GROUND_MIN + SEA_LEVEL;
+/// Absolute level the sea fills to. Columns at or below this are ocean; the water
+/// surface is rendered as a translucent plane at this level (the renderer reads it).
+pub const SEA_ABS: u8 = GROUND_MIN + SEA_LEVEL;
 /// Max surface height (lowlands + mountains).
 const MAX_H: u8 = GROUND_MIN + SURFACE_RANGE;
 /// Noise lattice spacing in columns (bigger → broader features).
@@ -124,6 +125,12 @@ fn fbm(seed: u64, x: f32, y: f32, salt: u64) -> f32 {
     (base * 0.7 + det * 0.3).clamp(0.0, 1.0)
 }
 
+/// Deterministic per-column unit value in `[0, 1)` for placing discrete features
+/// (trees, rocks…). `salt` separates independent decisions on the same column.
+pub fn feature_unit(seed: u64, x: usize, y: usize, salt: u64) -> f32 {
+    hash2(seed, x as i64, y as i64, salt)
+}
+
 /// Generate one column's packed cell. Pure function of `(seed, x, y)`. Coordinates
 /// outside the world return **air** (height 0): a boundary column's full side is then
 /// exposed, which is what gives the world its thick slab edge (strata cross-section).
@@ -138,7 +145,10 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
     let h = h.clamp(1, MAX_H);
 
     if h <= SEA_ABS {
-        return pack_cell(SEA_ABS, BiomeKind::Ocean, FLAG_WATER);
+        // Keep the real sea-floor height (not flattened to sea level) so the basin has
+        // depth: the opaque floor sits at `h`, and the renderer floats a translucent
+        // water plane up at `SEA_ABS` above it.
+        return pack_cell(h, BiomeKind::Ocean, FLAG_WATER);
     }
     let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7);
     let biome = if h == SEA_ABS + 1 {
@@ -185,6 +195,7 @@ impl Chunk {
 
 /// The whole world: a grid of chunks covering `COLS×ROWS` columns.
 pub struct VoxelTerrain {
+    pub seed: u64,
     pub chunks_x: usize,
     pub chunks_y: usize,
     chunks: Vec<Chunk>,
@@ -209,7 +220,7 @@ impl VoxelTerrain {
                 chunks.push(Chunk { cells });
             }
         }
-        VoxelTerrain { chunks_x, chunks_y, chunks }
+        VoxelTerrain { seed, chunks_x, chunks_y, chunks }
     }
 
     pub fn chunk(&self, cx: usize, cy: usize) -> &Chunk {
