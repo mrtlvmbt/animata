@@ -22,15 +22,18 @@ const MAX_H: u8 = LAND_FOOT + SURFACE_RANGE;
 /// Fraction of the elevation field that lies under the sea — sets how much of the map
 /// is water, independently of how tall the land rises (so taller peaks ≠ less sea).
 const SEA_FRACTION: f32 = 0.42;
-/// Macro elevation lattice in columns (continents, mountain masses). Scaled by
-/// `MAP_SCALE` so the big structure grows with the map instead of fragmenting.
+/// Macro elevation lattice in columns (continents, mountain masses), with FEW octaves
+/// → the big smooth structure. Scaled by `MAP_SCALE` so it grows with the map.
 const ELEV_LATTICE: f32 = 26.0 * MAP_SCALE as f32;
-const MOIST_LATTICE: f32 = 18.0 * MAP_SCALE as f32;
-/// Local relief lattices in columns — **fixed (absolute) sizes**, NOT scaled by
-/// `MAP_SCALE`, so hills/roughness stay metre-scale on any map and the surface gets
-/// local bumps on top of the macro shape instead of being smooth blobs.
-const HILL_LATTICE: f32 = 13.0;
-const ROUGH_LATTICE: f32 = 5.0;
+const ELEV_OCTAVES: u32 = 3;
+/// Detail field: MANY octaves at a fixed (absolute, not `MAP_SCALE`-scaled) coarsest
+/// lattice, admixed at low amplitude. This is the "few-octave base + more-octave,
+/// smaller-amplitude admix" — it adds local extrema/complexity on top of the macro
+/// shape. Its high octaves carry tiny amplitude, so altitude-band edges stay clean.
+const DETAIL_LATTICE: f32 = 22.0;
+const DETAIL_OCTAVES: u32 = 5;
+/// Detail admix amplitude in normalised `[0,1]` elevation units (≈ `±WEIGHT/2`).
+const DETAIL_WEIGHT: f32 = 0.34;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -129,23 +132,31 @@ fn value_noise(seed: u64, x: f32, y: f32, salt: u64) -> f32 {
     top + (bot - top) * ty
 }
 
-/// Two-octave fBm in `[0, 1]`.
-fn fbm(seed: u64, x: f32, y: f32, salt: u64) -> f32 {
-    let base = value_noise(seed, x, y, salt);
-    let det = value_noise(seed, x * 2.0, y * 2.0, salt ^ 0x9999);
-    (base * 0.7 + det * 0.3).clamp(0.0, 1.0)
+/// Fractal value-noise (fBm) in `[0, 1]`: `octaves` octaves, each at double frequency
+/// and half amplitude. (Value-noise fractal — same multi-scale look as Perlin fBm,
+/// cheaper.) More octaves = finer detail; the highest octaves carry little amplitude.
+fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
+    let mut sum = 0.0;
+    let mut amp = 1.0;
+    let mut freq = 1.0;
+    let mut norm = 0.0;
+    for o in 0..octaves {
+        sum += amp * value_noise(seed, x * freq, y * freq, salt.wrapping_add(o as u64 * 0x9E37_79B1));
+        norm += amp;
+        amp *= 0.5;
+        freq *= 2.0;
+    }
+    (sum / norm).clamp(0.0, 1.0)
 }
 
-/// Elevation in `[0, 1]`: a macro continent/mountain field (lattice scales with the
-/// map) plus fixed-size local relief — broad hills and finer roughness — so the
-/// surface has metre-scale undulation on top of the macro shape instead of smooth
-/// blobs. Weights sum to 1, keeping the mean near 0.5 (so `SEA_FRACTION` still holds);
-/// the macro term dominates, so continents/biomes keep their large structure.
+/// Combined surface elevation in `[0, 1]`: a few-octave macro field (continents,
+/// mountain masses) admixed with a many-octave, low-amplitude detail field (local
+/// hills + roughness). One height function with global AND local extrema — both
+/// height and biome read from it, so colour follows altitude.
 fn elevation(seed: u64, x: f32, y: f32) -> f32 {
-    let macro_e = fbm(seed, x / ELEV_LATTICE, y / ELEV_LATTICE, 1);
-    let hills = fbm(seed, x / HILL_LATTICE, y / HILL_LATTICE, 5);
-    let rough = value_noise(seed, x / ROUGH_LATTICE, y / ROUGH_LATTICE, 9);
-    (macro_e * 0.62 + hills * 0.28 + rough * 0.10).clamp(0.0, 1.0)
+    let macro_e = fbm(seed, x / ELEV_LATTICE, y / ELEV_LATTICE, 1, ELEV_OCTAVES);
+    let detail = fbm(seed, x / DETAIL_LATTICE, y / DETAIL_LATTICE, 5, DETAIL_OCTAVES) - 0.5;
+    (macro_e + detail * DETAIL_WEIGHT).clamp(0.0, 1.0)
 }
 
 /// Deterministic per-column unit value in `[0, 1)` for placing discrete features
@@ -163,36 +174,35 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
         return 0; // air
     }
     let (cx, cy) = (x as f32, y as f32);
-    let elev = elevation(seed, cx, cy);
+    let e = elevation(seed, cx, cy);
 
-    if elev < SEA_FRACTION {
-        // Sea floor with real depth (not flattened to sea level): deeper offshore,
-        // shallowing toward the shore. The renderer floats a translucent water plane
-        // at `SEA_ABS` above it.
-        let f = elev / SEA_FRACTION; // 0 deep .. 1 at the shoreline
-        let h = (1.0 + f * (SEA_ABS - 2) as f32).round() as u8;
-        return pack_cell(h.clamp(1, SEA_ABS - 1), BiomeKind::Ocean, FLAG_WATER);
+    if e < SEA_FRACTION {
+        // Sea floor with real depth: deeper offshore, shallowing toward the shore. The
+        // renderer floats a translucent water plane at `SEA_ABS` above it.
+        let f = e / SEA_FRACTION; // 0 deep .. 1 at the shoreline
+        let h = (1.0 + f * (SEA_ABS - 2) as f32).round();
+        let h = (h as i32).clamp(1, SEA_ABS as i32 - 1) as u8;
+        return pack_cell(h, BiomeKind::Ocean, FLAG_WATER);
     }
 
-    // Land: map the above-sea elevation onto `LAND_FOOT..=MAX_H` so peaks stand
-    // `SURFACE_RANGE` blocks above the foot.
-    let f = (elev - SEA_FRACTION) / (1.0 - SEA_FRACTION); // 0 foot .. 1 peak
-    let h = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).round() as u8;
-    let h = h.clamp(LAND_FOOT, MAX_H);
+    // Land: map elevation onto `LAND_FOOT..=MAX_H`. The same field drives BOTH the
+    // height and the biome, so biomes are altitude bands — colour follows height, and
+    // the detail octaves give local hills (a rise in the plains can crest into the
+    // forest or rock band) without speckle, since the field is smooth.
+    let f = (e - SEA_FRACTION) / (1.0 - SEA_FRACTION); // 0 foot .. 1 peak
+    let h = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).round();
+    let h = (h as i32).clamp(LAND_FOOT as i32, MAX_H as i32) as u8;
 
-    let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7);
-    let biome = if h == LAND_FOOT {
-        BiomeKind::Beach
+    let biome = if h <= LAND_FOOT {
+        BiomeKind::Beach // shore ring
     } else if h >= MAX_H - 1 {
-        BiomeKind::Snow // top 2 levels: snow caps
-    } else if h >= MAX_H - 6 {
-        BiomeKind::Mountain // the tall grey massif below the caps
-    } else if moist < 0.35 {
-        BiomeKind::Desert
-    } else if moist > 0.66 {
-        BiomeKind::Forest
+        BiomeKind::Snow // caps (top 2 levels)
+    } else if h >= MAX_H - 5 {
+        BiomeKind::Mountain // grey massif (4 levels)
+    } else if h >= LAND_FOOT + 4 {
+        BiomeKind::Forest // wooded hills
     } else {
-        BiomeKind::Plains
+        BiomeKind::Plains // low grassland
     };
     pack_cell(h, biome, 0)
 }
