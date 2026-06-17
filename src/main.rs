@@ -5,15 +5,17 @@
 //! bare environment viewer that will grow a Minecraft-like voxel world on
 //! macroquad's 3D pipeline (real cubes + GPU depth buffer).
 //!
-//! Phase 0: stand up an orthographic isometric `Camera3D` with pan/zoom/rotate and
-//! a test height-field of cubes — a spike to confirm the depth buffer and the
-//! orthographic camera behave in macroquad 0.4 before the real chunked terrain
-//! (phase 1+) is built.
+//! Phase 1: noise worldgen into a chunked `VoxelTerrain` (see `terrain.rs`), drawn
+//! with a simple per-column pillar preview (immediate-mode `draw_cube`, culled to a
+//! window around the camera). The proper batched, exposed-face chunk mesh comes in
+//! phase 2 — this preview only exists to eyeball the generated heights/biomes.
 
 mod config;
+mod terrain;
 
 use config::*;
 use macroquad::prelude::*;
+use terrain::{BiomeKind, VoxelTerrain};
 
 fn window_conf() -> Conf {
     Conf {
@@ -36,9 +38,9 @@ struct IsoCam {
 impl IsoCam {
     fn new() -> Self {
         IsoCam {
-            // Centre on the (eventual) world grid.
+            // Centre on the world grid.
             target: vec3(COLS as f32 * VOX * 0.5, 0.0, ROWS as f32 * VOX * 0.5),
-            zoom: 24.0,
+            zoom: 48.0,
             yaw: 0.0,
         }
     }
@@ -68,14 +70,16 @@ impl IsoCam {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
+    let mut seed: u64 = 1;
+    let mut terrain = VoxelTerrain::new(seed);
 
     loop {
         let dt = get_frame_time();
 
-        // ---- Camera input (no GUI) ----
+        // ---- Input (no GUI) ----
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
-            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(4.0, 160.0);
+            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(6.0, 200.0);
         }
         // Pan in the ground plane (WASD / arrows), rotated by the current yaw.
         let mut pan = Vec2::ZERO;
@@ -104,37 +108,64 @@ async fn main() {
         if is_key_pressed(KeyCode::E) {
             cam.yaw += std::f32::consts::FRAC_PI_2;
         }
+        // Regenerate the world with a fresh seed.
+        if is_key_pressed(KeyCode::R) {
+            seed = seed.wrapping_add(1);
+            terrain = VoxelTerrain::new(seed);
+        }
 
         // ---- Render ----
         clear_background(Color::new(0.53, 0.62, 0.78, 1.0)); // sky
         set_camera(&cam.camera());
-        draw_spike_scene(cam.target);
+        draw_terrain_preview(&terrain, &cam);
         set_default_camera();
 
         next_frame().await;
     }
 }
 
-/// Test scene: an 8×8 height-field of unit cubes around `centre`, coloured by
-/// height with wire edges — enough to confirm depth ordering and the iso look.
-fn draw_spike_scene(centre: Vec3) {
-    let n: i32 = 8;
-    let ox = centre.x - n as f32 * VOX * 0.5;
-    let oz = centre.z - n as f32 * VOX * 0.5;
-    for gx in 0..n {
-        for gz in 0..n {
-            let h = (((gx as f32 * 0.8).sin() + (gz as f32 * 0.6).cos()) * 1.5 + 3.0) as i32;
-            for gy in 0..h.max(1) {
-                let world = vec3(
-                    ox + gx as f32 * VOX,
-                    gy as f32 * VOX + VOX * 0.5,
-                    oz + gz as f32 * VOX,
-                );
-                let t = gy as f32 / 5.0;
-                let col = Color::new(0.25 + 0.5 * t, 0.55 - 0.2 * t, 0.30, 1.0);
-                draw_cube(world, vec3(VOX, VOX, VOX), None, col);
-                draw_cube_wires(world, vec3(VOX, VOX, VOX), Color::new(0.0, 0.0, 0.0, 0.25));
-            }
+/// Phase-1 preview: draw each column in a window around the camera as a solid
+/// pillar (one immediate-mode cube from ground to its surface height), coloured by
+/// biome. Bounded by a column radius so immediate mode stays cheap; the real
+/// batched exposed-face chunk mesh replaces this in phase 2.
+fn draw_terrain_preview(t: &VoxelTerrain, cam: &IsoCam) {
+    const R: i32 = 44; // preview window radius in columns
+    let cx = (cam.target.x / VOX).round() as i32;
+    let cy = (cam.target.z / VOX).round() as i32;
+    let x0 = (cx - R).max(0);
+    let x1 = (cx + R).min(COLS as i32);
+    let y0 = (cy - R).max(0);
+    let y1 = (cy + R).min(ROWS as i32);
+    for gy in y0..y1 {
+        for gx in x0..x1 {
+            let (x, y) = (gx as usize, gy as usize);
+            let h = t.height_at(x, y) as f32;
+            let col = if t.is_water(x, y) {
+                Color::new(0.11, 0.30, 0.57, 1.0) // flat sea (real water pass: phase 3)
+            } else {
+                block_color(t.biome_at(x, y), h)
+            };
+            let centre = vec3(gx as f32 * VOX, h * VOX * 0.5, gy as f32 * VOX);
+            let size = vec3(VOX, h * VOX, VOX);
+            draw_cube(centre, size, None, col);
+            draw_cube_wires(centre, size, Color::new(0.0, 0.0, 0.0, 0.12));
         }
     }
+}
+
+/// Render-side palette: map an abstract `BiomeKind` to a colour, with a slight
+/// brighten-by-height so taller terrain reads. (Representation lives here, not in
+/// the generator.)
+fn block_color(biome: BiomeKind, h: f32) -> Color {
+    let (r, g, b) = match biome {
+        BiomeKind::Ocean => (0.13, 0.32, 0.55),
+        BiomeKind::Beach => (0.80, 0.74, 0.50),
+        BiomeKind::Plains => (0.42, 0.62, 0.30),
+        BiomeKind::Forest => (0.20, 0.46, 0.24),
+        BiomeKind::Desert => (0.78, 0.68, 0.42),
+        BiomeKind::Mountain => (0.45, 0.43, 0.42),
+        BiomeKind::Snow => (0.92, 0.94, 0.97),
+    };
+    let s = (0.78 + 0.03 * h).min(1.0);
+    Color::new((r * s).min(1.0), (g * s).min(1.0), (b * s).min(1.0), 1.0)
 }
