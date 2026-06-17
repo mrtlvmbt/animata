@@ -1,0 +1,1 @@
+../../.claude-dev-kit/plugin/agents/web-research.md

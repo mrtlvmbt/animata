@@ -1,0 +1,73 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/branch-guard.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/branch-guard.sh\" || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-generated-guard.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-generated-guard.sh\" || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/commit-gate.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/commit-gate.sh\" || exit 0",
+            "timeout": 300
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-readonly-guard.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-readonly-guard.sh\" || exit 0"
+          }
+        ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/plan-consensus-guard.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/plan-consensus-guard.sh\" || exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-metrics-record.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-metrics-record.sh\" || exit 0"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-readonly-postcheck.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-readonly-postcheck.sh\" || exit 0"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/intent-router.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/intent-router.sh\" || exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}
