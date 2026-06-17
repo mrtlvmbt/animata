@@ -760,8 +760,12 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode, focus: Option<u8>)
             ),
             _ => color,
         };
+        // Condition: a starving creature is dimmer (body brightness scales with
+        // energy toward the reproduction threshold), so health reads at a glance.
+        let efrac = (cr.energy / REPRO_ENERGY).clamp(0.0, 1.0);
+        let ebright = 0.5 + 0.5 * efrac;
         // Layer-focus dimming: fade everything off the focused stratum.
-        let color = Color::new(color.r, color.g, color.b, color.a * dim);
+        let color = Color::new(color.r * ebright, color.g * ebright, color.b * ebright, color.a * dim);
         // A flier casts a soft shadow on the ground (height 0) below its lifted
         // body, so the air stratum reads even in the iso view. Pushed before the
         // body so the body floats over it.
@@ -779,6 +783,24 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode, focus: Option<u8>)
             mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
         let size = cr.pheno.radius * lerp(1.7, 2.2, c) * view.scale;
+        // Sexual ornament: a fan of bright spikes (a display crest) behind the
+        // creature, length & count scaled by the ornament gene — so Fisherian
+        // runaway is visible (a showy body actually looks showy). Near zoom only.
+        let orn = cr.pheno.ornament;
+        if size >= 5.0 && orn > 0.15 {
+            let back = Vec2::from_angle(cr.heading + std::f32::consts::PI);
+            let perp = vec2(-back.y, back.x);
+            let n = (1.0 + orn * 4.0) as i32;
+            let len = size * (0.8 + orn * 1.8);
+            let crest = Color::new(0.98, 0.8, 0.25, dim * (0.5 + 0.5 * orn));
+            for k in 0..n {
+                let t = if n > 1 { k as f32 / (n - 1) as f32 - 0.5 } else { 0.0 };
+                let tip = center + back * len + perp * (t * size * 1.6);
+                let b0 = center + perp * (size * 0.3);
+                let b1 = center - perp * (size * 0.3);
+                mesh_tri(&mut mesh, MAX_V, MAX_I, tip, b0, b1, crest);
+            }
+        }
         // Sense organs: a row of small eyes above the head (near zoom only), so a
         // body carrying evolved receptors reads as "it can see something".
         if size >= 5.0 && !cr.pheno.receptors.is_empty() {
