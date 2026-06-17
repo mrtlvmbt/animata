@@ -34,6 +34,10 @@ const DETAIL_LATTICE: f32 = 22.0;
 const DETAIL_OCTAVES: u32 = 5;
 /// Detail admix amplitude in normalised `[0,1]` elevation units (≈ `±WEIGHT/2`).
 const DETAIL_WEIGHT: f32 = 0.34;
+/// Moisture lattice (columns) — sets how dry/wet a region is, choosing the lowland
+/// biome (desert↔plains↔forest). Scaled by `MAP_SCALE` so moisture regions are big.
+const MOIST_LATTICE: f32 = 21.0 * MAP_SCALE as f32;
+const MOIST_OCTAVES: u32 = 3;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -193,16 +197,25 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
     let h = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).round();
     let h = (h as i32).clamp(LAND_FOOT as i32, MAX_H as i32) as u8;
 
+    // Altitude gates the vertical biomes (rock/snow only high, so colour still tracks
+    // height — no "rock at low ground"); below the rock line, MOISTURE picks the
+    // lowland biome, which is a natural same-height transition (dry desert ↔ grassland
+    // ↔ wet forest), not the old spilled-paint look.
     let biome = if h <= LAND_FOOT {
         BiomeKind::Beach // shore ring
     } else if h >= MAX_H - 1 {
         BiomeKind::Snow // caps (top 2 levels)
     } else if h >= MAX_H - 5 {
         BiomeKind::Mountain // grey massif (4 levels)
-    } else if h >= LAND_FOOT + 4 {
-        BiomeKind::Forest // wooded hills
     } else {
-        BiomeKind::Plains // low grassland
+        let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7, MOIST_OCTAVES);
+        if moist < 0.38 {
+            BiomeKind::Desert
+        } else if moist > 0.60 {
+            BiomeKind::Forest
+        } else {
+            BiomeKind::Plains
+        }
     };
     pack_cell(h, biome, 0)
 }
