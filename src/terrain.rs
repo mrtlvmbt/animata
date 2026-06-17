@@ -22,10 +22,15 @@ const MAX_H: u8 = LAND_FOOT + SURFACE_RANGE;
 /// Fraction of the elevation field that lies under the sea — sets how much of the map
 /// is water, independently of how tall the land rises (so taller peaks ≠ less sea).
 const SEA_FRACTION: f32 = 0.42;
-/// Noise lattice spacing in columns (bigger → broader features). Scaled by `MAP_SCALE`
-/// so biomes grow with the map instead of fragmenting into noise on a giant map.
+/// Macro elevation lattice in columns (continents, mountain masses). Scaled by
+/// `MAP_SCALE` so the big structure grows with the map instead of fragmenting.
 const ELEV_LATTICE: f32 = 26.0 * MAP_SCALE as f32;
 const MOIST_LATTICE: f32 = 18.0 * MAP_SCALE as f32;
+/// Local relief lattices in columns — **fixed (absolute) sizes**, NOT scaled by
+/// `MAP_SCALE`, so hills/roughness stay metre-scale on any map and the surface gets
+/// local bumps on top of the macro shape instead of being smooth blobs.
+const HILL_LATTICE: f32 = 13.0;
+const ROUGH_LATTICE: f32 = 5.0;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -131,6 +136,18 @@ fn fbm(seed: u64, x: f32, y: f32, salt: u64) -> f32 {
     (base * 0.7 + det * 0.3).clamp(0.0, 1.0)
 }
 
+/// Elevation in `[0, 1]`: a macro continent/mountain field (lattice scales with the
+/// map) plus fixed-size local relief — broad hills and finer roughness — so the
+/// surface has metre-scale undulation on top of the macro shape instead of smooth
+/// blobs. Weights sum to 1, keeping the mean near 0.5 (so `SEA_FRACTION` still holds);
+/// the macro term dominates, so continents/biomes keep their large structure.
+fn elevation(seed: u64, x: f32, y: f32) -> f32 {
+    let macro_e = fbm(seed, x / ELEV_LATTICE, y / ELEV_LATTICE, 1);
+    let hills = fbm(seed, x / HILL_LATTICE, y / HILL_LATTICE, 5);
+    let rough = value_noise(seed, x / ROUGH_LATTICE, y / ROUGH_LATTICE, 9);
+    (macro_e * 0.62 + hills * 0.28 + rough * 0.10).clamp(0.0, 1.0)
+}
+
 /// Deterministic per-column unit value in `[0, 1)` for placing discrete features
 /// (trees, rocks…). `salt` separates independent decisions on the same column.
 pub fn feature_unit(seed: u64, x: usize, y: usize, salt: u64) -> f32 {
@@ -146,7 +163,7 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
         return 0; // air
     }
     let (cx, cy) = (x as f32, y as f32);
-    let elev = fbm(seed, cx / ELEV_LATTICE, cy / ELEV_LATTICE, 1);
+    let elev = elevation(seed, cx, cy);
 
     if elev < SEA_FRACTION {
         // Sea floor with real depth (not flattened to sea level): deeper offshore,
