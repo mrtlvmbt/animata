@@ -579,6 +579,29 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
             ),
             _ => color,
         };
+        // Pseudo-depth: lift air-layer bodies above the ground and sink the
+        // underground ones, scaled with zoom (no separation on the overview), with
+        // a soft shadow cast under a flier so the three strata read as height.
+        let alt = (cr.pheno.radius * 2.2 * view.scale).min(60.0);
+        let lay_off = match cr.layer {
+            LAYER_AIR => Vec2::new(0.0, -alt),
+            LAYER_UNDERGROUND => Vec2::new(0.0, alt * 0.5),
+            _ => Vec2::ZERO,
+        };
+        if cr.layer == LAYER_AIR && alt > 1.0 {
+            // Shadow at the ground position (pushed before the body, so it floats over it).
+            let sr = (cr.pheno.radius * view.scale).max(1.5);
+            let shadow = Color::new(0.0, 0.0, 0.0, 0.28);
+            if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
+                flush(&mut mesh);
+            }
+            let base = mesh.vertices.len() as u16;
+            for (dx, dy) in [(-sr, -sr * 0.6), (sr, -sr * 0.6), (sr, sr * 0.6), (-sr, sr * 0.6)] {
+                mesh.vertices.push(Vertex::new(center.x + dx, center.y + dy, 0.0, uv.x, uv.y, shadow));
+            }
+            mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        let center = center + lay_off;
         let size = cr.pheno.radius * lerp(1.7, 2.2, c) * view.scale;
         // LOD: below ~LOD_POINT_PX a heading triangle is sub-pixel (invisible) and
         // costs trig per creature. At overview/giant-map zoom draw a fixed-size dot
@@ -605,7 +628,7 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         if !cr.pheno.segments.is_empty() {
             let mut prev = cr.pos;
             for (wc, wr, app) in cr.pheno.segment_layout(cr.pos, cr.heading) {
-                let sc = view.world_to_screen(wc);
+                let sc = view.world_to_screen(wc) + lay_off;
                 let r = (wr * view.scale).max(1.0);
                 let seg_color = appendage_tint(color, app);
                 if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
