@@ -881,6 +881,35 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode, focus: Option<u8>)
             drawn += 1;
             continue;
         }
+        // Single-segment body (the founder/most-common morphotype): a rounded
+        // teardrop — pointed nose, full rounded rear — instead of a flat dart, so
+        // it reads as a creature. A darker rim hull drawn underneath gives an
+        // outline against busy vegetation. Falls back to the cheap triangle when
+        // too small for the hull to be legible.
+        if size >= 4.0 {
+            let dir = Vec2::from_angle(cr.heading);
+            let perp = Vec2::new(-dir.y, dir.x);
+            // Teardrop outline in (forward, side) units, scaled by body size.
+            let hull = |k: f32| {
+                let pts = [
+                    (1.0, 0.0),
+                    (0.2, 0.55),
+                    (-0.6, 0.5),
+                    (-0.85, 0.0),
+                    (-0.6, -0.5),
+                    (0.2, -0.55),
+                ];
+                pts.map(|(a, s)| center + dir * (a * size * k) + perp * (s * size * k))
+            };
+            let rim = Color::new(color.r * 0.35, color.g * 0.4, color.b * 0.45, color.a);
+            for (outline, col) in [(hull(1.2), rim), (hull(1.0), color)] {
+                for k in 0..outline.len() {
+                    mesh_tri(&mut mesh, MAX_V, MAX_I, center, outline[k], outline[(k + 1) % outline.len()], col);
+                }
+            }
+            drawn += 1;
+            continue;
+        }
         let nose = center + Vec2::from_angle(cr.heading) * size;
         let back_l = center + Vec2::from_angle(cr.heading + 2.4) * size * 0.8;
         let back_r = center + Vec2::from_angle(cr.heading - 2.4) * size * 0.8;
