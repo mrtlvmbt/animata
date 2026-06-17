@@ -840,8 +840,11 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode, focus: Option<u8>)
             let layout = cr.pheno.segment_layout(cr.pos, cr.heading);
             let age = cr.age as f32;
             // Work in screen space after the iso projection, so the body axis and
-            // its perpendicular are correct in the tilted view.
+            // its perpendicular are correct in the tilted view. First gather the
+            // spine, then fill it as one continuous ribbon (instead of a row of
+            // axis-aligned squares) so the body reads as an organic, bending shape.
             let mut prev_sc = view.project(cr.pos, h);
+            let mut nodes: Vec<BodySeg> = Vec::with_capacity(layout.len());
             for (i, ((wc, wr, app), seg)) in layout.iter().zip(&cr.pheno.segments).enumerate() {
                 let (wc, wr, app) = (*wc, *wr, *app);
                 let sc0 = view.project(wc, h);
@@ -860,22 +863,19 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode, focus: Option<u8>)
                     (std::f32::consts::TAU * (age * OSC_FREQ_BASE * (0.5 + seg.flexibility) - i as f32 * 0.18)).sin();
                 let r = (wr * view.scale).max(1.0);
                 let sc = sc0 + perp * (osc * r * 0.5);
-                let seg_color = appendage_tint(color, app);
-                if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
-                    flush(&mut mesh);
-                }
-                let base = mesh.vertices.len() as u16;
-                for (dx, dy) in [(-r, -r), (r, -r), (r, r), (-r, r)] {
-                    mesh.vertices.push(Vertex::new(sc.x + dx, sc.y + dy, 0.0, uv.x, uv.y, seg_color));
-                }
-                mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-                // Limb shapes, beating with the segment's pacemaker phase. Visible
-                // only at near zoom.
-                if app != genome::Appendage::None && r >= 2.0 {
-                    let flap = 1.0 + 0.3 * osc;
-                    let mut ac = appendage_color(app);
+                nodes.push(BodySeg { sc, dir, perp, r, col: appendage_tint(color, app), app, flap: 1.0 + 0.3 * osc });
+            }
+            // A darker rim hull underneath for an outline against busy vegetation,
+            // then the filled body on top (matches the single-segment teardrop look).
+            let rim = Color::new(color.r * 0.35, color.g * 0.4, color.b * 0.45, color.a);
+            draw_body_ribbon(&mut mesh, MAX_V, MAX_I, &nodes, 1.3, Some(rim));
+            draw_body_ribbon(&mut mesh, MAX_V, MAX_I, &nodes, 1.0, None);
+            // Limb shapes on top, beating with each segment's pacemaker phase.
+            for n in &nodes {
+                if n.app != genome::Appendage::None && n.r >= 2.0 {
+                    let mut ac = appendage_color(n.app);
                     ac.a *= dim;
-                    draw_appendage(&mut mesh, MAX_V, MAX_I, sc, dir, perp, r, app, flap, ac);
+                    draw_appendage(&mut mesh, MAX_V, MAX_I, n.sc, n.dir, n.perp, n.r, n.app, n.flap, ac);
                 }
             }
             drawn += 1;
@@ -938,6 +938,50 @@ fn appendage_color(app: genome::Appendage) -> Color {
         genome::Appendage::None => return Color::new(1.0, 1.0, 1.0, 0.0),
     };
     Color::new(r, g, b, 0.92)
+}
+
+/// One rendered body segment along the spine, in screen space: its (oscillated)
+/// centre, body-axis `dir` and side `perp` (unit), screen radius, fill colour, and
+/// the appendage + flap phase to hang off it.
+struct BodySeg {
+    sc: Vec2,
+    dir: Vec2,
+    perp: Vec2,
+    r: f32,
+    col: Color,
+    app: genome::Appendage,
+    flap: f32,
+}
+
+/// Fill a creature body as a continuous ribbon down its segment spine: each
+/// adjacent pair of segments becomes a quad whose width follows the segment radii
+/// and whose orientation follows the body axis (so it bends with the CPG wave),
+/// capped by a rounded nose and tail. `rscale` inflates the width (>1 for the rim
+/// hull drawn underneath); `rim` forces a single outline colour, else each quad
+/// takes its segment's own (appendage-tinted) colour.
+fn draw_body_ribbon(mesh: &mut Mesh, max_v: usize, max_i: usize, nodes: &[BodySeg], rscale: f32, rim: Option<Color>) {
+    for pair in nodes.windows(2) {
+        let (a, b) = (&pair[0], &pair[1]);
+        let (ra, rb) = (a.r * rscale, b.r * rscale);
+        let (la, ra_) = (a.sc + a.perp * ra, a.sc - a.perp * ra);
+        let (lb, rb_) = (b.sc + b.perp * rb, b.sc - b.perp * rb);
+        mesh_tri(mesh, max_v, max_i, la, ra_, rb_, rim.unwrap_or(a.col));
+        mesh_tri(mesh, max_v, max_i, la, rb_, lb, rim.unwrap_or(b.col));
+    }
+    if let Some(n) = nodes.first() {
+        let r = n.r * rscale;
+        let tip = n.sc + n.dir * (r * 1.15);
+        let col = rim.unwrap_or(n.col);
+        mesh_tri(mesh, max_v, max_i, tip, n.sc + n.perp * r, n.sc, col);
+        mesh_tri(mesh, max_v, max_i, tip, n.sc, n.sc - n.perp * r, col);
+    }
+    if let Some(n) = nodes.last() {
+        let r = n.r * rscale;
+        let tip = n.sc - n.dir * r;
+        let col = rim.unwrap_or(n.col);
+        mesh_tri(mesh, max_v, max_i, tip, n.sc + n.perp * r, n.sc, col);
+        mesh_tri(mesh, max_v, max_i, tip, n.sc, n.sc - n.perp * r, col);
+    }
 }
 
 /// Push one filled triangle into the batched mesh, flushing the chunk first if it
