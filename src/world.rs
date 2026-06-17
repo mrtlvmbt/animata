@@ -81,7 +81,7 @@ pub struct World {
     pub g_cre: SpatialGrid,
     pub buf_cpos: Vec<Vec2>,
     pub buf_carns: Vec<f32>,
-    pub buf_targets: Vec<([Option<Vec2>; 3], f32)>,
+    pub buf_targets: Vec<([Option<Vec2>; 3], f32, f32)>,
 }
 
 impl World {
@@ -356,7 +356,7 @@ impl World {
     /// Every search is bounded by the creature's sense range (local, not global).
     fn sense_into(
         &self,
-        out: &mut Vec<([Option<Vec2>; 3], f32)>,
+        out: &mut Vec<([Option<Vec2>; 3], f32, f32)>,
         food_grids: &[SpatialGrid],
         cgrid: &SpatialGrid,
         cpos: &[Vec2],
@@ -369,6 +369,14 @@ impl World {
         let senses: Vec<f32> = self.creatures.iter().map(|c| c.pheno.sense_range).collect();
         let signals: Vec<f32> = self.creatures.iter().map(|c| c.signal).collect();
         let niches: Vec<f32> = self.creatures.iter().map(|c| c.pheno.diet_niche).collect();
+        // Eye-bearing creatures sense food on adjacent reachable layers (an
+        // exteroceptive "periscope" for informed migration).
+        let eyes: Vec<bool> = self
+            .creatures
+            .iter()
+            .map(|c| c.pheno.segments.iter().any(|s| s.appendage.is_sensor()))
+            .collect();
+        let access: Vec<u8> = self.creatures.iter().map(|c| c.pheno.layer_access()).collect();
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
         // |flavor - niche| beyond this digests below MIN_EAT_EFF -> ignore it.
@@ -413,6 +421,33 @@ impl World {
                 };
                 // Hear the nearest neighbor's emitted signal.
                 let heard = neighbor_i.map_or(0.0, |k| signals[k]);
+                // Exteroceptive cross-layer food sense (only if the body has an eye):
+                // proximity of the nearest digestible pellet on the best adjacent
+                // layer this creature can reach — the signal that makes migration
+                // informed rather than blind.
+                let cross = if eyes[i] {
+                    let niche = niches[i];
+                    let mut best = 0.0f32;
+                    for tl in [li as i32 - 1, li as i32 + 1] {
+                        if tl < 0 || tl >= N_LAYERS as i32 {
+                            continue;
+                        }
+                        let tl = tl as u8;
+                        if access[i] & (1 << tl) == 0 {
+                            continue;
+                        }
+                        if let Some(j) = food_grids[tl as usize].nearest_within(pellets, pos, sense, |j| {
+                            let d = flavors[j] - niche;
+                            d * d <= max_flavor_d2
+                        }) {
+                            let prox = 1.0 - (pellets[j] - pos).length() / sense;
+                            best = best.max(prox);
+                        }
+                    }
+                    best
+                } else {
+                    0.0
+                };
                 (
                     [
                         food,
@@ -420,6 +455,7 @@ impl World {
                         neighbor_i.map(|k| cpos[k] - pos),
                     ],
                     heard,
+                    cross,
                 )
             })
             .collect_into_vec(out);
@@ -428,21 +464,21 @@ impl World {
     /// Mutating pass: each creature thinks and moves given its sensed targets and
     /// the biome it stands in. Parallel for the neural brain (no shared state, no
     /// RNG); serial for rule-based (its wander uses the global RNG).
-    fn act_all(&mut self, targets: &[([Option<Vec2>; 3], f32)]) {
+    fn act_all(&mut self, targets: &[([Option<Vec2>; 3], f32, f32)]) {
         let biome = &self.biome;
         if matches!(self.behavior, BehaviorKind::Neural) {
             self.creatures.par_iter_mut().enumerate().for_each(|(i, c)| {
                 let b = biome.at(c.pos);
                 let bp = b.props();
-                let ([food, threat, neighbor], heard) = targets[i];
-                c.think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult, b.medium());
+                let ([food, threat, neighbor], heard, cross) = targets[i];
+                c.think_and_act(food, threat, neighbor, heard, cross, bp.move_mult, bp.metab_mult, b.medium());
             });
         } else {
             for i in 0..self.creatures.len() {
                 let b = biome.at(self.creatures[i].pos);
                 let bp = b.props();
-                let ([food, threat, neighbor], heard) = targets[i];
-                self.creatures[i].think_and_act(food, threat, neighbor, heard, bp.move_mult, bp.metab_mult, b.medium());
+                let ([food, threat, neighbor], heard, cross) = targets[i];
+                self.creatures[i].think_and_act(food, threat, neighbor, heard, cross, bp.move_mult, bp.metab_mult, b.medium());
             }
         }
     }

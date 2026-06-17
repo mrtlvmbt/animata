@@ -40,6 +40,10 @@ pub enum Appendage {
     Wing,
     Leg,
     Burrow,
+    /// A sensory organ (no locomotion): its brain input port carries an
+    /// exteroceptive reading — nearest food on an adjacent reachable layer — so a
+    /// body can "see" the stratum above/below and migrate toward it on purpose.
+    Eye,
 }
 
 impl Appendage {
@@ -49,8 +53,15 @@ impl Appendage {
             1 => Appendage::Fin,
             2 => Appendage::Wing,
             3 => Appendage::Leg,
-            _ => Appendage::Burrow,
+            4 => Appendage::Burrow,
+            _ => Appendage::Eye,
         }
+    }
+
+    /// True for a sensory organ whose brain input is an exteroceptive reading
+    /// rather than a locomotion pacemaker.
+    pub fn is_sensor(self) -> bool {
+        matches!(self, Appendage::Eye)
     }
 }
 

@@ -356,7 +356,7 @@ pub const MAX_SEGMENTS: usize = 8;
 pub const SEG_LEN_RANGE: (f32, f32) = (2.0, 7.0);
 pub const SEG_WIDTH_RANGE: (f32, f32) = (1.5, 5.0);
 /// Number of appendage kinds (None, Fin, Wing, Leg, Burrow).
-pub const APPENDAGE_KINDS: usize = 5;
+pub const APPENDAGE_KINDS: usize = 6;
 /// Metabolic upkeep added per body segment, as a fraction of the body cost
 /// multiplier. Counterweight to the locomotor benefit of extra segments, so the
 /// evolved chain length settles at an interior optimum instead of the cap.
