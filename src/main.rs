@@ -71,6 +71,22 @@ impl IsoCam {
     }
 }
 
+/// Offscreen colour+depth target the scene renders into. The depth attachment is the
+/// point: `render_target()` makes a colour-only target with no depth buffer, so a
+/// depth-testing 3D camera drawing into it loses occlusion (far faces overdraw near).
+fn new_scene_target(w: u32, h: u32) -> RenderTarget {
+    let rt = render_target_ex(
+        w,
+        h,
+        RenderTargetParams {
+            depth: true,
+            ..Default::default()
+        },
+    );
+    rt.texture.set_filter(FilterMode::Nearest);
+    rt
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
@@ -83,8 +99,10 @@ async fn main() {
     // finished pixels *before* the window present — so capture is decoupled from the
     // window back-buffer (GRAV-style framebuffer read) instead of `get_screen_data`,
     // which only sees the throttled front buffer of a foregrounded window.
-    let mut scene_rt = render_target(screen_width() as u32, screen_height() as u32);
-    scene_rt.texture.set_filter(FilterMode::Nearest);
+    // NB: it MUST have its own depth attachment (`depth: true`) — the bare
+    // `render_target()` has none, which silently disables depth testing in the pass
+    // and lets far faces overdraw near ones.
+    let mut scene_rt = new_scene_target(screen_width() as u32, screen_height() as u32);
 
     // Frame timing (EMA-smoothed) + an on-screen readout toggle (`I`).
     let mut fps = 0.0f32;
@@ -196,8 +214,7 @@ async fn main() {
         if scene_rt.texture.width() != screen_width()
             || scene_rt.texture.height() != screen_height()
         {
-            scene_rt = render_target(screen_width() as u32, screen_height() as u32);
-            scene_rt.texture.set_filter(FilterMode::Nearest);
+            scene_rt = new_scene_target(screen_width() as u32, screen_height() as u32);
         }
 
         // Pass 1: draw the scene into the offscreen target.
