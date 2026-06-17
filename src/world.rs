@@ -895,6 +895,38 @@ impl World {
             let var = (sq[k] / n - mean * mean).max(0.0);
             std_sum += var.sqrt();
         }
+        // Marker-substrate metrics: mean emission, listener fraction, and per-channel
+        // "meaning" = Pearson r between a channel's local intensity and the creature's
+        // food proximity. r climbing above 0 = the channel carries food information,
+        // i.e. self-organised semantics (the emergence readout for the research phase).
+        let mut emit_sum = 0.0f64;
+        let mut listeners = 0u32;
+        let (mut sx, mut sy, mut sxx, mut syy, mut sxy) = (
+            [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
+            [0.0f64; N_MARKER_CHANNELS], [0.0f64; N_MARKER_CHANNELS],
+        );
+        for c in &self.creatures {
+            emit_sum += c.marker_out.iter().sum::<f32>() as f64;
+            if c.pheno.receptors.iter().any(|r| r.modality == MODALITY_MARKER) {
+                listeners += 1;
+            }
+            let y = c.food_prox as f64;
+            for ch in 0..N_MARKER_CHANNELS {
+                let x = self.markers.sample(c.layer, c.pos, ch) as f64;
+                sx[ch] += x;
+                sy[ch] += y;
+                sxx[ch] += x * x;
+                syy[ch] += y * y;
+                sxy[ch] += x * y;
+            }
+        }
+        let nn = n as f64;
+        let mut channel_meaning = [0.0f32; N_MARKER_CHANNELS];
+        for ch in 0..N_MARKER_CHANNELS {
+            let cov = sxy[ch] - sx[ch] * sy[ch] / nn;
+            let d = ((sxx[ch] - sx[ch] * sx[ch] / nn) * (syy[ch] - sy[ch] * sy[ch] / nn)).sqrt();
+            channel_meaning[ch] = if d > 1e-9 { (cov / d) as f32 } else { 0.0 };
+        }
         let snap = Snapshot {
             population: self.creatures.len(),
             herbivores: herb as usize,
@@ -921,6 +953,9 @@ impl World {
             lineages,
             species: self.speciation.count(),
             max_generation: gen,
+            marker_emit: (emit_sum / nn) as f32,
+            marker_listener_frac: listeners as f32 / n,
+            channel_meaning,
         };
         self.stats.push(snap, top);
     }

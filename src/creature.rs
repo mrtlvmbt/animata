@@ -32,6 +32,9 @@ pub struct Creature {
     pub signal: f32,
     /// Per-channel scent emitted this step, deposited into the marker field.
     pub marker_out: [f32; N_MARKER_CHANNELS],
+    /// Food proximity sensed this step (0..1) — kept so stats can correlate it
+    /// with local marker intensity (the channel-meaning emergence metric).
+    pub food_prox: f32,
     /// Current infection's pathogen strain (0..1), or `None` if healthy.
     pub infection: Option<f32>,
     pub pos: Vec2,
@@ -66,6 +69,7 @@ impl Creature {
             species_id: 0,
             signal: 0.0,
             marker_out: [0.0; N_MARKER_CHANNELS],
+            food_prox: 0.0,
             infection: None,
             pos,
             layer: pheno.primary_layer(),
@@ -110,6 +114,7 @@ impl Creature {
             species_id: 0,
             signal: 0.0,
             marker_out: [0.0; N_MARKER_CHANNELS],
+            food_prox: 0.0,
             infection: None,
             pos,
             layer: pheno.primary_layer(),
@@ -169,6 +174,7 @@ impl Creature {
         let action = self.mind.decide(&senses);
         self.signal = action.signal; // emit this step's call (heard next step)
         self.marker_out = action.markers; // scent laid this step (deposited post-act)
+        self.food_prox = senses.food_prox; // kept for the channel-meaning metric
 
         // Turning is coupled to forward drive: a creature can only steer while
         // moving (like a car). This kills frantic spinning-in-place when idle.

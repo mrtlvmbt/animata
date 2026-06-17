@@ -179,6 +179,9 @@ pub fn status_json(world: &World, paused: bool, speed: u32, scale: f32, center: 
         "frac_air": s.frac_air,
         "avg_hidden": s.avg_hidden,
         "frac_finned": s.frac_finned,
+        "marker_emit": s.marker_emit,
+        "marker_listener_frac": s.marker_listener_frac,
+        "channel_meaning": s.channel_meaning,
     })
 }
 

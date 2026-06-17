@@ -177,6 +177,7 @@ async fn main() {
     let mut show_diet = false;
     // Show the Muller plot (stacked lineage shares over time).
     let mut show_muller = false;
+    let mut show_markers = false;
     // Cached static biome background texture, rebuilt when the biome seed changes.
     let mut biome_tex: Option<Texture2D> = None;
     let mut biome_tex_seed = u64::MAX;
@@ -225,6 +226,9 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::M) {
             show_muller = !show_muller;
+        }
+        if is_key_pressed(KeyCode::K) {
+            show_markers = !show_markers;
         }
         if is_key_pressed(KeyCode::Y) {
             let msg = match world.ancestry.export_csv(TREE_PATH) {
@@ -422,6 +426,11 @@ async fn main() {
         }
         clear_background(Color::new(0.06, 0.07, 0.09, 1.0));
         draw_biome_texture(biome_tex.as_ref().unwrap(), &view);
+        // Marker field overlay (toggle K): scent channels as R/G/B clouds, so
+        // emergent trails/signals are visible. Drawn under the entities.
+        if show_markers {
+            draw_markers(&world, &view);
+        }
         // All food + creatures in a single batched mesh (one draw call).
         let drawn = draw_entities(&world, &view, color_mode);
         // Subtle parched tint over the world during a drought.
@@ -493,6 +502,41 @@ fn build_biome_texture(world: &World) -> Texture2D {
     let tex = Texture2D::from_image(&img);
     tex.set_filter(FilterMode::Nearest);
     tex
+}
+
+/// Translucent overlay of the marker field: each occupied cell drawn as a soft
+/// blob whose colour mixes the channels (ch0→R, ch1→G, ch2→B) at its layer's
+/// height. Lets emergent scent clouds and trails be seen (toggle K).
+fn draw_markers(world: &World, view: &View) {
+    let m = &world.markers;
+    let (cols, rows, cell) = (m.cols(), m.rows(), m.cell());
+    let half = cell * 0.5;
+    let rad = (cell * view.scale * ISO_KX * 0.85).max(1.0);
+    for layer in 0..N_LAYERS as u8 {
+        let h = layer_height(layer);
+        for y in 0..rows {
+            for x in 0..cols {
+                let r = m.at(layer, 0, x, y);
+                let g = if N_MARKER_CHANNELS > 1 { m.at(layer, 1, x, y) } else { 0.0 };
+                let b = if N_MARKER_CHANNELS > 2 { m.at(layer, 2, x, y) } else { 0.0 };
+                let amax = r.max(g).max(b);
+                if amax < 0.03 {
+                    continue;
+                }
+                let c = view.project(vec2(x as f32 * cell + half, y as f32 * cell + half), h);
+                if c.x < -rad || c.x > VIEW_W + rad || c.y < -rad || c.y > VIEW_H + rad {
+                    continue;
+                }
+                let col = Color::new(
+                    (r / amax).clamp(0.0, 1.0),
+                    (g / amax).clamp(0.0, 1.0),
+                    (b / amax).clamp(0.0, 1.0),
+                    (amax * 0.7).min(0.6),
+                );
+                draw_circle(c.x, c.y, rad, col);
+            }
+        }
+    }
 }
 
 /// The whole biome map as a single iso-sheared textured quad: the world's four
