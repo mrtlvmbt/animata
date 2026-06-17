@@ -4,4 +4,6 @@ settings.json.bak.*
 .critic-prior.md
 .plan-consensus
 kit-plan-bypass.log
+kit-readonly-bypass.log
+kit-citation-misses.log
 # <<< claude-dev-kit (managed) <<<
