@@ -626,10 +626,28 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         // body plan reads at a glance. Empty chain falls through to the original
         // heading triangle (single implicit segment).
         if !cr.pheno.segments.is_empty() {
+            let layout = cr.pheno.segment_layout(cr.pos, cr.heading);
+            let age = cr.age as f32;
             let mut prev = cr.pos;
-            for (wc, wr, app) in cr.pheno.segment_layout(cr.pos, cr.heading) {
-                let sc = view.world_to_screen(wc) + lay_off;
+            for (i, ((wc, wr, app), seg)) in layout.iter().zip(&cr.pheno.segments).enumerate() {
+                let (wc, wr, app) = (*wc, *wr, *app);
+                // Local body axis from the static layout (the wiggle below is a
+                // visual displacement, so directions stay stable along the chain).
+                let dw = wc - prev;
+                let dir = if dw.length_squared() > 1e-6 {
+                    dw.normalize()
+                } else {
+                    Vec2::from_angle(cr.heading)
+                };
+                let perp = Vec2::new(-dir.y, dir.x);
+                prev = wc;
+                // CPG rhythm (render-only): a travelling lateral wave down the body
+                // at the segment's pacemaker rate (the same flexibility-tuned clock
+                // the brain feels), so a moving body undulates and its limbs beat.
+                let osc =
+                    (std::f32::consts::TAU * (age * OSC_FREQ_BASE * (0.5 + seg.flexibility) - i as f32 * 0.18)).sin();
                 let r = (wr * view.scale).max(1.0);
+                let sc = view.world_to_screen(wc) + lay_off + perp * (osc * r * 0.5);
                 let seg_color = appendage_tint(color, app);
                 if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
                     flush(&mut mesh);
@@ -639,19 +657,12 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
                     mesh.vertices.push(Vertex::new(sc.x + dx, sc.y + dy, 0.0, uv.x, uv.y, seg_color));
                 }
                 mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-                // Limb shapes, oriented to the local body axis (this segment minus
-                // the previous joint), scaled so they're visible only at near zoom.
+                // Limb shapes, beating with the segment's pacemaker phase. Visible
+                // only at near zoom.
                 if app != genome::Appendage::None && r >= 2.0 {
-                    let dw = wc - prev;
-                    let dir = if dw.length_squared() > 1e-6 {
-                        dw.normalize()
-                    } else {
-                        Vec2::from_angle(cr.heading)
-                    };
-                    let perp = Vec2::new(-dir.y, dir.x);
-                    draw_appendage(&mut mesh, MAX_V, MAX_I, sc, dir, perp, r, app, appendage_color(app));
+                    let flap = 1.0 + 0.3 * osc;
+                    draw_appendage(&mut mesh, MAX_V, MAX_I, sc, dir, perp, r, app, flap, appendage_color(app));
                 }
-                prev = wc;
             }
             drawn += 1;
             continue;
@@ -707,6 +718,7 @@ fn mesh_tri(mesh: &mut Mesh, max_v: usize, max_i: usize, a: Vec2, b: Vec2, c: Ve
 /// segment screen radius `r`. Fins/wings/legs sweep off both sides (paired limbs);
 /// a burrow claw points forward. Shape and sweep distinguish the kinds at a glance.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn draw_appendage(
     mesh: &mut Mesh,
     max_v: usize,
@@ -716,12 +728,13 @@ fn draw_appendage(
     perp: Vec2,
     r: f32,
     app: genome::Appendage,
+    flap: f32,
     col: Color,
 ) {
     use genome::Appendage::*;
     if let Burrow = app {
-        // A claw poking forward of the head segment.
-        let tip = sc + dir * (r * 2.0);
+        // A claw poking forward of the head segment (extends on the beat).
+        let tip = sc + dir * (r * 2.0 * flap);
         let b0 = sc + perp * (r * 0.6);
         let b1 = sc - perp * (r * 0.6);
         mesh_tri(mesh, max_v, max_i, tip, b0, b1, col);
@@ -733,6 +746,7 @@ fn draw_appendage(
         Leg => (r * 1.2, -0.2),  // short, angled slightly forward
         _ => return,
     };
+    let span = span * flap; // beat with the pacemaker
     for sgn in [-1.0f32, 1.0] {
         let attach = sc + perp * (sgn * r);
         let tip = attach + perp * (sgn * span) - dir * (span * sweep);
