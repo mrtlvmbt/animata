@@ -117,7 +117,7 @@ pub const PREDATOR_GAIN: f32 = 30.0;
 pub const PREDATOR_CATCH_PAD: f32 = 2.0;
 /// Predator upkeep multiplier: they burn energy faster, so they starve when
 /// prey get scarce — this is what lets prey rebound instead of going extinct.
-pub const PREDATOR_METAB_MULT: f32 = 3.0;
+pub const PREDATOR_METAB_MULT: f32 = 2.2;
 /// Predator speed relative to their gene speed. At 1.0 a fleeing alert prey is
 /// effectively uncatchable, so predators rely on ambushing prey that haven't
 /// sensed them — which is what keeps the neural arms race in balance. Raising
@@ -156,6 +156,21 @@ pub const DIET_WIDTH: f32 = 0.18;
 pub const MIN_EAT_EFF: f32 = 0.15;
 /// Random spread of pellet flavor around its biome's flavor.
 pub const FOOD_FLAVOR_NOISE: f32 = 0.05;
+
+// ---- Crypsis (camouflage) ----
+// A creature is detected (by predators, prey and neighbours) only within its
+// sense-range scaled by its *visibility*: how much its colour contrasts with the
+// local biome tint. A body that matches its biome is seen only up close; a
+// mismatched one is seen from afar. This makes the (previously cosmetic) colour
+// genes adaptive — camouflage evolves per biome — in tension with the ornament
+// (which wants to be *seen* by mates) and with mate-finding (camouflage also
+// hides you from partners), so colour settles at an interior optimum.
+/// Visibility floor: even a perfectly biome-matched body is detected within this
+/// fraction of sense range (so camouflage helps but is never total invisibility).
+pub const VIS_MIN: f32 = 0.2;
+/// Visibility added per unit of colour↔biome-tint contrast (RGB distance), capped
+/// at 1.0. At gain 1.0 a contrast of ~0.65 already saturates to full visibility.
+pub const VIS_GAIN: f32 = 1.0;
 
 // ---- Sexual selection ----
 /// A showy ornament is a handicap: upkeep is multiplied by (1 + cost·ornament²).

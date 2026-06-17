@@ -51,9 +51,10 @@ fn main() {
             let s = w.stats.latest();
             let cm = s.channel_meaning.iter().map(|v| format!("{:+.2}", v)).collect::<Vec<_>>().join(",");
             println!(
-                "{:8}  {:4}  {:4}  {:5}  {:.2}  {:.2}  {:.3}  {:3}    {:3}    {:.2}   {:3.0}  {:.2}  {:.3}  {:.2}  {:3.0}  {:3.0}  {:3.0}  {:.1} {:3.0} {:.1} | {:.3} {:.3} [{}]",
-                step, s.herbivores, s.predators, s.max_generation, s.avg_carnivory, s.avg_ornament, s.diversity, s.lineages, s.species, s.avg_resistance, s.infected_frac * 100.0, s.avg_memory, s.niche_spread, s.avg_segments, s.appendaged_frac * 100.0, s.frac_underground * 100.0, s.frac_air * 100.0, s.avg_hidden, s.frac_finned * 100.0, us, s.marker_emit, s.marker_listener_frac, cm
+                "{:8}  {:4}  {:4}  {:5}  {:.2}  {:.2}  {:.3}  {:3}    {:3}    {:.2}   {:3.0}  {:.2}  {:.3}  {:.2}  {:3.0}  {:3.0}  {:3.0}  {:.1} {:3.0} {:.1} | {:.3} {:.3} [{}] cryp={:.3}",
+                step, s.herbivores, s.predators, s.max_generation, s.avg_carnivory, s.avg_ornament, s.diversity, s.lineages, s.species, s.avg_resistance, s.infected_frac * 100.0, s.avg_memory, s.niche_spread, s.avg_segments, s.appendaged_frac * 100.0, s.frac_underground * 100.0, s.frac_air * 100.0, s.avg_hidden, s.frac_finned * 100.0, us, s.marker_emit, s.marker_listener_frac, cm, s.avg_color_contrast
             );
+            println!("         spd={:.2} sns={:.0} cryp_all={:.3} cryp_pred={:.3} und%={:.0} air%={:.0} pred={}", s.avg_speed, s.avg_sense, s.avg_color_contrast, s.avg_color_contrast_pred, s.frac_underground*100.0, s.frac_air*100.0, s.predators);
             t = std::time::Instant::now();
         }
         if w.creatures.is_empty() {

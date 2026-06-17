@@ -60,6 +60,12 @@ pub struct Snapshot {
     /// intensity and the creature's food proximity. |r| above ~0 means the channel
     /// carries information about food — a sign of self-organised semantics.
     pub channel_meaning: [f32; crate::config::N_MARKER_CHANNELS],
+    /// Mean colour↔biome-tint contrast (RGB distance). Falls as camouflage
+    /// (crypsis) evolves — bodies coming to match their biome.
+    pub avg_color_contrast: f32,
+    /// Same, but for carnivores only — to see if predators evolve *ambush*
+    /// camouflage (so prey don't spot them) even when prey don't.
+    pub avg_color_contrast_pred: f32,
 }
 
 /// Top lineages (id, count) at a snapshot, for the Muller stacked-area plot.
