@@ -7,12 +7,12 @@
 //!     (a mechanical/genetic prezygotic barrier) — a hard partition.
 //!   * **mate-recognition traits** ([`feature`]): diet assortment (carnivory)
 //!     and the sexual display (ornament) that gate who mates with whom.
+//!
 //! Ecological traits that *don't* isolate (speed, size, metabolism) are
 //! deliberately absent: two creatures that differ only in size still interbreed,
 //! so by the BSC they are one species. Leader/threshold clustering (adaptive
 //! count, no fixed k), run periodically; the UI colours creatures by species id.
 
-use crate::config::*;
 use crate::creature::Creature;
 use crate::genome::{Appendage, Phenotype};
 
@@ -172,6 +172,13 @@ impl Speciation {
 }
 
 #[cfg(test)]
+impl Speciation {
+    fn next_id_for_test(&self) -> u32 {
+        self.next_id
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::behavior::BehaviorKind;
@@ -196,12 +203,5 @@ mod tests {
         assert!(sp.count() >= 1 && sp.count() <= 4, "unexpected species count {}", sp.count());
         // Every creature got a species assignment that exists.
         assert!(creatures.iter().all(|c| c.species_id < sp.next_id_for_test()));
-    }
-}
-
-#[cfg(test)]
-impl Speciation {
-    fn next_id_for_test(&self) -> u32 {
-        self.next_id
     }
 }

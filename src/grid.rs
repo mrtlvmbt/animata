@@ -121,7 +121,7 @@ impl SpatialGrid {
                             continue;
                         }
                         let d2 = (points[idx] - from).length_squared();
-                        if d2 <= max_dist2 && best.map_or(true, |(_, bd2)| d2 < bd2) {
+                        if d2 <= max_dist2 && best.is_none_or(|(_, bd2)| d2 < bd2) {
                             best = Some((idx, d2));
                         }
                     }
@@ -155,7 +155,7 @@ impl SpatialGrid {
             }
             // Stop once neither best can still improve.
             let settled = |b: Option<(usize, f32)>| {
-                b.map_or(false, |(_, d2)| ring_min > 0.0 && ring_min * ring_min > d2)
+                b.is_some_and(|(_, d2)| ring_min > 0.0 && ring_min * ring_min > d2)
             };
             if settled(ba) && settled(bb) {
                 break;
@@ -173,10 +173,10 @@ impl SpatialGrid {
                         if d2 > max_dist2 {
                             continue;
                         }
-                        if ba.map_or(true, |(_, bd)| d2 < bd) && ok_a(idx) {
+                        if ba.is_none_or(|(_, bd)| d2 < bd) && ok_a(idx) {
                             ba = Some((idx, d2));
                         }
-                        if bb.map_or(true, |(_, bd)| d2 < bd) && ok_b(idx) {
+                        if bb.is_none_or(|(_, bd)| d2 < bd) && ok_b(idx) {
                             bb = Some((idx, d2));
                         }
                     }

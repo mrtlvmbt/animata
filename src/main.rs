@@ -446,7 +446,7 @@ async fn main() {
 
         // Append a CSV row once per recorded snapshot (every 5 ticks).
         if let Some(f) = &mut csv {
-            if world.tick % 5 == 0 && world.tick != last_logged {
+            if world.tick.is_multiple_of(5) && world.tick != last_logged {
                 let s = world.stats.latest();
                 let _ = writeln!(
                     f,
@@ -1083,6 +1083,10 @@ fn draw_signals(world: &World, view: &View) {
     }
 }
 
+/// One trend-graph series: its colour and a getter pulling the normalized value
+/// (0..1) out of a [`Snapshot`].
+type TrendSeries = (Color, fn(&Snapshot) -> f32);
+
 /// Bottom panel with the live trend graph.
 fn draw_panel(world: &World) {
     let top = VIEW_H;
@@ -1100,7 +1104,7 @@ fn draw_panel(world: &World) {
     let gh = PANEL_H - pad * 2.0;
 
     // Normalized trait curves (0..1) + populations scaled to caps.
-    let series: [(Color, fn(&Snapshot) -> f32); 22] = [
+    let series: [TrendSeries; 22] = [
         (Color::new(0.9, 0.9, 0.9, 1.0), |s| {
             (s.herbivores as f32 / POP_CAP as f32).min(1.0)
         }),
@@ -1249,15 +1253,15 @@ fn draw_legend(focus: Option<u8>, channel: Option<usize>) {
     let w = 188.0;
     draw_rectangle(x - 6.0, y - 18.0, w, 312.0, Color::new(0.02, 0.03, 0.05, 0.82));
     let dim = Color::new(0.55, 0.6, 0.65, 1.0);
-    let mut head = |y: &mut f32, t: &str| {
+    let head = |y: &mut f32, t: &str| {
         draw_text(t, x, *y, 16.0, Color::new(0.8, 0.85, 0.95, 1.0));
         *y += 17.0;
     };
-    let mut row = |y: &mut f32, col: Color, label: &str, active: bool| {
+    let row = |y: &mut f32, col: Color, label: &str, active: bool| {
         draw_rectangle(x, *y - 9.0, 13.0, 11.0, col);
         let c = if active { Color::new(1.0, 0.95, 0.5, 1.0) } else { dim };
         let tag = if active { " <" } else { "" };
-        draw_text(&format!("{label}{tag}"), x + 20.0, *y, 15.0, c);
+        draw_text(format!("{label}{tag}"), x + 20.0, *y, 15.0, c);
         *y += 16.0;
     };
     head(&mut y, "LEGEND (H)");
@@ -1309,7 +1313,7 @@ fn pick_creature(world: &World, p: Vec2) -> Option<u64> {
         let scale = 1.7 + 0.5 * c.carnivory();
         let pick = (c.pheno.radius * scale + 6.0).max(10.0);
         let d2 = (c.pos - p).length_squared();
-        if d2 <= pick * pick && best.map_or(true, |(_, bd)| d2 < bd) {
+        if d2 <= pick * pick && best.is_none_or(|(_, bd)| d2 < bd) {
             best = Some((c.id, d2));
         }
     }
@@ -1520,7 +1524,7 @@ fn draw_tree(world: &World) {
     // (e.g. just after a prune) — so the layout always has something to start from.
     let roots: Vec<u64> = nodes
         .iter()
-        .filter(|n| n.parent.map_or(true, |p| !info.contains_key(&p)))
+        .filter(|n| n.parent.is_none_or(|p| !info.contains_key(&p)))
         .map(|n| n.id)
         .collect();
     for &r in &roots {
@@ -1543,7 +1547,7 @@ fn draw_tree(world: &World) {
     }
 
     draw_text(
-        &format!(
+        format!(
             "phylogeny: {} living sampled, {} ancestors, {} surviving founder lines   (P to close)",
             sample.len(),
             nodes.len(),

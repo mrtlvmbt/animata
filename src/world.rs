@@ -339,18 +339,18 @@ impl World {
         self.buf_targets = targets;
 
         self.tick += 1;
-        if self.tick % 5 == 0 {
+        if self.tick.is_multiple_of(5) {
             self.record_stats();
             lap(&mut self.profile.stats);
         }
         // Periodically GC the ancestry log down to the living population's
         // ancestors so it stays bounded and the tree always reaches founders.
-        if self.tick % 500 == 0 {
+        if self.tick.is_multiple_of(500) {
             let living: Vec<u64> = self.creatures.iter().map(|c| c.id).collect();
             self.ancestry.prune(&living);
         }
         // Re-cluster creatures into species periodically (not every step).
-        if self.tick % 50 == 0 {
+        if self.tick.is_multiple_of(50) {
             let mut sp = std::mem::take(&mut self.speciation);
             sp.update(&mut self.creatures);
             self.speciation = sp;
@@ -452,7 +452,7 @@ impl World {
         let pellets: &[Vec2] = &self.food;
         let flavors: &[f32] = &self.flavor;
         // |flavor - niche| beyond this digests below MIN_EAT_EFF -> ignore it.
-        let max_flavor_d2 = -2.0 * DIET_WIDTH * DIET_WIDTH * (MIN_EAT_EFF as f32).ln();
+        let max_flavor_d2 = -2.0 * DIET_WIDTH * DIET_WIDTH * MIN_EAT_EFF.ln();
 
         // Read-only and per-creature independent (no RNG, no mutation) -> runs in
         // parallel; this is the heaviest phase at large populations.
@@ -573,12 +573,11 @@ impl World {
                 c.think_and_act(food, threat, neighbor, p.heard, &p.receptors, bp.move_mult, bp.metab_mult, b.medium());
             });
         } else {
-            for i in 0..self.creatures.len() {
-                let b = biome.at(self.creatures[i].pos);
+            for (c, p) in self.creatures.iter_mut().zip(targets.iter()) {
+                let b = biome.at(c.pos);
                 let bp = b.props();
-                let p = &targets[i];
                 let [food, threat, neighbor] = p.off;
-                self.creatures[i].think_and_act(food, threat, neighbor, p.heard, &p.receptors, bp.move_mult, bp.metab_mult, b.medium());
+                c.think_and_act(food, threat, neighbor, p.heard, &p.receptors, bp.move_mult, bp.metab_mult, b.medium());
             }
         }
     }
@@ -711,15 +710,14 @@ impl World {
         }
 
         // Apply: damage + recovery for the infected, then seat new infections.
-        for i in 0..n {
-            let c = &mut self.creatures[i];
+        for (c, &new) in self.creatures.iter_mut().zip(new_inf.iter()) {
             if let Some(s) = c.infection {
                 let prot = (-(c.pheno.resistance - s).powi(2) / PROTECT_WIDTH).exp();
                 c.energy -= INFECTION_DAMAGE * (1.0 - prot);
                 if gen_range(0.0f64, 1.0) < RECOVER_CHANCE {
                     c.infection = None;
                 }
-            } else if let Some(ns) = new_inf[i] {
+            } else if let Some(ns) = new {
                 c.infection = Some(ns);
             } else if gen_range(0.0f64, 1.0) < BACKGROUND_INFECT {
                 // Environmental pickup of the circulating strain.
@@ -790,7 +788,7 @@ impl World {
                     return;
                 }
                 let score = pref * ornament[k] - d2 * 1e-4;
-                if best.map_or(true, |(_, bs)| score > bs) {
+                if best.is_none_or(|(_, bs)| score > bs) {
                     best = Some((k, score));
                 }
             });
@@ -963,7 +961,7 @@ impl World {
             *counts.entry(c.species_id).or_insert(0) += 1;
         }
         let mut top: Vec<(u32, u32)> = counts.into_iter().collect();
-        top.sort_unstable_by(|a, b| b.1.cmp(&a.1)); // by count desc
+        top.sort_unstable_by_key(|&(_, count)| std::cmp::Reverse(count)); // by count desc
         top.truncate(12);
 
         let n = self.creatures.len().max(1) as f32;
@@ -1172,7 +1170,7 @@ mod tests {
         let true_roots = nodes.iter().filter(|n| n.parent.is_none()).count();
         let broken = nodes
             .iter()
-            .filter(|n| n.parent.map_or(false, |p| !set.contains(&p)))
+            .filter(|n| n.parent.is_some_and(|p| !set.contains(&p)))
             .count();
         let mut lin: Vec<u32> = w.creatures.iter().map(|c| c.lineage).collect();
         lin.sort_unstable();

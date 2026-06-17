@@ -1,6 +1,11 @@
 //! Run the simulation without a window and print population/trait trends.
 //! Useful for tuning constants. Run: `cargo run --example headless`
 
+// This harness re-includes the full `src/` module tree but exercises only the
+// headless slice of it (no window, no save/load, no phylo export), so much of
+// the shared API is legitimately unused here.
+#![allow(dead_code)]
+
 #[path = "../src/config.rs"]
 mod config;
 #[path = "../src/biome.rs"]

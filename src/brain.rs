@@ -7,7 +7,6 @@
 //! from the genome's marker-decoded [`Synapse`] list into dense matrices (see
 //! [`Brain::from_synapses`]), so the forward pass stays a plain matmul.
 
-use crate::config::*;
 use crate::genome::Synapse;
 
 pub struct Brain {
@@ -103,8 +102,9 @@ impl Brain {
         let mut rec_abs = 0.0f32; // total |recurrent contribution|
         for h in 0..nh {
             let mut sum = 0.0;
-            for i in 0..ni {
-                sum += inputs[i] * self.w_ih[h * ni + i];
+            let w_row = &self.w_ih[h * ni..h * ni + ni];
+            for (&inp, &w) in inputs.iter().zip(w_row) {
+                sum += inp * w;
             }
             let in_part = sum; // input contribution before the recurrent term
             // Recurrent term: previous hidden state feeds back in.

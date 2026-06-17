@@ -54,7 +54,7 @@ pub fn save(world: &World, path: &str) -> Result<()> {
             c.energy,
             c.age,
             c.generation,
-            c.genome.to_string(),
+            c.genome,
         );
     }
     std::fs::write(path, s)?;
