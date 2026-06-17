@@ -1,0 +1,7 @@
+# >>> claude-dev-kit (managed) — do not edit >>>
+settings.json.bak.*
+.critic-report.md
+.critic-prior.md
+.plan-consensus
+kit-plan-bypass.log
+# <<< claude-dev-kit (managed) <<<

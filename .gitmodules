@@ -1,0 +1,3 @@
+[submodule ".claude-dev-kit"]
+	path = .claude-dev-kit
+	url = https://github.com/mrtlvmbt/claude-dev-kit.git
