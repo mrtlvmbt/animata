@@ -590,9 +590,21 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         drawn += 1;
     }
 
-    // Creatures: triangles, colored by diet / lineage / species.
+    // Creatures: triangles, colored by diet / lineage / species. Drawn back-to-
+    // front in iso depth (x+y into the screen, with the layer as a tiebreak so a
+    // flier sits over the body beneath it) so nearer creatures overlap farther
+    // ones correctly. Food stays drawn first (flat on the ground, underneath).
+    let mut order: Vec<usize> = (0..world.creatures.len()).collect();
+    order.sort_unstable_by(|&a, &b| {
+        let ca = &world.creatures[a];
+        let cb = &world.creatures[b];
+        let ka = ca.pos.x + ca.pos.y + ca.layer as f32 * 0.5;
+        let kb = cb.pos.x + cb.pos.y + cb.layer as f32 * 0.5;
+        ka.total_cmp(&kb)
+    });
     let lerp = |a: f32, t: f32, w: f32| a + (t - a) * w;
-    for cr in &world.creatures {
+    for &ci in &order {
+        let cr = &world.creatures[ci];
         let h = layer_height(cr.layer);
         let center = view.project(cr.pos, h);
         if !on_screen(center) {
