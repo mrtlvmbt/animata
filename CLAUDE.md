@@ -1,3 +1,11 @@
+# animata — инструкции проекта
+
+**Язык общения — РУССКИЙ.** Отвечай пользователю по-русски во всех сессиях этого репозитория. Это
+относится к главному треду диалога. Исключения (всегда по-английски): код и идентификаторы, имена
+веток/коммитов/PR и тела git-команд, машинные токены инструментов. Форк-агенты кита
+(`bug-hunt`/`subsystem-reviewer`/`web-research`/`critic`/`judge`) уже локализованы на русский через
+`.claude/kit.overlay/agents/` — их вывод тоже русский, кроме машинных токенов (`F1`, `[severity: …]`,
+`VERDICT: PASS|FAIL`).
 
 <!-- claude-dev-kit:rules START (managed — do not edit by hand) -->
 ## Working with claude-dev-kit (consumer contract)
