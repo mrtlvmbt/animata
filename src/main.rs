@@ -396,14 +396,16 @@ const COLUMN_INDEX_BURST: usize = 768;
 fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
     let mut opaque = Vec::new();
     let mut water = Vec::new();
-    // The water plane is coplanar everywhere, so it batches across chunks freely.
-    let mut wv: Vec<Vertex> = Vec::new();
-    let mut wi: Vec<u16> = Vec::new();
     for cy in 0..t.chunks_y {
         for cx in 0..t.chunks_x {
             let ch = t.chunk(cx, cy);
             let mut verts: Vec<Vertex> = Vec::new();
             let mut idx: Vec<u16> = Vec::new();
+            // Water batches PER CHUNK too, so each water mesh's AABB stays local and
+            // frustum-culls — batching it globally gave map-wide AABBs that never culled,
+            // so all water drew every frame.
+            let mut wv: Vec<Vertex> = Vec::new();
+            let mut wi: Vec<u16> = Vec::new();
             for ly in 0..CHUNK {
                 for lx in 0..CHUNK {
                     let (gx, gy) = (cx * CHUNK + lx, cy * CHUNK + ly);
@@ -451,9 +453,9 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                 }
             }
             flush_mesh(&mut verts, &mut idx, &mut opaque);
+            flush_mesh(&mut wv, &mut wi, &mut water);
         }
     }
-    flush_mesh(&mut wv, &mut wi, &mut water);
     WorldMeshes { opaque, water }
 }
 
