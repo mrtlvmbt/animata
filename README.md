@@ -17,7 +17,10 @@ cargo run            # environment viewer
 ```
 
 Controls: `WASD`/arrows pan, mouse wheel zoom, `Q`/`E` rotate the iso view 90°,
-`R` regenerate with a new seed.
+`R` regenerate with a new seed, `I` toggle the fps/ms readout.
+
+Dev bridge: `cargo run --features dev` adds a localhost JSON-RPC server (drive the
+camera, reseed, capture screenshots) — see `DEV_BRIDGE.md`.
 
 Scale: **1 voxel = 1 m³**; the base map is 138×95 m. `MAP_SCALE` (in `config.rs`)
 scales it (×16 per side is the eventual target, needs chunk streaming).

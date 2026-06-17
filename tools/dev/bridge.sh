@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Dev-bridge curl cookbook for `life` (see DEV_BRIDGE.md).
+# Dev-bridge curl cookbook for the voxel viewer (see DEV_BRIDGE.md).
 #
 # Launch the app first:   cargo run --features dev &
 # Then load the recipes:  source tools/dev/bridge.sh
-# ...and call them:        bstatus ; bshot s.png ; brun 6 6000 25 ; bstatus
+# ...and call them:        bstatus ; bview 70 47 170 ; breseed 5 ; bshot s.png
 #
 # Keep this file as the single place curl recipes live — add a function here the
 # moment a useful one-liner proves itself, so it can be pulled and run instantly.
@@ -22,42 +22,22 @@ J() {
 }
 
 # ── reads ────────────────────────────────────────────────────────────────────
-bstatus()  { J animata/status; }                       # full stats snapshot + controls
-bhist()    { J animata/histogram; }                    # per-layer / appendage / segment / hidden spreads
-binspect() { J animata/inspect "{\"x\":${1:-4400},\"y\":${2:-3040}}"; }  # nearest creature to a world point
-binspectid() { J animata/inspect "{\"id\":$1}"; }      # a specific creature by id
+bstatus()  { J animata/status; }                       # fps + frame_ms + camera + map
 bping()    { curl -s -m 2 "http://${BRIDGE_HOST}:${BRIDGE_PORT}" -d '{"jsonrpc":"2.0","id":1,"method":"animata/status"}' >/dev/null && echo up || echo down; }
-
-# one numeric field out of status (needs jq): bget frac_underground
+# one numeric field out of status (needs jq):  bget fps | bget frame_ms | bget seed
 bget()     { J animata/status | jq -r ".result.$1"; }
 
 # ── controls ─────────────────────────────────────────────────────────────────
-bpause()   { J animata/set_pause '{"paused":true}'; }
-bresume()  { J animata/set_pause '{"paused":false}'; }
-bspeed()   { J animata/set_speed "{\"steps\":${1:-8}}"; }
-bstep()    { J animata/step "{\"n\":${1:-1}}"; }        # advance n steps (works while paused)
-breset()   { J animata/reset "{\"seed\":${1:-6}}"; }
-bview()    { J animata/set_view "{\"scale\":${1:-9},\"cx\":${2:-4400},\"cy\":${3:-3040}}"; }
-bcolor()   { J animata/set_color "{\"mode\":\"${1:-species}\"}"; }   # diet|lineage|species
-# boverlay <focus> <channel> <markers> <legend> — drive observability overlays.
-# focus: layer 0..2 or -1=none ; channel: marker chan 0..N or -1=mix ; markers/legend: true|false
-boverlay() { J animata/set_overlay "{\"focus\":${1:--1},\"channel\":${2:--1},\"markers\":${3:-false},\"legend\":${4:-false}}"; }
-blegend()  { J animata/set_overlay "{\"legend\":${1:-true}}"; }
-bfocus()   { J animata/set_overlay "{\"focus\":${1:--1}}"; }          # 0=under 1=surface 2=air -1=none
-bselect()  { J animata/select "{\"x\":${1:-4400},\"y\":${2:-3040}}"; }
-bparam()   { J animata/set_param "{\"name\":\"$1\",\"value\":$2}"; } # food_per_step|predator_gain|mutation_rate
-bsave()    { J animata/save "{\"path\":\"${1:-animata_save.txt}\"}"; }
-bload()    { J animata/load "{\"path\":\"${1:-animata_save.txt}\"}"; }
-bshot()    { J animata/screenshot "{\"path\":\"${1:-shot.png}\"}"; } # PNG to repo dir; then Read it
+# bview <cx> <cz> [zoom] [yaw]  — move/zoom/rotate the iso camera
+bview()    { J animata/set_view "{\"cx\":${1:-69},\"cz\":${2:-47},\"zoom\":${3:-170},\"yaw\":${4:-0}}"; }
+bzoom()    { J animata/set_view "{\"zoom\":${1:-170}}"; }
+breseed()  { J animata/reseed "{\"seed\":${1:-1}}"; }  # regenerate the world
+bshot()    { J animata/screenshot "{\"path\":\"${1:-shot.png}\"}"; }  # PNG of the current frame; then Read it
 
 # ── combos ───────────────────────────────────────────────────────────────────
-# brun <seed> <steps> <wait_s> — reset, run at speed, wait, then print status.
-# Use this to evolve a fresh world and read the emergent outcome in one call.
-brun() {
-  local seed="${1:-6}" steps="${2:-6000}" wait_s="${3:-25}"
-  breset "$seed" >/dev/null; bresume >/dev/null; bspeed 12 >/dev/null
-  echo "running seed $seed for ~${wait_s}s..."; sleep "$wait_s"; bstatus
+# bframe <seed> <cx> <cz> <zoom> <path> — reseed, frame a spot, capture it.
+bframe() {
+  breseed "${1:-1}" >/dev/null
+  bview "${2:-69}" "${3:-47}" "${4:-170}" >/dev/null
+  bshot "${5:-shot.png}"
 }
-
-# bzoomshot <scale> <cx> <cy> <path> — frame a spot and capture it (pause first for a clean frame).
-bzoomshot() { bpause >/dev/null; bview "${1:-9}" "${2:-4400}" "${3:-3040}" >/dev/null; bshot "${4:-shot.png}"; }
