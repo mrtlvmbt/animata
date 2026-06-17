@@ -398,23 +398,20 @@ pub const FOUNDER_SYNAPSES: usize =
 // ---- Vertical layers ----
 // The world has a small stack of layers. A creature's layer is its morphological
 // stratum: wings put it in the air, a burrow appendage underground, otherwise the
-// surface. Surface dwellers forage the positioned food pellets exactly as before
-// (baseline carrying capacity unchanged). Each non-surface layer instead offers a
-// fixed foraging *capacity* split among its current occupants — density-dependent,
-// so the niche self-limits (rich when sparse, poor when crowded) and can't run
-// away. Sensing/eating/hunting are gated to a creature's layer, so a non-surface
+// surface. Sensing/eating/hunting are gated to a creature's layer, so a non-surface
 // layer is also a refuge from surface predators. This is the selection pressure
 // that finally makes the burrow/wing appendages pay.
 pub const N_LAYERS: usize = 3;
 pub const LAYER_UNDERGROUND: u8 = 0;
 pub const LAYER_SURFACE: u8 = 1;
 pub const LAYER_AIR: u8 = 2;
-// Non-surface layers grow their own *positioned* food pellets (additive — surface
-// food unchanged). A creature must spatially forage its layer's pellets (biome
-// flavor, like surface), so a layer is a spatial niche, not a diet barrier. The
-// niches are kept food-RICH (same density as the surface): a sparse niche is a
-// marginal sink that destabilizes the population, while a rich one rewards
-// colonization, so body plans steadily evolve into all three strata.
+// Every layer grows its own *positioned* food pellets (non-surface layers are
+// additive — surface food unchanged). A creature must spatially forage its own
+// layer's pellets (biome flavor, like surface), so a layer is a spatial niche, not
+// a diet barrier. The non-surface niches are kept food-RICH (same density as the
+// surface): a sparse niche is a marginal sink that destabilizes the population,
+// while a rich one rewards colonization, so body plans steadily evolve into all
+// three strata.
 pub const BENTHIC_FOOD_CAP: usize = FOOD_CAP;
 pub const AERIAL_FOOD_CAP: usize = FOOD_CAP;
 pub const BENTHIC_FOOD_PER_STEP: f32 = FOOD_PER_STEP;
