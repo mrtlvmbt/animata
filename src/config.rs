@@ -293,10 +293,14 @@ pub const RECORD_START: [u8; 3] = [3, 3, 2]; // T,T,G
 /// plan only changes by a rare macro-mutation (and never by a synapse record's
 /// type gene drifting one step) — selection then has to amplify it.
 pub const SEGMENT_TYPE_MIN: u8 = 240; // ~6% of type-gene values
+/// Type-gene band for *receptor* records (evolvable sense organs): values in
+/// `[RECEPTOR_TYPE_MIN, SEGMENT_TYPE_MIN)`. Rare like segments, so growing a new
+/// sense is a macro-mutation.
+pub const RECEPTOR_TYPE_MIN: u8 = 232; // receptor band [232,240) ~3%
 /// Type-gene band for *neuron* records (hidden-unit count): values in
-/// `[NEURON_TYPE_MIN, SEGMENT_TYPE_MIN)`. Rare, like segments, so brain width
+/// `[NEURON_TYPE_MIN, RECEPTOR_TYPE_MIN)`. Rare, like segments, so brain width
 /// changes by macro-mutation. Below this band is a synapse.
-pub const NEURON_TYPE_MIN: u8 = 224; // neuron band ~6%, synapse < this ~88%
+pub const NEURON_TYPE_MIN: u8 = 224; // neuron band [224,232) ~3%, synapse < this ~88%
 /// nt consumed by a synapse record: start(3) + type + src + dst + weight.
 pub const SYNAPSE_RECORD_NT: usize = 3 + NT_PER_GENE + 3 * NT_PER_GENE; // 19
 /// nt consumed by a segment record: start(3) + type + length + width + appendage
@@ -306,6 +310,15 @@ pub const SEGMENT_RECORD_NT: usize = 3 + NT_PER_GENE + 4 * NT_PER_GENE; // 23
 /// unit (it carries no payload yet), so the hidden-layer width is the neuron-record
 /// count, clamped to [MIN_HIDDEN, MAX_HIDDEN].
 pub const NEURON_RECORD_NT: usize = 3 + NT_PER_GENE; // 7
+/// nt consumed by a receptor record: start(3) + type + modality + layer + tuning.
+/// Each receptor is a body-grown sense organ that adds one brain INPUT port whose
+/// *function* is gene-encoded (what it measures, on which stratum, tuned to what) —
+/// so the meaning of a sense evolves, not just its presence.
+pub const RECEPTOR_RECORD_NT: usize = 3 + NT_PER_GENE + 3 * NT_PER_GENE; // 19
+/// Number of receptor modalities (primitive things a receptor can be tuned to).
+pub const RECEPTOR_MODALITIES: usize = 4;
+/// Cap on sense organs per body (bounds the per-creature extra sense queries).
+pub const MAX_RECEPTORS: usize = 6;
 
 // Brain hidden-layer width (evolvable, per creature).
 /// Founder hidden width = the historical fixed count; founders emit this many
@@ -356,7 +369,7 @@ pub const MAX_SEGMENTS: usize = 8;
 pub const SEG_LEN_RANGE: (f32, f32) = (2.0, 7.0);
 pub const SEG_WIDTH_RANGE: (f32, f32) = (1.5, 5.0);
 /// Number of appendage kinds (None, Fin, Wing, Leg, Burrow).
-pub const APPENDAGE_KINDS: usize = 6;
+pub const APPENDAGE_KINDS: usize = 5;
 /// Metabolic upkeep added per body segment, as a fraction of the body cost
 /// multiplier. Counterweight to the locomotor benefit of extra segments, so the
 /// evolved chain length settles at an interior optimum instead of the cap.

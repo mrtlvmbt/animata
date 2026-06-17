@@ -156,12 +156,12 @@ impl Creature {
         nearest_threat: Option<Vec2>,
         nearest_neighbor: Option<Vec2>,
         heard: f32,
-        cross_food: f32,
+        receptors: &[f32],
         move_mult: f32,
         metab_mult: f32,
         medium: Medium,
     ) {
-        let senses = self.sense(nearest_food, nearest_threat, nearest_neighbor, heard, cross_food);
+        let senses = self.sense(nearest_food, nearest_threat, nearest_neighbor, heard, receptors);
         let action = self.mind.decide(&senses);
         self.signal = action.signal; // emit this step's call (heard next step)
 
@@ -245,7 +245,7 @@ impl Creature {
         nearest_threat: Option<Vec2>,
         nearest_neighbor: Option<Vec2>,
         heard: f32,
-        cross_food: f32,
+        receptors: &[f32],
     ) -> Senses {
         // Old age dulls the senses too.
         let sense = self.pheno.sense_range * (1.0 - SENESCENCE_SENSE_DROP * self.senescence());
@@ -264,27 +264,25 @@ impl Creature {
         let (food_rel_angle, food_prox) = channel(nearest_food);
         let (threat_rel_angle, threat_prox) = channel(nearest_threat);
         let (neighbor_rel_angle, neighbor_prox) = channel(nearest_neighbor);
-        // One brain input per appendage segment, in body order. A locomotor limb
-        // contributes a proprioceptive CPG oscillator (gene-tuned rate, phase-
-        // staggered — a travelling rhythm to wire into gait); an eye contributes
-        // its exteroceptive reading (food on an adjacent reachable layer) instead.
-        // Founders (no appendages) get none.
+        // One proprioceptive brain input per limb, in body order: a CPG oscillator
+        // (gene-tuned rate, phase-staggered) — a travelling rhythm to wire into
+        // gait. Founders (no limbs) get none.
         let mut proprioception = [0.0f32; MAX_SEGMENTS];
         let mut n_sensors = 0usize;
         for seg in self.pheno.segments.iter() {
             if seg.appendage == Appendage::None || n_sensors >= MAX_SEGMENTS {
                 continue;
             }
-            proprioception[n_sensors] = if seg.appendage.is_sensor() {
-                cross_food
-            } else {
-                let freq = OSC_FREQ_BASE * (0.5 + seg.flexibility);
-                let stagger = n_sensors as f32 * 0.25; // quarter-cycle between limbs
-                let phase = self.age as f32 * freq + stagger;
-                (phase * std::f32::consts::TAU).sin()
-            };
+            let freq = OSC_FREQ_BASE * (0.5 + seg.flexibility);
+            let stagger = n_sensors as f32 * 0.25; // quarter-cycle between limbs
+            let phase = self.age as f32 * freq + stagger;
+            proprioception[n_sensors] = (phase * std::f32::consts::TAU).sin();
             n_sensors += 1;
         }
+        // Exteroceptive inputs: one per sense organ, already computed by the world.
+        let n_receptors = self.pheno.receptors.len().min(MAX_RECEPTORS);
+        let mut receptor_in = [0.0f32; MAX_RECEPTORS];
+        receptor_in[..n_receptors].copy_from_slice(&receptors[..n_receptors]);
         Senses {
             food_rel_angle,
             food_prox,
@@ -296,6 +294,8 @@ impl Creature {
             energy: (self.energy / REPRO_ENERGY).min(1.0),
             proprioception,
             n_sensors,
+            receptors: receptor_in,
+            n_receptors,
         }
     }
 

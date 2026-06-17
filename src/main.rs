@@ -659,6 +659,19 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
             mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
         let size = cr.pheno.radius * lerp(1.7, 2.2, c) * view.scale;
+        // Sense organs: a row of small eyes above the head (near zoom only), so a
+        // body carrying evolved receptors reads as "it can see something".
+        if size >= 5.0 && !cr.pheno.receptors.is_empty() {
+            let n = cr.pheno.receptors.len().min(MAX_RECEPTORS);
+            let er = (size * 0.16).clamp(1.5, 5.0);
+            let eye = Color::new(0.97, 0.9, 0.35, 1.0);
+            let ey = center.y - size * 1.3;
+            for k in 0..n {
+                let ex = center.x + (k as f32 - (n as f32 - 1.0) * 0.5) * er * 2.4;
+                mesh_tri(&mut mesh, MAX_V, MAX_I, vec2(ex, ey - er), vec2(ex + er, ey), vec2(ex, ey + er), eye);
+                mesh_tri(&mut mesh, MAX_V, MAX_I, vec2(ex, ey - er), vec2(ex, ey + er), vec2(ex - er, ey), eye);
+            }
+        }
         // LOD: below ~LOD_POINT_PX a heading triangle is sub-pixel (invisible) and
         // costs trig per creature. At overview/giant-map zoom draw a fixed-size dot
         // instead — the "simplified overview". (Phase 0 render seam; later the
@@ -749,7 +762,6 @@ fn appendage_color(app: genome::Appendage) -> Color {
         genome::Appendage::Wing => (0.92, 0.92, 1.0),
         genome::Appendage::Leg => (0.72, 0.52, 0.30),
         genome::Appendage::Burrow => (0.42, 0.32, 0.25),
-        genome::Appendage::Eye => (0.95, 0.85, 0.30),
         genome::Appendage::None => return Color::new(1.0, 1.0, 1.0, 0.0),
     };
     Color::new(r, g, b, 0.92)
@@ -845,16 +857,6 @@ fn draw_appendage(
         mesh_tri(mesh, max_v, max_i, tip, b0, b1, col);
         return;
     }
-    if let Eye = app {
-        // An eyeball raised on a short stalk above the segment (screen-up).
-        let tip = sc + vec2(0.0, -r * 1.7);
-        let stalk = Color::new(0.5, 0.45, 0.2, 1.0);
-        mesh_tri(mesh, max_v, max_i, vec2(sc.x - 1.0, sc.y), vec2(sc.x + 1.0, sc.y), tip, stalk);
-        let e = r * 0.75;
-        mesh_tri(mesh, max_v, max_i, vec2(tip.x, tip.y - e), vec2(tip.x + e, tip.y), vec2(tip.x, tip.y + e), col);
-        mesh_tri(mesh, max_v, max_i, vec2(tip.x, tip.y - e), vec2(tip.x, tip.y + e), vec2(tip.x - e, tip.y), col);
-        return;
-    }
     let (span, sweep) = match app {
         Fin => (r * 1.5, 0.5),   // short, moderately swept
         Wing => (r * 2.6, 0.95), // long, strongly swept back
@@ -879,7 +881,6 @@ fn appendage_tint(base: Color, app: genome::Appendage) -> Color {
         genome::Appendage::Wing => ((0.95, 0.95, 0.98), 0.45),
         genome::Appendage::Leg => ((0.70, 0.50, 0.30), 0.40),
         genome::Appendage::Burrow => ((0.35, 0.28, 0.22), 0.45),
-        genome::Appendage::Eye => ((0.95, 0.85, 0.30), 0.35),
     };
     Color::new(
         base.r + (t.0 - base.r) * w,
