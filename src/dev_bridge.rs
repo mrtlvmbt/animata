@@ -35,6 +35,9 @@ pub enum Cmd {
     SetColor(ColorMode),
     Select { id: Option<u64>, at: Option<Vec2> },
     SetParam { name: String, value: f64 },
+    /// Drive the observability overlays. `focus`: layer 0..2 or <0 = none.
+    /// `channel`: marker channel 0..N or <0 = RGB mix. `markers`/`legend`: toggles.
+    SetOverlay { focus: Option<i64>, channel: Option<i64>, markers: Option<bool>, legend: Option<bool> },
     Save(String),
     Load(String),
     Screenshot(String),
@@ -138,6 +141,12 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             };
             Ok(Cmd::SetColor(mode))
         }
+        "animata/set_overlay" => Ok(Cmd::SetOverlay {
+            focus: p.get("focus").and_then(Value::as_i64),
+            channel: p.get("channel").and_then(Value::as_i64),
+            markers: p.get("markers").and_then(Value::as_bool),
+            legend: p.get("legend").and_then(Value::as_bool),
+        }),
         "animata/select" => Ok(Cmd::Select { id: u("id"), at: at() }),
         "animata/set_param" => Ok(Cmd::SetParam {
             name: s("name").ok_or("name must be string")?,

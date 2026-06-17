@@ -39,6 +39,11 @@ bstep()    { J animata/step "{\"n\":${1:-1}}"; }        # advance n steps (works
 breset()   { J animata/reset "{\"seed\":${1:-6}}"; }
 bview()    { J animata/set_view "{\"scale\":${1:-9},\"cx\":${2:-4400},\"cy\":${3:-3040}}"; }
 bcolor()   { J animata/set_color "{\"mode\":\"${1:-species}\"}"; }   # diet|lineage|species
+# boverlay <focus> <channel> <markers> <legend> — drive observability overlays.
+# focus: layer 0..2 or -1=none ; channel: marker chan 0..N or -1=mix ; markers/legend: true|false
+boverlay() { J animata/set_overlay "{\"focus\":${1:--1},\"channel\":${2:--1},\"markers\":${3:-false},\"legend\":${4:-false}}"; }
+blegend()  { J animata/set_overlay "{\"legend\":${1:-true}}"; }
+bfocus()   { J animata/set_overlay "{\"focus\":${1:--1}}"; }          # 0=under 1=surface 2=air -1=none
 bselect()  { J animata/select "{\"x\":${1:-4400},\"y\":${2:-3040}}"; }
 bparam()   { J animata/set_param "{\"name\":\"$1\",\"value\":$2}"; } # food_per_step|predator_gain|mutation_rate
 bsave()    { J animata/save "{\"path\":\"${1:-animata_save.txt}\"}"; }
