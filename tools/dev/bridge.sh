@@ -32,7 +32,7 @@ bget()     { J animata/status | jq -r ".result.$1"; }
 bview()    { J animata/set_view "{\"cx\":${1:-69},\"cz\":${2:-47},\"zoom\":${3:-170},\"yaw\":${4:-0}}"; }
 bzoom()    { J animata/set_view "{\"zoom\":${1:-170}}"; }
 breseed()  { J animata/reseed "{\"seed\":${1:-1}}"; }  # regenerate the world
-bshot()    { J animata/screenshot "{\"path\":\"${1:-shot.png}\"}"; }  # PNG of the current frame; then Read it
+bshot()    { J animata/screenshot "{\"path\":\"${1:-shot.png}\"}"; }  # PNG from offscreen target (works unfocused); then Read it
 
 # ── combos ───────────────────────────────────────────────────────────────────
 # bframe <seed> <cx> <cz> <zoom> <path> — reseed, frame a spot, capture it.

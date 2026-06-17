@@ -38,12 +38,17 @@ curl -s 127.0.0.1:8127 \
 - **Transport:** bg HTTP thread (`tiny_http`) ↔ main loop via a shared queue +
   per-request one-shot reply channel; the HTTP handler blocks up to 3 s for the
   main loop's answer (`timeout: main loop did not answer` if it never draws).
-- **Screenshots are deferred:** the `Screenshot` command stashes its reply; after
-  the frame is fully drawn the main loop runs `get_screen_data().export_png(path)`
-  and answers. Restrict paths to the repo dir.
-- **Sandbox gotcha:** macroquad only services frames (hence the bridge) while the
-  window is **foregrounded** — an unfocused/headless window stalls the loop and
-  every call times out. Capture locally with the window in focus.
+- **Screenshots read an offscreen target:** the scene is rendered into a
+  `RenderTarget` each frame and blitted to the window. The `Screenshot` command
+  stashes its reply; post-draw the main loop reads that target's texture
+  (`get_texture_data`, rows flipped back) and `export_png(path)`. Reading the
+  finished pixels *before* the window present decouples capture from the throttled
+  front buffer — so it works even when the window isn't focused (GRAV-style
+  framebuffer read), not just `get_screen_data` of a foregrounded window. Restrict
+  paths to the repo dir.
+- **Remaining limit:** capture still needs the loop to *tick*. A merely unfocused
+  (but visible) window keeps ticking → capture works. A fully occluded/minimized
+  window can have its frames frozen by the OS → the loop stalls and calls time out.
 
 ## Maintaining it
 
