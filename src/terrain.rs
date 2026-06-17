@@ -34,6 +34,22 @@ const DETAIL_LATTICE: f32 = 22.0;
 const DETAIL_OCTAVES: u32 = 5;
 /// Detail admix amplitude in normalised `[0,1]` elevation units (≈ `±WEIGHT/2`).
 const DETAIL_WEIGHT: f32 = 0.34;
+/// Moisture lattice (columns) — sets how dry/wet a region is, choosing the lowland
+/// biome (desert↔plains↔forest). Scaled by `MAP_SCALE` so moisture regions are big.
+const MOIST_LATTICE: f32 = 21.0 * MAP_SCALE as f32;
+const MOIST_OCTAVES: u32 = 3;
+/// Ridged-noise field for mountain ridgelines (belts scale with the map). Domain-warped
+/// by a broader field so ridges flow instead of forming blobs.
+const RIDGE_LATTICE: f32 = 30.0 * MAP_SCALE as f32;
+const RIDGE_OCTAVES: u32 = 4;
+const WARP_LATTICE: f32 = 55.0 * MAP_SCALE as f32;
+const WARP_AMP: f32 = 0.6;
+/// Macro elevation at which ridges start to bite (below this the land stays rolling).
+/// Kept fairly high so ridges (and the rock band they lift into) stay LOCAL to genuine
+/// highlands rather than spreading mountains across the map.
+const RIDGE_ONSET: f32 = 0.62;
+/// Ridge amplitude in normalised `[0,1]` elevation units (crest lift / trough carve).
+const RIDGE_WEIGHT: f32 = 0.32;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -156,7 +172,23 @@ fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
 fn elevation(seed: u64, x: f32, y: f32) -> f32 {
     let macro_e = fbm(seed, x / ELEV_LATTICE, y / ELEV_LATTICE, 1, ELEV_OCTAVES);
     let detail = fbm(seed, x / DETAIL_LATTICE, y / DETAIL_LATTICE, 5, DETAIL_OCTAVES) - 0.5;
-    (macro_e + detail * DETAIL_WEIGHT).clamp(0.0, 1.0)
+
+    // Ridged noise for mountain ridgelines/cliffs, applied only where the macro field
+    // is already high (so lowlands stay rolling). Domain-warp the sample so ridges
+    // flow organically instead of forming round blobs. `1 - |2n-1|` peaks at 1 along
+    // ridgelines: positive lifts crests, negative carves the troughs between them
+    // (which, reaching the sea, read as fjord-like inlets). True long parallel CHAINS
+    // come later from the tectonic layer; this gives ridge texture + sharper relief.
+    let wx = fbm(seed, x / WARP_LATTICE, y / WARP_LATTICE, 11, 2) - 0.5;
+    let wy = fbm(seed, x / WARP_LATTICE, y / WARP_LATTICE, 13, 2) - 0.5;
+    let rx = x / RIDGE_LATTICE + wx * WARP_AMP;
+    let ry = y / RIDGE_LATTICE + wy * WARP_AMP;
+    let rn = fbm(seed, rx, ry, 3, RIDGE_OCTAVES);
+    let ridged = 1.0 - (2.0 * rn - 1.0).abs();
+    let mountainness = ((macro_e - RIDGE_ONSET) / (1.0 - RIDGE_ONSET)).clamp(0.0, 1.0);
+
+    (macro_e + detail * DETAIL_WEIGHT + (ridged - 0.5) * RIDGE_WEIGHT * mountainness)
+        .clamp(0.0, 1.0)
 }
 
 /// Deterministic per-column unit value in `[0, 1)` for placing discrete features
@@ -193,16 +225,25 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
     let h = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).round();
     let h = (h as i32).clamp(LAND_FOOT as i32, MAX_H as i32) as u8;
 
+    // Altitude gates the vertical biomes (rock/snow only high, so colour still tracks
+    // height — no "rock at low ground"); below the rock line, MOISTURE picks the
+    // lowland biome, which is a natural same-height transition (dry desert ↔ grassland
+    // ↔ wet forest), not the old spilled-paint look.
     let biome = if h <= LAND_FOOT {
         BiomeKind::Beach // shore ring
     } else if h >= MAX_H - 1 {
         BiomeKind::Snow // caps (top 2 levels)
     } else if h >= MAX_H - 5 {
         BiomeKind::Mountain // grey massif (4 levels)
-    } else if h >= LAND_FOOT + 4 {
-        BiomeKind::Forest // wooded hills
     } else {
-        BiomeKind::Plains // low grassland
+        let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7, MOIST_OCTAVES);
+        if moist < 0.38 {
+            BiomeKind::Desert
+        } else if moist > 0.60 {
+            BiomeKind::Forest
+        } else {
+            BiomeKind::Plains
+        }
     };
     pack_cell(h, biome, 0)
 }
@@ -291,6 +332,31 @@ impl VoxelTerrain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guard the "mountains are LOCAL" invariant: rock + snow must stay a minority of
+    /// the land, so added worldgen complexity (ridged noise now; tectonics/erosion
+    /// later) can't quietly turn the map into one mountain mess. Prints the fraction.
+    #[test]
+    fn mountains_are_a_minority() {
+        for seed in 1..4 {
+            let t = VoxelTerrain::new(seed);
+            let (mut land, mut high) = (0u64, 0u64);
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    if t.is_water(x, y) {
+                        continue;
+                    }
+                    land += 1;
+                    if matches!(t.biome_at(x, y), BiomeKind::Mountain | BiomeKind::Snow) {
+                        high += 1;
+                    }
+                }
+            }
+            let frac = high as f64 / land.max(1) as f64;
+            eprintln!("seed {seed}: mountain+snow = {:.1}% of land", frac * 100.0);
+            assert!(frac < 0.35, "mountains dominate the land for seed {seed}: {:.1}%", frac * 100.0);
+        }
+    }
 
     #[test]
     fn bit_pack_roundtrips() {
