@@ -178,6 +178,12 @@ async fn main() {
     // Show the Muller plot (stacked lineage shares over time).
     let mut show_muller = false;
     let mut show_markers = false;
+    // Layer focus: when set, creatures/food off this stratum are dimmed (F cycles).
+    let mut focus_layer: Option<u8> = None;
+    // Which marker channel the overlay shows (None = RGB mix; J cycles).
+    let mut marker_channel: Option<usize> = None;
+    // Color/key legend overlay (H toggles).
+    let mut show_legend = false;
     // Cached static biome background texture, rebuilt when the biome seed changes.
     let mut biome_tex: Option<Texture2D> = None;
     let mut biome_tex_seed = u64::MAX;
@@ -229,6 +235,26 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::K) {
             show_markers = !show_markers;
+        }
+        if is_key_pressed(KeyCode::F) {
+            // Cycle layer focus: all -> underground -> surface -> air -> all.
+            focus_layer = match focus_layer {
+                None => Some(LAYER_UNDERGROUND),
+                Some(LAYER_UNDERGROUND) => Some(LAYER_SURFACE),
+                Some(LAYER_SURFACE) => Some(LAYER_AIR),
+                _ => None,
+            };
+        }
+        if is_key_pressed(KeyCode::J) {
+            // Cycle the marker overlay channel: mix -> 0 -> 1 -> ... -> mix.
+            marker_channel = match marker_channel {
+                None => Some(0),
+                Some(c) if c + 1 < N_MARKER_CHANNELS => Some(c + 1),
+                _ => None,
+            };
+        }
+        if is_key_pressed(KeyCode::H) {
+            show_legend = !show_legend;
         }
         if is_key_pressed(KeyCode::Y) {
             let msg = match world.ancestry.export_csv(TREE_PATH) {
@@ -360,6 +386,21 @@ async fn main() {
                     color_mode = m;
                     serde_json::json!({ "ok": true })
                 }
+                Cmd::SetOverlay { focus, channel, markers, legend } => {
+                    if let Some(fl) = focus {
+                        focus_layer = if (0..N_LAYERS as i64).contains(&fl) { Some(fl as u8) } else { None };
+                    }
+                    if let Some(ch) = channel {
+                        marker_channel = if (0..N_MARKER_CHANNELS as i64).contains(&ch) { Some(ch as usize) } else { None };
+                    }
+                    if let Some(b) = markers {
+                        show_markers = b;
+                    }
+                    if let Some(b) = legend {
+                        show_legend = b;
+                    }
+                    serde_json::json!({ "ok": true })
+                }
                 Cmd::Select { id, at } => {
                     selected = id.or_else(|| at.and_then(|p| pick_creature(&world, p)));
                     serde_json::json!({ "selected": selected })
@@ -429,10 +470,10 @@ async fn main() {
         // Marker field overlay (toggle K): scent channels as R/G/B clouds, so
         // emergent trails/signals are visible. Drawn under the entities.
         if show_markers {
-            draw_markers(&world, &view);
+            draw_markers(&world, &view, marker_channel);
         }
         // All food + creatures in a single batched mesh (one draw call).
-        let drawn = draw_entities(&world, &view, color_mode);
+        let drawn = draw_entities(&world, &view, color_mode, focus_layer);
         // Subtle parched tint over the world during a drought.
         if world.in_drought() {
             draw_rectangle(0.0, 0.0, VIEW_W, VIEW_H, Color::new(0.55, 0.4, 0.12, 0.12));
@@ -448,6 +489,9 @@ async fn main() {
         }
         draw_panel(&world);
         draw_hud(&world, paused, speed, drawn, color_mode);
+        if show_legend {
+            draw_legend(focus_layer, marker_channel);
+        }
         if let Some(id) = selected {
             if let Some(c) = world.creature_by_id(id) {
                 draw_inspector(c, &world.ancestry);
@@ -507,19 +551,45 @@ fn build_biome_texture(world: &World) -> Texture2D {
 /// Translucent overlay of the marker field: each occupied cell drawn as a soft
 /// blob whose colour mixes the channels (ch0→R, ch1→G, ch2→B) at its layer's
 /// height. Lets emergent scent clouds and trails be seen (toggle K).
-fn draw_markers(world: &World, view: &View) {
+fn draw_markers(world: &World, view: &View, channel: Option<usize>) {
     let m = &world.markers;
     let (cols, rows, cell) = (m.cols(), m.rows(), m.cell());
     let half = cell * 0.5;
     let rad = (cell * view.scale * ISO_KX * 0.85).max(1.0);
+    // Distinct hue per channel when isolating one (so J-cycling reads clearly).
+    let chan_hue = |ch: usize| match ch % 3 {
+        0 => (1.0, 0.4, 0.4),
+        1 => (0.4, 1.0, 0.4),
+        _ => (0.4, 0.6, 1.0),
+    };
     for layer in 0..N_LAYERS as u8 {
         let h = layer_height(layer);
         for y in 0..rows {
             for x in 0..cols {
-                let r = m.at(layer, 0, x, y);
-                let g = if N_MARKER_CHANNELS > 1 { m.at(layer, 1, x, y) } else { 0.0 };
-                let b = if N_MARKER_CHANNELS > 2 { m.at(layer, 2, x, y) } else { 0.0 };
-                let amax = r.max(g).max(b);
+                let (col, amax) = match channel {
+                    // One channel in isolation: its own hue, brightness = intensity.
+                    Some(ch) => {
+                        let v = m.at(layer, ch, x, y);
+                        let (hr, hg, hb) = chan_hue(ch);
+                        (Color::new(hr, hg, hb, (v * 0.8).min(0.7)), v)
+                    }
+                    // All channels mixed into RGB.
+                    None => {
+                        let r = m.at(layer, 0, x, y);
+                        let g = if N_MARKER_CHANNELS > 1 { m.at(layer, 1, x, y) } else { 0.0 };
+                        let b = if N_MARKER_CHANNELS > 2 { m.at(layer, 2, x, y) } else { 0.0 };
+                        let amax = r.max(g).max(b).max(1e-6);
+                        (
+                            Color::new(
+                                (r / amax).clamp(0.0, 1.0),
+                                (g / amax).clamp(0.0, 1.0),
+                                (b / amax).clamp(0.0, 1.0),
+                                (amax * 0.7).min(0.6),
+                            ),
+                            amax,
+                        )
+                    }
+                };
                 if amax < 0.03 {
                     continue;
                 }
@@ -527,12 +597,6 @@ fn draw_markers(world: &World, view: &View) {
                 if c.x < -rad || c.x > VIEW_W + rad || c.y < -rad || c.y > VIEW_H + rad {
                     continue;
                 }
-                let col = Color::new(
-                    (r / amax).clamp(0.0, 1.0),
-                    (g / amax).clamp(0.0, 1.0),
-                    (b / amax).clamp(0.0, 1.0),
-                    (amax * 0.7).min(0.6),
-                );
                 draw_circle(c.x, c.y, rad, col);
             }
         }
@@ -591,11 +655,17 @@ fn flavor_color(f: f32) -> Color {
     Color::new(c.0, c.1, c.2, 1.0)
 }
 
-fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
+fn draw_entities(world: &World, view: &View, mode: ColorMode, focus: Option<u8>) -> usize {
     let m = 24.0; // cull margin
     let on_screen = |p: Vec2| p.x >= -m && p.x <= VIEW_W + m && p.y >= -m && p.y <= VIEW_H + m;
     let uv = Vec2::ZERO;
     let mut drawn = 0;
+    // Layer focus: entities off the focused stratum are drawn faint, so one layer
+    // can be read in isolation. Alpha factor per layer.
+    let dim_of = |layer: u8| match focus {
+        Some(l) if l != layer => 0.16,
+        _ => 1.0,
+    };
 
     // Batched into a reused mesh, flushed in chunks: a single draw_mesh that
     // exceeds macroquad's per-draw geometry limit (10000 verts / 5000 indices)
@@ -626,12 +696,14 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         // Surface food, zoomed in enough, grows as standing vegetation (trees and
         // shrubs); otherwise (overview, or the benthic/aerial strata) it's a flat
         // flavour-tinted quad at its layer height.
+        let fdim = dim_of(flayer);
         if flayer == LAYER_SURFACE && fr >= 3.5 {
-            draw_plant(&mut mesh, MAX_V, MAX_I, view, *f, fl, fr);
+            draw_plant(&mut mesh, MAX_V, MAX_I, view, *f, fl, fr, fdim);
             drawn += 1;
             continue;
         }
-        let food_c = flavor_color(fl);
+        let mut food_c = flavor_color(fl);
+        food_c.a *= fdim;
         if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
             flush(&mut mesh);
         }
@@ -658,6 +730,7 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
     let lerp = |a: f32, t: f32, w: f32| a + (t - a) * w;
     for &ci in &order {
         let cr = &world.creatures[ci];
+        let dim = dim_of(cr.layer);
         let h = layer_height(cr.layer);
         let center = view.project(cr.pos, h);
         if !on_screen(center) {
@@ -687,13 +760,15 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
             ),
             _ => color,
         };
+        // Layer-focus dimming: fade everything off the focused stratum.
+        let color = Color::new(color.r, color.g, color.b, color.a * dim);
         // A flier casts a soft shadow on the ground (height 0) below its lifted
         // body, so the air stratum reads even in the iso view. Pushed before the
         // body so the body floats over it.
         if cr.layer == LAYER_AIR && view.scale * LAYER_LIFT > 2.0 {
             let ground = view.project(cr.pos, 0.0);
             let sr = (cr.pheno.radius * view.scale).max(1.5);
-            let shadow = Color::new(0.0, 0.0, 0.0, 0.28);
+            let shadow = Color::new(0.0, 0.0, 0.0, 0.28 * dim);
             if mesh.vertices.len() + 4 > MAX_V || mesh.indices.len() + 6 > MAX_I {
                 flush(&mut mesh);
             }
@@ -709,7 +784,7 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
         if size >= 5.0 && !cr.pheno.receptors.is_empty() {
             let n = cr.pheno.receptors.len().min(MAX_RECEPTORS);
             let er = (size * 0.16).clamp(1.5, 5.0);
-            let eye = Color::new(0.97, 0.9, 0.35, 1.0);
+            let eye = Color::new(0.97, 0.9, 0.35, dim);
             let ey = center.y - size * 1.3;
             for k in 0..n {
                 let ex = center.x + (k as f32 - (n as f32 - 1.0) * 0.5) * er * 2.4;
@@ -776,7 +851,9 @@ fn draw_entities(world: &World, view: &View, mode: ColorMode) -> usize {
                 // only at near zoom.
                 if app != genome::Appendage::None && r >= 2.0 {
                     let flap = 1.0 + 0.3 * osc;
-                    draw_appendage(&mut mesh, MAX_V, MAX_I, sc, dir, perp, r, app, flap, appendage_color(app));
+                    let mut ac = appendage_color(app);
+                    ac.a *= dim;
+                    draw_appendage(&mut mesh, MAX_V, MAX_I, sc, dir, perp, r, app, flap, ac);
                 }
             }
             drawn += 1;
@@ -852,7 +929,8 @@ fn mesh_blob(mesh: &mut Mesh, max_v: usize, max_i: usize, c: Vec2, rw: f32, rh: 
 /// glance. About half the pellets grow into tall trees, the rest low shrubs;
 /// forest-flavour pellets grow taller and the canopy keeps a hint of the biome
 /// colour over a leafy green.
-fn draw_plant(mesh: &mut Mesh, max_v: usize, max_i: usize, view: &View, pos: Vec2, flavor: f32, fr: f32) {
+#[allow(clippy::too_many_arguments)]
+fn draw_plant(mesh: &mut Mesh, max_v: usize, max_i: usize, view: &View, pos: Vec2, flavor: f32, fr: f32, dim: f32) {
     let rnd = plant_hash(pos);
     let tree = plant_hash(pos + vec2(7.3, 1.9)) > 0.45;
     let ht = if tree {
@@ -865,14 +943,14 @@ fn draw_plant(mesh: &mut Mesh, max_v: usize, max_i: usize, view: &View, pos: Vec
     let trunk_h = ht * if tree { 0.5 } else { 0.55 };
     let ttop = view.project(pos, trunk_h);
     let tw = (fr * (if tree { 0.34 } else { 0.28 })).max(1.0);
-    let brown = Color::new(0.34, 0.24, 0.16, 1.0);
+    let brown = Color::new(0.34, 0.24, 0.16, dim);
     mesh_tri(mesh, max_v, max_i, vec2(ground.x - tw, ground.y), vec2(ground.x + tw, ground.y), vec2(ttop.x + tw, ttop.y), brown);
     mesh_tri(mesh, max_v, max_i, vec2(ground.x - tw, ground.y), vec2(ttop.x + tw, ttop.y), vec2(ttop.x - tw, ttop.y), brown);
     // Canopy: a rounded leafy blob, biome colour blended toward green.
     let c = view.project(pos, ht * if tree { 0.8 } else { 0.92 });
     let cw = fr * if tree { 2.3 } else { 1.6 };
     let f = flavor_color(flavor);
-    let leaf = Color::new(f.r * 0.55, (f.g * 0.6 + 0.45).min(1.0), f.b * 0.5, 1.0);
+    let leaf = Color::new(f.r * 0.55, (f.g * 0.6 + 0.45).min(1.0), f.b * 0.5, dim);
     mesh_blob(mesh, max_v, max_i, c, cw, cw * 0.82, leaf);
 }
 
@@ -1103,12 +1181,60 @@ fn draw_hud(world: &World, paused: bool, speed: u32, drawn: usize, color_mode: C
         );
     }
     draw_text(
-        "Space pause  Up/Down speed  R reset  B brain  T tune  S/L save/load  O csv  G color  Y export  P tree  D diet  M muller  wheel zoom  mid-drag pan  C recenter  L-click inspect  R-click food",
+        "Space pause  Up/Down speed  R reset  B brain  T tune  S/L save  O csv  G color  Y export  P tree  D diet  M muller  K markers  J chan  F layer  H legend  wheel zoom  drag pan  C recenter  L-click inspect  R-click food",
         10.0,
         VIEW_H - 12.0,
-        16.0,
+        15.0,
         Color::new(0.6, 0.6, 0.65, 1.0),
     );
+}
+
+/// Color/key legend overlay (toggle H): what the appendage / layer / diet / marker
+/// colours mean, and which layer focus / marker channel is active.
+fn draw_legend(focus: Option<u8>, channel: Option<usize>) {
+    use genome::Appendage::*;
+    let x = 12.0;
+    let mut y = 70.0;
+    let w = 188.0;
+    draw_rectangle(x - 6.0, y - 18.0, w, 312.0, Color::new(0.02, 0.03, 0.05, 0.82));
+    let dim = Color::new(0.55, 0.6, 0.65, 1.0);
+    let mut head = |y: &mut f32, t: &str| {
+        draw_text(t, x, *y, 16.0, Color::new(0.8, 0.85, 0.95, 1.0));
+        *y += 17.0;
+    };
+    let mut row = |y: &mut f32, col: Color, label: &str, active: bool| {
+        draw_rectangle(x, *y - 9.0, 13.0, 11.0, col);
+        let c = if active { Color::new(1.0, 0.95, 0.5, 1.0) } else { dim };
+        let tag = if active { " <" } else { "" };
+        draw_text(&format!("{label}{tag}"), x + 20.0, *y, 15.0, c);
+        *y += 16.0;
+    };
+    head(&mut y, "LEGEND (H)");
+    head(&mut y, "appendages");
+    row(&mut y, appendage_color(Fin), "fin", false);
+    row(&mut y, appendage_color(Wing), "wing", false);
+    row(&mut y, appendage_color(Leg), "leg", false);
+    row(&mut y, appendage_color(Burrow), "burrow", false);
+    row(&mut y, Color::new(0.97, 0.9, 0.35, 1.0), "eye (receptor)", false);
+    y += 4.0;
+    head(&mut y, "diet");
+    row(&mut y, Color::new(0.35, 0.85, 0.45, 1.0), "herbivore", false);
+    row(&mut y, Color::new(0.95, 0.25, 0.2, 1.0), "carnivore", false);
+    y += 4.0;
+    head(&mut y, "layers (F)");
+    row(&mut y, Color::new(0.45, 0.45, 0.5, 1.0), "underground", focus == Some(LAYER_UNDERGROUND));
+    row(&mut y, Color::new(0.75, 0.75, 0.78, 1.0), "surface", focus == Some(LAYER_SURFACE));
+    row(&mut y, Color::new(0.92, 0.92, 1.0, 1.0), "air", focus == Some(LAYER_AIR));
+    y += 4.0;
+    head(&mut y, "marker chan (J/K)");
+    for ch in 0..N_MARKER_CHANNELS {
+        let (r, g, b) = match ch % 3 {
+            0 => (1.0, 0.4, 0.4),
+            1 => (0.4, 1.0, 0.4),
+            _ => (0.4, 0.6, 1.0),
+        };
+        row(&mut y, Color::new(r, g, b, 1.0), &format!("channel {ch}"), channel == Some(ch));
+    }
 }
 
 /// Live-tuning panel (immediate-mode UI). Mutates `params` in place.
