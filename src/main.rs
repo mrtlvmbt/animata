@@ -17,6 +17,12 @@ mod dev_bridge;
 mod terrain;
 
 use config::*;
+use macroquad::miniquad::{
+    Bindings, BlendFactor, BlendState, BlendValue, BufferSource, BufferType, BufferUsage,
+    Comparison, Equation, PassAction, Pipeline, PipelineParams, RenderingBackend, ShaderMeta,
+    ShaderSource, UniformBlockLayout, UniformDesc, UniformType, UniformsSource, VertexAttribute,
+    VertexFormat,
+};
 use macroquad::prelude::*;
 use terrain::{
     cell_biome, cell_flags, cell_height, feature_unit, BiomeKind, VoxelTerrain, FLAG_WATER, SEA_ABS,
@@ -110,12 +116,137 @@ fn aabb_in_view(vp: &Mat4, lo: Vec3, hi: Vec3) -> bool {
     !(maxx < -1.0 - M || minx > 1.0 + M || maxy < -1.0 - M || miny > 1.0 + M)
 }
 
+// ---- Retained-mode chunk rendering (persistent GPU buffers) ----
+//
+// macroquad's `draw_mesh` re-uploads a mesh's vertices into its batch buffer every
+// frame, so drawing a big world costs O(visible vertices) per frame even when the
+// geometry never changes. Instead we upload each chunk mesh to an immutable GPU
+// buffer ONCE (here, via raw miniquad), and each frame issue a cheap draw call per
+// *visible* chunk — per-frame cost becomes O(visible chunk count). Mirrors macroquad's
+// own 3D vertex layout so we can feed it the `Mesh` vertices unchanged.
+
+const CHUNK_VERT: &str = r#"#version 100
+attribute vec3 position;
+attribute vec4 color0;
+uniform mat4 mvp;
+varying lowp vec4 color;
+void main() {
+    gl_Position = mvp * vec4(position, 1.0);
+    color = color0 / 255.0;
+}"#;
+
+const CHUNK_FRAG: &str = r#"#version 100
+varying lowp vec4 color;
+void main() { gl_FragColor = color; }"#;
+
+#[repr(C)]
+struct ChunkUniforms {
+    mvp: Mat4,
+}
+
+/// One chunk's geometry living in immutable GPU buffers, plus its world AABB for culling.
+struct GpuChunk {
+    bindings: Bindings,
+    n_idx: i32,
+    lo: Vec3,
+    hi: Vec3,
+}
+
+/// Build the pipeline once. Vertex layout matches macroquad's `Vertex` (40 bytes:
+/// position f32x3, uv f32x2, color u8x4, normal f32x4) so the `Mesh` buffers upload
+/// as-is; the shader only consumes position + colour. Alpha blending for the water pass.
+fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
+    let shader = ctx
+        .new_shader(
+            ShaderSource::Glsl { vertex: CHUNK_VERT, fragment: CHUNK_FRAG },
+            ShaderMeta {
+                images: vec![],
+                uniforms: UniformBlockLayout {
+                    uniforms: vec![UniformDesc::new("mvp", UniformType::Mat4)],
+                },
+            },
+        )
+        .expect("chunk shader");
+    ctx.new_pipeline(
+        &[macroquad::miniquad::BufferLayout::default()],
+        &[
+            VertexAttribute::new("position", VertexFormat::Float3),
+            VertexAttribute::new("texcoord", VertexFormat::Float2),
+            VertexAttribute::new("color0", VertexFormat::Byte4),
+            VertexAttribute::new("normal", VertexFormat::Float4),
+        ],
+        shader,
+        PipelineParams {
+            depth_test: Comparison::LessOrEqual,
+            depth_write: true,
+            color_blend: Some(BlendState::new(
+                Equation::Add,
+                BlendFactor::Value(BlendValue::SourceAlpha),
+                BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
+            )),
+            ..Default::default()
+        },
+    )
+}
+
+/// Upload built chunk meshes to immutable GPU buffers.
+fn upload_chunks(ctx: &mut dyn RenderingBackend, batches: &[Batch]) -> Vec<GpuChunk> {
+    batches
+        .iter()
+        .map(|b| {
+            let vb = ctx.new_buffer(
+                BufferType::VertexBuffer,
+                BufferUsage::Immutable,
+                BufferSource::slice(&b.mesh.vertices),
+            );
+            let ib = ctx.new_buffer(
+                BufferType::IndexBuffer,
+                BufferUsage::Immutable,
+                BufferSource::slice(&b.mesh.indices),
+            );
+            GpuChunk {
+                bindings: Bindings {
+                    vertex_buffers: vec![vb],
+                    index_buffer: ib,
+                    images: vec![],
+                },
+                n_idx: b.mesh.indices.len() as i32,
+                lo: b.lo,
+                hi: b.hi,
+            }
+        })
+        .collect()
+}
+
+/// Release a chunk set's GPU buffers (before re-uploading on reseed).
+fn free_chunks(ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk]) {
+    for c in chunks {
+        ctx.delete_buffer(c.bindings.vertex_buffers[0]);
+        ctx.delete_buffer(c.bindings.index_buffer);
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
     let mut seed: u64 = 1;
     let mut terrain = VoxelTerrain::new(seed);
-    let mut meshes = build_world_meshes(&terrain);
+
+    // Build the world meshes on the CPU, upload them to immutable GPU buffers, then
+    // drop the CPU copy (the GPU owns the geometry now). Rebuilt the same way on reseed.
+    let pipeline;
+    let mut gpu_opaque;
+    let mut gpu_water;
+    let (mut opaque_count, mut water_count);
+    {
+        let m = build_world_meshes(&terrain);
+        opaque_count = m.opaque.len();
+        water_count = m.water.len();
+        let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+        pipeline = chunk_pipeline(ctx);
+        gpu_opaque = upload_chunks(ctx, &m.opaque);
+        gpu_water = upload_chunks(ctx, &m.water);
+    }
 
     // The scene is rendered into this offscreen target every frame, then blitted to
     // the window. A screenshot reads the target's texture directly — i.e. the
@@ -186,7 +317,14 @@ async fn main() {
         if is_key_pressed(KeyCode::R) {
             seed = seed.wrapping_add(1);
             terrain = VoxelTerrain::new(seed);
-            meshes = build_world_meshes(&terrain);
+            let m = build_world_meshes(&terrain);
+            opaque_count = m.opaque.len();
+            water_count = m.water.len();
+            let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+            free_chunks(ctx, &gpu_opaque);
+            free_chunks(ctx, &gpu_water);
+            gpu_opaque = upload_chunks(ctx, &m.opaque);
+            gpu_water = upload_chunks(ctx, &m.water);
         }
 
         // ---- Dev bridge: service queued commands on the main thread ----
@@ -201,8 +339,7 @@ async fn main() {
                         "seed": seed,
                         "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
                         "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
-                                 "meshes": meshes.opaque.len() + meshes.water.len(),
-                                 "water_meshes": meshes.water.len() },
+                                 "meshes": opaque_count + water_count, "water_meshes": water_count },
                     }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
@@ -223,7 +360,14 @@ async fn main() {
                 dev_bridge::Cmd::Reseed { seed: s } => {
                     seed = s.unwrap_or(seed.wrapping_add(1));
                     terrain = VoxelTerrain::new(seed);
-                    meshes = build_world_meshes(&terrain);
+                    let m = build_world_meshes(&terrain);
+                    opaque_count = m.opaque.len();
+                    water_count = m.water.len();
+                    let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+                    free_chunks(ctx, &gpu_opaque);
+                    free_chunks(ctx, &gpu_water);
+                    gpu_opaque = upload_chunks(ctx, &m.opaque);
+                    gpu_water = upload_chunks(ctx, &m.water);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
                 }
                 dev_bridge::Cmd::Screenshot(path) => {
@@ -240,31 +384,34 @@ async fn main() {
             scene_rt = new_scene_target(screen_width() as u32, screen_height() as u32);
         }
 
-        // Pass 1: draw the scene into the offscreen target, frustum-culled per chunk.
-        let mut scene_cam = cam.camera();
-        scene_cam.render_target = Some(scene_rt.clone());
-        set_camera(&scene_cam);
-        clear_background(Color::new(0.53, 0.62, 0.78, 1.0)); // sky
-        let vp = scene_cam.matrix();
-        // Opaque first (terrain + trees) so the depth buffer is complete...
+        // Pass 1: render the visible chunks into the offscreen target via raw miniquad
+        // — persistent buffers, one draw call per visible chunk, no per-frame upload.
+        let vp = cam.camera().matrix();
         let mut drawn = 0usize;
-        for b in &meshes.opaque {
-            if aabb_in_view(&vp, b.lo, b.hi) {
-                draw_mesh(&b.mesh);
-                drawn += 1;
+        {
+            let mut gl = unsafe { get_internal_gl() };
+            gl.flush(); // flush any pending macroquad 2D before our own pass
+            let ctx = gl.quad_context;
+            ctx.begin_pass(
+                Some(scene_rt.render_pass.raw_miniquad_id()),
+                PassAction::Clear {
+                    color: Some((0.53, 0.62, 0.78, 1.0)), // sky
+                    depth: Some(1.0),
+                    stencil: None,
+                },
+            );
+            ctx.apply_pipeline(&pipeline);
+            ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp }));
+            // Opaque first (fills the depth buffer), then the translucent water plane.
+            for c in gpu_opaque.iter().chain(gpu_water.iter()) {
+                if aabb_in_view(&vp, c.lo, c.hi) {
+                    ctx.apply_bindings(&c.bindings);
+                    ctx.draw(0, c.n_idx, 1);
+                    drawn += 1;
+                }
             }
+            ctx.end_render_pass();
         }
-        // ...then the translucent water plane on top. It's coplanar at SEA_ABS and one
-        // quad per column, so no two water quads overlap on screen — no back-to-front
-        // sort or depth-write toggle needed; the depth buffer hides water behind taller
-        // land and the default alpha blend shows the sea floor through it.
-        for b in &meshes.water {
-            if aabb_in_view(&vp, b.lo, b.hi) {
-                draw_mesh(&b.mesh);
-                drawn += 1;
-            }
-        }
-        set_default_camera();
 
         // Pass 2: blit the offscreen scene to the window (render targets are y-flipped).
         draw_texture_ex(
@@ -283,7 +430,7 @@ async fn main() {
         // shadow so it stays legible over any terrain colour.
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
-        let total = meshes.opaque.len() + meshes.water.len();
+        let total = opaque_count + water_count;
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   chunks {drawn}/{total}"
         );
