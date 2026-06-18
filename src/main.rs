@@ -15,6 +15,7 @@ mod config;
 #[cfg(feature = "dev")]
 mod dev_bridge;
 mod erosion;
+mod hydrology;
 mod tectonics;
 mod terrain;
 
@@ -26,9 +27,7 @@ use macroquad::miniquad::{
     VertexFormat,
 };
 use macroquad::prelude::*;
-use terrain::{
-    cell_biome, cell_flags, cell_height, feature_unit, BiomeKind, VoxelTerrain, FLAG_WATER, SEA_ABS,
-};
+use terrain::{cell_biome, cell_height, feature_unit, BiomeKind, VoxelTerrain};
 
 fn window_conf() -> Conf {
     Conf {
@@ -622,14 +621,28 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                         }
                     }
 
-                    if cell_flags(cell) & FLAG_WATER != 0 {
-                        // Translucent surface only where the basin actually has depth;
-                        // coplanar with the floor (h == SEA_ABS) would z-fight.
-                        if h < SEA_ABS {
-                            if wi.len() + 6 > MAX_MESH_INDICES {
-                                flush_mesh(&mut wv, &mut wi, &mut water);
+                    // Per-column water (ocean / lake / river): a translucent plane at the
+                    // column's water level, but only where it stands ABOVE the terrain top
+                    // (coplanar would z-fight). One quad per column ⇒ no overlap on screen
+                    // ⇒ still no back-to-front sort needed.
+                    let wl = t.water_level(ix, iy);
+                    if wl > h {
+                        if wi.len() + 30 > MAX_MESH_INDICES {
+                            flush_mesh(&mut wv, &mut wi, &mut water);
+                        }
+                        push_water_top(&mut wv, &mut wi, gx, gy, wl);
+                        // Connective side faces down to any lower-surfaced neighbour, so a
+                        // descending river / stepped water stays a continuous ribbon.
+                        for (nx, ny, face) in [
+                            (ix + 1, iy, Face::Px),
+                            (ix - 1, iy, Face::Nx),
+                            (ix, iy + 1, Face::Pz),
+                            (ix, iy - 1, Face::Nz),
+                        ] {
+                            let n_surface = t.water_level(nx, ny).max(t.height(nx, ny));
+                            if n_surface < wl {
+                                push_water_side(&mut wv, &mut wi, gx, gy, wl, n_surface, face);
                             }
-                            push_water_top(&mut wv, &mut wi, gx, gy);
                         }
                     } else {
                         let bd = biome_def(biome);
@@ -741,12 +754,36 @@ fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz:
 
 /// A translucent water-surface quad at sea level over column `(gx, gy)`. Drawn in the
 /// water pass; the alpha lets the opaque sea floor show through.
-fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize) {
+fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, level: u8) {
     let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
-    let y = SEA_ABS as f32 * VOX;
+    let y = level as f32 * VOX;
     let col = Color::new(0.16, 0.40, 0.62, 0.55);
     push_quad(verts, idx, [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)], col);
+}
+
+/// A translucent water side face on one edge, spanning levels `lo..hi`. Where a river
+/// steps down (or a water body abuts a lower one), this fills the vertical gap between the
+/// two water-surface quads so the ribbon reads as continuous instead of dashed.
+fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, hi: u8, lo: u8, face: Face) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+    let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
+    let shade = match face {
+        Face::Px => SHADE_PX,
+        Face::Nx => SHADE_NX,
+        Face::Pz => SHADE_PZ,
+        Face::Nz => SHADE_NZ,
+    };
+    let (r, g, b) = (0.16 * shade, 0.40 * shade, 0.62 * shade);
+    let col = Color::new(r, g, b, 0.55);
+    let q = match face {
+        Face::Px => [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)],
+        Face::Nx => [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)],
+        Face::Pz => [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)],
+        Face::Nz => [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)],
+    };
+    push_quad(verts, idx, q, col);
 }
 
 fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, biome: BiomeKind) {

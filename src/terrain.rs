@@ -222,23 +222,29 @@ pub fn feature_unit(seed: u64, x: usize, y: usize, salt: u64) -> f32 {
 /// Surface from elevation for one IN-WORLD column: the continuous surface level
 /// (`f32`, kept so later global passes — tectonics, erosion — can carve fractional
 /// levels), the biome, and the flags. The renderer rounds the level to an integer `h`.
+/// Map a continuous elevation `[0,1]` to a (float) surface level: sea floor below the
+/// shoreline fraction, land foot→peak above it. Shared by `classify` and the lake water
+/// level so they agree.
+fn elev_to_level(e: f32) -> f32 {
+    if e < SEA_FRACTION {
+        let f = e / SEA_FRACTION; // 0 deep .. 1 at the shoreline
+        (1.0 + f * (SEA_ABS - 2) as f32).clamp(1.0, (SEA_ABS - 1) as f32)
+    } else {
+        let f = (e - SEA_FRACTION) / (1.0 - SEA_FRACTION); // 0 foot .. 1 peak
+        (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).clamp(LAND_FOOT as f32, MAX_H as f32)
+    }
+}
+
 fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind, u8) {
     let (cx, cy) = (x as f32, y as f32);
+    let surf = elev_to_level(e);
 
     if e < SEA_FRACTION {
-        // Sea floor with real depth: deeper offshore, shallowing toward the shore. The
-        // renderer floats a translucent water plane at `SEA_ABS` above it.
-        let f = e / SEA_FRACTION; // 0 deep .. 1 at the shoreline
-        let surf = (1.0 + f * (SEA_ABS - 2) as f32).clamp(1.0, (SEA_ABS - 1) as f32);
+        // Sea floor with real depth; the renderer floats a translucent plane above it.
         return (surf, BiomeKind::Ocean, FLAG_WATER);
     }
 
-    // Land: map elevation onto `LAND_FOOT..=MAX_H`. The same field drives BOTH the
-    // height and the biome, so biomes are altitude bands — colour follows height, and
-    // the detail octaves give local hills (a rise in the plains can crest into the
-    // forest or rock band) without speckle, since the field is smooth.
-    let f = (e - SEA_FRACTION) / (1.0 - SEA_FRACTION); // 0 foot .. 1 peak
-    let surf = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).clamp(LAND_FOOT as f32, MAX_H as f32);
+    // Land: the same field drives BOTH height and biome (altitude bands + climate matrix).
     let h = surf.round() as u8;
 
     // Altitude gates the vertical biomes (rock/snow only high, so colour still tracks
@@ -314,6 +320,10 @@ pub struct VoxelTerrain {
     surf: Vec<f32>,
     biome: Vec<u8>,
     flags: Vec<u8>,
+    /// Water surface level per column (voxel levels): `SEA_ABS` for ocean, the fill level
+    /// for lakes, the channel top for rivers, `0` = dry. The renderer floats a translucent
+    /// plane here when it sits above the column's terrain.
+    water: Vec<u8>,
 }
 
 impl VoxelTerrain {
@@ -333,13 +343,38 @@ impl VoxelTerrain {
             }
         }
         crate::erosion::erode(seed, &mut elev);
+        // Hydrology (rivers via flow accumulation, lakes via depression filling) reads the
+        // eroded field; it feeds the per-column water level + river/lake biomes below.
+        let hydro = crate::hydrology::compute(&elev);
         let mut surf = vec![0.0f32; n];
         let mut biome = vec![0u8; n];
         let mut flags = vec![0u8; n];
+        let mut water = vec![0u8; n];
         for y in 0..ROWS {
             for x in 0..COLS {
                 let i = y * COLS + x;
-                let (s, b, f) = classify(seed, x, y, elev[i]);
+                let (mut s, mut b, mut f) = classify(seed, x, y, elev[i]);
+                if f & FLAG_WATER != 0 {
+                    // Ocean: water plane at the global sea level over the sea floor.
+                    water[i] = SEA_ABS;
+                } else if hydro.lake[i] {
+                    // Lake: standing water at the depression fill level over the bed.
+                    let lvl = elev_to_level(hydro.filled[i]).round() as u8;
+                    if lvl > s.round() as u8 {
+                        water[i] = lvl;
+                        b = BiomeKind::Ocean; // underwater bed
+                        f |= FLAG_WATER;
+                    }
+                } else if hydro.river[i] {
+                    // River: carve the channel one level and float water at the old top.
+                    let top = s.round() as u8;
+                    if top > LAND_FOOT {
+                        s = (top - 1) as f32;
+                        water[i] = top;
+                        b = BiomeKind::Ocean;
+                        f |= FLAG_WATER;
+                    }
+                }
                 surf[i] = s;
                 biome[i] = b.id();
                 flags[i] = f;
@@ -352,6 +387,16 @@ impl VoxelTerrain {
             surf,
             biome,
             flags,
+            water,
+        }
+    }
+
+    /// Water surface level (voxel) at signed coords, `0` if dry or out of world. The
+    /// renderer floats a translucent plane here where it stands above the terrain.
+    pub fn water_level(&self, x: i32, y: i32) -> u8 {
+        match self.index(x, y) {
+            Some(i) => self.water[i],
+            None => 0,
         }
     }
 
@@ -638,6 +683,78 @@ mod tests {
         eprintln!("distinct biomes (>1%): {present}, largest share {:.0}%", maxf * 100.0);
         assert!(present >= 6, "too few biomes present: {present}");
         assert!(maxf < 0.6, "one biome dominates the land: {:.0}%", maxf * 100.0);
+    }
+
+    /// Guard that hydrology actually produces both rivers and lakes (a regression in the
+    /// flood routing once silently gave 0 rivers). Rebuilds the eroded field + hydrology.
+    #[test]
+    fn hydrology_makes_rivers_and_lakes() {
+        let seed = 2u64;
+        let tect = TectonicField::generate(seed);
+        let mut elev = vec![0.0f32; COLS * ROWS];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                elev[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        crate::erosion::erode(seed, &mut elev);
+        let hydro = crate::hydrology::compute(&elev);
+        let rivers = hydro.river.iter().filter(|&&r| r).count();
+        let lakes = hydro.lake.iter().filter(|&&l| l).count();
+        eprintln!("seed {seed}: {rivers} river cells, {lakes} lake cells");
+        assert!(rivers > 200, "no river network: {rivers} cells");
+        assert!(lakes > 50, "no lakes: {lakes} cells");
+    }
+
+    /// Report river/lake coverage and dump a water map (ocean / lake / river distinct).
+    /// Rebuilds the eroded field + hydrology directly. Run with `--release`.
+    #[test]
+    #[ignore]
+    fn dump_water() {
+        use macroquad::color::Color;
+        use macroquad::texture::Image;
+        let seed = 1u64;
+        let tect = TectonicField::generate(seed);
+        let n = COLS * ROWS;
+        let mut elev = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                elev[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        crate::erosion::erode(seed, &mut elev);
+        let hydro = crate::hydrology::compute(&elev);
+        let (mut land, mut river, mut lake) = (0u64, 0u64, 0u64);
+        let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let i = y * COLS + x;
+                let sea = elev[i] < SEA_FRACTION;
+                let c = if sea {
+                    Color::new(0.10, 0.22, 0.42, 1.0) // ocean
+                } else if hydro.lake[i] {
+                    lake += 1;
+                    Color::new(0.30, 0.65, 0.85, 1.0) // lake
+                } else if hydro.river[i] {
+                    river += 1;
+                    land += 1;
+                    Color::new(0.55, 0.80, 1.0, 1.0) // river
+                } else {
+                    land += 1;
+                    let v = 0.25 + 0.5 * ((elev[i] - SEA_FRACTION) / (1.0 - SEA_FRACTION)).clamp(0.0, 1.0);
+                    Color::new(v, v * 0.95, v * 0.8, 1.0)
+                };
+                img.set_pixel(x as u32, y as u32, c);
+            }
+        }
+        img.export_png("/tmp/dbg_water.png");
+        eprintln!(
+            "rivers {:.2}% of land, lakes {} cells; dumped /tmp/dbg_water.png",
+            river as f64 / land.max(1) as f64 * 100.0,
+            lake
+        );
     }
 
     #[test]
