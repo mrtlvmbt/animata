@@ -517,6 +517,8 @@ async fn main() {
     // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
     // topology + underwater bed shape that the shaded/translucent normal view obscures.
     let mut topo = false;
+    // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
+    let mut grab: Option<Vec2> = None;
 
     // Dev bridge: localhost JSON-RPC for driving/inspecting the viewer (see
     // DEV_BRIDGE.md). Off unless built with `--features dev`.
@@ -549,6 +551,17 @@ async fn main() {
             let after = ground_under_cursor(&cam);
             cam.target.x += before.x - after.x;
             cam.target.z += before.y - after.y;
+        }
+        // Left-drag pan: lock the grabbed ground point under the moving cursor.
+        if is_mouse_button_pressed(MouseButton::Left) {
+            grab = Some(ground_under_cursor(&cam));
+        }
+        if !is_mouse_button_down(MouseButton::Left) {
+            grab = None;
+        } else if let Some(g) = grab {
+            let cur = ground_under_cursor(&cam);
+            cam.target.x += g.x - cur.x;
+            cam.target.z += g.y - cur.y;
         }
         // Pan in the ground plane (WASD / arrows), rotated by the current yaw.
         let mut pan = Vec2::ZERO;
