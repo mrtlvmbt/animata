@@ -268,92 +268,160 @@ fn free_chunks(ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk]) {
 // built + uploaded, and chunks that fall outside are freed. A per-frame BUILD BUDGET
 // amortises the meshing so entering new terrain doesn't spike a frame.
 
-/// One loaded chunk's GPU geometry (a dense chunk can split into several batches).
+/// One loaded chunk's GPU geometry (a dense chunk can split into several batches), plus
+/// the LOD it was built at (so the streamer rebuilds it when its ring changes).
 struct LoadedChunk {
     opaque: Vec<GpuChunk>,
     water: Vec<GpuChunk>,
+    lod: u32,
 }
 
-/// New chunk meshes built+uploaded per frame (amortises panning into fresh terrain, and
-/// fills the initial window in ~1-2 s). Cheap per chunk (~256 columns + one GPU upload).
+/// Detail-tier chunk meshes built+uploaded per frame, and coarse super-tiles per frame.
 const BUILD_BUDGET: usize = 24;
-/// Hard cap on the load radius (chunks) → bounds resident mesh memory. Beyond this the
-/// view can out-run the loaded window when zoomed far out; LOD (phase F) covers that.
-const MAX_LOAD_RADIUS: i32 = 22;
-/// Extra rings kept loaded beyond the visible span so a pan doesn't stall at the edge.
-const LOAD_MARGIN: i32 = 2;
+const COARSE_BUDGET: usize = 16;
+/// Within the detail tier, LOD by chunk distance: full detail within `LOD0`, half-res to
+/// `LOD1`, quarter-res beyond.
+const LOD0_RADIUS: i32 = 5;
+const LOD1_RADIUS: i32 = 12;
+/// Two-tier streaming. The DETAIL tier renders per-chunk (LOD by distance) the super-tiles
+/// around the camera; the COARSE tier renders every OTHER super-tile as one merged buffer
+/// at `COARSE_LOD`, covering the WHOLE map cheaply (so a full zoom-out shows all of ×16
+/// at a few hundred draws). A super-tile is detail XOR coarse, so the two never overlap.
+const SUPER: i32 = 8; // chunks per super-tile side
+const DETAIL_SUPER_R: i32 = 1; // super-tiles around the camera kept at per-chunk detail
+const COARSE_LOD: u32 = 3; // stride-8 overview
+/// Past this zoom the detail tier is dropped entirely — pure coarse whole-map overview,
+/// so a full zoom-out costs only the (few hundred) coarse super-tile draws.
+const DETAIL_ZOOM_CUTOFF: f32 = 520.0;
+
+/// LOD for a detail chunk at Chebyshev distance `d` (chunks) from the camera centre.
+fn lod_for(d: i32) -> u32 {
+    if d <= LOD0_RADIUS {
+        0
+    } else if d <= LOD1_RADIUS {
+        1
+    } else {
+        2
+    }
+}
+
+type ChunkMap = std::collections::HashMap<(i32, i32), LoadedChunk>;
 
 struct Streamer {
-    loaded: std::collections::HashMap<(usize, usize), LoadedChunk>,
+    detail: ChunkMap, // per-chunk, in the detail super-tiles
+    coarse: ChunkMap, // per super-tile, whole-map overview
 }
 
 impl Streamer {
     fn new() -> Self {
-        Streamer { loaded: std::collections::HashMap::new() }
+        Streamer { detail: ChunkMap::new(), coarse: ChunkMap::new() }
     }
 
-    fn loaded_count(&self) -> usize {
-        self.loaded.len()
-    }
-
-    /// Free everything (on reseed / map change).
     fn clear(&mut self, ctx: &mut dyn RenderingBackend) {
-        for lc in self.loaded.values() {
+        for lc in self.detail.values().chain(self.coarse.values()) {
             free_chunks(ctx, &lc.opaque);
             free_chunks(ctx, &lc.water);
         }
-        self.loaded.clear();
+        self.detail.clear();
+        self.coarse.clear();
     }
 
-    /// Reconcile the loaded set with the chunk window `[cx0..=cx1] × [cy0..=cy1]`: free
-    /// chunks outside it, then build up to `BUILD_BUDGET` of the missing ones (nearest to
-    /// the centre first), so the view fills inward and the per-frame cost stays bounded.
-    fn update(&mut self, ctx: &mut dyn RenderingBackend, t: &VoxelTerrain, center: (i32, i32), radius: i32) {
+    fn update(&mut self, ctx: &mut dyn RenderingBackend, t: &VoxelTerrain, center: (i32, i32), zoom: f32) {
         let (ccx, ccy) = center;
-        let (cx0, cx1) = ((ccx - radius).max(0), (ccx + radius).min(t.chunks_x as i32 - 1));
-        let (cy0, cy1) = ((ccy - radius).max(0), (ccy + radius).min(t.chunks_y as i32 - 1));
-        // Free chunks that left the window.
-        self.loaded.retain(|&(cx, cy), lc| {
-            let inside = (cx0..=cx1).contains(&(cx as i32)) && (cy0..=cy1).contains(&(cy as i32));
-            if !inside {
+        let nsx = (t.chunks_x as i32 + SUPER - 1) / SUPER;
+        let nsy = (t.chunks_y as i32 + SUPER - 1) / SUPER;
+        let (scx, scy) = (ccx.div_euclid(SUPER), ccy.div_euclid(SUPER));
+        let detail_on = zoom <= DETAIL_ZOOM_CUTOFF;
+
+        // ---- DETAIL tier: per-chunk (LOD by distance) within the camera super-tiles ----
+        if detail_on {
+            let dr = DETAIL_SUPER_R;
+            let dcx0 = (scx - dr).max(0) * SUPER;
+            let dcx1 = ((scx + dr + 1).min(nsx) * SUPER).min(t.chunks_x as i32);
+            let dcy0 = (scy - dr).max(0) * SUPER;
+            let dcy1 = ((scy + dr + 1).min(nsy) * SUPER).min(t.chunks_y as i32);
+            self.detail.retain(|&(cx, cy), lc| {
+                let inside = (dcx0..dcx1).contains(&cx) && (dcy0..dcy1).contains(&cy);
+                if !inside {
+                    free_chunks(ctx, &lc.opaque);
+                    free_chunks(ctx, &lc.water);
+                }
+                inside
+            });
+            let mut todo: Vec<(i64, i32, i32, u32)> = Vec::new();
+            for cy in dcy0..dcy1 {
+                for cx in dcx0..dcx1 {
+                    let want = lod_for((cx - ccx).abs().max((cy - ccy).abs()));
+                    let needs = match self.detail.get(&(cx, cy)) {
+                        None => true,
+                        Some(lc) => lc.lod != want,
+                    };
+                    if needs {
+                        let (dx, dy) = ((cx - ccx) as i64, (cy - ccy) as i64);
+                        todo.push((dx * dx + dy * dy, cx, cy, want));
+                    }
+                }
+            }
+            todo.sort_unstable_by_key(|m| m.0);
+            for &(_, cx, cy, lod) in todo.iter().take(BUILD_BUDGET) {
+                if let Some(old) = self.detail.remove(&(cx, cy)) {
+                    free_chunks(ctx, &old.opaque);
+                    free_chunks(ctx, &old.water);
+                }
+                let (o, w) = build_chunk_mesh(t, cx as usize, cy as usize, lod);
+                let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), water: upload_chunks(ctx, &w), lod };
+                self.detail.insert((cx, cy), lc);
+            }
+        } else if !self.detail.is_empty() {
+            for lc in self.detail.values() {
                 free_chunks(ctx, &lc.opaque);
                 free_chunks(ctx, &lc.water);
             }
-            inside
-        });
-        // Collect missing chunks, nearest-first, build a budget of them.
-        let mut missing: Vec<(i64, usize, usize)> = Vec::new();
-        for cy in cy0..=cy1 {
-            for cx in cx0..=cx1 {
-                let key = (cx as usize, cy as usize);
-                if !self.loaded.contains_key(&key) {
-                    let (dx, dy) = ((cx - ccx) as i64, (cy - ccy) as i64);
-                    missing.push((dx * dx + dy * dy, key.0, key.1));
+            self.detail.clear();
+        }
+
+        // ---- COARSE tier: every super-tile that ISN'T detail (whole map) ----
+        let mut ctodo: Vec<(i64, i32, i32)> = Vec::new();
+        for sy in 0..nsy {
+            for sx in 0..nsx {
+                let is_detail = detail_on && (sx - scx).abs() <= DETAIL_SUPER_R && (sy - scy).abs() <= DETAIL_SUPER_R;
+                let key = (sx, sy);
+                if is_detail {
+                    if let Some(old) = self.coarse.remove(&key) {
+                        free_chunks(ctx, &old.opaque);
+                        free_chunks(ctx, &old.water);
+                    }
+                } else if !self.coarse.contains_key(&key) {
+                    let (dx, dy) = ((sx - scx) as i64, (sy - scy) as i64);
+                    ctodo.push((dx * dx + dy * dy, sx, sy));
                 }
             }
         }
-        if !missing.is_empty() {
-            missing.sort_unstable_by_key(|m| m.0);
-            for &(_, cx, cy) in missing.iter().take(BUILD_BUDGET) {
-                let (o, w) = build_chunk_mesh(t, cx, cy);
-                let opaque = upload_chunks(ctx, &o);
-                let water = upload_chunks(ctx, &w);
-                self.loaded.insert((cx, cy), LoadedChunk { opaque, water });
-            }
+        ctodo.sort_unstable_by_key(|m| m.0);
+        for &(_, sx, sy) in ctodo.iter().take(COARSE_BUDGET) {
+            let x0 = sx as usize * SUPER as usize * CHUNK;
+            let y0 = sy as usize * SUPER as usize * CHUNK;
+            let x1 = (x0 + SUPER as usize * CHUNK).min(COLS);
+            let y1 = (y0 + SUPER as usize * CHUNK).min(ROWS);
+            let (o, w) = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
+            let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), water: upload_chunks(ctx, &w), lod: COARSE_LOD };
+            self.coarse.insert((sx, sy), lc);
         }
     }
 }
 
-/// Camera centre chunk + load radius (chunks) from the orthographic view span. `zoom` is
-/// the visible world height; the iso tilt and aspect widen the ground footprint, so a
-/// factor covers the corners, plus the margin and the hard cap.
-fn load_window(cam: &IsoCam) -> ((i32, i32), i32) {
-    let ccx = (cam.target.x / (CHUNK as f32 * VOX)).floor() as i32;
-    let ccy = (cam.target.z / (CHUNK as f32 * VOX)).floor() as i32;
-    let aspect = screen_width() / screen_height().max(1.0);
-    let span_world = cam.zoom * aspect.max(1.0) * 1.6; // ground span incl. iso tilt
-    let radius = ((span_world * 0.5) / (CHUNK as f32 * VOX)).ceil() as i32 + LOAD_MARGIN;
-    ((ccx, ccy), radius.clamp(1, MAX_LOAD_RADIUS))
+/// Camera centre chunk from its world target.
+fn center_chunk(cam: &IsoCam) -> (i32, i32) {
+    (
+        (cam.target.x / (CHUNK as f32 * VOX)).floor() as i32,
+        (cam.target.z / (CHUNK as f32 * VOX)).floor() as i32,
+    )
+}
+
+/// Max zoom-out (visible world height): frame the whole map with margin — the coarse tier
+/// covers all of it, so there are no empty edges however far out you go.
+fn max_zoom() -> f32 {
+    COLS.max(ROWS) as f32 * VOX * 1.2
 }
 
 #[macroquad::main(window_conf)]
@@ -414,7 +482,7 @@ async fn main() {
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
-            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(8.0, 600.0);
+            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(8.0, max_zoom());
         }
         // Pan in the ground plane (WASD / arrows), rotated by the current yaw.
         let mut pan = Vec2::ZERO;
@@ -463,7 +531,7 @@ async fn main() {
                         "seed": seed,
                         "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
                         "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
-                                 "loaded_chunks": streamer.loaded_count(), "chunks_total": terrain.chunks_x * terrain.chunks_y },
+                                 "detail_chunks": streamer.detail.len(), "coarse_tiles": streamer.coarse.len() },
                     }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
@@ -474,7 +542,7 @@ async fn main() {
                         cam.target.z = v;
                     }
                     if let Some(v) = zoom {
-                        cam.zoom = v.clamp(8.0, 600.0);
+                        cam.zoom = v.clamp(8.0, max_zoom());
                     }
                     if let Some(v) = yaw {
                         cam.yaw = v;
@@ -505,14 +573,14 @@ async fn main() {
         // Pass 1: render the visible chunks into the offscreen target via raw miniquad
         // — persistent buffers, one draw call per visible chunk, no per-frame upload.
         let vp = cam.camera().matrix();
-        let (center, radius) = load_window(&cam);
+        let center = center_chunk(&cam);
         let mut drawn = 0usize;
         {
             let mut gl = unsafe { get_internal_gl() };
             gl.flush(); // flush any pending macroquad 2D before our own pass
             let ctx = gl.quad_context;
-            // Stream: load chunks entering the window (budgeted), free those leaving.
-            streamer.update(ctx, &terrain, center, radius);
+            // Stream: detail tier around the camera + coarse super-tiles over the rest.
+            streamer.update(ctx, &terrain, center, cam.zoom);
             ctx.begin_pass(
                 Some(scene_rt.render_pass.raw_miniquad_id()),
                 PassAction::Clear {
@@ -524,27 +592,24 @@ async fn main() {
             ctx.apply_pipeline(&pipeline);
             let dbg = vec4(if topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
             ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
-            // Opaque first (fills the depth buffer), then the translucent water across all
-            // loaded chunks (skipped in topo mode so the bed topology is visible). Each
-            // GPU chunk is frustum-culled by its AABB.
-            for lc in streamer.loaded.values() {
-                for c in &lc.opaque {
+            // Opaque first (fills the depth buffer) across both tiers, then the translucent
+            // water (skipped in topo). Detail super-tiles have no coarse twin, so the tiers
+            // never overlap. Each GPU buffer is frustum-culled by its AABB.
+            let draw_pass = |ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk], drawn: &mut usize| {
+                for c in chunks {
                     if aabb_in_view(&vp, c.lo, c.hi) {
                         ctx.apply_bindings(&c.bindings);
                         ctx.draw(0, c.n_idx, 1);
-                        drawn += 1;
+                        *drawn += 1;
                     }
                 }
+            };
+            for lc in streamer.coarse.values().chain(streamer.detail.values()) {
+                draw_pass(ctx, &lc.opaque, &mut drawn);
             }
             if !topo {
-                for lc in streamer.loaded.values() {
-                    for c in &lc.water {
-                        if aabb_in_view(&vp, c.lo, c.hi) {
-                            ctx.apply_bindings(&c.bindings);
-                            ctx.draw(0, c.n_idx, 1);
-                            drawn += 1;
-                        }
-                    }
+                for lc in streamer.coarse.values().chain(streamer.detail.values()) {
+                    draw_pass(ctx, &lc.water, &mut drawn);
                 }
             }
             ctx.end_render_pass();
@@ -567,11 +632,10 @@ async fn main() {
         // shadow so it stays legible over any terrain colour.
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
-        let loaded = streamer.loaded_count();
-        let total_chunks = terrain.chunks_x * terrain.chunks_y;
+        let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
         let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
         let line = format!(
-            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   chunks {loaded}/{total_chunks}{mode}"
+            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
         );
         if show_info {
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
@@ -702,106 +766,109 @@ struct Batch {
 /// Indices bind first (6 per quad vs 4 verts), so we split meshes on the index count,
 /// keeping a margin for the largest single-column burst (top + 4 cliff sides + a tree).
 const MAX_MESH_INDICES: usize = 4800;
-const COLUMN_INDEX_BURST: usize = 768;
+/// Worst-case indices a single column/LOD-block can add at once: a block can emit four
+/// full-relief side faces (≈ `4 × MAX_H` strata quads) at a tall LOD step, plus the top.
+const COLUMN_INDEX_BURST: usize = 1200;
 
-/// Build the chunk meshes (one cached `Mesh` per chunk) plus the water plane. Each
-/// land column emits its top quad and, for every lower horizontal neighbour, the
-/// cliff side faces from the neighbour's height up to its own (one quad per level →
-/// strata bands); neighbour heights come from the chunk's ghost ring, so this is
-/// self-contained. Forest/Plains columns also grow a voxel tree. Water columns add a
-/// single translucent surface quad at `SEA_ABS` to the separate water list.
-/// Build the meshes for ONE chunk `(cx, cy)` — the unit the renderer streams. Returns the
-/// opaque batches and the (translucent) water batches; a dense chunk may split into more
-/// than one of each to stay under macroquad's per-draw limit.
-fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize) -> (Vec<Batch>, Vec<Batch>) {
+/// Build the meshes for ONE chunk `(cx, cy)` at `lod` — the unit the detail tier streams.
+fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
+    let x1 = (cx * CHUNK + CHUNK).min(COLS);
+    let y1 = (cy * CHUNK + CHUNK).min(ROWS);
+    build_region_mesh(t, cx * CHUNK, cy * CHUNK, x1, y1, lod)
+}
+
+/// Build the opaque + water meshes for an arbitrary column rectangle `[x0,x1) × [y0,y1)`
+/// at `lod`, merged into as few batches as the per-draw limit allows. A single chunk uses
+/// this for the streamed detail tier; a whole super-tile uses it for the coarse overview
+/// tier (many chunks → a handful of buffers, so the whole map is a few hundred draws).
+///
+/// At LOD>0 columns are read on a `stride` grid (blocks aligned globally because `x0/y0`
+/// are stride multiples) and each block emits one `stride×stride` footprint sampled from
+/// its origin column, with neighbour heights read a stride away. Trees are full-detail
+/// only (too small to read far out). Submerged side faces are skipped (clean water beds).
+fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
+    let stride = 1usize << lod;
+    let si = stride as i32;
     let mut opaque = Vec::new();
     let mut water = Vec::new();
-    {
-            let mut verts: Vec<Vertex> = Vec::new();
-            let mut idx: Vec<u16> = Vec::new();
-            // Water batches PER CHUNK too, so each water mesh's AABB stays local and
-            // frustum-culls — batching it globally gave map-wide AABBs that never culled,
-            // so all water drew every frame.
-            let mut wv: Vec<Vertex> = Vec::new();
-            let mut wi: Vec<u16> = Vec::new();
-            for ly in 0..CHUNK {
-                for lx in 0..CHUNK {
-                    let (gx, gy) = (cx * CHUNK + lx, cy * CHUNK + ly);
-                    if gx >= COLS || gy >= ROWS {
-                        continue; // partial edge chunk: outside the world
-                    }
-                    let cell = t.cell(gx as i32, gy as i32);
-                    let h = cell_height(cell);
-                    if h == 0 {
-                        continue; // air
-                    }
-                    // Split before macroquad's per-drawcall batch limit (see consts).
-                    if idx.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
-                        flush_mesh(&mut verts, &mut idx, &mut opaque);
-                    }
-                    let biome = cell_biome(cell);
-                    push_top(&mut verts, &mut idx, gx, gy, h, biome);
-                    // Neighbour heights sampled straight from the resident grid (air
-                    // out of the world → full side exposed at the map edge).
-                    let (ix, iy) = (gx as i32, gy as i32);
-                    let wl = t.water_level(ix, iy);
-                    // Skip the opaque side faces of a SUBMERGED column (water above its
-                    // top): those underwater vertical walls are what showed through shallow
-                    // water as a dark "ring" around a basin's slope. Through the water only
-                    // the flat bed tops remain — clean — and it saves geometry. Shore land
-                    // (not submerged) keeps its bank faces down to the water.
-                    if wl <= h {
-                        let nb = [
-                            (t.height(ix + 1, iy), Face::Px),
-                            (t.height(ix - 1, iy), Face::Nx),
-                            (t.height(ix, iy + 1), Face::Pz),
-                            (t.height(ix, iy - 1), Face::Nz),
-                        ];
-                        for (nh, face) in nb {
-                            if nh < h {
-                                push_side(&mut verts, &mut idx, (gx, gy), h, nh, face, biome);
-                            }
-                        }
-                    }
-
-                    // Per-column water (ocean / lake / river): a translucent plane at the
-                    // column's water level, but only where it stands ABOVE the terrain top
-                    // (coplanar would z-fight). One quad per column ⇒ no overlap on screen
-                    // ⇒ still no back-to-front sort needed.
-                    if wl > h {
-                        if wi.len() + 30 > MAX_MESH_INDICES {
-                            flush_mesh(&mut wv, &mut wi, &mut water);
-                        }
-                        let depth = wl - h;
-                        push_water_top(&mut wv, &mut wi, gx, gy, wl, depth);
-                        // Connective side faces to a LOWER neighbouring WATER surface only
-                        // (a river step / water meeting lower water), so the ribbon stays
-                        // continuous. NOT toward dry land — that drew spurious walls around
-                        // terrain poking into a water body.
-                        for (nx, ny, face) in [
-                            (ix + 1, iy, Face::Px),
-                            (ix - 1, iy, Face::Nx),
-                            (ix, iy + 1, Face::Pz),
-                            (ix, iy - 1, Face::Nz),
-                        ] {
-                            let nwl = t.water_level(nx, ny);
-                            if nwl > 0 && nwl < wl {
-                                push_water_side(&mut wv, &mut wi, (gx, gy), wl, nwl, depth, face);
-                            }
-                        }
-                    } else {
-                        let bd = biome_def(biome);
-                        if bd.tree != TreeKind::None
-                            && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
-                        {
-                            push_tree(&mut verts, &mut idx, t, gx, gy, h, bd.tree);
-                        }
+    let mut verts: Vec<Vertex> = Vec::new();
+    let mut idx: Vec<u16> = Vec::new();
+    let mut wv: Vec<Vertex> = Vec::new();
+    let mut wi: Vec<u16> = Vec::new();
+    let mut gyc = y0;
+    while gyc < y1 {
+        let mut gxc = x0;
+        while gxc < x1 {
+            let (gx, gy) = (gxc, gyc);
+            gxc += stride;
+            if gx >= COLS || gy >= ROWS {
+                continue; // outside the world
+            }
+            let cell = t.cell(gx as i32, gy as i32);
+            let h = cell_height(cell);
+            if h == 0 {
+                continue; // air
+            }
+            // Split before macroquad's per-drawcall batch limit (see consts). The burst
+            // margin must cover a tall LOD step's 4 full-height side faces.
+            if idx.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
+                flush_mesh(&mut verts, &mut idx, &mut opaque);
+            }
+            let biome = cell_biome(cell);
+            push_top(&mut verts, &mut idx, gx, gy, stride, h, biome);
+            let (ix, iy) = (gx as i32, gy as i32);
+            let wl = t.water_level(ix, iy);
+            // Skip the side faces of a SUBMERGED block (water above its top): those
+            // underwater walls showed through shallow water as a dark basin ring; only the
+            // flat bed tops remain. Shore (not submerged) keeps its bank faces.
+            if wl <= h {
+                let nb = [
+                    (t.height(ix + si, iy), Face::Px),
+                    (t.height(ix - si, iy), Face::Nx),
+                    (t.height(ix, iy + si), Face::Pz),
+                    (t.height(ix, iy - si), Face::Nz),
+                ];
+                for (nh, face) in nb {
+                    if nh < h {
+                        push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, biome);
                     }
                 }
             }
-            flush_mesh(&mut verts, &mut idx, &mut opaque);
-            flush_mesh(&mut wv, &mut wi, &mut water);
+
+            // Per-column (per-block) water: a translucent plane at the water level where it
+            // stands above the terrain top. One quad per block ⇒ no overlap ⇒ no sort.
+            if wl > h {
+                if wi.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
+                    flush_mesh(&mut wv, &mut wi, &mut water);
+                }
+                let depth = wl - h;
+                push_water_top(&mut wv, &mut wi, gx, gy, stride, wl, depth);
+                // Connective faces only toward a LOWER neighbouring WATER surface (river
+                // step / water meeting lower water), never onto dry land.
+                for (nx, ny, face) in [
+                    (ix + si, iy, Face::Px),
+                    (ix - si, iy, Face::Nx),
+                    (ix, iy + si, Face::Pz),
+                    (ix, iy - si, Face::Nz),
+                ] {
+                    let nwl = t.water_level(nx, ny);
+                    if nwl > 0 && nwl < wl {
+                        push_water_side(&mut wv, &mut wi, (gx, gy), stride, wl, nwl, depth, face);
+                    }
+                }
+            } else if lod == 0 {
+                let bd = biome_def(biome);
+                if bd.tree != TreeKind::None
+                    && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
+                {
+                    push_tree(&mut verts, &mut idx, t, gx, gy, h, bd.tree);
+                }
+            }
+        }
+        gyc += stride;
     }
+    flush_mesh(&mut verts, &mut idx, &mut opaque);
+    flush_mesh(&mut wv, &mut wi, &mut water);
     (opaque, water)
 }
 
@@ -921,9 +988,9 @@ fn water_color(depth: u8) -> Color {
 /// Depth (levels) at which water reaches its deep, near-opaque colour.
 const WATER_OPAQUE_DEPTH: f32 = 6.0;
 
-fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, level: u8, depth: u8) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, level: u8, depth: u8) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let y = level as f32 * VOX;
     let col = water_color(depth);
     push_quad(verts, idx, [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)], col);
@@ -932,9 +999,10 @@ fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: us
 /// A translucent water side face on one edge, spanning levels `lo..hi`. Where a river
 /// steps down (or a water body abuts a lower one), this fills the vertical gap between the
 /// two water-surface quads so the ribbon reads as continuous instead of dashed.
-fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), hi: u8, lo: u8, depth: u8, face: Face) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+#[allow(clippy::too_many_arguments)]
+fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), s: usize, hi: u8, lo: u8, depth: u8, face: Face) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
     let shade = match face {
         Face::Px => SHADE_PX,
@@ -953,9 +1021,9 @@ fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize
     push_quad(verts, idx, q, col);
 }
 
-fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, biome: BiomeKind) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, h: u8, biome: BiomeKind) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let y = h as f32 * VOX;
     let col = shaded(top_rgb(biome), SHADE_TOP);
     push_quad(
@@ -971,17 +1039,19 @@ fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_side(
     verts: &mut Vec<Vertex>,
     idx: &mut Vec<u16>,
     (gx, gy): (usize, usize),
+    s: usize,
     h: u8,
     nh: u8,
     face: Face,
     biome: BiomeKind,
 ) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let shade = match face {
         Face::Px => SHADE_PX,
         Face::Nx => SHADE_NX,
@@ -1035,7 +1105,7 @@ mod tests {
         let mut any = false;
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy);
+                let (op, wa) = build_chunk_mesh(&t, cx, cy, 0);
                 for b in op.iter().chain(wa.iter()) {
                     any = true;
                     assert!(b.mesh.vertices.len() < 10_000, "verts {} at chunk ({cx},{cy})", b.mesh.vertices.len());
@@ -1044,6 +1114,58 @@ mod tests {
             }
         }
         assert!(any, "no geometry built");
+    }
+
+    /// LOD must (a) stay under the draw-call limits at every level and (b) actually shrink
+    /// the geometry as it coarsens (else the far rings buy nothing). Checks a spread of
+    /// chunks across the map at LOD 0/1/2.
+    #[test]
+    fn lod_reduces_geometry_within_limits() {
+        let t = VoxelTerrain::new(1);
+        let sample = [
+            (t.chunks_x / 4, t.chunks_y / 4),
+            (t.chunks_x / 2, t.chunks_y / 2),
+            (t.chunks_x * 3 / 4, t.chunks_y / 2),
+        ];
+        for (cx, cy) in sample {
+            let mut prev = usize::MAX;
+            for lod in 0..3u32 {
+                let (op, wa) = build_chunk_mesh(&t, cx, cy, lod);
+                let mut verts = 0;
+                for b in op.iter().chain(wa.iter()) {
+                    verts += b.mesh.vertices.len();
+                    assert!(b.mesh.vertices.len() < 10_000, "lod {lod} verts overflow at ({cx},{cy})");
+                    assert!(b.mesh.indices.len() < 5_000, "lod {lod} indices overflow at ({cx},{cy})");
+                }
+                assert!(verts <= prev, "lod {lod} not coarser at ({cx},{cy}): {verts} > {prev}");
+                prev = verts;
+            }
+        }
+    }
+
+    /// A coarse super-tile (a whole SUPER×SUPER chunk region merged into one mesh stream)
+    /// must also stay under the per-draw limits and be far fewer batches than its chunks —
+    /// that merge is what lets the whole map render in a few hundred draws.
+    #[test]
+    fn coarse_super_tiles_merge_within_limits() {
+        let t = VoxelTerrain::new(1);
+        let span = SUPER as usize * CHUNK;
+        for &(sx, sy) in &[(0usize, 0usize), (2, 1)] {
+            let (x0, y0) = (sx * span, sy * span);
+            if x0 >= COLS || y0 >= ROWS {
+                continue;
+            }
+            let (x1, y1) = ((x0 + span).min(COLS), (y0 + span).min(ROWS));
+            let (op, wa) = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
+            let batches = op.len() + wa.len();
+            for b in op.iter().chain(wa.iter()) {
+                assert!(b.mesh.vertices.len() < 10_000, "coarse verts overflow");
+                assert!(b.mesh.indices.len() < 5_000, "coarse indices overflow");
+            }
+            // A super-tile is SUPER² chunks; the merged coarse mesh must be far fewer
+            // buffers than that (else the overview buys no draw-call reduction).
+            assert!(batches < (SUPER * SUPER) as usize, "coarse not merged: {batches} batches");
+        }
     }
 
     /// Report the WHOLE-map mesh size at the current scale (built per chunk + dropped, so
@@ -1056,7 +1178,7 @@ mod tests {
         let (mut verts, mut batches) = (0usize, 0usize);
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy);
+                let (op, wa) = build_chunk_mesh(&t, cx, cy, 0);
                 for b in op.iter().chain(wa.iter()) {
                     verts += b.mesh.vertices.len();
                     batches += 1;
