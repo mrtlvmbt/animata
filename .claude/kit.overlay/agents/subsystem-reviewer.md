@@ -1,5 +1,6 @@
 ---
 description: Read-only ревью ОДНОГО изменённого участка animata (модуль симуляции / рендер / сейв) против инвариантов проекта. Возвращает PASS/FAIL + `path:line` + фикс + доказательство. Код не правит.
+tools: mcp__codegraph__codegraph_explore, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_impact
 ---
 Проверяй изменённый участок против инвариантов animata + повторяющихся конфаундов (accuracy rules выше
 НЕнарушаемы — цитируй доказательство, не выдумывай):

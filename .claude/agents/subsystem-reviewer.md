@@ -1,7 +1,7 @@
 ---
 name: subsystem-reviewer
 description: Read-only ревью ОДНОГО изменённого участка animata (модуль симуляции / рендер / сейв) против инвариантов проекта. Возвращает PASS/FAIL + `path:line` + фикс + доказательство. Код не правит.
-tools: Read, Glob, Grep
+tools: Read, Glob, Grep, mcp__codegraph__codegraph_explore, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_impact
 disallowedTools: Edit, Write, Agent
 model: sonnet
 ---
