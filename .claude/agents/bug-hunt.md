@@ -18,7 +18,9 @@ Given a symptom + category, find the responsible code and return:
 
 Method:
 - If a code-graph/index tool is available, prefer it over grep+read loops (it returns verbatim
-  source grouped by file, and traces callers/callees/blast-radius). Otherwise Glob→Grep→Read.
+  source grouped by file, and traces callers/callees/blast-radius) — but it is a nav aid, NOT an
+  authority: re-verify a cited `file:line` against the file (an index can lag). `docs/code-index.md`.
+  Otherwise Glob→Grep→Read.
 - Ground in the project's KNOWN traps — read the project's debugging spine (see `KIT_DEBUG_SPINE`
   in the kit config; it lists the recurring confounds and their tells). Attribute the symptom to a
   confound category before pointing at code.
