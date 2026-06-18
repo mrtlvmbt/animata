@@ -43,10 +43,12 @@ pub const CHUNK: usize = 16;
 /// Underground strata shown on cliff/edge cross-sections.
 pub const UNDERGROUND_LEVELS: u8 = 4;
 /// Land relief in **levels (= metres)** above the shoreline: the tallest peak stands
-/// this many blocks above the lowest land (the "foot"). Mountains tower ~8 blocks over
-/// the plains, snow caps above that. Decoupled from how much of the map is water
-/// (`SEA_FRACTION` in `terrain.rs`), so raising peaks doesn't drain the sea.
-pub const SURFACE_RANGE: u8 = 11;
+/// this many blocks above the lowest land (the "foot"). Raised to give erosion and
+/// tectonics vertical room — deep valleys / tall ridges need resolution. Biome bands
+/// in `terrain.rs` scale with this, so the area distribution stays the same, just
+/// taller. Decoupled from how much of the map is water (`SEA_FRACTION` in `terrain.rs`),
+/// so raising peaks doesn't drain the sea.
+pub const SURFACE_RANGE: u8 = 40;
 /// Water fills columns whose surface sits below this level.
 pub const SEA_LEVEL: u8 = 2;
 

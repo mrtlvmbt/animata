@@ -545,7 +545,6 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
     let mut water = Vec::new();
     for cy in 0..t.chunks_y {
         for cx in 0..t.chunks_x {
-            let ch = t.chunk(cx, cy);
             let mut verts: Vec<Vertex> = Vec::new();
             let mut idx: Vec<u16> = Vec::new();
             // Water batches PER CHUNK too, so each water mesh's AABB stays local and
@@ -559,7 +558,7 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                     if gx >= COLS || gy >= ROWS {
                         continue; // partial edge chunk: outside the world
                     }
-                    let cell = ch.interior(lx, ly);
+                    let cell = t.cell(gx as i32, gy as i32);
                     let h = cell_height(cell);
                     if h == 0 {
                         continue; // air
@@ -570,12 +569,14 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                     }
                     let biome = cell_biome(cell);
                     push_top(&mut verts, &mut idx, gx, gy, h, biome);
-                    // Neighbour heights from the ghost ring (padded index = local+1).
+                    // Neighbour heights sampled straight from the resident grid (air
+                    // out of the world → full side exposed at the map edge).
+                    let (ix, iy) = (gx as i32, gy as i32);
                     let nb = [
-                        (cell_height(ch.padded(lx + 2, ly + 1)), Face::Px),
-                        (cell_height(ch.padded(lx, ly + 1)), Face::Nx),
-                        (cell_height(ch.padded(lx + 1, ly + 2)), Face::Pz),
-                        (cell_height(ch.padded(lx + 1, ly)), Face::Nz),
+                        (t.height(ix + 1, iy), Face::Px),
+                        (t.height(ix - 1, iy), Face::Nx),
+                        (t.height(ix, iy + 1), Face::Pz),
+                        (t.height(ix, iy - 1), Face::Nz),
                     ];
                     for (nh, face) in nb {
                         if nh < h {
@@ -785,5 +786,20 @@ mod tests {
                 assert!(b.mesh.indices.len() < 5_000, "indices {} (seed {seed})", b.mesh.indices.len());
             }
         }
+    }
+
+    /// Report total mesh size at the current `MAP_SCALE`/`SURFACE_RANGE` — taller relief
+    /// means more cliff-strata quads, so this is the number that decides whether ×8 still
+    /// fits before chunk streaming. Informational (prints), not a hard gate.
+    #[test]
+    fn report_mesh_footprint() {
+        let t = VoxelTerrain::new(1);
+        let m = build_world_meshes(&t);
+        let verts: usize = m.opaque.iter().chain(m.water.iter()).map(|b| b.mesh.vertices.len()).sum();
+        let batches = m.opaque.len() + m.water.len();
+        let mb = (verts * std::mem::size_of::<Vertex>()) as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "MAP_SCALE={MAP_SCALE} SURFACE_RANGE={SURFACE_RANGE}: {verts} verts, {batches} batches, ~{mb:.0} MB vertex data"
+        );
     }
 }

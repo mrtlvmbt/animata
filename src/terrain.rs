@@ -19,6 +19,12 @@ pub const SEA_ABS: u8 = GROUND_MIN + SEA_LEVEL;
 const LAND_FOOT: u8 = SEA_ABS + 1;
 /// Tallest peak. Land relief (`SURFACE_RANGE`) is measured up from the foot.
 const MAX_H: u8 = LAND_FOOT + SURFACE_RANGE;
+/// Vertical biome bands as a FRACTION of the relief (not a fixed level count), so the
+/// area distribution is invariant to `SURFACE_RANGE`: the top `SNOW_BAND` levels are
+/// Snow, the top `MOUNTAIN_BAND` (incl. snow) are rock. Calibrated to reproduce the
+/// previous fixed bands at the old `SURFACE_RANGE = 11` (snow = 1, mountain = 5 levels).
+const SNOW_BAND: u8 = (SURFACE_RANGE as u32 / 9) as u8;
+const MOUNTAIN_BAND: u8 = (SURFACE_RANGE as u32 * 5 / 11) as u8;
 /// Fraction of the elevation field that lies under the sea — sets how much of the map
 /// is water, independently of how tall the land rises (so taller peaks ≠ less sea).
 const SEA_FRACTION: f32 = 0.42;
@@ -197,14 +203,10 @@ pub fn feature_unit(seed: u64, x: usize, y: usize, salt: u64) -> f32 {
     hash2(seed, x as i64, y as i64, salt)
 }
 
-/// Generate one column's packed cell. Pure function of `(seed, x, y)`. Coordinates
-/// outside the world return **air** (height 0): a boundary column's full side is then
-/// exposed, which is what gives the world its thick slab edge (strata cross-section).
-/// This is also what the ghost border samples.
-fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
-    if x < 0 || y < 0 || x >= COLS as i32 || y >= ROWS as i32 {
-        return 0; // air
-    }
+/// Surface from elevation for one IN-WORLD column: the continuous surface level
+/// (`f32`, kept so later global passes — tectonics, erosion — can carve fractional
+/// levels), the biome, and the flags. The renderer rounds the level to an integer `h`.
+fn gen_column(seed: u64, x: usize, y: usize) -> (f32, BiomeKind, u8) {
     let (cx, cy) = (x as f32, y as f32);
     let e = elevation(seed, cx, cy);
 
@@ -212,9 +214,8 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
         // Sea floor with real depth: deeper offshore, shallowing toward the shore. The
         // renderer floats a translucent water plane at `SEA_ABS` above it.
         let f = e / SEA_FRACTION; // 0 deep .. 1 at the shoreline
-        let h = (1.0 + f * (SEA_ABS - 2) as f32).round();
-        let h = (h as i32).clamp(1, SEA_ABS as i32 - 1) as u8;
-        return pack_cell(h, BiomeKind::Ocean, FLAG_WATER);
+        let surf = (1.0 + f * (SEA_ABS - 2) as f32).clamp(1.0, (SEA_ABS - 1) as f32);
+        return (surf, BiomeKind::Ocean, FLAG_WATER);
     }
 
     // Land: map elevation onto `LAND_FOOT..=MAX_H`. The same field drives BOTH the
@@ -222,19 +223,19 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
     // the detail octaves give local hills (a rise in the plains can crest into the
     // forest or rock band) without speckle, since the field is smooth.
     let f = (e - SEA_FRACTION) / (1.0 - SEA_FRACTION); // 0 foot .. 1 peak
-    let h = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).round();
-    let h = (h as i32).clamp(LAND_FOOT as i32, MAX_H as i32) as u8;
+    let surf = (LAND_FOOT as f32 + f * SURFACE_RANGE as f32).clamp(LAND_FOOT as f32, MAX_H as f32);
+    let h = surf.round() as u8;
 
     // Altitude gates the vertical biomes (rock/snow only high, so colour still tracks
     // height — no "rock at low ground"); below the rock line, MOISTURE picks the
     // lowland biome, which is a natural same-height transition (dry desert ↔ grassland
-    // ↔ wet forest), not the old spilled-paint look.
+    // ↔ wet forest), not the old spilled-paint look. Bands scale with the relief.
     let biome = if h <= LAND_FOOT {
         BiomeKind::Beach // shore ring
-    } else if h >= MAX_H - 1 {
-        BiomeKind::Snow // caps (top 2 levels)
-    } else if h >= MAX_H - 5 {
-        BiomeKind::Mountain // grey massif (4 levels)
+    } else if h >= MAX_H - SNOW_BAND {
+        BiomeKind::Snow // caps
+    } else if h >= MAX_H - MOUNTAIN_BAND {
+        BiomeKind::Mountain // grey massif
     } else {
         let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7, MOIST_OCTAVES);
         if moist < 0.38 {
@@ -245,87 +246,92 @@ fn gen_cell(seed: u64, x: i32, y: i32) -> u16 {
             BiomeKind::Plains
         }
     };
-    pack_cell(h, biome, 0)
+    (surf, biome, 0)
 }
 
-// ---- Chunked storage (ghost-padded) ----
+// ---- Resident world model (flat per-column arrays) ----
 
-const PAD: usize = CHUNK + 2; // 18: 16 interior + 1 ghost ring each side
-
-/// One chunk: a ghost-padded `PAD×PAD` block of packed cells. The 1-cell border is
-/// a copy of neighbouring columns so a chunk's mesh build (phase 2) is fully
-/// self-contained — no cross-chunk reads, no bounds checks in the hot loop.
-pub struct Chunk {
-    cells: [u16; PAD * PAD],
-}
-
-impl Chunk {
-    fn local(lx: usize, ly: usize) -> usize {
-        ly * PAD + lx
-    }
-    /// Interior cell at chunk-local `(0..CHUNK, 0..CHUNK)` (skips the ghost ring).
-    pub fn interior(&self, lx: usize, ly: usize) -> u16 {
-        self.cells[Self::local(lx + 1, ly + 1)]
-    }
-    /// Any padded cell incl. the ghost ring, `(0..PAD, 0..PAD)`. Used by the
-    /// chunk mesher (and the ghost-ring test).
-    pub fn padded(&self, plx: usize, ply: usize) -> u16 {
-        self.cells[Self::local(plx, ply)]
-    }
-}
-
-/// The whole world: a grid of chunks covering `COLS×ROWS` columns.
+/// The whole world as flat `COLS×ROWS` column arrays, computed once per seed and held
+/// in RAM. Cheap (≈6 B/column → a few MB even at ×16), unlike the chunk meshes — so the
+/// global generation passes (tectonics, erosion) can run over the full grid here, while
+/// the renderer streams meshes from it. `surf` is the continuous surface level; the
+/// renderer (and `height`) round it. `chunks_x/y` are kept for the mesher's tiling.
 pub struct VoxelTerrain {
     pub seed: u64,
     pub chunks_x: usize,
     pub chunks_y: usize,
-    chunks: Vec<Chunk>,
+    surf: Vec<f32>,
+    biome: Vec<u8>,
+    flags: Vec<u8>,
 }
 
 impl VoxelTerrain {
     pub fn new(seed: u64) -> Self {
-        let chunks_x = COLS.div_ceil(CHUNK);
-        let chunks_y = ROWS.div_ceil(CHUNK);
-        let mut chunks = Vec::with_capacity(chunks_x * chunks_y);
-        for cy in 0..chunks_y {
-            for cx in 0..chunks_x {
-                let mut cells = [0u16; PAD * PAD];
-                // Fill interior + the ghost ring in one pass via the pure generator.
-                for ply in 0..PAD {
-                    for plx in 0..PAD {
-                        let gx = (cx * CHUNK) as i32 + plx as i32 - 1;
-                        let gy = (cy * CHUNK) as i32 + ply as i32 - 1;
-                        cells[ply * PAD + plx] = gen_cell(seed, gx, gy);
-                    }
-                }
-                chunks.push(Chunk { cells });
+        let n = COLS * ROWS;
+        let mut surf = vec![0.0f32; n];
+        let mut biome = vec![0u8; n];
+        let mut flags = vec![0u8; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let (s, b, f) = gen_column(seed, x, y);
+                let i = y * COLS + x;
+                surf[i] = s;
+                biome[i] = b.id();
+                flags[i] = f;
             }
         }
-        VoxelTerrain { seed, chunks_x, chunks_y, chunks }
+        VoxelTerrain {
+            seed,
+            chunks_x: COLS.div_ceil(CHUNK),
+            chunks_y: ROWS.div_ceil(CHUNK),
+            surf,
+            biome,
+            flags,
+        }
     }
 
-    pub fn chunk(&self, cx: usize, cy: usize) -> &Chunk {
-        &self.chunks[cy * self.chunks_x + cx]
+    /// Rounded surface height at signed column coords. **Out of the world ⇒ air (0)** —
+    /// a boundary column's full side is then exposed (the thick slab edge), and the
+    /// mesher samples neighbours through this, so no ghost ring is needed.
+    pub fn height(&self, x: i32, y: i32) -> u8 {
+        match self.index(x, y) {
+            Some(i) => self.surf[i].round() as u8,
+            None => 0,
+        }
+    }
+
+    /// Packed cell at signed coords (0 = air out of world). The mesher reads this for
+    /// each column's own cell; neighbour heights come from `height`.
+    pub fn cell(&self, x: i32, y: i32) -> u16 {
+        match self.index(x, y) {
+            Some(i) => {
+                pack_cell(self.surf[i].round() as u8, BiomeKind::from_id(self.biome[i]), self.flags[i])
+            }
+            None => 0,
+        }
+    }
+
+    fn index(&self, x: i32, y: i32) -> Option<usize> {
+        if x < 0 || y < 0 || x >= COLS as i32 || y >= ROWS as i32 {
+            None
+        } else {
+            Some(y as usize * COLS + x as usize)
+        }
     }
 }
 
-/// Per-column world-space queries. The renderer builds meshes straight from chunk
-/// cells, so these aren't used there — they exist for the tests and the future sim
-/// (which will look up the terrain under a creature's position).
+/// Per-column world-space queries for the tests and the future sim (which will look up
+/// the terrain under a creature's position). The mesher uses `height`/`cell` directly.
 #[allow(dead_code)]
 impl VoxelTerrain {
-    fn cell_at(&self, x: usize, y: usize) -> u16 {
-        let (cx, cy) = (x / CHUNK, y / CHUNK);
-        self.chunk(cx, cy).interior(x % CHUNK, y % CHUNK)
-    }
     pub fn height_at(&self, x: usize, y: usize) -> u8 {
-        cell_height(self.cell_at(x, y))
+        self.height(x as i32, y as i32)
     }
     pub fn biome_at(&self, x: usize, y: usize) -> BiomeKind {
-        cell_biome(self.cell_at(x, y))
+        BiomeKind::from_id(self.biome[y * COLS + x])
     }
     pub fn is_water(&self, x: usize, y: usize) -> bool {
-        cell_flags(self.cell_at(x, y)) & FLAG_WATER != 0
+        self.flags[y * COLS + x] & FLAG_WATER != 0
     }
 }
 
@@ -417,19 +423,19 @@ mod tests {
     }
 
     #[test]
-    fn ghost_ring_matches_neighbour_interior() {
+    fn out_of_world_is_air_and_sampling_is_consistent() {
         let t = VoxelTerrain::new(3);
-        // The right ghost column of chunk (0,0) must equal the left interior column
-        // of chunk (1,0), when that neighbour exists.
-        if t.chunks_x >= 2 {
-            let a = t.chunk(0, 0);
-            let b = t.chunk(1, 0);
-            for ly in 0..CHUNK {
-                // a's ghost at padded x = CHUNK+1 (one past its last interior col)
-                let ghost = a.padded(CHUNK + 1, ly + 1);
-                let neighbour = b.interior(0, ly);
-                assert_eq!(cell_height(ghost), cell_height(neighbour));
-            }
+        // Out of the world reads as air (height 0) on every side — that's the slab edge.
+        assert_eq!(t.height(-1, 0), 0);
+        assert_eq!(t.height(0, -1), 0);
+        assert_eq!(t.height(COLS as i32, 0), 0);
+        assert_eq!(t.height(0, ROWS as i32), 0);
+        // The signed `height`/`cell` and the unsigned `height_at` agree in-world, and
+        // a column read straight across a chunk seam (x = CHUNK-1 vs CHUNK) is the same
+        // value whether reached as "self" or as a neighbour — the seam is just one array.
+        for &(x, y) in &[(0usize, 0usize), (CHUNK - 1, 1), (CHUNK, 1), (COLS - 1, ROWS - 1)] {
+            assert_eq!(t.height(x as i32, y as i32), t.height_at(x, y));
+            assert_eq!(cell_height(t.cell(x as i32, y as i32)), t.height_at(x, y));
         }
     }
 }
