@@ -15,6 +15,7 @@ mod config;
 #[cfg(feature = "dev")]
 mod dev_bridge;
 mod erosion;
+mod hydrology;
 mod tectonics;
 mod terrain;
 
@@ -26,9 +27,7 @@ use macroquad::miniquad::{
     VertexFormat,
 };
 use macroquad::prelude::*;
-use terrain::{
-    cell_biome, cell_flags, cell_height, feature_unit, BiomeKind, VoxelTerrain, FLAG_WATER, SEA_ABS,
-};
+use terrain::{cell_biome, cell_height, feature_unit, BiomeKind, VoxelTerrain};
 
 fn window_conf() -> Conf {
     Conf {
@@ -132,18 +131,48 @@ attribute vec3 position;
 attribute vec4 color0;
 uniform mat4 mvp;
 varying lowp vec4 color;
+varying highp float vy;
 void main() {
     gl_Position = mvp * vec4(position, 1.0);
     color = color0 / 255.0;
+    vy = position.y;
 }"#;
 
+// `dbg.x > 0.5` switches to a TOPO debug view: colour by absolute height with per-level
+// contour banding, so the cube topology / land height / underwater DEPTH are readable
+// (underwater = a cold gradient by depth, land = a terrain ramp). Water is simply not
+// drawn in this mode (the render loop skips it), so the bed shape is laid bare.
 const CHUNK_FRAG: &str = r#"#version 100
 varying lowp vec4 color;
-void main() { gl_FragColor = color; }"#;
+varying highp float vy;
+uniform highp vec4 dbg;
+void main() {
+    if (dbg.x > 0.5) {
+        // Quantise to integer levels and colour each by height, with STRONG per-level
+        // brightness alternation + a dark line every 5 levels — so every cube step reads
+        // as its own band (a topographic-map look). Waterline is at level 6.
+        highp float lv = floor(vy);
+        highp float t = clamp(lv / 40.0, 0.0, 1.0);
+        highp vec3 c = mix(vec3(0.03, 0.08, 0.35), vec3(0.10, 0.65, 0.85), smoothstep(0.0, 0.15, t)); // depth -> shallow
+        c = mix(c, vec3(0.92, 0.86, 0.55), smoothstep(0.15, 0.20, t)); // shore
+        c = mix(c, vec3(0.28, 0.66, 0.28), smoothstep(0.20, 0.42, t)); // lowland
+        c = mix(c, vec3(0.82, 0.74, 0.30), smoothstep(0.42, 0.60, t)); // hills
+        c = mix(c, vec3(0.58, 0.40, 0.28), smoothstep(0.60, 0.80, t)); // mountain
+        c = mix(c, vec3(1.0, 1.0, 1.0), smoothstep(0.80, 1.0, t)); // peak
+        // MONOTONIC by height (no per-level brightness flip — that read as false
+        // alternating ridges on a smooth slope). Only a thin dark contour line every 4
+        // levels for scale, like a bathymetric map: a bowl reads as a smooth ramp.
+        highp float contour = (mod(lv, 4.0) < 0.5) ? 0.62 : 1.0;
+        gl_FragColor = vec4(c * contour, 1.0);
+    } else {
+        gl_FragColor = color;
+    }
+}"#;
 
 #[repr(C)]
 struct ChunkUniforms {
     mvp: Mat4,
+    dbg: Vec4,
 }
 
 /// One chunk's geometry living in immutable GPU buffers, plus its world AABB for culling.
@@ -164,7 +193,10 @@ fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
             ShaderMeta {
                 images: vec![],
                 uniforms: UniformBlockLayout {
-                    uniforms: vec![UniformDesc::new("mvp", UniformType::Mat4)],
+                    uniforms: vec![
+                        UniformDesc::new("mvp", UniformType::Mat4),
+                        UniformDesc::new("dbg", UniformType::Float4),
+                    ],
                 },
             },
         )
@@ -264,6 +296,9 @@ async fn main() {
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
     let mut show_info = true;
+    // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
+    // topology + underwater bed shape that the shaded/translucent normal view obscures.
+    let mut topo = false;
 
     // Dev bridge: localhost JSON-RPC for driving/inspecting the viewer (see
     // DEV_BRIDGE.md). Off unless built with `--features dev`.
@@ -283,6 +318,9 @@ async fn main() {
         // ---- Input (no GUI) ----
         if is_key_pressed(KeyCode::I) {
             show_info = !show_info;
+        }
+        if is_key_pressed(KeyCode::G) {
+            topo = !topo;
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
@@ -403,9 +441,16 @@ async fn main() {
                 },
             );
             ctx.apply_pipeline(&pipeline);
-            ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp }));
-            // Opaque first (fills the depth buffer), then the translucent water plane.
-            for c in gpu_opaque.iter().chain(gpu_water.iter()) {
+            let dbg = vec4(if topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
+            ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
+            // Opaque first (fills the depth buffer), then the translucent water plane —
+            // except in topo mode, where water is hidden so the bed topology is visible.
+            let chunks: &mut dyn Iterator<Item = &GpuChunk> = if topo {
+                &mut gpu_opaque.iter()
+            } else {
+                &mut gpu_opaque.iter().chain(gpu_water.iter())
+            };
+            for c in chunks {
                 if aabb_in_view(&vp, c.lo, c.hi) {
                     ctx.apply_bindings(&c.bindings);
                     ctx.draw(0, c.n_idx, 1);
@@ -433,8 +478,9 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let total = opaque_count + water_count;
+        let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
         let line = format!(
-            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   chunks {drawn}/{total}"
+            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   chunks {drawn}/{total}{mode}"
         );
         if show_info {
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
@@ -472,28 +518,67 @@ fn capture_target(rt: &RenderTarget) -> Image {
     img
 }
 
-// ---- Render-side palette (representation; kept out of the generator) ----
+// ---- Render-side palette: data-driven biome LUT (representation; kept out of the
+// generator). A new biome = a new row here + a `BiomeKind` variant; the hot mesh loop
+// just indexes `BIOME_DEFS[id]`, no match. Vegetation kind/density also live here. ----
+
+#[derive(Clone, Copy, PartialEq)]
+enum TreeKind {
+    None,
+    Broadleaf,
+    Conifer,
+}
+
+#[derive(Clone, Copy)]
+struct BiomeDef {
+    surface: (f32, f32, f32),
+    tree_density: f32,
+    tree: TreeKind,
+}
+
+const fn def(surface: (f32, f32, f32), tree_density: f32, tree: TreeKind) -> BiomeDef {
+    BiomeDef { surface, tree_density, tree }
+}
+
+/// Indexed by `BiomeKind::id()` (0..12 used, 12..16 padded). Order matches the enum.
+static BIOME_DEFS: [BiomeDef; 16] = [
+    def((0.13, 0.32, 0.55), 0.0, TreeKind::None),       // 0 Ocean
+    def((0.84, 0.78, 0.54), 0.0, TreeKind::None),       // 1 Beach
+    def((0.42, 0.62, 0.30), 0.04, TreeKind::Broadleaf), // 2 Plains
+    def((0.20, 0.46, 0.24), 0.30, TreeKind::Broadleaf), // 3 Forest
+    def((0.80, 0.70, 0.44), 0.0, TreeKind::None),       // 4 Desert
+    def((0.48, 0.46, 0.45), 0.0, TreeKind::None),       // 5 Mountain
+    def((0.93, 0.95, 0.98), 0.02, TreeKind::Conifer),   // 6 Snow
+    def((0.17, 0.38, 0.29), 0.30, TreeKind::Conifer),   // 7 Taiga
+    def((0.62, 0.64, 0.56), 0.0, TreeKind::None),       // 8 Tundra
+    def((0.70, 0.66, 0.34), 0.03, TreeKind::Broadleaf), // 9 Savanna
+    def((0.31, 0.40, 0.25), 0.14, TreeKind::Broadleaf), // 10 Swamp
+    def((0.12, 0.43, 0.17), 0.50, TreeKind::Broadleaf), // 11 Jungle
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),       // 12-15 padding
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
+];
+
+fn biome_def(biome: BiomeKind) -> &'static BiomeDef {
+    &BIOME_DEFS[biome.id() as usize]
+}
 
 /// Surface (top-face) base colour per biome.
 fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
-    match biome {
-        BiomeKind::Ocean => (0.13, 0.32, 0.55),
-        BiomeKind::Beach => (0.84, 0.78, 0.54),
-        BiomeKind::Plains => (0.42, 0.62, 0.30),
-        BiomeKind::Forest => (0.20, 0.46, 0.24),
-        BiomeKind::Desert => (0.80, 0.70, 0.44),
-        BiomeKind::Mountain => (0.48, 0.46, 0.45),
-        BiomeKind::Snow => (0.93, 0.95, 0.98),
-    }
+    biome_def(biome).surface
 }
 
 /// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin
 /// biome "lip" just under the surface, then topsoil, then stone deeper down.
 fn strata_rgb(gz: u8, h: u8, biome: BiomeKind) -> (f32, f32, f32) {
+    // Rocky biomes are bare stone all the way down — no brown topsoil band, which read as
+    // out-of-place dirt specks on mountain/snow cliffs.
+    let rocky = matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
     if gz + 1 == h {
         let (r, g, b) = top_rgb(biome);
         (r * 0.85, g * 0.85, b * 0.85)
-    } else if gz + 3 >= h {
+    } else if !rocky && gz + 3 >= h {
         (0.42, 0.31, 0.20) // topsoil
     } else {
         (0.40, 0.38, 0.36) // stone
@@ -574,31 +659,58 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                     // Neighbour heights sampled straight from the resident grid (air
                     // out of the world → full side exposed at the map edge).
                     let (ix, iy) = (gx as i32, gy as i32);
-                    let nb = [
-                        (t.height(ix + 1, iy), Face::Px),
-                        (t.height(ix - 1, iy), Face::Nx),
-                        (t.height(ix, iy + 1), Face::Pz),
-                        (t.height(ix, iy - 1), Face::Nz),
-                    ];
-                    for (nh, face) in nb {
-                        if nh < h {
-                            push_side(&mut verts, &mut idx, (gx, gy), h, nh, face, biome);
+                    let wl = t.water_level(ix, iy);
+                    // Skip the opaque side faces of a SUBMERGED column (water above its
+                    // top): those underwater vertical walls are what showed through shallow
+                    // water as a dark "ring" around a basin's slope. Through the water only
+                    // the flat bed tops remain — clean — and it saves geometry. Shore land
+                    // (not submerged) keeps its bank faces down to the water.
+                    if wl <= h {
+                        let nb = [
+                            (t.height(ix + 1, iy), Face::Px),
+                            (t.height(ix - 1, iy), Face::Nx),
+                            (t.height(ix, iy + 1), Face::Pz),
+                            (t.height(ix, iy - 1), Face::Nz),
+                        ];
+                        for (nh, face) in nb {
+                            if nh < h {
+                                push_side(&mut verts, &mut idx, (gx, gy), h, nh, face, biome);
+                            }
                         }
                     }
 
-                    if cell_flags(cell) & FLAG_WATER != 0 {
-                        // Translucent surface only where the basin actually has depth;
-                        // coplanar with the floor (h == SEA_ABS) would z-fight.
-                        if h < SEA_ABS {
-                            if wi.len() + 6 > MAX_MESH_INDICES {
-                                flush_mesh(&mut wv, &mut wi, &mut water);
-                            }
-                            push_water_top(&mut wv, &mut wi, gx, gy);
+                    // Per-column water (ocean / lake / river): a translucent plane at the
+                    // column's water level, but only where it stands ABOVE the terrain top
+                    // (coplanar would z-fight). One quad per column ⇒ no overlap on screen
+                    // ⇒ still no back-to-front sort needed.
+                    if wl > h {
+                        if wi.len() + 30 > MAX_MESH_INDICES {
+                            flush_mesh(&mut wv, &mut wi, &mut water);
                         }
-                    } else if tree_density(biome) > 0.0
-                        && feature_unit(t.seed, gx, gy, 101) < tree_density(biome)
-                    {
-                        push_tree(&mut verts, &mut idx, gx, gy, h, t.seed);
+                        let depth = wl - h;
+                        push_water_top(&mut wv, &mut wi, gx, gy, wl, depth);
+                        // Connective side faces to a LOWER neighbouring WATER surface only
+                        // (a river step / water meeting lower water), so the ribbon stays
+                        // continuous. NOT toward dry land — that drew spurious walls around
+                        // terrain poking into a water body.
+                        for (nx, ny, face) in [
+                            (ix + 1, iy, Face::Px),
+                            (ix - 1, iy, Face::Nx),
+                            (ix, iy + 1, Face::Pz),
+                            (ix, iy - 1, Face::Nz),
+                        ] {
+                            let nwl = t.water_level(nx, ny);
+                            if nwl > 0 && nwl < wl {
+                                push_water_side(&mut wv, &mut wi, (gx, gy), wl, nwl, depth, face);
+                            }
+                        }
+                    } else {
+                        let bd = biome_def(biome);
+                        if bd.tree != TreeKind::None
+                            && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
+                        {
+                            push_tree(&mut verts, &mut idx, t, gx, gy, h, bd.tree);
+                        }
                     }
                 }
             }
@@ -609,36 +721,50 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
     WorldMeshes { opaque, water }
 }
 
-/// Fraction of columns of a biome that grow a tree (0 = none).
-fn tree_density(biome: BiomeKind) -> f32 {
-    match biome {
-        BiomeKind::Forest => 0.30,
-        BiomeKind::Plains => 0.04,
-        _ => 0.0,
-    }
-}
-
-/// A voxel tree on column `(gx, gy)` standing on surface height `h`: a brown trunk
-/// (2–3 cubes) topped by a 3×3 leaf canopy and a single cap cube. Per-column hashes
-/// keep it deterministic. Leaves may overhang into neighbour columns (skipped if they
-/// fall outside the world).
-fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, seed: u64) {
+/// A voxel tree on column `(gx, gy)` standing on surface height `h`. **Broadleaf**: a
+/// short brown trunk under a 3×3 leaf canopy + cap (rounded, deciduous). **Conifer**: a
+/// taller trunk with a narrow tapering spire (1-cell tip over a + of leaves) — gives
+/// taiga/snow a distinct boreal look. Per-column hashes keep it deterministic; canopy
+/// blocks overhanging outside the world are skipped.
+fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, t: &VoxelTerrain, gx: usize, gy: usize, h: u8, kind: TreeKind) {
+    let seed = t.seed;
     let trunk = (0.36, 0.26, 0.16);
-    let leaf = (0.16, 0.42, 0.20);
-    let th = 2 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 2 or 3
-    for gz in h..h + th {
-        push_block(verts, idx, gx as i32, gy as i32, gz, trunk);
-    }
-    let top = h + th;
-    for dy in -1i32..=1 {
-        for dx in -1i32..=1 {
-            let (lx, ly) = (gx as i32 + dx, gy as i32 + dy);
-            if (0..COLS as i32).contains(&lx) && (0..ROWS as i32).contains(&ly) {
-                push_block(verts, idx, lx, ly, top, leaf);
+    let leaf = if kind == TreeKind::Conifer { (0.09, 0.24, 0.16) } else { (0.16, 0.42, 0.20) };
+    // Skip canopy blocks that would overhang a WATER column (leaves floating over a
+    // river/lake) or fall outside the world.
+    let leaf_at = |verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, lx: i32, ly: i32, lz: u8| {
+        if (0..COLS as i32).contains(&lx)
+            && (0..ROWS as i32).contains(&ly)
+            && t.water_level(lx, ly) == 0
+        {
+            push_block(verts, idx, lx, ly, lz, leaf);
+        }
+    };
+    let (gxi, gyi) = (gx as i32, gy as i32);
+    if kind == TreeKind::Conifer {
+        let th = 3 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 3 or 4
+        for gz in h..h + th {
+            push_block(verts, idx, gxi, gyi, gz, trunk);
+        }
+        // Two narrow tiers (+ shape) then a single tip — a spire.
+        for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            leaf_at(verts, idx, gxi + dx, gyi + dy, h + th);
+        }
+        leaf_at(verts, idx, gxi, gyi, h + th + 1);
+        leaf_at(verts, idx, gxi, gyi, h + th + 2);
+    } else {
+        let th = 2 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 2 or 3
+        for gz in h..h + th {
+            push_block(verts, idx, gxi, gyi, gz, trunk);
+        }
+        let top = h + th;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                leaf_at(verts, idx, gxi + dx, gyi + dy, top);
             }
         }
+        leaf_at(verts, idx, gxi, gyi, top + 1);
     }
-    push_block(verts, idx, gx as i32, gy as i32, top + 1, leaf);
 }
 
 #[derive(Clone, Copy)]
@@ -694,12 +820,53 @@ fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz:
 
 /// A translucent water-surface quad at sea level over column `(gx, gy)`. Drawn in the
 /// water pass; the alpha lets the opaque sea floor show through.
-fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize) {
+/// Water surface colour by DEPTH (levels of water above the bed): shallows are light and
+/// translucent (the bed shows through, as in clear shoreline water), deeps darken and turn
+/// nearly opaque (hiding the bed, so a basin's sloped walls don't read as a harsh dark
+/// ring through clear water). Standard shallow→deep gradient.
+fn water_color(depth: u8) -> Color {
+    let t = (depth as f32 / WATER_OPAQUE_DEPTH).clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    Color::new(
+        lerp(0.28, 0.08),
+        lerp(0.52, 0.21),
+        lerp(0.68, 0.40),
+        lerp(0.45, 0.94),
+    )
+}
+/// Depth (levels) at which water reaches its deep, near-opaque colour.
+const WATER_OPAQUE_DEPTH: f32 = 6.0;
+
+fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, level: u8, depth: u8) {
     let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
-    let y = SEA_ABS as f32 * VOX;
-    let col = Color::new(0.16, 0.40, 0.62, 0.55);
+    let y = level as f32 * VOX;
+    let col = water_color(depth);
     push_quad(verts, idx, [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)], col);
+}
+
+/// A translucent water side face on one edge, spanning levels `lo..hi`. Where a river
+/// steps down (or a water body abuts a lower one), this fills the vertical gap between the
+/// two water-surface quads so the ribbon reads as continuous instead of dashed.
+fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), hi: u8, lo: u8, depth: u8, face: Face) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+    let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
+    let shade = match face {
+        Face::Px => SHADE_PX,
+        Face::Nx => SHADE_NX,
+        Face::Pz => SHADE_PZ,
+        Face::Nz => SHADE_NZ,
+    };
+    let base = water_color(depth);
+    let col = Color::new(base.r * shade, base.g * shade, base.b * shade, base.a);
+    let q = match face {
+        Face::Px => [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)],
+        Face::Nx => [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)],
+        Face::Pz => [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)],
+        Face::Nz => [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)],
+    };
+    push_quad(verts, idx, q, col);
 }
 
 fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, biome: BiomeKind) {
