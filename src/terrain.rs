@@ -8,6 +8,7 @@
 //! `gz in 0..h`. World space is `(x*VOX, gz*VOX, y*VOX)` (y-up).
 
 use crate::config::*;
+use crate::tectonics::TectonicField;
 
 /// Baseline slab thickness in levels: even the lowest land keeps this many levels
 /// below the surface, so cliff/edge cross-sections always show strata.
@@ -28,10 +29,6 @@ const MOUNTAIN_BAND: u8 = (SURFACE_RANGE as u32 * 5 / 11) as u8;
 /// Fraction of the elevation field that lies under the sea — sets how much of the map
 /// is water, independently of how tall the land rises (so taller peaks ≠ less sea).
 const SEA_FRACTION: f32 = 0.42;
-/// Macro elevation lattice in columns (continents, mountain masses), with FEW octaves
-/// → the big smooth structure. Scaled by `MAP_SCALE` so it grows with the map.
-const ELEV_LATTICE: f32 = 26.0 * MAP_SCALE as f32;
-const ELEV_OCTAVES: u32 = 3;
 /// Detail field: MANY octaves at a fixed (absolute, not `MAP_SCALE`-scaled) coarsest
 /// lattice, admixed at low amplitude. This is the "few-octave base + more-octave,
 /// smaller-amplitude admix" — it adds local extrema/complexity on top of the macro
@@ -50,12 +47,9 @@ const RIDGE_LATTICE: f32 = 30.0 * MAP_SCALE as f32;
 const RIDGE_OCTAVES: u32 = 4;
 const WARP_LATTICE: f32 = 55.0 * MAP_SCALE as f32;
 const WARP_AMP: f32 = 0.6;
-/// Macro elevation at which ridges start to bite (below this the land stays rolling).
-/// Kept fairly high so ridges (and the rock band they lift into) stay LOCAL to genuine
-/// highlands rather than spreading mountains across the map.
-const RIDGE_ONSET: f32 = 0.62;
 /// Ridge amplitude in normalised `[0,1]` elevation units (crest lift / trough carve).
-const RIDGE_WEIGHT: f32 = 0.32;
+/// Gated by the tectonic mountainness field, so ridgelines ride on real orogenic belts.
+const RIDGE_WEIGHT: f32 = 0.34;
 
 /// Abstract biome class from worldgen — carries no colours (those live in the
 /// render palette). Up to 16 kinds (4 bits in the packed cell).
@@ -157,7 +151,7 @@ fn value_noise(seed: u64, x: f32, y: f32, salt: u64) -> f32 {
 /// Fractal value-noise (fBm) in `[0, 1]`: `octaves` octaves, each at double frequency
 /// and half amplitude. (Value-noise fractal — same multi-scale look as Perlin fBm,
 /// cheaper.) More octaves = finer detail; the highest octaves carry little amplitude.
-fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
+pub(crate) fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
     let mut sum = 0.0;
     let mut amp = 1.0;
     let mut freq = 1.0;
@@ -171,27 +165,26 @@ fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
     (sum / norm).clamp(0.0, 1.0)
 }
 
-/// Combined surface elevation in `[0, 1]`: a few-octave macro field (continents,
-/// mountain masses) admixed with a many-octave, low-amplitude detail field (local
-/// hills + roughness). One height function with global AND local extrema — both
-/// height and biome read from it, so colour follows altitude.
-fn elevation(seed: u64, x: f32, y: f32) -> f32 {
-    let macro_e = fbm(seed, x / ELEV_LATTICE, y / ELEV_LATTICE, 1, ELEV_OCTAVES);
+/// Combined surface elevation in `[0, 1]`. The macro base now comes from the **tectonic
+/// field** (continents/ocean basins + orogenic belts) instead of plain fBm; on top ride
+/// a many-octave low-amplitude detail field (local hills/roughness) and domain-warped
+/// **ridged** noise gated by the tectonic `mountainness` — so ridgelines/cliffs flow
+/// along the real mountain belts. One height function with global AND local extrema:
+/// both height and biome read from it, so colour follows altitude.
+fn elevation(seed: u64, x: f32, y: f32, macro_e: f32, mountainness: f32) -> f32 {
     let detail = fbm(seed, x / DETAIL_LATTICE, y / DETAIL_LATTICE, 5, DETAIL_OCTAVES) - 0.5;
 
-    // Ridged noise for mountain ridgelines/cliffs, applied only where the macro field
-    // is already high (so lowlands stay rolling). Domain-warp the sample so ridges
-    // flow organically instead of forming round blobs. `1 - |2n-1|` peaks at 1 along
+    // Ridged noise for ridgelines/cliffs, applied only where the tectonic field is
+    // orogenic (so lowlands stay rolling). Domain-warp the sample so ridges flow
+    // organically instead of forming round blobs. `1 - |2n-1|` peaks at 1 along
     // ridgelines: positive lifts crests, negative carves the troughs between them
-    // (which, reaching the sea, read as fjord-like inlets). True long parallel CHAINS
-    // come later from the tectonic layer; this gives ridge texture + sharper relief.
+    // (which, reaching the sea, read as fjord-like inlets).
     let wx = fbm(seed, x / WARP_LATTICE, y / WARP_LATTICE, 11, 2) - 0.5;
     let wy = fbm(seed, x / WARP_LATTICE, y / WARP_LATTICE, 13, 2) - 0.5;
     let rx = x / RIDGE_LATTICE + wx * WARP_AMP;
     let ry = y / RIDGE_LATTICE + wy * WARP_AMP;
     let rn = fbm(seed, rx, ry, 3, RIDGE_OCTAVES);
     let ridged = 1.0 - (2.0 * rn - 1.0).abs();
-    let mountainness = ((macro_e - RIDGE_ONSET) / (1.0 - RIDGE_ONSET)).clamp(0.0, 1.0);
 
     (macro_e + detail * DETAIL_WEIGHT + (ridged - 0.5) * RIDGE_WEIGHT * mountainness)
         .clamp(0.0, 1.0)
@@ -206,9 +199,9 @@ pub fn feature_unit(seed: u64, x: usize, y: usize, salt: u64) -> f32 {
 /// Surface from elevation for one IN-WORLD column: the continuous surface level
 /// (`f32`, kept so later global passes — tectonics, erosion — can carve fractional
 /// levels), the biome, and the flags. The renderer rounds the level to an integer `h`.
-fn gen_column(seed: u64, x: usize, y: usize) -> (f32, BiomeKind, u8) {
+fn gen_column(seed: u64, x: usize, y: usize, tect: &TectonicField) -> (f32, BiomeKind, u8) {
     let (cx, cy) = (x as f32, y as f32);
-    let e = elevation(seed, cx, cy);
+    let e = elevation(seed, cx, cy, tect.macro_at(x, y), tect.mountain_at(x, y));
 
     if e < SEA_FRACTION {
         // Sea floor with real depth: deeper offshore, shallowing toward the shore. The
@@ -268,12 +261,15 @@ pub struct VoxelTerrain {
 impl VoxelTerrain {
     pub fn new(seed: u64) -> Self {
         let n = COLS * ROWS;
+        // The tectonic macro layer is global (Voronoi plates + a distance transform from
+        // boundaries), so it's built once up front; the per-column generator samples it.
+        let tect = TectonicField::generate(seed);
         let mut surf = vec![0.0f32; n];
         let mut biome = vec![0u8; n];
         let mut flags = vec![0u8; n];
         for y in 0..ROWS {
             for x in 0..COLS {
-                let (s, b, f) = gen_column(seed, x, y);
+                let (s, b, f) = gen_column(seed, x, y, &tect);
                 let i = y * COLS + x;
                 surf[i] = s;
                 biome[i] = b.id();
@@ -361,6 +357,135 @@ mod tests {
             let frac = high as f64 / land.max(1) as f64;
             eprintln!("seed {seed}: mountain+snow = {:.1}% of land", frac * 100.0);
             assert!(frac < 0.35, "mountains dominate the land for seed {seed}: {:.1}%", frac * 100.0);
+        }
+    }
+
+    /// Tectonic sanity: mountains should form a few large connected BELTS (chains), not
+    /// scattered specks, and the land/water balance must stay reasonable per seed (the
+    /// oceanic-plate layout shouldn't drown or fill the whole map). Prints both.
+    #[test]
+    fn tectonic_chains_and_balance() {
+        for seed in 1..4 {
+            let t = VoxelTerrain::new(seed);
+            let n = COLS * ROWS;
+            let mut high = vec![false; n];
+            let (mut water, mut mtn) = (0u64, 0u64);
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    let i = y * COLS + x;
+                    if t.is_water(x, y) {
+                        water += 1;
+                    }
+                    if matches!(t.biome_at(x, y), BiomeKind::Mountain | BiomeKind::Snow) {
+                        high[i] = true;
+                        mtn += 1;
+                    }
+                }
+            }
+            // Largest connected mountain component (4-connectivity, iterative flood fill).
+            let mut seen = vec![false; n];
+            let mut largest = 0u64;
+            let mut stack = Vec::new();
+            for start in 0..n {
+                if !high[start] || seen[start] {
+                    continue;
+                }
+                let mut size = 0u64;
+                stack.push(start);
+                seen[start] = true;
+                while let Some(i) = stack.pop() {
+                    size += 1;
+                    let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
+                    for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                        if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                            continue;
+                        }
+                        let j = ny as usize * COLS + nx as usize;
+                        if high[j] && !seen[j] {
+                            seen[j] = true;
+                            stack.push(j);
+                        }
+                    }
+                }
+                largest = largest.max(size);
+            }
+            let water_pct = water as f64 / n as f64 * 100.0;
+            let chain = if mtn > 0 { largest as f64 / mtn as f64 } else { 0.0 };
+            eprintln!(
+                "seed {seed}: water {water_pct:.0}%, mountains in chains {:.0}% (largest/total)",
+                chain * 100.0
+            );
+            assert!((8.0..92.0).contains(&water_pct), "extreme water balance for seed {seed}: {water_pct:.0}%");
+        }
+    }
+
+    /// Debug dump (run with `--ignored`): writes grayscale PNGs of the generation fields
+    /// to /tmp so the straight-cliff artifact can be located visually and traced to the
+    /// field that produces it. Not a gate.
+    #[test]
+    #[ignore]
+    fn dump_debug_fields() {
+        use macroquad::color::Color;
+        use macroquad::texture::Image;
+        let seed = 1u64;
+        let t = VoxelTerrain::new(seed);
+        let tect = TectonicField::generate(seed);
+        let dump = |path: &str, f: &dyn Fn(usize, usize) -> f32| {
+            let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    let v = f(x, y).clamp(0.0, 1.0);
+                    img.set_pixel(x as u32, y as u32, Color::new(v, v, v, 1.0));
+                }
+            }
+            img.export_png(path);
+        };
+        dump("/tmp/dbg_macro.png", &|x, y| tect.macro_field()[y * COLS + x]);
+        dump("/tmp/dbg_mtn.png", &|x, y| tect.mountain_field()[y * COLS + x]);
+        dump("/tmp/dbg_height.png", &|x, y| t.height_at(x, y) as f32 / MAX_H as f32);
+        // Cliff map: the largest DOWNWARD step from a column to any 4-neighbour, in
+        // levels, scaled so a ~10-level drop is white. This isolates where the knife
+        // cliffs actually are, independent of biome colour.
+        dump("/tmp/dbg_cliff.png", &|x, y| {
+            let h = t.height(x as i32, y as i32) as i32;
+            let mut drop = 0i32;
+            for (nx, ny) in [(x as i32 + 1, y as i32), (x as i32 - 1, y as i32), (x as i32, y as i32 + 1), (x as i32, y as i32 - 1)] {
+                drop = drop.max(h - t.height(nx, ny) as i32);
+            }
+            drop as f32 / 10.0
+        });
+        eprintln!("dumped /tmp/dbg_macro.png dbg_mtn.png dbg_height.png dbg_cliff.png");
+    }
+
+    /// Guard against KNIFE CLIFFS — the artifact where the macro field stepped a full
+    /// relief in one column (root cause: taking the single NEAREST plate boundary's
+    /// convergence, which flips across the medial axis between two boundaries; fixed by
+    /// using a distance-weighted average convergence instead). The worst LAND-to-LAND
+    /// downward step must stay a slope, not a wall. Prints the worst per seed.
+    #[test]
+    fn land_has_no_knife_cliffs() {
+        for seed in 1..4 {
+            let t = VoxelTerrain::new(seed);
+            let mut worst = 0i32;
+            for y in 0..ROWS as i32 {
+                for x in 0..COLS as i32 {
+                    let h = t.height(x, y) as i32;
+                    for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                        // In-world land neighbours only (the map-edge slab to air and the
+                        // shoreline drop to the sea floor are legitimate, not artifacts).
+                        if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                            continue;
+                        }
+                        let nh = t.height(nx, ny) as i32;
+                        if nh == 0 || t.is_water(nx as usize, ny as usize) {
+                            continue;
+                        }
+                        worst = worst.max(h - nh);
+                    }
+                }
+            }
+            eprintln!("seed {seed}: worst land cliff = {worst} levels (of {SURFACE_RANGE})");
+            assert!(worst < 16, "knife cliff for seed {seed}: {worst}-level step in one column");
         }
     }
 
