@@ -277,7 +277,6 @@ fn free_chunks(ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk]) {
 /// the LOD it was built at (so the streamer rebuilds it when its ring changes).
 struct LoadedChunk {
     opaque: Vec<GpuChunk>,
-    water: Vec<GpuChunk>,
     lod: u32,
 }
 
@@ -338,7 +337,6 @@ impl Streamer {
     fn clear(&mut self, ctx: &mut dyn RenderingBackend) {
         for lc in self.detail.values().chain(self.coarse.values()) {
             free_chunks(ctx, &lc.opaque);
-            free_chunks(ctx, &lc.water);
         }
         self.detail.clear();
         self.coarse.clear();
@@ -363,7 +361,6 @@ impl Streamer {
                 let inside = (dcx0..dcx1).contains(&cx) && (dcy0..dcy1).contains(&cy);
                 if !inside {
                     free_chunks(ctx, &lc.opaque);
-                    free_chunks(ctx, &lc.water);
                 }
                 inside
             });
@@ -385,16 +382,14 @@ impl Streamer {
             for &(_, cx, cy, lod) in todo.iter().take(BUILD_BUDGET) {
                 if let Some(old) = self.detail.remove(&(cx, cy)) {
                     free_chunks(ctx, &old.opaque);
-                    free_chunks(ctx, &old.water);
                 }
-                let (o, w) = build_chunk_mesh(t, cx as usize, cy as usize, lod);
-                let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), water: upload_chunks(ctx, &w), lod };
+                let o = build_chunk_mesh(t, cx as usize, cy as usize, lod);
+                let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod };
                 self.detail.insert((cx, cy), lc);
             }
         } else if !self.detail.is_empty() {
             for lc in self.detail.values() {
                 free_chunks(ctx, &lc.opaque);
-                free_chunks(ctx, &lc.water);
             }
             self.detail.clear();
         }
@@ -417,8 +412,8 @@ impl Streamer {
             let y0 = sy as usize * SUPER as usize * CHUNK;
             let x1 = (x0 + SUPER as usize * CHUNK).min(COLS);
             let y1 = (y0 + SUPER as usize * CHUNK).min(ROWS);
-            let (o, w) = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
-            let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), water: upload_chunks(ctx, &w), lod: COARSE_LOD };
+            let o = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
+            let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod: COARSE_LOD };
             self.coarse.insert((sx, sy), lc);
         }
 
@@ -517,8 +512,6 @@ async fn main() {
     // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
     // topology + underwater bed shape that the shaded/translucent normal view obscures.
     let mut topo = false;
-    // `H` hides all water (the surface quads) so the bare bed/terrain is visible.
-    let mut water_on = true;
     // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
     let mut grab: Option<Vec2> = None;
 
@@ -540,9 +533,6 @@ async fn main() {
         // ---- Input (no GUI) ----
         if is_key_pressed(KeyCode::I) {
             show_info = !show_info;
-        }
-        if is_key_pressed(KeyCode::H) {
-            water_on = !water_on;
         }
         if is_key_pressed(KeyCode::G) {
             topo = !topo;
@@ -691,7 +681,6 @@ async fn main() {
                     }
                 }
             };
-            // Opaque
             for (key, lc) in &streamer.coarse {
                 if !ready.contains(key) {
                     draw(&lc.opaque, &mut drawn, ctx);
@@ -700,19 +689,6 @@ async fn main() {
             for (&(cx, cy), lc) in &streamer.detail {
                 if ready.contains(&(cx.div_euclid(SUPER), cy.div_euclid(SUPER))) {
                     draw(&lc.opaque, &mut drawn, ctx);
-                }
-            }
-            // Water (skipped in topo mode, or when toggled off with `H`)
-            if !topo && water_on {
-                for (key, lc) in &streamer.coarse {
-                    if !ready.contains(key) {
-                        draw(&lc.water, &mut drawn, ctx);
-                    }
-                }
-                for (&(cx, cy), lc) in &streamer.detail {
-                    if ready.contains(&(cx.div_euclid(SUPER), cy.div_euclid(SUPER))) {
-                        draw(&lc.water, &mut drawn, ctx);
-                    }
                 }
             }
             ctx.end_render_pass();
@@ -736,13 +712,7 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
-        let mode = if topo {
-            "   [TOPO: height/depth, G]"
-        } else if !water_on {
-            "   [water off, H]"
-        } else {
-            ""
-        };
+        let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
         );
@@ -877,7 +847,7 @@ const MAX_MESH_INDICES: usize = 4800;
 const COLUMN_INDEX_BURST: usize = 1200;
 
 /// Build the meshes for ONE chunk `(cx, cy)` at `lod` — the unit the detail tier streams.
-fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
+fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> Vec<Batch> {
     let x1 = (cx * CHUNK + CHUNK).min(COLS);
     let y1 = (cy * CHUNK + CHUNK).min(ROWS);
     build_region_mesh(t, cx * CHUNK, cy * CHUNK, x1, y1, lod)
@@ -891,16 +861,13 @@ fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Vec<Ba
 /// At LOD>0 columns are read on a `stride` grid (blocks aligned globally because `x0/y0`
 /// are stride multiples) and each block emits one `stride×stride` footprint sampled from
 /// its origin column, with neighbour heights read a stride away. Trees are full-detail
-/// only (too small to read far out). Submerged side faces are skipped (clean water beds).
-fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
+/// only. Water is NOT rendered — submerged columns just show a sand/rock seabed.
+fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> Vec<Batch> {
     let stride = 1usize << lod;
     let si = stride as i32;
     let mut opaque = Vec::new();
-    let mut water = Vec::new();
     let mut verts: Vec<Vertex> = Vec::new();
     let mut idx: Vec<u16> = Vec::new();
-    let mut wv: Vec<Vertex> = Vec::new();
-    let mut wi: Vec<u16> = Vec::new();
     let mut gyc = y0;
     while gyc < y1 {
         let mut gxc = x0;
@@ -950,35 +917,11 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
                 }
             }
 
-            // Per-column (per-block) water: a translucent plane at the water level where it
-            // stands above the terrain top. One quad per block ⇒ no overlap ⇒ no sort.
-            if wl > h {
-                if wi.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
-                    flush_mesh(&mut wv, &mut wi, &mut water);
-                }
-                push_water_top(&mut wv, &mut wi, gx, gy, stride, wl);
-                // Connective faces only toward a slightly LOWER neighbouring WATER surface
-                // (a river step), so a descending river isn't dashed. A LARGE drop means
-                // two separate bodies (e.g. a high mountain lake beside the sea) — drawing
-                // a face there made tall "water walls" standing in the column, so cap it.
-                for (nx, ny, face) in [
-                    (ix + si, iy, Face::Px),
-                    (ix - si, iy, Face::Nx),
-                    (ix, iy + si, Face::Pz),
-                    (ix, iy - si, Face::Nz),
-                ] {
-                    let nwl = t.water_level(nx, ny);
-                    if nwl > 0 && nwl < wl && wl - nwl <= WATER_STEP_MAX {
-                        push_water_side(&mut wv, &mut wi, (gx, gy), stride, wl, nwl, face);
-                    }
-                }
-            } else if lod <= 1 {
-                // Trees through LOD1 (one per block) so the canopy fades out a ring later
-                // instead of stopping abruptly at the LOD0 edge.
+            // Trees on dry land (through LOD1, one per block, so the canopy fades a ring
+            // out instead of a hard edge). Water itself is not rendered.
+            if !submerged && lod <= 1 {
                 let bd = biome_def(biome);
-                if bd.tree != TreeKind::None
-                    && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
-                {
+                if bd.tree != TreeKind::None && feature_unit(t.seed, gx, gy, 101) < bd.tree_density {
                     push_tree(&mut verts, &mut idx, t, gx, gy, h, bd.tree);
                 }
             }
@@ -986,8 +929,7 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
         gyc += stride;
     }
     flush_mesh(&mut verts, &mut idx, &mut opaque);
-    flush_mesh(&mut wv, &mut wi, &mut water);
-    (opaque, water)
+    opaque
 }
 
 /// A voxel tree on column `(gx, gy)` standing on surface height `h`. **Broadleaf**: a
@@ -1087,53 +1029,8 @@ fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz:
     push_quad(verts, idx, [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)], shaded(rgb, SHADE_NZ));
 }
 
-/// A translucent water-surface quad at sea level over column `(gx, gy)`. Drawn in the
-/// water pass; the alpha lets the opaque sea floor show through.
-/// Max level drop across which a connective water side face is drawn (a river step). A
-/// bigger drop is two separate water bodies, not a continuous surface — no wall.
-const WATER_STEP_MAX: u8 = 2;
-
-/// Uniform, translucent water surface colour — the bed (now a proper sand/rock seabed)
-/// shows through, as clear water does in reality.
-fn water_color() -> Color {
-    Color::new(0.18, 0.42, 0.58, 0.5)
-}
-
-fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, level: u8) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
-    let y = level as f32 * VOX;
-    let col = water_color();
-    push_quad(verts, idx, [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)], col);
-}
-
-/// A translucent water side face on one edge, spanning levels `lo..hi`. Where a river
-/// steps down (or a water body abuts a lower one), this fills the vertical gap between the
-/// two water-surface quads so the ribbon reads as continuous instead of dashed.
-fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), s: usize, hi: u8, lo: u8, face: Face) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
-    let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
-    let shade = match face {
-        Face::Px => SHADE_PX,
-        Face::Nx => SHADE_NX,
-        Face::Pz => SHADE_PZ,
-        Face::Nz => SHADE_NZ,
-    };
-    let base = water_color();
-    let col = Color::new(base.r * shade, base.g * shade, base.b * shade, base.a);
-    let q = match face {
-        Face::Px => [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)],
-        Face::Nx => [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)],
-        Face::Pz => [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)],
-        Face::Nz => [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)],
-    };
-    push_quad(verts, idx, q, col);
-}
-
-/// Sea/lake BED colour by water depth: a sandy shoal in the shallows grading to bare
-/// rock in the deeps — so the floor reads as a real bottom, not a blue tile under the
-/// (separately blue) water surface.
+/// Sea/lake BED colour by water depth: a sandy shoal in the shallows grading to bare rock
+/// in the deeps — submerged columns render this instead of a (removed) water surface.
 fn seabed_rgb(depth: u8) -> (f32, f32, f32) {
     let t = (depth as f32 / 5.0).clamp(0.0, 1.0);
     let lerp = |a: f32, b: f32| a + (b - a) * t;
@@ -1239,8 +1136,8 @@ mod tests {
         let mut any = false;
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy, 0);
-                for b in op.iter().chain(wa.iter()) {
+                let op = build_chunk_mesh(&t, cx, cy, 0);
+                for b in op.iter() {
                     any = true;
                     assert!(b.mesh.vertices.len() < 10_000, "verts {} at chunk ({cx},{cy})", b.mesh.vertices.len());
                     assert!(b.mesh.indices.len() < 5_000, "indices {} at chunk ({cx},{cy})", b.mesh.indices.len());
@@ -1264,9 +1161,9 @@ mod tests {
         for (cx, cy) in sample {
             let mut prev = usize::MAX;
             for lod in 0..3u32 {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy, lod);
+                let op = build_chunk_mesh(&t, cx, cy, lod);
                 let mut verts = 0;
-                for b in op.iter().chain(wa.iter()) {
+                for b in op.iter() {
                     verts += b.mesh.vertices.len();
                     assert!(b.mesh.vertices.len() < 10_000, "lod {lod} verts overflow at ({cx},{cy})");
                     assert!(b.mesh.indices.len() < 5_000, "lod {lod} indices overflow at ({cx},{cy})");
@@ -1290,9 +1187,9 @@ mod tests {
                 continue;
             }
             let (x1, y1) = ((x0 + span).min(COLS), (y0 + span).min(ROWS));
-            let (op, wa) = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
-            let batches = op.len() + wa.len();
-            for b in op.iter().chain(wa.iter()) {
+            let op = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
+            let batches = op.len();
+            for b in op.iter() {
                 assert!(b.mesh.vertices.len() < 10_000, "coarse verts overflow");
                 assert!(b.mesh.indices.len() < 5_000, "coarse indices overflow");
             }
@@ -1312,8 +1209,8 @@ mod tests {
         let (mut verts, mut batches) = (0usize, 0usize);
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy, 0);
-                for b in op.iter().chain(wa.iter()) {
+                let op = build_chunk_mesh(&t, cx, cy, 0);
+                for b in op.iter() {
                     verts += b.mesh.vertices.len();
                     batches += 1;
                 }
