@@ -633,7 +633,8 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                         if wi.len() + 30 > MAX_MESH_INDICES {
                             flush_mesh(&mut wv, &mut wi, &mut water);
                         }
-                        push_water_top(&mut wv, &mut wi, gx, gy, wl);
+                        let depth = wl - h;
+                        push_water_top(&mut wv, &mut wi, gx, gy, wl, depth);
                         // Connective side faces to a LOWER neighbouring WATER surface only
                         // (a river step / water meeting lower water), so the ribbon stays
                         // continuous. NOT toward dry land — that drew spurious walls around
@@ -646,7 +647,7 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                         ] {
                             let nwl = t.water_level(nx, ny);
                             if nwl > 0 && nwl < wl {
-                                push_water_side(&mut wv, &mut wi, gx, gy, wl, nwl, face);
+                                push_water_side(&mut wv, &mut wi, (gx, gy), wl, nwl, depth, face);
                             }
                         }
                     } else {
@@ -765,18 +766,35 @@ fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz:
 
 /// A translucent water-surface quad at sea level over column `(gx, gy)`. Drawn in the
 /// water pass; the alpha lets the opaque sea floor show through.
-fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, level: u8) {
+/// Water surface colour by DEPTH (levels of water above the bed): shallows are light and
+/// translucent (the bed shows through, as in clear shoreline water), deeps darken and turn
+/// nearly opaque (hiding the bed, so a basin's sloped walls don't read as a harsh dark
+/// ring through clear water). Standard shallow→deep gradient.
+fn water_color(depth: u8) -> Color {
+    let t = (depth as f32 / WATER_OPAQUE_DEPTH).clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    Color::new(
+        lerp(0.28, 0.08),
+        lerp(0.52, 0.21),
+        lerp(0.68, 0.40),
+        lerp(0.45, 0.94),
+    )
+}
+/// Depth (levels) at which water reaches its deep, near-opaque colour.
+const WATER_OPAQUE_DEPTH: f32 = 6.0;
+
+fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, level: u8, depth: u8) {
     let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
     let y = level as f32 * VOX;
-    let col = Color::new(0.16, 0.40, 0.62, 0.55);
+    let col = water_color(depth);
     push_quad(verts, idx, [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)], col);
 }
 
 /// A translucent water side face on one edge, spanning levels `lo..hi`. Where a river
 /// steps down (or a water body abuts a lower one), this fills the vertical gap between the
 /// two water-surface quads so the ribbon reads as continuous instead of dashed.
-fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, hi: u8, lo: u8, face: Face) {
+fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), hi: u8, lo: u8, depth: u8, face: Face) {
     let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
     let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
@@ -786,8 +804,8 @@ fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: u
         Face::Pz => SHADE_PZ,
         Face::Nz => SHADE_NZ,
     };
-    let (r, g, b) = (0.16 * shade, 0.40 * shade, 0.62 * shade);
-    let col = Color::new(r, g, b, 0.55);
+    let base = water_color(depth);
+    let col = Color::new(base.r * shade, base.g * shade, base.b * shade, base.a);
     let q = match face {
         Face::Px => [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)],
         Face::Nx => [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)],
