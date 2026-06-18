@@ -131,18 +131,42 @@ attribute vec3 position;
 attribute vec4 color0;
 uniform mat4 mvp;
 varying lowp vec4 color;
+varying highp float vy;
 void main() {
     gl_Position = mvp * vec4(position, 1.0);
     color = color0 / 255.0;
+    vy = position.y;
 }"#;
 
+// `dbg.x > 0.5` switches to a TOPO debug view: colour by absolute height with per-level
+// contour banding, so the cube topology / land height / underwater DEPTH are readable
+// (underwater = a cold gradient by depth, land = a terrain ramp). Water is simply not
+// drawn in this mode (the render loop skips it), so the bed shape is laid bare.
 const CHUNK_FRAG: &str = r#"#version 100
 varying lowp vec4 color;
-void main() { gl_FragColor = color; }"#;
+varying highp float vy;
+uniform highp vec4 dbg;
+void main() {
+    if (dbg.x > 0.5) {
+        highp float y = vy;
+        highp float t = clamp(y / 48.0, 0.0, 1.0);
+        highp vec3 c = mix(vec3(0.04, 0.10, 0.40), vec3(0.10, 0.55, 0.70), smoothstep(0.0, 0.12, t));
+        c = mix(c, vec3(0.85, 0.80, 0.55), smoothstep(0.12, 0.17, t));
+        c = mix(c, vec3(0.25, 0.60, 0.25), smoothstep(0.17, 0.40, t));
+        c = mix(c, vec3(0.78, 0.72, 0.32), smoothstep(0.40, 0.60, t));
+        c = mix(c, vec3(0.60, 0.40, 0.30), smoothstep(0.60, 0.80, t));
+        c = mix(c, vec3(1.0, 1.0, 1.0), smoothstep(0.80, 1.0, t));
+        highp float band = mix(0.78, 1.0, mod(floor(y), 2.0));
+        gl_FragColor = vec4(c * band, 1.0);
+    } else {
+        gl_FragColor = color;
+    }
+}"#;
 
 #[repr(C)]
 struct ChunkUniforms {
     mvp: Mat4,
+    dbg: Vec4,
 }
 
 /// One chunk's geometry living in immutable GPU buffers, plus its world AABB for culling.
@@ -163,7 +187,10 @@ fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
             ShaderMeta {
                 images: vec![],
                 uniforms: UniformBlockLayout {
-                    uniforms: vec![UniformDesc::new("mvp", UniformType::Mat4)],
+                    uniforms: vec![
+                        UniformDesc::new("mvp", UniformType::Mat4),
+                        UniformDesc::new("dbg", UniformType::Float4),
+                    ],
                 },
             },
         )
@@ -263,6 +290,9 @@ async fn main() {
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
     let mut show_info = true;
+    // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
+    // topology + underwater bed shape that the shaded/translucent normal view obscures.
+    let mut topo = false;
 
     // Dev bridge: localhost JSON-RPC for driving/inspecting the viewer (see
     // DEV_BRIDGE.md). Off unless built with `--features dev`.
@@ -282,6 +312,9 @@ async fn main() {
         // ---- Input (no GUI) ----
         if is_key_pressed(KeyCode::I) {
             show_info = !show_info;
+        }
+        if is_key_pressed(KeyCode::G) {
+            topo = !topo;
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
@@ -402,9 +435,16 @@ async fn main() {
                 },
             );
             ctx.apply_pipeline(&pipeline);
-            ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp }));
-            // Opaque first (fills the depth buffer), then the translucent water plane.
-            for c in gpu_opaque.iter().chain(gpu_water.iter()) {
+            let dbg = vec4(if topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
+            ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
+            // Opaque first (fills the depth buffer), then the translucent water plane —
+            // except in topo mode, where water is hidden so the bed topology is visible.
+            let chunks: &mut dyn Iterator<Item = &GpuChunk> = if topo {
+                &mut gpu_opaque.iter()
+            } else {
+                &mut gpu_opaque.iter().chain(gpu_water.iter())
+            };
+            for c in chunks {
                 if aabb_in_view(&vp, c.lo, c.hi) {
                     ctx.apply_bindings(&c.bindings);
                     ctx.draw(0, c.n_idx, 1);
@@ -432,8 +472,9 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let total = opaque_count + water_count;
+        let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
         let line = format!(
-            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   chunks {drawn}/{total}"
+            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   chunks {drawn}/{total}{mode}"
         );
         if show_info {
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
