@@ -27,12 +27,59 @@ const MIN_LAKE_CELLS: usize = 6;
 pub struct Hydrology {
     pub river: Vec<bool>,
     pub lake: Vec<bool>,
+    /// The real sea: cells below sea level CONNECTED to the open map border (flood from the
+    /// edge over `elev < sea_fraction`). Inland sub-sea pits cut off by land are NOT ocean —
+    /// they fall to `lake` and fill to their own pour point, instead of being pinned to the
+    /// global sea level. This is what keeps a deep inland pit from rendering as a "lake in a
+    /// lake" (an ocean-level pool sunk inside a higher lake).
+    pub ocean: Vec<bool>,
     /// Depression-filled surface; where `filled > elev` this is the lake water level.
     pub filled: Vec<f32>,
 }
 
-pub fn compute(elev: &[f32]) -> Hydrology {
+/// Flood the open sea inward from the map border: a cell is ocean iff its terrain is below
+/// sea level AND a continuous below-sea path reaches the edge. Land above sea level walls the
+/// sea out, so a basin sealed by land (even if its floor is below sea level) is not ocean.
+fn flood_ocean(elev: &[f32], sea_fraction: f32) -> Vec<bool> {
+    let (w, h) = (COLS as i32, ROWS as i32);
+    let mut ocean = vec![false; elev.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    let seed = |x: i32, y: i32, ocean: &mut [bool], stack: &mut Vec<usize>| {
+        let i = (y * w + x) as usize;
+        if elev[i] < sea_fraction && !ocean[i] {
+            ocean[i] = true;
+            stack.push(i);
+        }
+    };
+    for x in 0..w {
+        seed(x, 0, &mut ocean, &mut stack);
+        seed(x, h - 1, &mut ocean, &mut stack);
+    }
+    for y in 0..h {
+        seed(0, y, &mut ocean, &mut stack);
+        seed(w - 1, y, &mut ocean, &mut stack);
+    }
+    while let Some(i) = stack.pop() {
+        let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
+        for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+            if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                continue;
+            }
+            let j = (ny * w + nx) as usize;
+            if elev[j] < sea_fraction && !ocean[j] {
+                ocean[j] = true;
+                stack.push(j);
+            }
+        }
+    }
+    ocean
+}
+
+pub fn compute(elev: &[f32], sea_fraction: f32) -> Hydrology {
     let n = COLS * ROWS;
+    // Ocean = below-sea water connected to the map edge. Computed first so lake/river can
+    // exclude it (a cell that is the open sea is never also a lake or a river).
+    let ocean = flood_ocean(elev, sea_fraction);
     // Priority-flood the terrain: fills depressions AND records, for every column, the
     // neighbour it was flooded from (its drainage receiver) plus the pop order. Following
     // receivers always leads to the map border (acyclic), even across flat lake surfaces —
@@ -51,6 +98,9 @@ pub fn compute(elev: &[f32]) -> Hydrology {
     let mut river = vec![false; n];
     let mut lake = vec![false; n];
     for i in 0..n {
+        if ocean[i] {
+            continue; // the open sea is neither lake nor river
+        }
         if filled[i] - elev[i] > LAKE_EPS {
             lake[i] = true;
         } else if accum[i] > RIVER_THRESHOLD {
@@ -58,7 +108,7 @@ pub fn compute(elev: &[f32]) -> Hydrology {
         }
     }
     drop_small_lakes(&mut lake);
-    Hydrology { river, lake, filled }
+    Hydrology { river, lake, ocean, filled }
 }
 
 /// Unmark lake components smaller than `MIN_LAKE_CELLS` (4-connected flood fill) so single-
