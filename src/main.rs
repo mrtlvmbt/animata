@@ -924,9 +924,12 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
                 flush_mesh(&mut verts, &mut idx, &mut opaque);
             }
             let biome = cell_biome(cell);
-            push_top(&mut verts, &mut idx, gx, gy, stride, h, biome);
             let (ix, iy) = (gx as i32, gy as i32);
             let wl = t.water_level(ix, iy);
+            // Submerged columns get a sand/rock SEABED top (by depth), not the blue Ocean
+            // biome colour — the floor reads as a bottom under the blue water surface.
+            let top_col = if wl > h { seabed_rgb(wl - h) } else { top_rgb(biome) };
+            push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col);
             // Skip the side faces of a SUBMERGED block (water above its top): those
             // underwater walls showed through shallow water as a dark basin ring; only the
             // flat bed tops remain. Shore (not submerged) keeps its bank faces.
@@ -1138,11 +1141,20 @@ fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize
     push_quad(verts, idx, q, col);
 }
 
-fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, h: u8, biome: BiomeKind) {
+/// Sea/lake BED colour by water depth: a sandy shoal in the shallows grading to bare
+/// rock in the deeps — so the floor reads as a real bottom, not a blue tile under the
+/// (separately blue) water surface.
+fn seabed_rgb(depth: u8) -> (f32, f32, f32) {
+    let t = (depth as f32 / 5.0).clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32| a + (b - a) * t;
+    (lerp(0.80, 0.40), lerp(0.72, 0.39), lerp(0.52, 0.37)) // sand → rock
+}
+
+fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, h: u8, rgb: (f32, f32, f32)) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let y = h as f32 * VOX;
-    let col = shaded(top_rgb(biome), SHADE_TOP);
+    let col = shaded(rgb, SHADE_TOP);
     push_quad(
         verts,
         idx,
