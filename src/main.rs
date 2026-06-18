@@ -1076,17 +1076,20 @@ fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz:
 /// nearly opaque (hiding the bed, so a basin's sloped walls don't read as a harsh dark
 /// ring through clear water). Standard shallow→deep gradient.
 fn water_color(depth: u8) -> Color {
+    // Keep the surface a coherent water colour: only a SUBTLE darkening with depth (a big
+    // swing made the surface a patchwork mosaic of the bed's bathymetry) and fairly opaque
+    // throughout so the bed doesn't show through and break the read of a flat surface.
     let t = (depth as f32 / WATER_OPAQUE_DEPTH).clamp(0.0, 1.0);
     let lerp = |a: f32, b: f32| a + (b - a) * t;
     Color::new(
-        lerp(0.28, 0.08),
-        lerp(0.52, 0.21),
-        lerp(0.68, 0.40),
-        lerp(0.45, 0.94),
+        lerp(0.17, 0.11),
+        lerp(0.41, 0.31),
+        lerp(0.61, 0.50),
+        lerp(0.80, 0.90),
     )
 }
-/// Depth (levels) at which water reaches its deep, near-opaque colour.
-const WATER_OPAQUE_DEPTH: f32 = 6.0;
+/// Depth (levels) over which water darkens to its deep tone (gentle, so no hard banding).
+const WATER_OPAQUE_DEPTH: f32 = 8.0;
 
 fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, level: u8, depth: u8) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
