@@ -1,7 +1,7 @@
 ---
 name: bug-hunt
 description: Read-only локализация корневой причины бага в animata (Rust-симуляция жизни на macroquad/rayon). Возвращает ранжированные `path:line` + гипотезу. Ничего не чинит.
-tools: Read, Glob, Grep
+tools: Read, Glob, Grep, mcp__codegraph__codegraph_explore, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_callers, mcp__codegraph__codegraph_callees, mcp__codegraph__codegraph_impact
 disallowedTools: Edit, Write, Agent
 model: sonnet
 ---
