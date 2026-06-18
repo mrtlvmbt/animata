@@ -199,9 +199,8 @@ pub fn feature_unit(seed: u64, x: usize, y: usize, salt: u64) -> f32 {
 /// Surface from elevation for one IN-WORLD column: the continuous surface level
 /// (`f32`, kept so later global passes — tectonics, erosion — can carve fractional
 /// levels), the biome, and the flags. The renderer rounds the level to an integer `h`.
-fn gen_column(seed: u64, x: usize, y: usize, tect: &TectonicField) -> (f32, BiomeKind, u8) {
+fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind, u8) {
     let (cx, cy) = (x as f32, y as f32);
-    let e = elevation(seed, cx, cy, tect.macro_at(x, y), tect.mountain_at(x, y));
 
     if e < SEA_FRACTION {
         // Sea floor with real depth: deeper offshore, shallowing toward the shore. The
@@ -264,13 +263,24 @@ impl VoxelTerrain {
         // The tectonic macro layer is global (Voronoi plates + a distance transform from
         // boundaries), so it's built once up front; the per-column generator samples it.
         let tect = TectonicField::generate(seed);
+        // Build the continuous elevation field, then ERODE it globally (droplet + thermal)
+        // before classifying columns into height/biome — so valleys, drainage and fjords
+        // are carved into the land, and the altitude bands follow the eroded surface.
+        let mut elev = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                elev[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        crate::erosion::erode(seed, &mut elev);
         let mut surf = vec![0.0f32; n];
         let mut biome = vec![0u8; n];
         let mut flags = vec![0u8; n];
         for y in 0..ROWS {
             for x in 0..COLS {
-                let (s, b, f) = gen_column(seed, x, y, &tect);
                 let i = y * COLS + x;
+                let (s, b, f) = classify(seed, x, y, elev[i]);
                 surf[i] = s;
                 biome[i] = b.id();
                 flags[i] = f;
@@ -443,6 +453,18 @@ mod tests {
         dump("/tmp/dbg_macro.png", &|x, y| tect.macro_field()[y * COLS + x]);
         dump("/tmp/dbg_mtn.png", &|x, y| tect.mountain_field()[y * COLS + x]);
         dump("/tmp/dbg_height.png", &|x, y| t.height_at(x, y) as f32 / MAX_H as f32);
+        // Hillshade of the actual terrain — reveals erosion channels/ridges far better
+        // than raw height (slope-lit, sun from the NW).
+        dump("/tmp/dbg_shade.png", &|x, y| {
+            let xi = x as i32;
+            let yi = y as i32;
+            let gx = (t.height(xi + 1, yi) as f32 - t.height(xi - 1, yi) as f32) * 0.5;
+            let gy = (t.height(xi, yi + 1) as f32 - t.height(xi, yi - 1) as f32) * 0.5;
+            let inv = 1.0 / (gx * gx + gy * gy + 1.0).sqrt();
+            // light dir (0.5, 0.5, 0.7) normalised ≈ (0.49,0.49,0.69), dot with normal
+            let shade = (-gx * 0.49 - gy * 0.49 + 0.69) * inv;
+            0.15 + 0.85 * shade.clamp(0.0, 1.0)
+        });
         // Cliff map: the largest DOWNWARD step from a column to any 4-neighbour, in
         // levels, scaled so a ~10-level drop is white. This isolates where the knife
         // cliffs actually are, independent of biome colour.
@@ -487,6 +509,28 @@ mod tests {
             eprintln!("seed {seed}: worst land cliff = {worst} levels (of {SURFACE_RANGE})");
             assert!(worst < 16, "knife cliff for seed {seed}: {worst}-level step in one column");
         }
+    }
+
+    /// Report the erosion preprocess cost (the heavy one-time pass). Run with `--release`
+    /// for a representative number; informational, not a gate.
+    #[test]
+    #[ignore]
+    fn report_erosion_cost() {
+        let tect = TectonicField::generate(1);
+        let mut elev = vec![0.0f32; COLS * ROWS];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                elev[y * COLS + x] =
+                    elevation(1, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        let t0 = std::time::Instant::now();
+        crate::erosion::erode(1, &mut elev);
+        eprintln!(
+            "erosion: {} cols, {:.0} ms (MAP_SCALE={MAP_SCALE})",
+            COLS * ROWS,
+            t0.elapsed().as_secs_f64() * 1000.0
+        );
     }
 
     #[test]

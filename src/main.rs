@@ -14,6 +14,7 @@
 mod config;
 #[cfg(feature = "dev")]
 mod dev_bridge;
+mod erosion;
 mod tectonics;
 mod terrain;
 
