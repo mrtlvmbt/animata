@@ -148,16 +148,22 @@ varying highp float vy;
 uniform highp vec4 dbg;
 void main() {
     if (dbg.x > 0.5) {
-        highp float y = vy;
-        highp float t = clamp(y / 48.0, 0.0, 1.0);
-        highp vec3 c = mix(vec3(0.04, 0.10, 0.40), vec3(0.10, 0.55, 0.70), smoothstep(0.0, 0.12, t));
-        c = mix(c, vec3(0.85, 0.80, 0.55), smoothstep(0.12, 0.17, t));
-        c = mix(c, vec3(0.25, 0.60, 0.25), smoothstep(0.17, 0.40, t));
-        c = mix(c, vec3(0.78, 0.72, 0.32), smoothstep(0.40, 0.60, t));
-        c = mix(c, vec3(0.60, 0.40, 0.30), smoothstep(0.60, 0.80, t));
-        c = mix(c, vec3(1.0, 1.0, 1.0), smoothstep(0.80, 1.0, t));
-        highp float band = mix(0.78, 1.0, mod(floor(y), 2.0));
-        gl_FragColor = vec4(c * band, 1.0);
+        // Quantise to integer levels and colour each by height, with STRONG per-level
+        // brightness alternation + a dark line every 5 levels — so every cube step reads
+        // as its own band (a topographic-map look). Waterline is at level 6.
+        highp float lv = floor(vy);
+        highp float t = clamp(lv / 40.0, 0.0, 1.0);
+        highp vec3 c = mix(vec3(0.03, 0.08, 0.35), vec3(0.10, 0.65, 0.85), smoothstep(0.0, 0.15, t)); // depth -> shallow
+        c = mix(c, vec3(0.92, 0.86, 0.55), smoothstep(0.15, 0.20, t)); // shore
+        c = mix(c, vec3(0.28, 0.66, 0.28), smoothstep(0.20, 0.42, t)); // lowland
+        c = mix(c, vec3(0.82, 0.74, 0.30), smoothstep(0.42, 0.60, t)); // hills
+        c = mix(c, vec3(0.58, 0.40, 0.28), smoothstep(0.60, 0.80, t)); // mountain
+        c = mix(c, vec3(1.0, 1.0, 1.0), smoothstep(0.80, 1.0, t)); // peak
+        // MONOTONIC by height (no per-level brightness flip — that read as false
+        // alternating ridges on a smooth slope). Only a thin dark contour line every 4
+        // levels for scale, like a bathymetric map: a bowl reads as a smooth ramp.
+        highp float contour = (mod(lv, 4.0) < 0.5) ? 0.62 : 1.0;
+        gl_FragColor = vec4(c * contour, 1.0);
     } else {
         gl_FragColor = color;
     }
@@ -653,15 +659,23 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                     // Neighbour heights sampled straight from the resident grid (air
                     // out of the world → full side exposed at the map edge).
                     let (ix, iy) = (gx as i32, gy as i32);
-                    let nb = [
-                        (t.height(ix + 1, iy), Face::Px),
-                        (t.height(ix - 1, iy), Face::Nx),
-                        (t.height(ix, iy + 1), Face::Pz),
-                        (t.height(ix, iy - 1), Face::Nz),
-                    ];
-                    for (nh, face) in nb {
-                        if nh < h {
-                            push_side(&mut verts, &mut idx, (gx, gy), h, nh, face, biome);
+                    let wl = t.water_level(ix, iy);
+                    // Skip the opaque side faces of a SUBMERGED column (water above its
+                    // top): those underwater vertical walls are what showed through shallow
+                    // water as a dark "ring" around a basin's slope. Through the water only
+                    // the flat bed tops remain — clean — and it saves geometry. Shore land
+                    // (not submerged) keeps its bank faces down to the water.
+                    if wl <= h {
+                        let nb = [
+                            (t.height(ix + 1, iy), Face::Px),
+                            (t.height(ix - 1, iy), Face::Nx),
+                            (t.height(ix, iy + 1), Face::Pz),
+                            (t.height(ix, iy - 1), Face::Nz),
+                        ];
+                        for (nh, face) in nb {
+                            if nh < h {
+                                push_side(&mut verts, &mut idx, (gx, gy), h, nh, face, biome);
+                            }
                         }
                     }
 
@@ -669,7 +683,6 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                     // column's water level, but only where it stands ABOVE the terrain top
                     // (coplanar would z-fight). One quad per column ⇒ no overlap on screen
                     // ⇒ still no back-to-front sort needed.
-                    let wl = t.water_level(ix, iy);
                     if wl > h {
                         if wi.len() + 30 > MAX_MESH_INDICES {
                             flush_mesh(&mut wv, &mut wi, &mut water);
