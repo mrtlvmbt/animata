@@ -28,8 +28,9 @@ pub const VOX: f32 = 1.0;
 /// `MAP_SCALE = 16` is 2208×1520 ≈ 3.36M columns and will need chunk *streaming*
 /// (don't hold every chunk mesh at once) + aggressive culling, a separate phase.
 pub const MAP_SCALE: usize = 16;
-const BASE_COLS: usize = 138;
-const BASE_ROWS: usize = 95;
+// Square footprint (×16 ⇒ 1920×1920 columns = 120×120 chunks = 15×15 super-tiles).
+const BASE_COLS: usize = 120;
+const BASE_ROWS: usize = 120;
 
 /// World footprint in columns (x) × rows (z) = metres. Derived from `MAP_SCALE`.
 pub const COLS: usize = BASE_COLS * MAP_SCALE;
