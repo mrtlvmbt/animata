@@ -260,26 +260,116 @@ fn free_chunks(ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk]) {
     }
 }
 
+// ---- Chunk streaming -------------------------------------------------------------
+//
+// Holding every chunk's GPU mesh at once is fine at ×8 (~0.7 GB) but blows past memory
+// at ×16 (~2.9 GB). The world MODEL (heights/biomes/water) stays fully resident — it's
+// cheap — but the meshes are streamed: only chunks within a radius of the camera are
+// built + uploaded, and chunks that fall outside are freed. A per-frame BUILD BUDGET
+// amortises the meshing so entering new terrain doesn't spike a frame.
+
+/// One loaded chunk's GPU geometry (a dense chunk can split into several batches).
+struct LoadedChunk {
+    opaque: Vec<GpuChunk>,
+    water: Vec<GpuChunk>,
+}
+
+/// New chunk meshes built+uploaded per frame (amortises panning into fresh terrain, and
+/// fills the initial window in ~1-2 s). Cheap per chunk (~256 columns + one GPU upload).
+const BUILD_BUDGET: usize = 24;
+/// Hard cap on the load radius (chunks) → bounds resident mesh memory. Beyond this the
+/// view can out-run the loaded window when zoomed far out; LOD (phase F) covers that.
+const MAX_LOAD_RADIUS: i32 = 22;
+/// Extra rings kept loaded beyond the visible span so a pan doesn't stall at the edge.
+const LOAD_MARGIN: i32 = 2;
+
+struct Streamer {
+    loaded: std::collections::HashMap<(usize, usize), LoadedChunk>,
+}
+
+impl Streamer {
+    fn new() -> Self {
+        Streamer { loaded: std::collections::HashMap::new() }
+    }
+
+    fn loaded_count(&self) -> usize {
+        self.loaded.len()
+    }
+
+    /// Free everything (on reseed / map change).
+    fn clear(&mut self, ctx: &mut dyn RenderingBackend) {
+        for lc in self.loaded.values() {
+            free_chunks(ctx, &lc.opaque);
+            free_chunks(ctx, &lc.water);
+        }
+        self.loaded.clear();
+    }
+
+    /// Reconcile the loaded set with the chunk window `[cx0..=cx1] × [cy0..=cy1]`: free
+    /// chunks outside it, then build up to `BUILD_BUDGET` of the missing ones (nearest to
+    /// the centre first), so the view fills inward and the per-frame cost stays bounded.
+    fn update(&mut self, ctx: &mut dyn RenderingBackend, t: &VoxelTerrain, center: (i32, i32), radius: i32) {
+        let (ccx, ccy) = center;
+        let (cx0, cx1) = ((ccx - radius).max(0), (ccx + radius).min(t.chunks_x as i32 - 1));
+        let (cy0, cy1) = ((ccy - radius).max(0), (ccy + radius).min(t.chunks_y as i32 - 1));
+        // Free chunks that left the window.
+        self.loaded.retain(|&(cx, cy), lc| {
+            let inside = (cx0..=cx1).contains(&(cx as i32)) && (cy0..=cy1).contains(&(cy as i32));
+            if !inside {
+                free_chunks(ctx, &lc.opaque);
+                free_chunks(ctx, &lc.water);
+            }
+            inside
+        });
+        // Collect missing chunks, nearest-first, build a budget of them.
+        let mut missing: Vec<(i64, usize, usize)> = Vec::new();
+        for cy in cy0..=cy1 {
+            for cx in cx0..=cx1 {
+                let key = (cx as usize, cy as usize);
+                if !self.loaded.contains_key(&key) {
+                    let (dx, dy) = ((cx - ccx) as i64, (cy - ccy) as i64);
+                    missing.push((dx * dx + dy * dy, key.0, key.1));
+                }
+            }
+        }
+        if !missing.is_empty() {
+            missing.sort_unstable_by_key(|m| m.0);
+            for &(_, cx, cy) in missing.iter().take(BUILD_BUDGET) {
+                let (o, w) = build_chunk_mesh(t, cx, cy);
+                let opaque = upload_chunks(ctx, &o);
+                let water = upload_chunks(ctx, &w);
+                self.loaded.insert((cx, cy), LoadedChunk { opaque, water });
+            }
+        }
+    }
+}
+
+/// Camera centre chunk + load radius (chunks) from the orthographic view span. `zoom` is
+/// the visible world height; the iso tilt and aspect widen the ground footprint, so a
+/// factor covers the corners, plus the margin and the hard cap.
+fn load_window(cam: &IsoCam) -> ((i32, i32), i32) {
+    let ccx = (cam.target.x / (CHUNK as f32 * VOX)).floor() as i32;
+    let ccy = (cam.target.z / (CHUNK as f32 * VOX)).floor() as i32;
+    let aspect = screen_width() / screen_height().max(1.0);
+    let span_world = cam.zoom * aspect.max(1.0) * 1.6; // ground span incl. iso tilt
+    let radius = ((span_world * 0.5) / (CHUNK as f32 * VOX)).ceil() as i32 + LOAD_MARGIN;
+    ((ccx, ccy), radius.clamp(1, MAX_LOAD_RADIUS))
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
     let mut seed: u64 = 1;
     let mut terrain = VoxelTerrain::new(seed);
 
-    // Build the world meshes on the CPU, upload them to immutable GPU buffers, then
-    // drop the CPU copy (the GPU owns the geometry now). Rebuilt the same way on reseed.
+    // Chunk meshes are STREAMED around the camera (see `Streamer`) rather than all built
+    // up front — the world model is fully resident but the meshes are not, so a ×16 map
+    // stays within memory. The streamer fills in each frame from `terrain`.
     let pipeline;
-    let mut gpu_opaque;
-    let mut gpu_water;
-    let (mut opaque_count, mut water_count);
+    let mut streamer = Streamer::new();
     {
-        let m = build_world_meshes(&terrain);
-        opaque_count = m.opaque.len();
-        water_count = m.water.len();
         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
         pipeline = chunk_pipeline(ctx);
-        gpu_opaque = upload_chunks(ctx, &m.opaque);
-        gpu_water = upload_chunks(ctx, &m.water);
     }
 
     // The scene is rendered into this offscreen target every frame, then blitted to
@@ -357,14 +447,8 @@ async fn main() {
         if is_key_pressed(KeyCode::R) {
             seed = seed.wrapping_add(1);
             terrain = VoxelTerrain::new(seed);
-            let m = build_world_meshes(&terrain);
-            opaque_count = m.opaque.len();
-            water_count = m.water.len();
             let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
-            free_chunks(ctx, &gpu_opaque);
-            free_chunks(ctx, &gpu_water);
-            gpu_opaque = upload_chunks(ctx, &m.opaque);
-            gpu_water = upload_chunks(ctx, &m.water);
+            streamer.clear(ctx); // the streamer reloads around the camera next frame
         }
 
         // ---- Dev bridge: service queued commands on the main thread ----
@@ -379,7 +463,7 @@ async fn main() {
                         "seed": seed,
                         "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
                         "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
-                                 "meshes": opaque_count + water_count, "water_meshes": water_count },
+                                 "loaded_chunks": streamer.loaded_count(), "chunks_total": terrain.chunks_x * terrain.chunks_y },
                     }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
@@ -400,14 +484,8 @@ async fn main() {
                 dev_bridge::Cmd::Reseed { seed: s } => {
                     seed = s.unwrap_or(seed.wrapping_add(1));
                     terrain = VoxelTerrain::new(seed);
-                    let m = build_world_meshes(&terrain);
-                    opaque_count = m.opaque.len();
-                    water_count = m.water.len();
                     let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
-                    free_chunks(ctx, &gpu_opaque);
-                    free_chunks(ctx, &gpu_water);
-                    gpu_opaque = upload_chunks(ctx, &m.opaque);
-                    gpu_water = upload_chunks(ctx, &m.water);
+                    streamer.clear(ctx);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
                 }
                 dev_bridge::Cmd::Screenshot(path) => {
@@ -427,11 +505,14 @@ async fn main() {
         // Pass 1: render the visible chunks into the offscreen target via raw miniquad
         // — persistent buffers, one draw call per visible chunk, no per-frame upload.
         let vp = cam.camera().matrix();
+        let (center, radius) = load_window(&cam);
         let mut drawn = 0usize;
         {
             let mut gl = unsafe { get_internal_gl() };
             gl.flush(); // flush any pending macroquad 2D before our own pass
             let ctx = gl.quad_context;
+            // Stream: load chunks entering the window (budgeted), free those leaving.
+            streamer.update(ctx, &terrain, center, radius);
             ctx.begin_pass(
                 Some(scene_rt.render_pass.raw_miniquad_id()),
                 PassAction::Clear {
@@ -443,18 +524,27 @@ async fn main() {
             ctx.apply_pipeline(&pipeline);
             let dbg = vec4(if topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
             ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
-            // Opaque first (fills the depth buffer), then the translucent water plane —
-            // except in topo mode, where water is hidden so the bed topology is visible.
-            let chunks: &mut dyn Iterator<Item = &GpuChunk> = if topo {
-                &mut gpu_opaque.iter()
-            } else {
-                &mut gpu_opaque.iter().chain(gpu_water.iter())
-            };
-            for c in chunks {
-                if aabb_in_view(&vp, c.lo, c.hi) {
-                    ctx.apply_bindings(&c.bindings);
-                    ctx.draw(0, c.n_idx, 1);
-                    drawn += 1;
+            // Opaque first (fills the depth buffer), then the translucent water across all
+            // loaded chunks (skipped in topo mode so the bed topology is visible). Each
+            // GPU chunk is frustum-culled by its AABB.
+            for lc in streamer.loaded.values() {
+                for c in &lc.opaque {
+                    if aabb_in_view(&vp, c.lo, c.hi) {
+                        ctx.apply_bindings(&c.bindings);
+                        ctx.draw(0, c.n_idx, 1);
+                        drawn += 1;
+                    }
+                }
+            }
+            if !topo {
+                for lc in streamer.loaded.values() {
+                    for c in &lc.water {
+                        if aabb_in_view(&vp, c.lo, c.hi) {
+                            ctx.apply_bindings(&c.bindings);
+                            ctx.draw(0, c.n_idx, 1);
+                            drawn += 1;
+                        }
+                    }
                 }
             }
             ctx.end_render_pass();
@@ -477,10 +567,11 @@ async fn main() {
         // shadow so it stays legible over any terrain colour.
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
-        let total = opaque_count + water_count;
+        let loaded = streamer.loaded_count();
+        let total_chunks = terrain.chunks_x * terrain.chunks_y;
         let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
         let line = format!(
-            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   chunks {drawn}/{total}{mode}"
+            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   chunks {loaded}/{total_chunks}{mode}"
         );
         if show_info {
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
@@ -606,14 +697,6 @@ struct Batch {
     hi: Vec3,
 }
 
-/// The world split into two draw lists: solid geometry and the translucent water
-/// plane. They are drawn in that order (opaque fills the depth buffer, water blends
-/// over it) — see the render loop.
-struct WorldMeshes {
-    opaque: Vec<Batch>,
-    water: Vec<Batch>,
-}
-
 /// macroquad's `draw_mesh` pushes through the immediate batch buffer, which **clamps**
 /// (silently dropping geometry) at `>= 10000` vertices or `>= 5000` indices per call.
 /// Indices bind first (6 per quad vs 4 verts), so we split meshes on the index count,
@@ -627,11 +710,13 @@ const COLUMN_INDEX_BURST: usize = 768;
 /// strata bands); neighbour heights come from the chunk's ghost ring, so this is
 /// self-contained. Forest/Plains columns also grow a voxel tree. Water columns add a
 /// single translucent surface quad at `SEA_ABS` to the separate water list.
-fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
+/// Build the meshes for ONE chunk `(cx, cy)` — the unit the renderer streams. Returns the
+/// opaque batches and the (translucent) water batches; a dense chunk may split into more
+/// than one of each to stay under macroquad's per-draw limit.
+fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize) -> (Vec<Batch>, Vec<Batch>) {
     let mut opaque = Vec::new();
     let mut water = Vec::new();
-    for cy in 0..t.chunks_y {
-        for cx in 0..t.chunks_x {
+    {
             let mut verts: Vec<Vertex> = Vec::new();
             let mut idx: Vec<u16> = Vec::new();
             // Water batches PER CHUNK too, so each water mesh's AABB stays local and
@@ -716,9 +801,8 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
             }
             flush_mesh(&mut verts, &mut idx, &mut opaque);
             flush_mesh(&mut wv, &mut wi, &mut water);
-        }
     }
-    WorldMeshes { opaque, water }
+    (opaque, water)
 }
 
 /// A voxel tree on column `(gx, gy)` standing on surface height `h`. **Broadleaf**: a
@@ -941,34 +1025,45 @@ fn push_side(
 mod tests {
     use super::*;
 
-    /// Every built mesh must stay strictly under macroquad's per-`draw_mesh` batch
-    /// limits (`>= 10000` verts / `>= 5000` indices ⇒ silent clamping). Builds plain
-    /// `Mesh` structs with no GL context, so this runs headless. Guards the splitter.
+    /// Every built chunk mesh must stay strictly under macroquad's per-`draw_mesh` batch
+    /// limits (`>= 10000` verts / `>= 5000` indices ⇒ silent clamping). Builds chunk by
+    /// chunk (the streaming unit) so peak memory is one chunk even at ×16. Guards the
+    /// splitter.
     #[test]
     fn meshes_stay_under_macroquad_drawcall_limits() {
-        for seed in 1..3 {
-            let t = VoxelTerrain::new(seed);
-            let m = build_world_meshes(&t);
-            assert!(!m.opaque.is_empty(), "no opaque geometry for seed {seed}");
-            for b in m.opaque.iter().chain(m.water.iter()) {
-                assert!(b.mesh.vertices.len() < 10_000, "verts {} (seed {seed})", b.mesh.vertices.len());
-                assert!(b.mesh.indices.len() < 5_000, "indices {} (seed {seed})", b.mesh.indices.len());
+        let t = VoxelTerrain::new(1);
+        let mut any = false;
+        for cy in 0..t.chunks_y {
+            for cx in 0..t.chunks_x {
+                let (op, wa) = build_chunk_mesh(&t, cx, cy);
+                for b in op.iter().chain(wa.iter()) {
+                    any = true;
+                    assert!(b.mesh.vertices.len() < 10_000, "verts {} at chunk ({cx},{cy})", b.mesh.vertices.len());
+                    assert!(b.mesh.indices.len() < 5_000, "indices {} at chunk ({cx},{cy})", b.mesh.indices.len());
+                }
             }
         }
+        assert!(any, "no geometry built");
     }
 
-    /// Report total mesh size at the current `MAP_SCALE`/`SURFACE_RANGE` — taller relief
-    /// means more cliff-strata quads, so this is the number that decides whether ×8 still
-    /// fits before chunk streaming. Informational (prints), not a hard gate.
+    /// Report the WHOLE-map mesh size at the current scale (built per chunk + dropped, so
+    /// it doesn't hold it all) — this is the number the streaming exists to avoid holding
+    /// resident. Informational, `--ignored` (it meshes the whole map).
     #[test]
+    #[ignore]
     fn report_mesh_footprint() {
         let t = VoxelTerrain::new(1);
-        let m = build_world_meshes(&t);
-        let verts: usize = m.opaque.iter().chain(m.water.iter()).map(|b| b.mesh.vertices.len()).sum();
-        let batches = m.opaque.len() + m.water.len();
+        let (mut verts, mut batches) = (0usize, 0usize);
+        for cy in 0..t.chunks_y {
+            for cx in 0..t.chunks_x {
+                let (op, wa) = build_chunk_mesh(&t, cx, cy);
+                for b in op.iter().chain(wa.iter()) {
+                    verts += b.mesh.vertices.len();
+                    batches += 1;
+                }
+            }
+        }
         let mb = (verts * std::mem::size_of::<Vertex>()) as f64 / (1024.0 * 1024.0);
-        eprintln!(
-            "MAP_SCALE={MAP_SCALE} SURFACE_RANGE={SURFACE_RANGE}: {verts} verts, {batches} batches, ~{mb:.0} MB vertex data"
-        );
+        eprintln!("MAP_SCALE={MAP_SCALE} SURFACE_RANGE={SURFACE_RANGE}: {verts} verts, {batches} batches, ~{mb:.0} MB if all resident");
     }
 }

@@ -714,21 +714,27 @@ mod tests {
     fn water_model_is_clean() {
         let t = VoxelTerrain::new(1);
         let nb = |x: i32, y: i32| [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)];
-        let (mut misset, mut isolated) = (0u64, 0u64);
+        let (mut misset, mut isolated, mut water_cols) = (0u64, 0u64, 0u64);
         for y in 0..ROWS as i32 {
             for x in 0..COLS as i32 {
                 let (h, wl) = (t.height(x, y), t.water_level(x, y));
-                if wl > 0 && wl <= h {
+                if wl == 0 {
+                    continue;
+                }
+                water_cols += 1;
+                if wl <= h {
                     misset += 1;
                 }
-                if wl > 0 && nb(x, y).iter().all(|&(a, b)| t.water_level(a, b) == 0) {
+                if nb(x, y).iter().all(|&(a, b)| t.water_level(a, b) == 0) {
                     isolated += 1;
                 }
             }
         }
-        eprintln!("misset_water={misset}, isolated_water={isolated}");
+        // Relative to the water area (scale-independent: ×16 has 4× the columns).
+        let frac = isolated as f64 / water_cols.max(1) as f64;
+        eprintln!("misset_water={misset}, isolated_water={isolated} ({:.3}% of water)", frac * 100.0);
         assert_eq!(misset, 0, "water rendered below terrain in {misset} columns");
-        assert!(isolated < 200, "too many 1-cell water specks: {isolated}");
+        assert!(frac < 0.005, "too many 1-cell water specks: {:.3}% of water", frac * 100.0);
     }
 
     /// Diagnose the reported water/tree artifacts numerically on the FINAL world model:
