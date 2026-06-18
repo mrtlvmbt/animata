@@ -66,15 +66,39 @@ impl IsoCam {
         // The camera must sit BEYOND the map along the view direction, else the near half
         // of the ground falls behind the near plane and clips to a triangle when zoomed
         // out. Push back by the whole map extent (+ zoom), with a far plane to match.
+        // Sit BEYOND the map along the view dir so all geometry has positive depth (ortho, so
+        // distance doesn't affect size).
         let reach = (COLS as f32 + ROWS as f32) * VOX + self.zoom;
-        // Fit near/far TIGHTLY around the world. The depth buffer quantises [near, far]
-        // into a fixed number of steps, so a needlessly huge range (the old 0.1 … reach*2.5)
-        // throws away precision and lets cube top/side faces z-fight at their shared rim
-        // (dark speckles on corners). `extent` = the world's depth span along the view ray,
-        // bounded by the ground diagonal; bracket the camera by it.
-        let extent = (COLS as f32).hypot(ROWS as f32) * VOX + SURFACE_RANGE as f32;
+        let position = self.target + dir * reach;
+        // Depth precision = (z_far - z_near) / depth-buffer-steps, and ortho depth is LINEAR.
+        // The OLD range was the whole-map diagonal (~2700 m at ×16), so a single voxel spanned
+        // only a handful of depth steps — faces tied and the water pass had to paper over it
+        // with `LessOrEqual` + a hand-tuned z-bias (which then bled water over the shore).
+        // Instead fit [z_near, z_far] to ONLY the geometry actually on screen: intersect the
+        // four screen corners' view rays with the ground (`y=0`) and the tallest possible
+        // column, and bracket the resulting depths. This tracks `zoom`, so precision stays
+        // per-voxel-fine at any zoom AND any MAP_SCALE — no magic constants.
+        let fwd = (self.target - position).normalize();
+        let right = fwd.cross(vec3(0.0, 1.0, 0.0)).normalize();
+        let up = right.cross(fwd);
+        let half_h = self.zoom * 0.5;
+        let half_w = half_h * (screen_width() / screen_height().max(1.0));
+        // Vertical span of drawable geometry: ground (0) up to the tallest column + a little
+        // headroom for tree canopies.
+        let top_y = (UNDERGROUND_LEVELS + SEA_LEVEL + 1 + SURFACE_RANGE) as f32 * VOX + 8.0;
+        let (mut z_near, mut z_far) = (f32::MAX, f32::MIN);
+        for sx in [-half_w, half_w] {
+            for sy in [-half_h, half_h] {
+                let corner = position + right * sx + up * sy;
+                for y in [0.0_f32, top_y] {
+                    let t = (y - corner.y) / fwd.y; // distance along the (downward) view ray to y
+                    z_near = z_near.min(t);
+                    z_far = z_far.max(t);
+                }
+            }
+        }
         Camera3D {
-            position: self.target + dir * reach,
+            position,
             target: self.target,
             up: vec3(0.0, 1.0, 0.0),
             fovy: self.zoom,
@@ -82,8 +106,8 @@ impl IsoCam {
             projection: Projection::Orthographics,
             render_target: None,
             viewport: None,
-            z_near: (reach - extent).max(1.0),
-            z_far: reach + extent,
+            z_near: (z_near - 1.0).max(1.0),
+            z_far: z_far + 1.0,
         }
     }
 }
@@ -344,8 +368,14 @@ fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
 /// Pipeline for the translucent water surface (second pass). Same vertex layout as the
 /// terrain (so `upload_chunks` feeds it unchanged), but: `depth_write: false` (water is
 /// transparent — it must not occlude itself or hide what's behind it, only be occluded by
-/// terrain in front, hence `LessOrEqual` test against the already-written terrain depth);
+/// terrain in front, via a strict `Less` test against the already-written terrain depth);
 /// no face culling (waves tilt the surface, and it's viewed from above). Alpha blended.
+///
+/// `Less` (not `LessOrEqual`): with the depth range now fit to the visible slab, a water
+/// surface sits a full voxel — many depth steps — above its own seabed, so it still draws
+/// over the bed, while losing depth TIES to any other terrain. That kills the old shore/
+/// distance bleed without a z-bias (which only worked when precision was too coarse to tell
+/// "my seabed below me" from "unrelated terrain at the same depth").
 fn water_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
     let shader = ctx
         .new_shader(
@@ -371,7 +401,7 @@ fn water_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
         ],
         shader,
         PipelineParams {
-            depth_test: Comparison::LessOrEqual,
+            depth_test: Comparison::Less,
             depth_write: false,
             cull_face: CullFace::Nothing,
             color_blend: Some(BlendState::new(
