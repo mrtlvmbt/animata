@@ -284,10 +284,12 @@ struct LoadedChunk {
 /// Detail-tier chunk meshes built+uploaded per frame, and coarse super-tiles per frame.
 const BUILD_BUDGET: usize = 24;
 const COARSE_BUDGET: usize = 16;
-/// Within the detail tier, LOD by chunk distance: full detail within `LOD0`, half-res to
-/// `LOD1`, quarter-res beyond.
-const LOD0_RADIUS: i32 = 5;
-const LOD1_RADIUS: i32 = 12;
+/// Within the detail tier, LOD by chunk distance. The OUTER ring grades down to
+/// `COARSE_LOD` (stride 8) so the detail edge meets the coarse tier at the SAME
+/// resolution → blocks align on the global stride grid → no seam at the boundary.
+const LOD0_RADIUS: i32 = 4;
+const LOD1_RADIUS: i32 = 8;
+const LOD2_RADIUS: i32 = 12;
 /// Two-tier streaming. The DETAIL tier renders per-chunk (LOD by distance) the super-tiles
 /// around the camera; the COARSE tier renders every OTHER super-tile as one merged buffer
 /// at `COARSE_LOD`, covering the WHOLE map cheaply (so a full zoom-out shows all of ×16
@@ -299,14 +301,17 @@ const COARSE_LOD: u32 = 3; // stride-8 overview
 /// so a full zoom-out costs only the (few hundred) coarse super-tile draws.
 const DETAIL_ZOOM_CUTOFF: f32 = 520.0;
 
-/// LOD for a detail chunk at Chebyshev distance `d` (chunks) from the camera centre.
+/// LOD for a detail chunk at Chebyshev distance `d` (chunks) from the camera centre,
+/// grading 0→1→2→`COARSE_LOD` so the detail edge matches the coarse tier.
 fn lod_for(d: i32) -> u32 {
     if d <= LOD0_RADIUS {
         0
     } else if d <= LOD1_RADIUS {
         1
-    } else {
+    } else if d <= LOD2_RADIUS {
         2
+    } else {
+        COARSE_LOD
     }
 }
 
@@ -463,6 +468,22 @@ fn max_zoom() -> f32 {
     COLS.max(ROWS) as f32 * VOX * 1.2
 }
 
+/// The ground-plane point (returned as `(x, z)`) under the mouse cursor: unproject the
+/// cursor through the camera and intersect the ray with `y = 0`. Used for zoom-to-cursor.
+fn ground_under_cursor(cam: &IsoCam) -> Vec2 {
+    let (mx, my) = mouse_position();
+    let (sw, sh) = (screen_width().max(1.0), screen_height().max(1.0));
+    let nx = mx / sw * 2.0 - 1.0;
+    let ny = 1.0 - my / sh * 2.0; // screen Y is top-down; NDC Y is bottom-up
+    let inv = cam.camera().matrix().inverse();
+    let near = inv.project_point3(vec3(nx, ny, -1.0));
+    let far = inv.project_point3(vec3(nx, ny, 1.0));
+    let d = far - near;
+    let t = if d.y.abs() > 1e-6 { -near.y / d.y } else { 0.0 };
+    let hit = near + d * t;
+    vec2(hit.x, hit.z)
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
@@ -496,6 +517,8 @@ async fn main() {
     // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
     // topology + underwater bed shape that the shaded/translucent normal view obscures.
     let mut topo = false;
+    // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
+    let mut grab: Option<Vec2> = None;
 
     // Dev bridge: localhost JSON-RPC for driving/inspecting the viewer (see
     // DEV_BRIDGE.md). Off unless built with `--features dev`.
@@ -521,7 +544,24 @@ async fn main() {
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
+            // Zoom toward the cursor: keep the ground point under the mouse fixed by
+            // shifting the target by how much that point would otherwise move.
+            let before = ground_under_cursor(&cam);
             cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(8.0, max_zoom());
+            let after = ground_under_cursor(&cam);
+            cam.target.x += before.x - after.x;
+            cam.target.z += before.y - after.y;
+        }
+        // Left-drag pan: lock the grabbed ground point under the moving cursor.
+        if is_mouse_button_pressed(MouseButton::Left) {
+            grab = Some(ground_under_cursor(&cam));
+        }
+        if !is_mouse_button_down(MouseButton::Left) {
+            grab = None;
+        } else if let Some(g) = grab {
+            let cur = ground_under_cursor(&cam);
+            cam.target.x += g.x - cur.x;
+            cam.target.z += g.y - cur.y;
         }
         // Pan in the ground plane (WASD / arrows), rotated by the current yaw.
         let mut pan = Vec2::ZERO;
@@ -914,7 +954,9 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
                         push_water_side(&mut wv, &mut wi, (gx, gy), stride, wl, nwl, depth, face);
                     }
                 }
-            } else if lod == 0 {
+            } else if lod <= 1 {
+                // Trees through LOD1 (one per block) so the canopy fades out a ring later
+                // instead of stopping abruptly at the LOD0 edge.
                 let bd = biome_def(biome);
                 if bd.tree != TreeKind::None
                     && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
@@ -1034,17 +1076,23 @@ fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz:
 /// nearly opaque (hiding the bed, so a basin's sloped walls don't read as a harsh dark
 /// ring through clear water). Standard shallow→deep gradient.
 fn water_color(depth: u8) -> Color {
+    // Keep the surface a coherent water colour: only a SUBTLE darkening with depth (a big
+    // swing made the surface a patchwork mosaic of the bed's bathymetry) and fairly opaque
+    // throughout so the bed doesn't show through and break the read of a flat surface.
     let t = (depth as f32 / WATER_OPAQUE_DEPTH).clamp(0.0, 1.0);
     let lerp = |a: f32, b: f32| a + (b - a) * t;
     Color::new(
-        lerp(0.28, 0.08),
-        lerp(0.52, 0.21),
-        lerp(0.68, 0.40),
-        lerp(0.45, 0.94),
+        lerp(0.17, 0.11),
+        lerp(0.41, 0.31),
+        lerp(0.61, 0.50),
+        lerp(0.80, 0.90),
     )
 }
-/// Depth (levels) at which water reaches its deep, near-opaque colour.
-const WATER_OPAQUE_DEPTH: f32 = 6.0;
+/// Depth (levels) over which water reaches its deep tone. SMALL on purpose: water
+/// saturates to the deep colour after ~2 levels, so anything genuinely underwater (a deep
+/// canyon and the flats around it) is ONE uniform tone — the water column hides the bed
+/// relief instead of tracing it. Only the immediate shore lightens.
+const WATER_OPAQUE_DEPTH: f32 = 2.0;
 
 fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, level: u8, depth: u8) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
