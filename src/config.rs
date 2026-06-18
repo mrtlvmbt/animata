@@ -27,7 +27,7 @@ pub const VOX: f32 = 1.0;
 /// the **eventual target is ×16 per side** (×256 area) — keep at 1 for now, because
 /// `MAP_SCALE = 16` is 2208×1520 ≈ 3.36M columns and will need chunk *streaming*
 /// (don't hold every chunk mesh at once) + aggressive culling, a separate phase.
-pub const MAP_SCALE: usize = 8;
+pub const MAP_SCALE: usize = 16;
 const BASE_COLS: usize = 138;
 const BASE_ROWS: usize = 95;
 
