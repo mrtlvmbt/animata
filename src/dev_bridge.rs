@@ -35,6 +35,9 @@ pub enum Cmd {
     },
     /// Regenerate the world; `seed` omitted → next seed.
     Reseed { seed: Option<u64> },
+    /// Toggle render flags (diagnostic): `water` draws the translucent surface, `topo` is the
+    /// height-debug view (water hidden). Either field optional.
+    Render { water: Option<bool>, topo: Option<bool> },
     /// Capture the current frame to a PNG (serviced post-draw on the main loop).
     Screenshot(String),
 }
@@ -105,6 +108,7 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
     let f = |k: &str| p.get(k).and_then(Value::as_f64);
     let u = |k: &str| p.get(k).and_then(Value::as_u64);
     let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
+    let b = |k: &str| p.get(k).and_then(Value::as_bool);
     match method {
         "animata/status" => Ok(Cmd::Status),
         "animata/set_view" => Ok(Cmd::SetView {
@@ -114,6 +118,7 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             yaw: f("yaw").map(|v| v as f32),
         }),
         "animata/reseed" => Ok(Cmd::Reseed { seed: u("seed") }),
+        "animata/render" => Ok(Cmd::Render { water: b("water"), topo: b("topo") }),
         "animata/screenshot" => Ok(Cmd::Screenshot(s("path").unwrap_or_else(|| "shot.png".into()))),
         other => Err(format!("unknown method: {other}")),
     }

@@ -27,7 +27,7 @@ use macroquad::miniquad::{
     UniformsSource, VertexAttribute, VertexFormat,
 };
 use macroquad::prelude::*;
-use terrain::{cell_biome, cell_height, feature_unit, BiomeKind, VoxelTerrain};
+use terrain::{cell_biome, cell_height, feature_unit, BiomeKind, VoxelTerrain, SEA_ABS};
 
 fn window_conf() -> Conf {
     Conf {
@@ -825,10 +825,12 @@ async fn main() {
             let dev_bridge::Req { cmd, reply } = req;
             match cmd {
                 dev_bridge::Cmd::Status => {
+                    let c = cam.camera();
                     let _ = reply.send(serde_json::json!({
                         "fps": fps,
                         "frame_ms": frame_ms,
                         "seed": seed,
+                        "depth": { "z_near": c.z_near, "z_far": c.z_far, "range": c.z_far - c.z_near },
                         "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
                         "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
                                  "detail_chunks": streamer.detail.len(), "coarse_tiles": streamer.coarse.len() },
@@ -855,6 +857,15 @@ async fn main() {
                     let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                     streamer.clear(ctx);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
+                }
+                dev_bridge::Cmd::Render { water: w, topo: tp } => {
+                    if let Some(w) = w {
+                        water_on = w;
+                    }
+                    if let Some(tp) = tp {
+                        topo = tp;
+                    }
+                    let _ = reply.send(serde_json::json!({"water": water_on, "topo": topo}));
                 }
                 dev_bridge::Cmd::Screenshot(path) => {
                     pending_shots.push((path, reply)); // serviced post-draw below
@@ -1450,7 +1461,15 @@ fn push_side(
     };
     for gz in nh..h {
         let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-        let col = shaded(strata_rgb(gz, h, top, rocky), shade);
+        // Levels below the sea surface are seabed, not land strata: a dry shore cliff dropping
+        // into water exposes a tall side face whose underwater part would otherwise show the
+        // land (grass/dirt) colour and, through the translucent water, read as "water drawn
+        // over land". Colour it by depth below the surface, matching the submerged tops.
+        let col = if gz < SEA_ABS {
+            shaded(seabed_rgb(SEA_ABS - gz), shade)
+        } else {
+            shaded(strata_rgb(gz, h, top, rocky), shade)
+        };
         let q = match face {
             Face::Px => [
                 vec3(x1, y0, z0),
