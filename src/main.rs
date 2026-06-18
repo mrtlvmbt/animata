@@ -283,25 +283,37 @@ struct LoadedChunk {
 /// Detail-tier chunk meshes built+uploaded per frame, and coarse super-tiles per frame.
 const BUILD_BUDGET: usize = 24;
 const COARSE_BUDGET: usize = 16;
-/// Within the detail tier, LOD by chunk distance. The OUTER ring grades down to
-/// `COARSE_LOD` (stride 8) so the detail edge meets the coarse tier at the SAME
-/// resolution → blocks align on the global stride grid → no seam at the boundary.
-const LOD0_RADIUS: i32 = 4;
-const LOD1_RADIUS: i32 = 8;
-const LOD2_RADIUS: i32 = 12;
+/// Within the detail tier, LOD by **Euclidean** chunk distance → concentric circular
+/// rings (not square). The OUTER ring grades down to `COARSE_LOD` (stride 8) so the detail
+/// edge meets the coarse tier at the SAME resolution → blocks align on the global stride
+/// grid → no seam at the boundary.
+const LOD0_RADIUS: i32 = 8;
+const LOD1_RADIUS: i32 = 16;
+const LOD2_RADIUS: i32 = 24;
+/// Deadband (chunks) around each LOD ring boundary — see `lod_hyst`.
+const LOD_HYSTERESIS: i32 = 2;
+/// Skirt depth (levels): border columns drop their outward side face at least this far,
+/// hiding sky cracks where adjacent meshes differ in LOD/height. Only applied on faces
+/// that actually meet a DIFFERENT-LOD neighbour (see `SKIRT_*` mask), so same-LOD chunk
+/// borders stay clean (no blanket of dark seams).
+const SKIRT_LEVELS: u8 = 4;
+const SKIRT_PX: u8 = 1;
+const SKIRT_NX: u8 = 2;
+const SKIRT_PZ: u8 = 4;
+const SKIRT_NZ: u8 = 8;
 /// Two-tier streaming. The DETAIL tier renders per-chunk (LOD by distance) the super-tiles
 /// around the camera; the COARSE tier renders every OTHER super-tile as one merged buffer
 /// at `COARSE_LOD`, covering the WHOLE map cheaply (so a full zoom-out shows all of ×16
 /// at a few hundred draws). A super-tile is detail XOR coarse, so the two never overlap.
 const SUPER: i32 = 8; // chunks per super-tile side
-const DETAIL_SUPER_R: i32 = 1; // super-tiles around the camera kept at per-chunk detail
+const DETAIL_SUPER_R: i32 = 2; // super-tiles around the camera kept at per-chunk detail
 const COARSE_LOD: u32 = 3; // stride-8 overview
 /// Past this zoom the detail tier is dropped entirely — pure coarse whole-map overview,
 /// so a full zoom-out costs only the (few hundred) coarse super-tile draws.
 const DETAIL_ZOOM_CUTOFF: f32 = 520.0;
 
-/// LOD for a detail chunk at Chebyshev distance `d` (chunks) from the camera centre,
-/// grading 0→1→2→`COARSE_LOD` so the detail edge matches the coarse tier.
+/// LOD for a detail chunk at Euclidean distance `d` (chunks) from the camera centre,
+/// grading 0→1→2→`COARSE_LOD` in concentric rings so the detail edge matches the coarse tier.
 fn lod_for(d: i32) -> u32 {
     if d <= LOD0_RADIUS {
         0
@@ -311,6 +323,32 @@ fn lod_for(d: i32) -> u32 {
         2
     } else {
         COARSE_LOD
+    }
+}
+
+/// LOD a detail chunk `(cx, cy)` resolves to, given the camera centre chunk `(ccx, ccy)`.
+fn lod_at(cx: i32, cy: i32, ccx: i32, ccy: i32) -> u32 {
+    let (dx, dy) = (cx - ccx, cy - ccy);
+    lod_for(((dx * dx + dy * dy) as f32).sqrt() as i32)
+}
+
+/// Chunk distance (chunks) from the camera centre.
+fn chunk_dist(cx: i32, cy: i32, ccx: i32, ccy: i32) -> i32 {
+    let (dx, dy) = (cx - ccx, cy - ccy);
+    ((dx * dx + dy * dy) as f32).sqrt() as i32
+}
+
+/// LOD with HYSTERESIS: a chunk already at `cur` only switches once the camera distance
+/// clears the ring boundary by `LOD_HYSTERESIS` chunks, so a camera hovering on a ring
+/// edge doesn't flip-flop the chunk's LOD (rebuild thrash + visible popping) every frame.
+fn lod_hyst(d: i32, cur: Option<u32>) -> u32 {
+    let raw = lod_for(d);
+    match cur {
+        // Coarsening (moved away): require d past the boundary by the margin.
+        Some(c) if raw > c => if lod_for(d - LOD_HYSTERESIS) > c { raw } else { c },
+        // Refining (moved closer): require d inside the boundary by the margin.
+        Some(c) if raw < c => if lod_for(d + LOD_HYSTERESIS) < c { raw } else { c },
+        _ => raw,
     }
 }
 
@@ -367,12 +405,9 @@ impl Streamer {
             let mut todo: Vec<(i64, i32, i32, u32)> = Vec::new();
             for cy in dcy0..dcy1 {
                 for cx in dcx0..dcx1 {
-                    let want = lod_for((cx - ccx).abs().max((cy - ccy).abs()));
-                    let needs = match self.detail.get(&(cx, cy)) {
-                        None => true,
-                        Some(lc) => lc.lod != want,
-                    };
-                    if needs {
+                    let cur = self.detail.get(&(cx, cy)).map(|lc| lc.lod);
+                    let want = lod_hyst(chunk_dist(cx, cy, ccx, ccy), cur);
+                    if cur != Some(want) {
                         let (dx, dy) = ((cx - ccx) as i64, (cy - ccy) as i64);
                         todo.push((dx * dx + dy * dy, cx, cy, want));
                     }
@@ -383,7 +418,19 @@ impl Streamer {
                 if let Some(old) = self.detail.remove(&(cx, cy)) {
                     free_chunks(ctx, &old.opaque);
                 }
-                let o = build_chunk_mesh(t, cx as usize, cy as usize, lod);
+                // Skirt only the faces meeting a DIFFERENT-LOD neighbour chunk (an actual
+                // seam) — not every chunk border, which painted dark seams everywhere. Use
+                // the neighbour's LOADED LOD (hysteresis means it may differ from the pure
+                // distance LOD), falling back to the distance LOD if it isn't resident yet.
+                let nlod = |nx: i32, ny: i32| {
+                    self.detail.get(&(nx, ny)).map(|lc| lc.lod).unwrap_or_else(|| lod_at(nx, ny, ccx, ccy))
+                };
+                let mut sk = 0u8;
+                if nlod(cx + 1, cy) != lod { sk |= SKIRT_PX; }
+                if nlod(cx - 1, cy) != lod { sk |= SKIRT_NX; }
+                if nlod(cx, cy + 1) != lod { sk |= SKIRT_PZ; }
+                if nlod(cx, cy - 1) != lod { sk |= SKIRT_NZ; }
+                let o = build_chunk_mesh(t, cx as usize, cy as usize, lod, sk);
                 let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod };
                 self.detail.insert((cx, cy), lc);
             }
@@ -412,7 +459,7 @@ impl Streamer {
             let y0 = sy as usize * SUPER as usize * CHUNK;
             let x1 = (x0 + SUPER as usize * CHUNK).min(COLS);
             let y1 = (y0 + SUPER as usize * CHUNK).min(ROWS);
-            let o = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
+            let o = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD, 0);
             let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod: COARSE_LOD };
             self.coarse.insert((sx, sy), lc);
         }
@@ -847,10 +894,10 @@ const MAX_MESH_INDICES: usize = 4800;
 const COLUMN_INDEX_BURST: usize = 1200;
 
 /// Build the meshes for ONE chunk `(cx, cy)` at `lod` — the unit the detail tier streams.
-fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> Vec<Batch> {
+fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32, skirt_faces: u8) -> Vec<Batch> {
     let x1 = (cx * CHUNK + CHUNK).min(COLS);
     let y1 = (cy * CHUNK + CHUNK).min(ROWS);
-    build_region_mesh(t, cx * CHUNK, cy * CHUNK, x1, y1, lod)
+    build_region_mesh(t, cx * CHUNK, cy * CHUNK, x1, y1, lod, skirt_faces)
 }
 
 /// Build the opaque + water meshes for an arbitrary column rectangle `[x0,x1) × [y0,y1)`
@@ -862,7 +909,8 @@ fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> Vec<Bat
 /// are stride multiples) and each block emits one `stride×stride` footprint sampled from
 /// its origin column, with neighbour heights read a stride away. Trees are full-detail
 /// only. Water is NOT rendered — submerged columns just show a sand/rock seabed.
-fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> Vec<Batch> {
+#[allow(clippy::too_many_arguments)]
+fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32, skirt_faces: u8) -> Vec<Batch> {
     let stride = 1usize << lod;
     let si = stride as i32;
     let mut opaque = Vec::new();
@@ -905,15 +953,23 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
             };
             let rocky = submerged || matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
             push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col);
+            // SKIRT: on a region-border column whose face meets a DIFFERENT-LOD neighbour
+            // mesh (flagged in `skirt_faces`), drop the side down by ≥SKIRT_LEVELS so a
+            // height mismatch across the seam can't show a sky crack. Same-LOD borders are
+            // not flagged, so they stay clean. The dropped part is coloured with the SURFACE
+            // tone (not dark stone strata) so the apron blends in instead of a dark seam.
+            let (bpx, bnx) = (gx + stride >= x1 && skirt_faces & SKIRT_PX != 0, gx == x0 && skirt_faces & SKIRT_NX != 0);
+            let (bpz, bnz) = (gy + stride >= y1 && skirt_faces & SKIRT_PZ != 0, gy == y0 && skirt_faces & SKIRT_NZ != 0);
             let nb = [
-                (t.height(ix + si, iy), Face::Px),
-                (t.height(ix - si, iy), Face::Nx),
-                (t.height(ix, iy + si), Face::Pz),
-                (t.height(ix, iy - si), Face::Nz),
+                (t.height(ix + si, iy), Face::Px, bpx),
+                (t.height(ix - si, iy), Face::Nx, bnx),
+                (t.height(ix, iy + si), Face::Pz, bpz),
+                (t.height(ix, iy - si), Face::Nz, bnz),
             ];
-            for (nh, face) in nb {
+            for (nh_real, face, is_skirt) in nb {
+                let nh = if is_skirt { nh_real.min(h.saturating_sub(SKIRT_LEVELS)) } else { nh_real };
                 if nh < h {
-                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky);
+                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky, is_skirt);
                 }
             }
 
@@ -1080,6 +1136,7 @@ fn push_side(
     face: Face,
     top: (f32, f32, f32),
     rocky: bool,
+    skirt: bool,
 ) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
@@ -1091,7 +1148,15 @@ fn push_side(
     };
     for gz in nh..h {
         let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-        let col = shaded(strata_rgb(gz, h, top, rocky), shade);
+        // A skirt face is a hidden gap-filler at a LOD seam, not real geology. Colour it
+        // with the FLAT top tone (SHADE_TOP, no directional darkening) so the thin sliver
+        // that pokes out on a "flat" seam matches the top exactly and disappears — with
+        // side shading it read as a dark line tracing every LOD-ring boundary.
+        let col = if skirt {
+            shaded(top, SHADE_TOP)
+        } else {
+            shaded(strata_rgb(gz, h, top, rocky), shade)
+        };
         let q = match face {
             Face::Px => [
                 vec3(x1, y0, z0),
@@ -1136,7 +1201,7 @@ mod tests {
         let mut any = false;
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let op = build_chunk_mesh(&t, cx, cy, 0);
+                let op = build_chunk_mesh(&t, cx, cy, 0, 0);
                 for b in op.iter() {
                     any = true;
                     assert!(b.mesh.vertices.len() < 10_000, "verts {} at chunk ({cx},{cy})", b.mesh.vertices.len());
@@ -1161,7 +1226,7 @@ mod tests {
         for (cx, cy) in sample {
             let mut prev = usize::MAX;
             for lod in 0..3u32 {
-                let op = build_chunk_mesh(&t, cx, cy, lod);
+                let op = build_chunk_mesh(&t, cx, cy, lod, 0);
                 let mut verts = 0;
                 for b in op.iter() {
                     verts += b.mesh.vertices.len();
@@ -1187,7 +1252,7 @@ mod tests {
                 continue;
             }
             let (x1, y1) = ((x0 + span).min(COLS), (y0 + span).min(ROWS));
-            let op = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
+            let op = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD, 0);
             let batches = op.len();
             for b in op.iter() {
                 assert!(b.mesh.vertices.len() < 10_000, "coarse verts overflow");
@@ -1209,7 +1274,7 @@ mod tests {
         let (mut verts, mut batches) = (0usize, 0usize);
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let op = build_chunk_mesh(&t, cx, cy, 0);
+                let op = build_chunk_mesh(&t, cx, cy, 0, 0);
                 for b in op.iter() {
                     verts += b.mesh.vertices.len();
                     batches += 1;
