@@ -707,11 +707,39 @@ fn ground_under_cursor(cam: &IsoCam) -> Vec2 {
     vec2(hit.x, hit.z)
 }
 
+/// A world generation running on a background thread, so the render loop never blocks on
+/// it. The worker produces a `Send` `VoxelTerrain` and ships it back over the channel; the
+/// main thread polls `rx` each frame and reads `progress` (permille, 0..=1000) for the bar.
+struct GenJob {
+    rx: std::sync::mpsc::Receiver<VoxelTerrain>,
+    progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    seed: u64,
+}
+
+/// Kick off background generation for `seed`. Generation is pure CPU (touches no GPU), so it
+/// is safe off the main thread; meshes are still built on the main thread by the `Streamer`.
+fn spawn_gen(seed: u64) -> GenJob {
+    use std::sync::atomic::Ordering;
+    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = progress.clone();
+    std::thread::spawn(move || {
+        let t = VoxelTerrain::generate(seed, &|f| {
+            p.store((f.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+        });
+        let _ = tx.send(t); // receiver may be gone if the app exited mid-gen — ignore
+    });
+    GenJob { rx, progress, seed }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
     let mut seed: u64 = 1;
-    let mut terrain = VoxelTerrain::new(seed);
+    // The world is generated on a background thread so the first frame (and every regen)
+    // never blocks the render loop. `terrain` is `None` until the initial job finishes.
+    let mut terrain: Option<VoxelTerrain> = None;
+    let mut gen: Option<GenJob> = Some(spawn_gen(seed));
 
     // Chunk meshes are STREAMED around the camera (see `Streamer`) rather than all built
     // up front — the world model is fully resident but the meshes are not, so a ×16 map
@@ -756,6 +784,16 @@ async fn main() {
 
     loop {
         let dt = get_frame_time();
+        // Pick up a finished background world (non-blocking). On readiness, swap it in and
+        // reset the streamer so meshes rebuild around the camera from the new terrain.
+        if let Some(job) = &gen {
+            if let Ok(t) = job.rx.try_recv() {
+                terrain = Some(t);
+                gen = None;
+                let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+                streamer.clear(ctx);
+            }
+        }
         // Smooth the frame-time readout so it doesn't jitter.
         frame_ms = 0.9 * frame_ms + 0.1 * dt * 1000.0;
         if dt > 0.0 {
@@ -820,12 +858,12 @@ async fn main() {
         if is_key_pressed(KeyCode::E) {
             cam.yaw += std::f32::consts::FRAC_PI_2;
         }
-        // Regenerate the world with a fresh seed.
-        if is_key_pressed(KeyCode::R) {
+        // Regenerate the world with a fresh seed — in the background. The current map stays
+        // visible and interactive until the new one is ready (swapped in by the poll above).
+        // A regen already in flight ignores further presses.
+        if is_key_pressed(KeyCode::R) && gen.is_none() {
             seed = seed.wrapping_add(1);
-            terrain = VoxelTerrain::new(seed);
-            let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
-            streamer.clear(ctx); // the streamer reloads around the camera next frame
+            gen = Some(spawn_gen(seed));
         }
 
         // ---- Dev bridge: service queued commands on the main thread ----
@@ -861,8 +899,11 @@ async fn main() {
                     let _ = reply.send(serde_json::json!({"ok": true}));
                 }
                 dev_bridge::Cmd::Reseed { seed: s } => {
+                    // Synchronous on the dev path: scripted inspection expects the new world
+                    // (e.g. an immediate screenshot) deterministically, so we block here.
                     seed = s.unwrap_or(seed.wrapping_add(1));
-                    terrain = VoxelTerrain::new(seed);
+                    gen = None; // cancel any in-flight background regen — this wins
+                    terrain = Some(VoxelTerrain::new(seed));
                     let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                     streamer.clear(ctx);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
@@ -900,7 +941,11 @@ async fn main() {
             gl.flush(); // flush any pending macroquad 2D before our own pass
             let ctx = gl.quad_context;
             // Stream: detail tier around the camera + coarse super-tiles over the rest.
-            streamer.update(ctx, &terrain, center, cam.zoom);
+            // No terrain yet (initial generation still running) ⇒ nothing to stream/draw;
+            // the pass below just clears to sky and the progress bar shows over it.
+            if let Some(terrain) = &terrain {
+                streamer.update(ctx, terrain, center, cam.zoom);
+            }
             ctx.begin_pass(
                 Some(scene_rt.render_pass.raw_miniquad_id()),
                 PassAction::Clear {
@@ -989,6 +1034,22 @@ async fn main() {
         if show_info {
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
             draw_text(&line, 8.0, 22.0, 24.0, Color::new(0.95, 0.97, 1.0, 1.0));
+        }
+
+        // Background generation progress bar (only while a world is being built). Centred
+        // near the bottom; same shadow-text convention as the HUD above.
+        if let Some(job) = &gen {
+            let p = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
+            let w = screen_width();
+            let (bw, bh, margin) = (w * 0.5, 14.0, 24.0);
+            let x = (w - bw) * 0.5;
+            let y = screen_height() - margin - bh;
+            draw_rectangle(x - 2.0, y - 2.0, bw + 4.0, bh + 4.0, Color::new(0.0, 0.0, 0.0, 0.5));
+            draw_rectangle(x, y, bw, bh, Color::new(0.12, 0.14, 0.18, 0.9));
+            draw_rectangle(x, y, bw * p, bh, Color::new(0.45, 0.75, 1.0, 1.0));
+            let label = format!("generating world   seed {}   {:.0}%", job.seed, p * 100.0);
+            draw_text(&label, x + 1.0, y - 6.0, 22.0, Color::new(0.0, 0.0, 0.0, 0.6));
+            draw_text(&label, x, y - 7.0, 22.0, Color::new(0.95, 0.97, 1.0, 1.0));
         }
 
         // Dev bridge: service deferred screenshots now the frame is fully drawn.

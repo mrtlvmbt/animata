@@ -69,15 +69,16 @@ fn height_grad(elev: &[f32], px: f32, py: f32) -> (f32, f32, f32) {
 
 /// Run hydraulic then thermal erosion over `elev` in place. Returns nothing; rivers are
 /// derived separately (flow accumulation) by the caller.
-pub fn erode(seed: u64, elev: &mut [f32]) {
-    hydraulic(seed, elev);
-    thermal(elev);
+pub fn erode(seed: u64, elev: &mut [f32], progress: &dyn Fn(f32)) {
+    // Hydraulic dominates the runtime; give it most of the [0,1] band, thermal the tail.
+    hydraulic(seed, elev, &|f| progress(f * 0.9));
+    thermal(elev, &|f| progress(0.9 + f * 0.1));
     for h in elev.iter_mut() {
         *h = h.clamp(0.0, 1.0);
     }
 }
 
-fn hydraulic(seed: u64, elev: &mut [f32]) {
+fn hydraulic(seed: u64, elev: &mut [f32], progress: &dyn Fn(f32)) {
     // Precompute the circular brush (offsets + normalised weights) once.
     let mut brush: Vec<(i32, i32, f32)> = Vec::new();
     let mut wsum = 0.0;
@@ -97,7 +98,12 @@ fn hydraulic(seed: u64, elev: &mut [f32]) {
 
     let mut rng = Rng(seed ^ 0xE051_0051_0051_0051);
     let num = ((COLS * ROWS) as f32 * DROPLET_FRACTION) as u64;
-    for _ in 0..num {
+    // Report progress every ~1% of droplets — cheap, keeps the bar moving smoothly.
+    let report_every = (num / 100).max(1);
+    for d in 0..num {
+        if d % report_every == 0 {
+            progress(d as f32 / num as f32);
+        }
         let mut px = rng.unit() * (COLS - 1) as f32;
         let mut py = rng.unit() * (ROWS - 1) as f32;
         let (mut dx, mut dy) = (0.0f32, 0.0f32);
@@ -172,10 +178,11 @@ fn hydraulic(seed: u64, elev: &mut [f32]) {
 
 /// Thermal/talus relaxation: where the drop to the steepest-descent neighbour exceeds the
 /// talus threshold, move material down. Smooths cliffs into scree and caps the slope.
-fn thermal(elev: &mut [f32]) {
+fn thermal(elev: &mut [f32], progress: &dyn Fn(f32)) {
     let n = COLS * ROWS;
     let mut delta = vec![0f32; n];
-    for _ in 0..THERMAL_PASSES {
+    for pass in 0..THERMAL_PASSES {
+        progress(pass as f32 / THERMAL_PASSES as f32);
         for v in delta.iter_mut() {
             *v = 0.0;
         }
