@@ -14,6 +14,7 @@
 mod config;
 #[cfg(feature = "dev")]
 mod dev_bridge;
+mod tectonics;
 mod terrain;
 
 use config::*;
