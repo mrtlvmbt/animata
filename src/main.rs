@@ -525,10 +525,13 @@ fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
 /// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin
 /// biome "lip" just under the surface, then topsoil, then stone deeper down.
 fn strata_rgb(gz: u8, h: u8, biome: BiomeKind) -> (f32, f32, f32) {
+    // Rocky biomes are bare stone all the way down — no brown topsoil band, which read as
+    // out-of-place dirt specks on mountain/snow cliffs.
+    let rocky = matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
     if gz + 1 == h {
         let (r, g, b) = top_rgb(biome);
         (r * 0.85, g * 0.85, b * 0.85)
-    } else if gz + 3 >= h {
+    } else if !rocky && gz + 3 >= h {
         (0.42, 0.31, 0.20) // topsoil
     } else {
         (0.40, 0.38, 0.36) // stone
@@ -631,17 +634,19 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                             flush_mesh(&mut wv, &mut wi, &mut water);
                         }
                         push_water_top(&mut wv, &mut wi, gx, gy, wl);
-                        // Connective side faces down to any lower-surfaced neighbour, so a
-                        // descending river / stepped water stays a continuous ribbon.
+                        // Connective side faces to a LOWER neighbouring WATER surface only
+                        // (a river step / water meeting lower water), so the ribbon stays
+                        // continuous. NOT toward dry land — that drew spurious walls around
+                        // terrain poking into a water body.
                         for (nx, ny, face) in [
                             (ix + 1, iy, Face::Px),
                             (ix - 1, iy, Face::Nx),
                             (ix, iy + 1, Face::Pz),
                             (ix, iy - 1, Face::Nz),
                         ] {
-                            let n_surface = t.water_level(nx, ny).max(t.height(nx, ny));
-                            if n_surface < wl {
-                                push_water_side(&mut wv, &mut wi, gx, gy, wl, n_surface, face);
+                            let nwl = t.water_level(nx, ny);
+                            if nwl > 0 && nwl < wl {
+                                push_water_side(&mut wv, &mut wi, gx, gy, wl, nwl, face);
                             }
                         }
                     } else {
@@ -649,7 +654,7 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                         if bd.tree != TreeKind::None
                             && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
                         {
-                            push_tree(&mut verts, &mut idx, gx, gy, h, t.seed, bd.tree);
+                            push_tree(&mut verts, &mut idx, t, gx, gy, h, bd.tree);
                         }
                     }
                 }
@@ -666,11 +671,17 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
 /// taller trunk with a narrow tapering spire (1-cell tip over a + of leaves) — gives
 /// taiga/snow a distinct boreal look. Per-column hashes keep it deterministic; canopy
 /// blocks overhanging outside the world are skipped.
-fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, seed: u64, kind: TreeKind) {
+fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, t: &VoxelTerrain, gx: usize, gy: usize, h: u8, kind: TreeKind) {
+    let seed = t.seed;
     let trunk = (0.36, 0.26, 0.16);
     let leaf = if kind == TreeKind::Conifer { (0.09, 0.24, 0.16) } else { (0.16, 0.42, 0.20) };
+    // Skip canopy blocks that would overhang a WATER column (leaves floating over a
+    // river/lake) or fall outside the world.
     let leaf_at = |verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, lx: i32, ly: i32, lz: u8| {
-        if (0..COLS as i32).contains(&lx) && (0..ROWS as i32).contains(&ly) {
+        if (0..COLS as i32).contains(&lx)
+            && (0..ROWS as i32).contains(&ly)
+            && t.water_level(lx, ly) == 0
+        {
             push_block(verts, idx, lx, ly, lz, leaf);
         }
     };

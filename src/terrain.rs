@@ -707,6 +707,81 @@ mod tests {
         assert!(lakes > 50, "no lakes: {lakes} cells");
     }
 
+    /// Guard the water model: water is never rendered below its own terrain (`misset`),
+    /// and there are no swarms of 1-cell water specks (the lake-size filter). Both were
+    /// artifacts reported on the 3D view; this locks the data side of the fixes.
+    #[test]
+    fn water_model_is_clean() {
+        let t = VoxelTerrain::new(1);
+        let nb = |x: i32, y: i32| [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)];
+        let (mut misset, mut isolated) = (0u64, 0u64);
+        for y in 0..ROWS as i32 {
+            for x in 0..COLS as i32 {
+                let (h, wl) = (t.height(x, y), t.water_level(x, y));
+                if wl > 0 && wl <= h {
+                    misset += 1;
+                }
+                if wl > 0 && nb(x, y).iter().all(|&(a, b)| t.water_level(a, b) == 0) {
+                    isolated += 1;
+                }
+            }
+        }
+        eprintln!("misset_water={misset}, isolated_water={isolated}");
+        assert_eq!(misset, 0, "water rendered below terrain in {misset} columns");
+        assert!(isolated < 200, "too many 1-cell water specks: {isolated}");
+    }
+
+    /// Diagnose the reported water/tree artifacts numerically on the FINAL world model:
+    /// mis-set water (rendered where it shouldn't), terrain poking into water (dry holes →
+    /// internal walls), isolated 1-cell water (specks), and land trees overhanging water.
+    #[test]
+    #[ignore]
+    fn diagnose_water_artifacts() {
+        let t = VoxelTerrain::new(1);
+        let nb = |x: i32, y: i32| [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)];
+        let (mut misset, mut dry_holes, mut isolated, mut trees_over_water) = (0u64, 0u64, 0u64, 0u64);
+        let mut mountain_with_soil = 0u64;
+        for y in 0..ROWS as i32 {
+            for x in 0..COLS as i32 {
+                let h = t.height(x, y);
+                let wl = t.water_level(x, y);
+                let watn = nb(x, y).iter().filter(|&&(a, b)| t.water_level(a, b) > 0).count();
+                if wl > 0 && wl <= h {
+                    misset += 1;
+                }
+                if wl > 0 && watn == 0 {
+                    isolated += 1;
+                }
+                // Dry land cell mostly ringed by water (pokes up inside a water body).
+                if wl == 0 && h > 0 && watn >= 3 {
+                    dry_holes += 1;
+                }
+                // A tree-growing land column next to water → canopy overhangs the water.
+                if wl == 0 && h > 0 {
+                    let biome = t.biome_at(x as usize, y as usize);
+                    if matches!(biome, BiomeKind::Mountain | BiomeKind::Snow) && h >= GROUND_MIN + 3 {
+                        mountain_with_soil += 1; // would show a brown topsoil strata band
+                    }
+                }
+            }
+        }
+        // Trees overhanging water (approximate: tree columns with a water neighbour).
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                if t.water_level(x as i32, y as i32) > 0 {
+                    continue;
+                }
+                let b = t.biome_at(x, y);
+                let grows = matches!(b, BiomeKind::Forest | BiomeKind::Jungle | BiomeKind::Taiga | BiomeKind::Plains | BiomeKind::Savanna | BiomeKind::Swamp);
+                let near_water = nb(x as i32, y as i32).iter().any(|&(a, c)| t.water_level(a, c) > 0);
+                if grows && near_water {
+                    trees_over_water += 1;
+                }
+            }
+        }
+        eprintln!("misset_water={misset} dry_holes={dry_holes} isolated_water={isolated} trees_near_water={trees_over_water} mountain_soil_bands={mountain_with_soil}");
+    }
+
     /// Report river/lake coverage and dump a water map (ocean / lake / river distinct).
     /// Rebuilds the eroded field + hydrology directly. Run with `--release`.
     #[test]

@@ -20,6 +20,9 @@ use std::collections::BinaryHeap;
 const RIVER_THRESHOLD: f32 = 28.0 * (MAP_SCALE * MAP_SCALE) as f32;
 /// Minimum fill depth (elevation units) to count a column as lake (ignore numeric dust).
 const LAKE_EPS: f32 = 0.0040;
+/// A lake must be at least this many connected cells — drops 1-cell puddles that read as
+/// stray water specks rather than bodies of water.
+const MIN_LAKE_CELLS: usize = 6;
 
 pub struct Hydrology {
     pub river: Vec<bool>,
@@ -54,7 +57,44 @@ pub fn compute(elev: &[f32]) -> Hydrology {
             river[i] = true;
         }
     }
+    drop_small_lakes(&mut lake);
     Hydrology { river, lake, filled }
+}
+
+/// Unmark lake components smaller than `MIN_LAKE_CELLS` (4-connected flood fill) so single-
+/// cell puddles don't render as stray water specks.
+fn drop_small_lakes(lake: &mut [bool]) {
+    let (w, h) = (COLS as i32, ROWS as i32);
+    let mut seen = vec![false; lake.len()];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut comp: Vec<usize> = Vec::new();
+    for start in 0..lake.len() {
+        if !lake[start] || seen[start] {
+            continue;
+        }
+        comp.clear();
+        stack.push(start);
+        seen[start] = true;
+        while let Some(i) = stack.pop() {
+            comp.push(i);
+            let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
+            for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                    continue;
+                }
+                let j = (ny * w + nx) as usize;
+                if lake[j] && !seen[j] {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            }
+        }
+        if comp.len() < MIN_LAKE_CELLS {
+            for &i in &comp {
+                lake[i] = false;
+            }
+        }
+    }
 }
 
 fn quant(e: f32) -> i64 {
