@@ -1088,8 +1088,11 @@ fn water_color(depth: u8) -> Color {
         lerp(0.80, 0.90),
     )
 }
-/// Depth (levels) over which water darkens to its deep tone (gentle, so no hard banding).
-const WATER_OPAQUE_DEPTH: f32 = 8.0;
+/// Depth (levels) over which water reaches its deep tone. SMALL on purpose: water
+/// saturates to the deep colour after ~2 levels, so anything genuinely underwater (a deep
+/// canyon and the flats around it) is ONE uniform tone — the water column hides the bed
+/// relief instead of tracing it. Only the immediate shore lightens.
+const WATER_OPAQUE_DEPTH: f32 = 2.0;
 
 fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, level: u8, depth: u8) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
