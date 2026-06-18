@@ -833,15 +833,12 @@ fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
     biome_def(biome).surface
 }
 
-/// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin
-/// biome "lip" just under the surface, then topsoil, then stone deeper down.
-fn strata_rgb(gz: u8, h: u8, biome: BiomeKind) -> (f32, f32, f32) {
-    // Rocky biomes are bare stone all the way down — no brown topsoil band, which read as
-    // out-of-place dirt specks on mountain/snow cliffs.
-    let rocky = matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
+/// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin lip of
+/// the surface colour `top` just under the surface, then (unless `rocky`) topsoil, then
+/// stone. `rocky` biomes (mountain/snow/seabed) skip the brown topsoil band.
+fn strata_rgb(gz: u8, h: u8, top: (f32, f32, f32), rocky: bool) -> (f32, f32, f32) {
     if gz + 1 == h {
-        let (r, g, b) = top_rgb(biome);
-        (r * 0.85, g * 0.85, b * 0.85)
+        (top.0 * 0.85, top.1 * 0.85, top.2 * 0.85)
     } else if !rocky && gz + 3 >= h {
         (0.42, 0.31, 0.20) // topsoil
     } else {
@@ -928,22 +925,28 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
             let wl = t.water_level(ix, iy);
             // Submerged columns get a sand/rock SEABED top (by depth), not the blue Ocean
             // biome colour — the floor reads as a bottom under the blue water surface.
-            let top_col = if wl > h { seabed_rgb(wl - h) } else { top_rgb(biome) };
+            // Submerged columns are a sand/rock seabed (by depth); land uses its biome.
+            // Either way the SIDE faces are drawn (the bed reads as 3D terrain like land,
+            // and culling them left sky showing through the steps as blue edges).
+            let submerged = wl > h;
+            let top_col = if submerged {
+                seabed_rgb(wl - h)
+            } else if matches!(biome, BiomeKind::Mountain) {
+                rock_rgb(gx, gy, t.seed)
+            } else {
+                top_rgb(biome)
+            };
+            let rocky = submerged || matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
             push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col);
-            // Skip the side faces of a SUBMERGED block (water above its top): those
-            // underwater walls showed through shallow water as a dark basin ring; only the
-            // flat bed tops remain. Shore (not submerged) keeps its bank faces.
-            if wl <= h {
-                let nb = [
-                    (t.height(ix + si, iy), Face::Px),
-                    (t.height(ix - si, iy), Face::Nx),
-                    (t.height(ix, iy + si), Face::Pz),
-                    (t.height(ix, iy - si), Face::Nz),
-                ];
-                for (nh, face) in nb {
-                    if nh < h {
-                        push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, biome);
-                    }
+            let nb = [
+                (t.height(ix + si, iy), Face::Px),
+                (t.height(ix - si, iy), Face::Nx),
+                (t.height(ix, iy + si), Face::Pz),
+                (t.height(ix, iy - si), Face::Nz),
+            ];
+            for (nh, face) in nb {
+                if nh < h {
+                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky);
                 }
             }
 
@@ -1150,6 +1153,20 @@ fn seabed_rgb(depth: u8) -> (f32, f32, f32) {
     (lerp(0.80, 0.40), lerp(0.72, 0.39), lerp(0.52, 0.37)) // sand → rock
 }
 
+/// Varied mountain rock: a coherent (low-frequency) brightness field over the bare grey,
+/// plus greenish mossy patches — so a massif isn't a flat slab of one stone colour.
+fn rock_rgb(gx: usize, gy: usize, seed: u64) -> (f32, f32, f32) {
+    let v = terrain::fbm(seed, gx as f32 / 22.0, gy as f32 / 22.0, 303, 3); // brightness [0,1]
+    let m = terrain::fbm(seed, gx as f32 / 34.0, gy as f32 / 34.0, 305, 2); // moss mask
+    let g = 0.36 + 0.22 * v;
+    let mut c = (g, g * 0.98, g * 0.93); // slightly warm, brightness-varied grey
+    if m > 0.60 {
+        let k = ((m - 0.60) / 0.40).min(1.0) * 0.5;
+        c = (c.0 + (0.33 - c.0) * k, c.1 + (0.45 - c.1) * k, c.2 + (0.29 - c.2) * k); // → moss
+    }
+    c
+}
+
 fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, h: u8, rgb: (f32, f32, f32)) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
@@ -1177,7 +1194,8 @@ fn push_side(
     h: u8,
     nh: u8,
     face: Face,
-    biome: BiomeKind,
+    top: (f32, f32, f32),
+    rocky: bool,
 ) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
@@ -1189,7 +1207,7 @@ fn push_side(
     };
     for gz in nh..h {
         let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-        let col = shaded(strata_rgb(gz, h, biome), shade);
+        let col = shaded(strata_rgb(gz, h, top, rocky), shade);
         let q = match face {
             Face::Px => [
                 vec3(x1, y0, z0),
