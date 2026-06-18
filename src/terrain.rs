@@ -328,11 +328,16 @@ pub struct VoxelTerrain {
 }
 
 impl VoxelTerrain {
-    pub fn new(seed: u64) -> Self {
+    /// Generate a world for `seed`, blocking the calling thread. Pure CPU (no GPU), so it
+    /// may run on a background thread; the result is `Send`. `progress` is called with a
+    /// monotonically rising fraction in `[0, 1]` as the phases (tectonics → elevation →
+    /// erosion → hydrology → classification) complete, for a UI progress bar.
+    pub fn generate(seed: u64, progress: &(dyn Fn(f32) + Sync)) -> Self {
         let n = COLS * ROWS;
         // The tectonic macro layer is global (Voronoi plates + a distance transform from
         // boundaries), so it's built once up front; the per-column generator samples it.
         let tect = TectonicField::generate(seed);
+        progress(0.10);
         // Build the continuous elevation field, then ERODE it globally (droplet + thermal)
         // before classifying columns into height/biome — so valleys, drainage and fjords
         // are carved into the land, and the altitude bands follow the eroded surface.
@@ -342,11 +347,14 @@ impl VoxelTerrain {
                 elev[y * COLS + x] =
                     elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
             }
+            progress(0.10 + 0.20 * (y + 1) as f32 / ROWS as f32);
         }
-        crate::erosion::erode(seed, &mut elev);
+        // Erosion is the heavy pass; thread its local [0,1] progress into our 0.30..0.65 band.
+        crate::erosion::erode(seed, &mut elev, &|f| progress(0.30 + 0.35 * f));
         // Hydrology (rivers via flow accumulation, lakes via depression filling) reads the
         // eroded field; it feeds the per-column water level + river/lake biomes below.
         let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
+        progress(0.72);
         let mut surf = vec![0.0f32; n];
         let mut biome = vec![0u8; n];
         let mut flags = vec![0u8; n];
@@ -387,6 +395,7 @@ impl VoxelTerrain {
                 biome[i] = b.id();
                 flags[i] = f;
             }
+            progress(0.72 + 0.28 * (y + 1) as f32 / ROWS as f32);
         }
         VoxelTerrain {
             seed,
@@ -397,6 +406,14 @@ impl VoxelTerrain {
             flags,
             water,
         }
+    }
+
+    /// Generate a world for `seed`, blocking, with no progress reporting. Thin wrapper over
+    /// [`generate`](Self::generate). Used by tests/benches; the app uses `generate` on a
+    /// background thread.
+    #[allow(dead_code)]
+    pub fn new(seed: u64) -> Self {
+        Self::generate(seed, &|_| {})
     }
 
     /// Water surface level (voxel) at signed coords, `0` if dry or out of world. The
@@ -656,7 +673,7 @@ mod tests {
             }
         }
         let t0 = std::time::Instant::now();
-        crate::erosion::erode(1, &mut elev);
+        crate::erosion::erode(1, &mut elev, &|_| {});
         eprintln!(
             "erosion: {} cols, {:.0} ms (MAP_SCALE={MAP_SCALE})",
             COLS * ROWS,
@@ -706,7 +723,7 @@ mod tests {
                     elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
             }
         }
-        crate::erosion::erode(seed, &mut elev);
+        crate::erosion::erode(seed, &mut elev, &|_| {});
         let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         let rivers = hydro.river.iter().filter(|&&r| r).count();
         let lakes = hydro.lake.iter().filter(|&&l| l).count();
@@ -813,7 +830,7 @@ mod tests {
                     elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
             }
         }
-        crate::erosion::erode(seed, &mut elev);
+        crate::erosion::erode(seed, &mut elev, &|_| {});
         let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         let (mut land, mut river, mut lake) = (0u64, 0u64, 0u64);
         let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
@@ -1110,7 +1127,7 @@ mod tests {
                     elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
             }
         }
-        crate::erosion::erode(seed, &mut elev);
+        crate::erosion::erode(seed, &mut elev, &|_| {});
         let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         // Rendered water level per lake column (same formula the world model uses).
         let lvl = |i: usize| elev_to_level(hydro.filled[i]).round() as i32;
