@@ -66,15 +66,39 @@ impl IsoCam {
         // The camera must sit BEYOND the map along the view direction, else the near half
         // of the ground falls behind the near plane and clips to a triangle when zoomed
         // out. Push back by the whole map extent (+ zoom), with a far plane to match.
+        // Sit BEYOND the map along the view dir so all geometry has positive depth (ortho, so
+        // distance doesn't affect size).
         let reach = (COLS as f32 + ROWS as f32) * VOX + self.zoom;
-        // Fit near/far TIGHTLY around the world. The depth buffer quantises [near, far]
-        // into a fixed number of steps, so a needlessly huge range (the old 0.1 … reach*2.5)
-        // throws away precision and lets cube top/side faces z-fight at their shared rim
-        // (dark speckles on corners). `extent` = the world's depth span along the view ray,
-        // bounded by the ground diagonal; bracket the camera by it.
-        let extent = (COLS as f32).hypot(ROWS as f32) * VOX + SURFACE_RANGE as f32;
+        let position = self.target + dir * reach;
+        // Depth precision = (z_far - z_near) / depth-buffer-steps, and ortho depth is LINEAR.
+        // The OLD range was the whole-map diagonal (~2700 m at ×16), so a single voxel spanned
+        // only a handful of depth steps — faces tied and the water pass had to paper over it
+        // with `LessOrEqual` + a hand-tuned z-bias (which then bled water over the shore).
+        // Instead fit [z_near, z_far] to ONLY the geometry actually on screen: intersect the
+        // four screen corners' view rays with the ground (`y=0`) and the tallest possible
+        // column, and bracket the resulting depths. This tracks `zoom`, so precision stays
+        // per-voxel-fine at any zoom AND any MAP_SCALE — no magic constants.
+        let fwd = (self.target - position).normalize();
+        let right = fwd.cross(vec3(0.0, 1.0, 0.0)).normalize();
+        let up = right.cross(fwd);
+        let half_h = self.zoom * 0.5;
+        let half_w = half_h * (screen_width() / screen_height().max(1.0));
+        // Vertical span of drawable geometry: ground (0) up to the tallest column + a little
+        // headroom for tree canopies.
+        let top_y = (UNDERGROUND_LEVELS + SEA_LEVEL + 1 + SURFACE_RANGE) as f32 * VOX + 8.0;
+        let (mut z_near, mut z_far) = (f32::MAX, f32::MIN);
+        for sx in [-half_w, half_w] {
+            for sy in [-half_h, half_h] {
+                let corner = position + right * sx + up * sy;
+                for y in [0.0_f32, top_y] {
+                    let t = (y - corner.y) / fwd.y; // distance along the (downward) view ray to y
+                    z_near = z_near.min(t);
+                    z_far = z_far.max(t);
+                }
+            }
+        }
         Camera3D {
-            position: self.target + dir * reach,
+            position,
             target: self.target,
             up: vec3(0.0, 1.0, 0.0),
             fovy: self.zoom,
@@ -82,8 +106,8 @@ impl IsoCam {
             projection: Projection::Orthographics,
             render_target: None,
             viewport: None,
-            z_near: (reach - extent).max(1.0),
-            z_far: reach + extent,
+            z_near: (z_near - 1.0).max(1.0),
+            z_far: z_far + 1.0,
         }
     }
 }
@@ -192,6 +216,96 @@ struct ChunkUniforms {
     dbg: Vec4,
 }
 
+// ---- Water surface (separate, animated, translucent pass) ----------------------
+//
+// Submerged columns render a sand/rock seabed (opaque) PLUS a translucent water
+// surface drawn on top in a second pass. The surface is stylised (Minecraft-like),
+// not photoreal: depth-shaded (deeper = darker + more opaque, Beer-Lambert), with
+// two world-space sine waves animating the vertices and a bright foam rim at the
+// shore. Depth (`water_level - terrain_height`, in voxel levels) is carried per
+// vertex in `uv.y`; the wave is a pure function of WORLD xz + time so it matches
+// bit-for-bit across chunk / LOD boundaries (no seam).
+// FLAT geometry (no vertex displacement — that jittered on the low-tessellation per-column
+// quads). All motion lives in the fragment shader. Passes world xz + depth to the fragment.
+const WATER_VERT: &str = r#"#version 100
+attribute vec3 position;
+attribute vec2 texcoord;
+attribute vec4 color0;
+uniform mat4 mvp;
+varying highp float vDepth;
+varying highp vec2 vWorld;
+void main() {
+    gl_Position = mvp * vec4(position, 1.0);
+    vDepth = texcoord.y;     // water depth in voxel levels
+    vWorld = position.xz;    // world coords → animation is seamless across chunks
+}"#;
+
+// Toon / cel-shaded water, fully procedural (no textures): a domain-warped scrolling
+// value-noise field (pure function of WORLD xz + time → seamless across chunk/LOD edges)
+// is quantised into a few brightness steps with bright contour lines on the band edges
+// (the "crests"), over a depth-banded blue (deeper = darker + more opaque) with a broken
+// foam rim at the shore. No geometry moves, so nothing jitters on the coarse quads.
+const WATER_FRAG: &str = r#"#version 100
+uniform highp vec4 params; // params.x = time
+varying highp float vDepth;
+varying highp vec2 vWorld;
+
+highp float hash(highp vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+highp float vnoise(highp vec2 p) {
+    highp vec2 i = floor(p);
+    highp vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    highp float a = hash(i);
+    highp float b = hash(i + vec2(1.0, 0.0));
+    highp float c = hash(i + vec2(0.0, 1.0));
+    highp float d = hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main() {
+    highp float t = params.x;
+    highp vec2 p = vWorld * 0.20; // ripple scale (world units per noise cell)
+    // Domain warp: two slow scrolling noise layers warp a third → organic, living surface.
+    highp vec2 q = vec2(vnoise(p + vec2(0.0, t * 0.10)),
+                        vnoise(p + vec2(5.2, t * 0.12)));
+    highp float n = vnoise(p + 1.3 * q + vec2(t * 0.06, -t * 0.05));
+
+    // Depth colour, QUANTISED into bands (cel look): deeper = darker + more opaque.
+    // NB depth is in INTEGER voxel levels, minimum 1 (a submerged column has wl > h), so
+    // there is no depth→0 shore ramp — the shallowest water is depth 1.
+    highp float absorb = 1.0 - exp(-vDepth * 0.16);
+    highp vec3 shallow = vec3(0.24, 0.62, 0.74);
+    highp vec3 deep    = vec3(0.02, 0.17, 0.40);
+    highp float db = floor(absorb * 4.0) / 4.0;
+    highp vec3 col = mix(shallow, deep, db);
+
+    // Toon ripple: quantise the noise into 3 brightness steps.
+    highp float lv = floor(n * 3.0) / 3.0;
+    col *= mix(0.86, 1.14, lv);
+
+    // Bright contour "crest" lines on the band boundaries (animated, since n moves).
+    highp float edge = abs(fract(n * 3.0) - 0.5);
+    highp float crest = smoothstep(0.47, 0.5, edge);
+    col = mix(col, vec3(0.82, 0.93, 0.99), crest * 0.35);
+
+    // Broken foam: ONLY the shallowest shore band (depth ≈ 1), and only on noise crests, so
+    // it reads as scattered flecks at the water's edge — not a white wash over shallow lakes.
+    highp float shoreband = smoothstep(2.4, 1.0, vDepth); // 1 at depth 1 → 0 by depth ~2.4
+    highp float foamy = shoreband * smoothstep(0.58, 0.82, n);
+    col = mix(col, vec3(0.92, 0.96, 1.0), foamy * 0.6);
+
+    highp float alpha = mix(0.62, 0.94, db);
+    gl_FragColor = vec4(col, alpha);
+}"#;
+
+#[repr(C)]
+struct WaterUniforms {
+    mvp: Mat4,
+    params: Vec4, // params.x = time
+}
+
 /// One chunk's geometry living in immutable GPU buffers, plus its world AABB for culling.
 struct GpuChunk {
     bindings: Bindings,
@@ -251,6 +365,64 @@ fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
     )
 }
 
+/// Pipeline for the translucent water surface (second pass). Same vertex layout as the
+/// terrain (so `upload_chunks` feeds it unchanged); strict `Less` depth test against the
+/// terrain depth already in the buffer, `depth_write: true` (see below), no face culling
+/// (waves tilt the surface, and it's viewed from above). Alpha blended.
+///
+/// `depth_write: true`: water is one flat layer per pixel, so writing depth costs nothing,
+/// and on the GL-on-Metal backend (macOS) a blended pass with `depth_write: false` had its
+/// depth TEST mis-applied — water leaked over the far shore/forest (view-dependent). Writing
+/// depth makes the occlusion correct.
+///
+/// `Less` (not `LessOrEqual`): a water surface sits a full voxel above its own seabed (many
+/// depth steps with the visible-slab depth range), so it still draws over the bed while
+/// losing depth TIES to any other terrain.
+fn water_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
+    let shader = ctx
+        .new_shader(
+            ShaderSource::Glsl { vertex: WATER_VERT, fragment: WATER_FRAG },
+            ShaderMeta {
+                images: vec![],
+                uniforms: UniformBlockLayout {
+                    uniforms: vec![
+                        UniformDesc::new("mvp", UniformType::Mat4),
+                        UniformDesc::new("params", UniformType::Float4),
+                    ],
+                },
+            },
+        )
+        .expect("water shader");
+    ctx.new_pipeline(
+        &[macroquad::miniquad::BufferLayout::default()],
+        &[
+            VertexAttribute::new("position", VertexFormat::Float3),
+            VertexAttribute::new("texcoord", VertexFormat::Float2),
+            VertexAttribute::new("color0", VertexFormat::Byte4),
+            VertexAttribute::new("normal", VertexFormat::Float4),
+        ],
+        shader,
+        PipelineParams {
+            depth_test: Comparison::Less,
+            // depth_write MUST stay true. With `depth_write: false` the GL-on-Metal backend
+            // (Apple's GL→Metal layer, what miniquad runs on macOS) mis-applies the depth
+            // TEST for this blended pass: water fragments that are behind opaque terrain pass
+            // anyway and the surface bleeds over the far shore/forest (view-dependent — only
+            // the shore facing away from the camera). The water surface is a single layer per
+            // pixel, so writing depth is harmless (no self-sorting artifacts) and makes the
+            // occlusion correct.
+            depth_write: true,
+            cull_face: CullFace::Nothing,
+            color_blend: Some(BlendState::new(
+                Equation::Add,
+                BlendFactor::Value(BlendValue::SourceAlpha),
+                BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
+            )),
+            ..Default::default()
+        },
+    )
+}
+
 /// Upload built chunk meshes to immutable GPU buffers.
 fn upload_chunks(ctx: &mut dyn RenderingBackend, batches: &[Batch]) -> Vec<GpuChunk> {
     batches
@@ -300,6 +472,7 @@ fn free_chunks(ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk]) {
 /// the LOD it was built at (so the streamer rebuilds it when its ring changes).
 struct LoadedChunk {
     opaque: Vec<GpuChunk>,
+    water: Vec<GpuChunk>,
     lod: u32,
 }
 
@@ -383,6 +556,7 @@ impl Streamer {
     fn clear(&mut self, ctx: &mut dyn RenderingBackend) {
         for lc in self.detail.values().chain(self.coarse.values()) {
             free_chunks(ctx, &lc.opaque);
+            free_chunks(ctx, &lc.water);
         }
         self.detail.clear();
         self.coarse.clear();
@@ -407,6 +581,7 @@ impl Streamer {
                 let inside = (dcx0..dcx1).contains(&cx) && (dcy0..dcy1).contains(&cy);
                 if !inside {
                     free_chunks(ctx, &lc.opaque);
+                    free_chunks(ctx, &lc.water);
                 }
                 inside
             });
@@ -425,14 +600,20 @@ impl Streamer {
             for &(_, cx, cy, lod) in todo.iter().take(BUILD_BUDGET) {
                 if let Some(old) = self.detail.remove(&(cx, cy)) {
                     free_chunks(ctx, &old.opaque);
+                    free_chunks(ctx, &old.water);
                 }
-                let o = build_chunk_mesh(t, cx as usize, cy as usize, lod);
-                let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod };
+                let (o, w) = build_chunk_mesh(t, cx as usize, cy as usize, lod);
+                let lc = LoadedChunk {
+                    opaque: upload_chunks(ctx, &o),
+                    water: upload_chunks(ctx, &w),
+                    lod,
+                };
                 self.detail.insert((cx, cy), lc);
             }
         } else if !self.detail.is_empty() {
             for lc in self.detail.values() {
                 free_chunks(ctx, &lc.opaque);
+                free_chunks(ctx, &lc.water);
             }
             self.detail.clear();
         }
@@ -455,8 +636,12 @@ impl Streamer {
             let y0 = sy as usize * SUPER as usize * CHUNK;
             let x1 = (x0 + SUPER as usize * CHUNK).min(COLS);
             let y1 = (y0 + SUPER as usize * CHUNK).min(ROWS);
-            let o = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
-            let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod: COARSE_LOD };
+            let (o, w) = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
+            let lc = LoadedChunk {
+                opaque: upload_chunks(ctx, &o),
+                water: upload_chunks(ctx, &w),
+                lod: COARSE_LOD,
+            };
             self.coarse.insert((sx, sy), lc);
         }
 
@@ -532,10 +717,12 @@ async fn main() {
     // up front — the world model is fully resident but the meshes are not, so a ×16 map
     // stays within memory. The streamer fills in each frame from `terrain`.
     let pipeline;
+    let water_pipe;
     let mut streamer = Streamer::new();
     {
         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
         pipeline = chunk_pipeline(ctx);
+        water_pipe = water_pipeline(ctx);
     }
 
     // The scene is rendered into this offscreen target every frame, then blitted to
@@ -555,6 +742,8 @@ async fn main() {
     // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
     // topology + underwater bed shape that the shaded/translucent normal view obscures.
     let mut topo = false;
+    // `H` hides the translucent water surface, baring the seabed/terrain underneath.
+    let mut water_on = true;
     // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
     let mut grab: Option<Vec2> = None;
 
@@ -579,6 +768,9 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::G) {
             topo = !topo;
+        }
+        if is_key_pressed(KeyCode::H) {
+            water_on = !water_on;
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
@@ -642,10 +834,12 @@ async fn main() {
             let dev_bridge::Req { cmd, reply } = req;
             match cmd {
                 dev_bridge::Cmd::Status => {
+                    let c = cam.camera();
                     let _ = reply.send(serde_json::json!({
                         "fps": fps,
                         "frame_ms": frame_ms,
                         "seed": seed,
+                        "depth": { "z_near": c.z_near, "z_far": c.z_far, "range": c.z_far - c.z_near },
                         "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
                         "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
                                  "detail_chunks": streamer.detail.len(), "coarse_tiles": streamer.coarse.len() },
@@ -672,6 +866,15 @@ async fn main() {
                     let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                     streamer.clear(ctx);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
+                }
+                dev_bridge::Cmd::Render { water: w, topo: tp } => {
+                    if let Some(w) = w {
+                        water_on = w;
+                    }
+                    if let Some(tp) = tp {
+                        topo = tp;
+                    }
+                    let _ = reply.send(serde_json::json!({"water": water_on, "topo": topo}));
                 }
                 dev_bridge::Cmd::Screenshot(path) => {
                     pending_shots.push((path, reply)); // serviced post-draw below
@@ -733,6 +936,25 @@ async fn main() {
                     draw(&lc.opaque, &mut drawn, ctx);
                 }
             }
+            // Water: second, translucent, animated pass over the opaque scene. Skipped in
+            // topo mode (bed laid bare) or when toggled off with `H`. Same draw rule as the
+            // opaque tiers so the two never overlap; `depth_write:false` lets terrain in
+            // front still occlude it without the water occluding itself.
+            if !topo && water_on {
+                ctx.apply_pipeline(&water_pipe);
+                let params = vec4(get_time() as f32, 0.0, 0.0, 0.0);
+                ctx.apply_uniforms(UniformsSource::table(&WaterUniforms { mvp: vp, params }));
+                for (key, lc) in &streamer.coarse {
+                    if !ready.contains(key) {
+                        draw(&lc.water, &mut drawn, ctx);
+                    }
+                }
+                for (&(cx, cy), lc) in &streamer.detail {
+                    if ready.contains(&(cx.div_euclid(SUPER), cy.div_euclid(SUPER))) {
+                        draw(&lc.water, &mut drawn, ctx);
+                    }
+                }
+            }
             ctx.end_render_pass();
         }
 
@@ -754,7 +976,13 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
-        let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
+        let mode = if topo {
+            "   [TOPO: height/depth, G]"
+        } else if !water_on {
+            "   [water off, H]"
+        } else {
+            ""
+        };
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
         );
@@ -889,7 +1117,8 @@ const MAX_MESH_INDICES: usize = 4800;
 const COLUMN_INDEX_BURST: usize = 1200;
 
 /// Build the meshes for ONE chunk `(cx, cy)` at `lod` — the unit the detail tier streams.
-fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> Vec<Batch> {
+/// Returns `(opaque, water)`.
+fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
     let x1 = (cx * CHUNK + CHUNK).min(COLS);
     let y1 = (cy * CHUNK + CHUNK).min(ROWS);
     build_region_mesh(t, cx * CHUNK, cy * CHUNK, x1, y1, lod)
@@ -903,13 +1132,18 @@ fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> Vec<Bat
 /// At LOD>0 columns are read on a `stride` grid (blocks aligned globally because `x0/y0`
 /// are stride multiples) and each block emits one `stride×stride` footprint sampled from
 /// its origin column, with neighbour heights read a stride away. Trees are full-detail
-/// only. Water is NOT rendered — submerged columns just show a sand/rock seabed.
-fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> Vec<Batch> {
+/// only. Returns `(opaque, water)`: the opaque seabed/land/trees, plus a translucent
+/// water surface (one quad per submerged column + connective faces for river steps),
+/// drawn in a second, animated pass.
+fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
     let stride = 1usize << lod;
     let si = stride as i32;
     let mut opaque = Vec::new();
     let mut verts: Vec<Vertex> = Vec::new();
     let mut idx: Vec<u16> = Vec::new();
+    let mut water = Vec::new();
+    let mut wv: Vec<Vertex> = Vec::new();
+    let mut wi: Vec<u16> = Vec::new();
     // Trees are voxelised into a set first, then meshed with EXPOSED faces only (like the
     // terrain) — so overlapping canopies and adjacent cubes don't leave coincident,
     // differently-shaded faces that z-fight into dashed seams.
@@ -952,19 +1186,46 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
             let rocky = submerged || matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
             push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col);
             let nb = [
-                (t.height(ix + si, iy), Face::Px),
-                (t.height(ix - si, iy), Face::Nx),
-                (t.height(ix, iy + si), Face::Pz),
-                (t.height(ix, iy - si), Face::Nz),
+                (t.height(ix + si, iy), t.water_level(ix + si, iy), Face::Px),
+                (t.height(ix - si, iy), t.water_level(ix - si, iy), Face::Nx),
+                (t.height(ix, iy + si), t.water_level(ix, iy + si), Face::Pz),
+                (t.height(ix, iy - si), t.water_level(ix, iy - si), Face::Nz),
             ];
-            for (nh, face) in nb {
+            for (nh, nwl, face) in nb {
                 if nh < h {
-                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky);
+                    // `nwl` = the neighbour's water surface: levels of this face below it are
+                    // underwater (this neighbour is the water body fronting the face), so the
+                    // mesher colours them as seabed rather than land strata.
+                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky, nwl);
+                }
+            }
+
+            // Translucent water surface over this column: a quad at the water level, depth
+            // (`wl - h`) carried per vertex for the shader's depth shading. Connective side
+            // faces ONLY toward a slightly LOWER water neighbour (a river step ≤ WATER_STEP_MAX)
+            // so a descending river reads continuous; a BIG drop is two separate bodies (e.g.
+            // mountain lake beside the sea) — no face there, which avoids the old "water walls".
+            if submerged {
+                let depth = wl - h;
+                if wi.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
+                    flush_mesh(&mut wv, &mut wi, &mut water);
+                }
+                push_water_top(&mut wv, &mut wi, gx, gy, stride, wl, depth);
+                for (nx, ny, face) in [
+                    (ix + si, iy, Face::Px),
+                    (ix - si, iy, Face::Nx),
+                    (ix, iy + si, Face::Pz),
+                    (ix, iy - si, Face::Nz),
+                ] {
+                    let nwl = t.water_level(nx, ny);
+                    if nwl > 0 && nwl < wl && wl - nwl <= WATER_STEP_MAX {
+                        push_water_side(&mut wv, &mut wi, (gx, gy), stride, wl, nwl, depth, face);
+                    }
                 }
             }
 
             // Trees on dry land (through LOD1, one per block, so the canopy fades a ring
-            // out instead of a hard edge). Water itself is not rendered.
+            // out instead of a hard edge). Water itself is a separate translucent pass.
             if !submerged && lod <= 1 {
                 let bd = biome_def(biome);
                 if bd.tree != TreeKind::None && feature_unit(t.seed, gx, gy, 101) < bd.tree_density {
@@ -976,7 +1237,8 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
     }
     mesh_tree_voxels(&mut verts, &mut idx, &mut opaque, &tvox);
     flush_mesh(&mut verts, &mut idx, &mut opaque);
-    opaque
+    flush_mesh(&mut wv, &mut wi, &mut water);
+    (opaque, water)
 }
 
 /// A sparse voxel set (position → colour) the trees are rasterised into before meshing.
@@ -1105,6 +1367,49 @@ fn push_quad(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Col
     push_quad_v(verts, idx, q, col, [back; 4]);
 }
 
+/// Max level drop across which a connective water SIDE face is drawn (a river step). A
+/// bigger drop means two separate water bodies (e.g. a mountain lake beside the sea), where
+/// a face would stand as a tall spurious "water wall" — so it's capped.
+const WATER_STEP_MAX: u8 = 2;
+
+/// A water-surface quad covering column `(gx, gy)`'s `stride×stride` footprint at level
+/// `wl`. `depth` (= `wl - terrain_h`, voxel levels) goes in every vertex's `uv.y` for the
+/// water shader's depth shading; vertex colour is unused by the shader (placeholder WHITE).
+fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, wl: u8, depth: u8) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
+    let y = wl as f32 * VOX;
+    let q = [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)];
+    push_water_quad(verts, idx, q, depth);
+}
+
+/// A water side face on one edge, from the lower neighbour surface `lo` up to this water
+/// level `hi` — fills the vertical gap at a river step so the ribbon reads continuous.
+#[allow(clippy::too_many_arguments)]
+fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), s: usize, hi: u8, lo: u8, depth: u8, face: Face) {
+    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
+    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
+    let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
+    let q = match face {
+        Face::Px => [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)],
+        Face::Nx => [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)],
+        Face::Pz => [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)],
+        Face::Nz => [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)],
+    };
+    push_water_quad(verts, idx, q, depth);
+}
+
+/// Emit a water quad: `uv.x = 0` (no terrain depth-nudge), `uv.y = depth`, colour WHITE
+/// (the water shader computes colour/alpha from depth, ignoring vertex colour).
+fn push_water_quad(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], depth: u8) {
+    let base = verts.len() as u16;
+    let d = depth as f32;
+    for p in q {
+        verts.push(Vertex::new(p.x, p.y, p.z, 0.0, d, WHITE));
+    }
+    idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
 /// Sea/lake BED colour by water depth: a sandy shoal in the shallows grading to bare rock
 /// in the deeps — submerged columns render this instead of a (removed) water surface.
 fn seabed_rgb(depth: u8) -> (f32, f32, f32) {
@@ -1157,6 +1462,7 @@ fn push_side(
     face: Face,
     top: (f32, f32, f32),
     rocky: bool,
+    nwl: u8,
 ) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
@@ -1168,7 +1474,17 @@ fn push_side(
     };
     for gz in nh..h {
         let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-        let col = shaded(strata_rgb(gz, h, top, rocky), shade);
+        // Levels below the fronting water's surface (`nwl`) are seabed, not land strata: a dry
+        // shore column dropping into a lake/sea exposes a side face whose underwater part would
+        // otherwise show the land (grass/dirt) colour and, through the translucent water, read
+        // as "water drawn over land" (and only from the angle the face points at the camera —
+        // hence view-dependent). `nwl` is the NEIGHBOUR's level, so it works for high lakes too,
+        // not just the global sea. Colour by depth below that surface, matching submerged tops.
+        let col = if gz < nwl {
+            shaded(seabed_rgb(nwl - gz), shade)
+        } else {
+            shaded(strata_rgb(gz, h, top, rocky), shade)
+        };
         let q = match face {
             Face::Px => [
                 vec3(x1, y0, z0),
@@ -1216,8 +1532,8 @@ mod tests {
         let mut any = false;
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let op = build_chunk_mesh(&t, cx, cy, 0);
-                for b in op.iter() {
+                let (op, wt) = build_chunk_mesh(&t, cx, cy, 0);
+                for b in op.iter().chain(wt.iter()) {
                     any = true;
                     assert!(b.mesh.vertices.len() < 10_000, "verts {} at chunk ({cx},{cy})", b.mesh.vertices.len());
                     assert!(b.mesh.indices.len() < 5_000, "indices {} at chunk ({cx},{cy})", b.mesh.indices.len());
@@ -1241,9 +1557,9 @@ mod tests {
         for (cx, cy) in sample {
             let mut prev = usize::MAX;
             for lod in 0..3u32 {
-                let op = build_chunk_mesh(&t, cx, cy, lod);
+                let (op, wt) = build_chunk_mesh(&t, cx, cy, lod);
                 let mut verts = 0;
-                for b in op.iter() {
+                for b in op.iter().chain(wt.iter()) {
                     verts += b.mesh.vertices.len();
                     assert!(b.mesh.vertices.len() < 10_000, "lod {lod} verts overflow at ({cx},{cy})");
                     assert!(b.mesh.indices.len() < 5_000, "lod {lod} indices overflow at ({cx},{cy})");
@@ -1267,9 +1583,9 @@ mod tests {
                 continue;
             }
             let (x1, y1) = ((x0 + span).min(COLS), (y0 + span).min(ROWS));
-            let op = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
+            let (op, wt) = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
             let batches = op.len();
-            for b in op.iter() {
+            for b in op.iter().chain(wt.iter()) {
                 assert!(b.mesh.vertices.len() < 10_000, "coarse verts overflow");
                 assert!(b.mesh.indices.len() < 5_000, "coarse indices overflow");
             }
@@ -1289,8 +1605,8 @@ mod tests {
         let (mut verts, mut batches) = (0usize, 0usize);
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let op = build_chunk_mesh(&t, cx, cy, 0);
-                for b in op.iter() {
+                let (op, wt) = build_chunk_mesh(&t, cx, cy, 0);
+                for b in op.iter().chain(wt.iter()) {
                     verts += b.mesh.vertices.len();
                     batches += 1;
                 }

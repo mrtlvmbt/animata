@@ -235,16 +235,17 @@ fn elev_to_level(e: f32) -> f32 {
     }
 }
 
-fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind, u8) {
+/// Continuous surface level + the LAND-style biome for a column, from elevation alone. The
+/// water decision (ocean / lake / river) is NOT made here — it's applied in `VoxelTerrain::new`
+/// from hydrology (connectivity), which overrides the biome to `Ocean` (seabed) where water
+/// stands. A sub-sea column that ends up dry (a landlocked below-sea floor) therefore reads as
+/// a low-`h` land biome (Beach), not a stray blue seabed.
+fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind) {
     let (cx, cy) = (x as f32, y as f32);
     let surf = elev_to_level(e);
 
-    if e < SEA_FRACTION {
-        // Sea floor with real depth; the renderer floats a translucent plane above it.
-        return (surf, BiomeKind::Ocean, FLAG_WATER);
-    }
-
-    // Land: the same field drives BOTH height and biome (altitude bands + climate matrix).
+    // The same field drives BOTH height and biome (altitude bands + climate matrix); a sub-sea
+    // floor lands in the lowest band (`h <= LAND_FOOT` ⇒ Beach).
     let h = surf.round() as u8;
 
     // Altitude gates the vertical biomes (rock/snow only high, so colour still tracks
@@ -262,7 +263,7 @@ fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind, u8) {
         let temp = temperature(seed, cx, cy, h);
         climate_biome(temp, moist, h)
     };
-    (surf, biome, 0)
+    (surf, biome)
 }
 
 /// Temperature in `[0, 1]` (0 cold .. 1 hot): warm at the equator (map middle), cooling
@@ -345,7 +346,7 @@ impl VoxelTerrain {
         crate::erosion::erode(seed, &mut elev);
         // Hydrology (rivers via flow accumulation, lakes via depression filling) reads the
         // eroded field; it feeds the per-column water level + river/lake biomes below.
-        let hydro = crate::hydrology::compute(&elev);
+        let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         let mut surf = vec![0.0f32; n];
         let mut biome = vec![0u8; n];
         let mut flags = vec![0u8; n];
@@ -353,17 +354,24 @@ impl VoxelTerrain {
         for y in 0..ROWS {
             for x in 0..COLS {
                 let i = y * COLS + x;
-                let (mut s, mut b, mut f) = classify(seed, x, y, elev[i]);
-                if f & FLAG_WATER != 0 {
-                    // Ocean: water plane at the global sea level over the sea floor.
+                let (mut s, mut b) = classify(seed, x, y, elev[i]);
+                let mut f = 0u8;
+                // Water priority on connectivity, not absolute height: ocean (sea-connected)
+                // wins, else a depression lake, else a river. `hydro` already cleared lake/river
+                // on ocean cells, so the `else if` chain is doubly exclusive.
+                if hydro.ocean[i] {
+                    // Open sea: water plane at the global sea level over the sea floor.
                     water[i] = SEA_ABS;
+                    b = BiomeKind::Ocean;
+                    f = FLAG_WATER;
                 } else if hydro.lake[i] {
-                    // Lake: standing water at the depression fill level over the bed.
+                    // Lake (incl. inland sub-sea pits, NOT pinned to sea level): standing water
+                    // at the depression fill level over the bed.
                     let lvl = elev_to_level(hydro.filled[i]).round() as u8;
                     if lvl > s.round() as u8 {
                         water[i] = lvl;
                         b = BiomeKind::Ocean; // underwater bed
-                        f |= FLAG_WATER;
+                        f = FLAG_WATER;
                     }
                 } else if hydro.river[i] {
                     // River: carve the channel one level and float water at the old top.
@@ -372,7 +380,7 @@ impl VoxelTerrain {
                         s = (top - 1) as f32;
                         water[i] = top;
                         b = BiomeKind::Ocean;
-                        f |= FLAG_WATER;
+                        f = FLAG_WATER;
                     }
                 }
                 surf[i] = s;
@@ -699,7 +707,7 @@ mod tests {
             }
         }
         crate::erosion::erode(seed, &mut elev);
-        let hydro = crate::hydrology::compute(&elev);
+        let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         let rivers = hydro.river.iter().filter(|&&r| r).count();
         let lakes = hydro.lake.iter().filter(|&&l| l).count();
         eprintln!("seed {seed}: {rivers} river cells, {lakes} lake cells");
@@ -806,7 +814,7 @@ mod tests {
             }
         }
         crate::erosion::erode(seed, &mut elev);
-        let hydro = crate::hydrology::compute(&elev);
+        let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         let (mut land, mut river, mut lake) = (0u64, 0u64, 0u64);
         let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
         for y in 0..ROWS {
@@ -870,6 +878,283 @@ mod tests {
             }
         }
         eprintln!("tallest water wall = {worst} levels at ({wx},{wy}) wl={wwl} nwl={wnwl}; cells with >=3-tall walls: {count_tall}");
+    }
+
+    /// Dump every connected WATER body coloured by its surface height (voxel level): each
+    /// 4-connected component of `water_level > 0` is flood-filled and painted with a height
+    /// ramp (blue=low → red=high). A flat body reads as ONE solid colour; any gradient inside
+    /// a single blob is a stepped body. Land is dark grey. Writes /tmp/dbg_water_height.png.
+    #[test]
+    #[ignore]
+    fn dump_water_height() {
+        use macroquad::color::Color;
+        use macroquad::texture::Image;
+        let t = VoxelTerrain::new(1);
+        let n = COLS * ROWS;
+        // Range of water surface levels present (for normalising the colour ramp).
+        let (mut lo, mut hi) = (u8::MAX, 0u8);
+        for i in 0..n {
+            let wl = t.water[i];
+            if wl > 0 {
+                lo = lo.min(wl);
+                hi = hi.max(wl);
+            }
+        }
+        let span = (hi - lo).max(1) as f32;
+        // Blue(low) → cyan → green → yellow → red(high) ramp.
+        let ramp = |u: f32| -> Color {
+            let stops = [
+                (0.00, (0.10, 0.20, 0.70)),
+                (0.25, (0.10, 0.75, 0.85)),
+                (0.50, (0.20, 0.80, 0.30)),
+                (0.75, (0.95, 0.85, 0.15)),
+                (1.00, (0.85, 0.15, 0.10)),
+            ];
+            for w in stops.windows(2) {
+                let (a, ca) = w[0];
+                let (b, cb) = w[1];
+                if u <= b {
+                    let f = ((u - a) / (b - a)).clamp(0.0, 1.0);
+                    return Color::new(
+                        ca.0 + (cb.0 - ca.0) * f,
+                        ca.1 + (cb.1 - ca.1) * f,
+                        ca.2 + (cb.2 - ca.2) * f,
+                        1.0,
+                    );
+                }
+            }
+            Color::new(0.85, 0.15, 0.10, 1.0)
+        };
+        let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
+        let (mut bodies, mut water_cells) = (0u64, 0u64);
+        let mut seen = vec![false; n];
+        let mut stack: Vec<usize> = Vec::new();
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let i = y * COLS + x;
+                let wl = t.water[i];
+                let c = if wl == 0 {
+                    Color::new(0.12, 0.12, 0.13, 1.0) // dry land
+                } else {
+                    ramp((wl - lo) as f32 / span)
+                };
+                img.set_pixel(x as u32, y as u32, c);
+            }
+        }
+        // Count connected water bodies (4-connected over water_level > 0).
+        for start in 0..n {
+            if t.water[start] == 0 || seen[start] {
+                continue;
+            }
+            bodies += 1;
+            stack.push(start);
+            seen[start] = true;
+            while let Some(i) = stack.pop() {
+                water_cells += 1;
+                let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
+                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                    if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                        continue;
+                    }
+                    let j = (ny * COLS as i32 + nx) as usize;
+                    if t.water[j] > 0 && !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+        }
+        img.export_png("/tmp/dbg_water_height.png");
+        eprintln!(
+            "water levels {lo}..{hi}; connected bodies={bodies}, water cells={water_cells}; dumped /tmp/dbg_water_height.png"
+        );
+    }
+
+    /// LOCK: no "lake inside a lake". The bug pinned inland sub-sea pits to the global sea
+    /// level (`SEA_ABS`) by absolute elevation, so a deep pit rendered as an ocean-level pool
+    /// embedded in a higher lake. Invariant after the fix: an ocean-level water column
+    /// (`wl == SEA_ABS`) only exists in a body CONNECTED TO THE MAP BORDER — i.e. the real sea.
+    /// Any landlocked `SEA_ABS` cell is the bug. Must be EXACTLY 0 (it's impossible by
+    /// construction once ocean is defined by border-connectivity, not by `e < SEA_FRACTION`).
+    /// RED until the classify/ocean fix lands.
+    #[test]
+    fn no_landlocked_ocean() {
+        let t = VoxelTerrain::new(1);
+        let n = COLS * ROWS;
+        let mut seen = vec![false; n];
+        let mut stack: Vec<usize> = Vec::new();
+        let mut landlocked_ocean_cells = 0u64;
+        for start in 0..n {
+            if t.water[start] == 0 || seen[start] {
+                continue;
+            }
+            stack.push(start);
+            seen[start] = true;
+            // Count SEA_ABS cells in this body; flag if the body ever touches the map edge.
+            let (mut ocean_cells, mut touches_border) = (0u64, false);
+            while let Some(i) = stack.pop() {
+                if t.water[i] == SEA_ABS {
+                    ocean_cells += 1;
+                }
+                let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
+                if x == 0 || y == 0 || x == COLS as i32 - 1 || y == ROWS as i32 - 1 {
+                    touches_border = true;
+                }
+                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                    if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                        continue;
+                    }
+                    let j = (ny * COLS as i32 + nx) as usize;
+                    if t.water[j] > 0 && !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+            // Ocean-level water in a body that never reaches the map edge = inland pit pinned
+            // to SEA_ABS (the bug). The real sea always touches the border.
+            if !touches_border {
+                landlocked_ocean_cells += ocean_cells;
+            }
+        }
+        eprintln!("landlocked_ocean_cells={landlocked_ocean_cells}");
+        assert_eq!(
+            landlocked_ocean_cells, 0,
+            "{landlocked_ocean_cells} water cells sit at SEA_ABS in a landlocked body (lake-in-lake bug)"
+        );
+    }
+
+    /// "Lake inside a lake": flood-fill connected WATER bodies (final model, `water > 0`) and
+    /// report bodies that span >1 surface level, separating OCEAN-classified cells (`wl ==
+    /// SEA_ABS`) from lake/river. Also counts LANDLOCKED ocean (a `wl == SEA_ABS` body that
+    /// never touches the map border) — an inland below-sea-level pit pinned to the global sea.
+    #[test]
+    #[ignore]
+    fn diagnose_lake_in_lake() {
+        let t = VoxelTerrain::new(1);
+        let n = COLS * ROWS;
+        let mut seen = vec![false; n];
+        let mut stack: Vec<usize> = Vec::new();
+        let mut comp: Vec<usize> = Vec::new();
+        let (mut bodies, mut mixed, mut worst_span) = (0u64, 0u64, 0i32);
+        let (mut landlocked_ocean_bodies, mut landlocked_ocean_cells) = (0u64, 0u64);
+        let mut example = (0usize, 0usize, 0i32, 0i32);
+        for start in 0..n {
+            if t.water[start] == 0 || seen[start] {
+                continue;
+            }
+            comp.clear();
+            stack.push(start);
+            seen[start] = true;
+            let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+            let (mut has_ocean, mut has_other, mut touches_border) = (false, false, false);
+            while let Some(i) = stack.pop() {
+                comp.push(i);
+                let wl = t.water[i] as i32;
+                lo = lo.min(wl);
+                hi = hi.max(wl);
+                if t.water[i] == SEA_ABS {
+                    has_ocean = true;
+                } else {
+                    has_other = true;
+                }
+                let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
+                if x == 0 || y == 0 || x == COLS as i32 - 1 || y == ROWS as i32 - 1 {
+                    touches_border = true;
+                }
+                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                    if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                        continue;
+                    }
+                    let j = (ny * COLS as i32 + nx) as usize;
+                    if t.water[j] > 0 && !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+            bodies += 1;
+            let span = hi - lo;
+            if span > 0 {
+                mixed += 1;
+                if span > worst_span {
+                    worst_span = span;
+                    example = (start % COLS, start / COLS, lo, hi);
+                }
+            }
+            // A wholly-ocean body that never reaches the border = inland "sea" at SEA_ABS.
+            if has_ocean && !has_other && !touches_border {
+                landlocked_ocean_bodies += 1;
+                landlocked_ocean_cells += comp.len() as u64;
+            }
+        }
+        eprintln!(
+            "water bodies={bodies}, MIXED-level bodies={mixed}, worst span={worst_span} levels (lo={} hi={} near col={} row={}); landlocked-ocean bodies={landlocked_ocean_bodies} cells={landlocked_ocean_cells}",
+            example.2, example.3, example.0, example.1
+        );
+    }
+
+    /// Lake flatness: flood-fill each connected LAKE body (`hydro.lake`) and report how many
+    /// distinct rendered water levels (`elev_to_level(filled).round()`) it spans. A correct
+    /// lake is ONE flat mirror → span 0. Any body with span > 0 is a stepped lake (the bug).
+    #[test]
+    #[ignore]
+    fn diagnose_lake_steps() {
+        let seed = 1u64;
+        let tect = TectonicField::generate(seed);
+        let n = COLS * ROWS;
+        let mut elev = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                elev[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        crate::erosion::erode(seed, &mut elev);
+        let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
+        // Rendered water level per lake column (same formula the world model uses).
+        let lvl = |i: usize| elev_to_level(hydro.filled[i]).round() as i32;
+        let mut seen = vec![false; n];
+        let (mut bodies, mut stepped_bodies, mut stepped_cells, mut worst_span) = (0u64, 0u64, 0u64, 0i32);
+        let mut stack: Vec<usize> = Vec::new();
+        let mut comp: Vec<usize> = Vec::new();
+        for start in 0..n {
+            if !hydro.lake[start] || seen[start] {
+                continue;
+            }
+            comp.clear();
+            stack.push(start);
+            seen[start] = true;
+            let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+            while let Some(i) = stack.pop() {
+                comp.push(i);
+                let l = lvl(i);
+                lo = lo.min(l);
+                hi = hi.max(l);
+                let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
+                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                    if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                        continue;
+                    }
+                    let j = (ny * COLS as i32 + nx) as usize;
+                    if hydro.lake[j] && !seen[j] {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                }
+            }
+            bodies += 1;
+            let span = hi - lo;
+            if span > 0 {
+                stepped_bodies += 1;
+                stepped_cells += comp.len() as u64;
+                worst_span = worst_span.max(span);
+            }
+        }
+        eprintln!(
+            "lake bodies={bodies}, STEPPED bodies={stepped_bodies} ({:.0}%), cells in stepped bodies={stepped_cells}, worst intra-lake span={worst_span} levels",
+            stepped_bodies as f64 / bodies.max(1) as f64 * 100.0
+        );
     }
 
     #[test]

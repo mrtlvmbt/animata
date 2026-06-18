@@ -16,3 +16,9 @@
 
 # Dev-bridge screenshots
 /*.png
+
+# CodeGraph local index
+/.codegraph/
+
+# Agent metrics (local run log, machine-specific)
+/tools/agent-metrics/runs.tsv
