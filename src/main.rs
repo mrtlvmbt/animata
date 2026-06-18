@@ -957,8 +957,10 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
                     flush_mesh(&mut wv, &mut wi, &mut water);
                 }
                 push_water_top(&mut wv, &mut wi, gx, gy, stride, wl);
-                // Connective faces only toward a LOWER neighbouring WATER surface (river
-                // step / water meeting lower water), never onto dry land.
+                // Connective faces only toward a slightly LOWER neighbouring WATER surface
+                // (a river step), so a descending river isn't dashed. A LARGE drop means
+                // two separate bodies (e.g. a high mountain lake beside the sea) — drawing
+                // a face there made tall "water walls" standing in the column, so cap it.
                 for (nx, ny, face) in [
                     (ix + si, iy, Face::Px),
                     (ix - si, iy, Face::Nx),
@@ -966,7 +968,7 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
                     (ix, iy - si, Face::Nz),
                 ] {
                     let nwl = t.water_level(nx, ny);
-                    if nwl > 0 && nwl < wl {
+                    if nwl > 0 && nwl < wl && wl - nwl <= WATER_STEP_MAX {
                         push_water_side(&mut wv, &mut wi, (gx, gy), stride, wl, nwl, face);
                     }
                 }
@@ -1087,8 +1089,12 @@ fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz:
 
 /// A translucent water-surface quad at sea level over column `(gx, gy)`. Drawn in the
 /// water pass; the alpha lets the opaque sea floor show through.
+/// Max level drop across which a connective water side face is drawn (a river step). A
+/// bigger drop is two separate water bodies, not a continuous surface — no wall.
+const WATER_STEP_MAX: u8 = 2;
+
 /// Uniform, translucent water surface colour — the bed (now a proper sand/rock seabed)
-/// shows through, as clear water does in reality. (Depth tinting will come back later.)
+/// shows through, as clear water does in reality.
 fn water_color() -> Color {
     Color::new(0.18, 0.42, 0.58, 0.5)
 }

@@ -838,6 +838,40 @@ mod tests {
         );
     }
 
+    /// Find the tallest water-to-lower-water step (= the height of a `push_water_side`
+    /// wall). A big value explains the "vertical walls in the water" — a water cell whose
+    /// neighbour's water surface is many levels lower.
+    #[test]
+    #[ignore]
+    fn diagnose_water_walls() {
+        let t = VoxelTerrain::new(1);
+        let nb = |x: i32, y: i32| [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)];
+        let (mut worst, mut wx, mut wy, mut wwl, mut wnwl) = (0u8, 0i32, 0i32, 0u8, 0u8);
+        let mut count_tall = 0u64;
+        for y in 0..ROWS as i32 {
+            for x in 0..COLS as i32 {
+                let wl = t.water_level(x, y);
+                if wl == 0 {
+                    continue;
+                }
+                for (nx, ny) in nb(x, y) {
+                    let nwl = t.water_level(nx, ny);
+                    if nwl > 0 && nwl < wl {
+                        let d = wl - nwl;
+                        if d >= 3 {
+                            count_tall += 1;
+                        }
+                        if d > worst {
+                            worst = d;
+                            (wx, wy, wwl, wnwl) = (x, y, wl, nwl);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("tallest water wall = {worst} levels at ({wx},{wy}) wl={wwl} nwl={wnwl}; cells with >=3-tall walls: {count_tall}");
+    }
+
     #[test]
     fn bit_pack_roundtrips() {
         for &h in &[1u8, 4, 7, 10, 200] {
