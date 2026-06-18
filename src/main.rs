@@ -472,19 +472,55 @@ fn capture_target(rt: &RenderTarget) -> Image {
     img
 }
 
-// ---- Render-side palette (representation; kept out of the generator) ----
+// ---- Render-side palette: data-driven biome LUT (representation; kept out of the
+// generator). A new biome = a new row here + a `BiomeKind` variant; the hot mesh loop
+// just indexes `BIOME_DEFS[id]`, no match. Vegetation kind/density also live here. ----
+
+#[derive(Clone, Copy, PartialEq)]
+enum TreeKind {
+    None,
+    Broadleaf,
+    Conifer,
+}
+
+#[derive(Clone, Copy)]
+struct BiomeDef {
+    surface: (f32, f32, f32),
+    tree_density: f32,
+    tree: TreeKind,
+}
+
+const fn def(surface: (f32, f32, f32), tree_density: f32, tree: TreeKind) -> BiomeDef {
+    BiomeDef { surface, tree_density, tree }
+}
+
+/// Indexed by `BiomeKind::id()` (0..12 used, 12..16 padded). Order matches the enum.
+static BIOME_DEFS: [BiomeDef; 16] = [
+    def((0.13, 0.32, 0.55), 0.0, TreeKind::None),       // 0 Ocean
+    def((0.84, 0.78, 0.54), 0.0, TreeKind::None),       // 1 Beach
+    def((0.42, 0.62, 0.30), 0.04, TreeKind::Broadleaf), // 2 Plains
+    def((0.20, 0.46, 0.24), 0.30, TreeKind::Broadleaf), // 3 Forest
+    def((0.80, 0.70, 0.44), 0.0, TreeKind::None),       // 4 Desert
+    def((0.48, 0.46, 0.45), 0.0, TreeKind::None),       // 5 Mountain
+    def((0.93, 0.95, 0.98), 0.02, TreeKind::Conifer),   // 6 Snow
+    def((0.17, 0.38, 0.29), 0.30, TreeKind::Conifer),   // 7 Taiga
+    def((0.62, 0.64, 0.56), 0.0, TreeKind::None),       // 8 Tundra
+    def((0.70, 0.66, 0.34), 0.03, TreeKind::Broadleaf), // 9 Savanna
+    def((0.31, 0.40, 0.25), 0.14, TreeKind::Broadleaf), // 10 Swamp
+    def((0.12, 0.43, 0.17), 0.50, TreeKind::Broadleaf), // 11 Jungle
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),       // 12-15 padding
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
+];
+
+fn biome_def(biome: BiomeKind) -> &'static BiomeDef {
+    &BIOME_DEFS[biome.id() as usize]
+}
 
 /// Surface (top-face) base colour per biome.
 fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
-    match biome {
-        BiomeKind::Ocean => (0.13, 0.32, 0.55),
-        BiomeKind::Beach => (0.84, 0.78, 0.54),
-        BiomeKind::Plains => (0.42, 0.62, 0.30),
-        BiomeKind::Forest => (0.20, 0.46, 0.24),
-        BiomeKind::Desert => (0.80, 0.70, 0.44),
-        BiomeKind::Mountain => (0.48, 0.46, 0.45),
-        BiomeKind::Snow => (0.93, 0.95, 0.98),
-    }
+    biome_def(biome).surface
 }
 
 /// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin
@@ -595,10 +631,13 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
                             }
                             push_water_top(&mut wv, &mut wi, gx, gy);
                         }
-                    } else if tree_density(biome) > 0.0
-                        && feature_unit(t.seed, gx, gy, 101) < tree_density(biome)
-                    {
-                        push_tree(&mut verts, &mut idx, gx, gy, h, t.seed);
+                    } else {
+                        let bd = biome_def(biome);
+                        if bd.tree != TreeKind::None
+                            && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
+                        {
+                            push_tree(&mut verts, &mut idx, gx, gy, h, t.seed, bd.tree);
+                        }
                     }
                 }
             }
@@ -609,36 +648,44 @@ fn build_world_meshes(t: &VoxelTerrain) -> WorldMeshes {
     WorldMeshes { opaque, water }
 }
 
-/// Fraction of columns of a biome that grow a tree (0 = none).
-fn tree_density(biome: BiomeKind) -> f32 {
-    match biome {
-        BiomeKind::Forest => 0.30,
-        BiomeKind::Plains => 0.04,
-        _ => 0.0,
-    }
-}
-
-/// A voxel tree on column `(gx, gy)` standing on surface height `h`: a brown trunk
-/// (2–3 cubes) topped by a 3×3 leaf canopy and a single cap cube. Per-column hashes
-/// keep it deterministic. Leaves may overhang into neighbour columns (skipped if they
-/// fall outside the world).
-fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, seed: u64) {
+/// A voxel tree on column `(gx, gy)` standing on surface height `h`. **Broadleaf**: a
+/// short brown trunk under a 3×3 leaf canopy + cap (rounded, deciduous). **Conifer**: a
+/// taller trunk with a narrow tapering spire (1-cell tip over a + of leaves) — gives
+/// taiga/snow a distinct boreal look. Per-column hashes keep it deterministic; canopy
+/// blocks overhanging outside the world are skipped.
+fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, h: u8, seed: u64, kind: TreeKind) {
     let trunk = (0.36, 0.26, 0.16);
-    let leaf = (0.16, 0.42, 0.20);
-    let th = 2 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 2 or 3
-    for gz in h..h + th {
-        push_block(verts, idx, gx as i32, gy as i32, gz, trunk);
-    }
-    let top = h + th;
-    for dy in -1i32..=1 {
-        for dx in -1i32..=1 {
-            let (lx, ly) = (gx as i32 + dx, gy as i32 + dy);
-            if (0..COLS as i32).contains(&lx) && (0..ROWS as i32).contains(&ly) {
-                push_block(verts, idx, lx, ly, top, leaf);
+    let leaf = if kind == TreeKind::Conifer { (0.09, 0.24, 0.16) } else { (0.16, 0.42, 0.20) };
+    let leaf_at = |verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, lx: i32, ly: i32, lz: u8| {
+        if (0..COLS as i32).contains(&lx) && (0..ROWS as i32).contains(&ly) {
+            push_block(verts, idx, lx, ly, lz, leaf);
+        }
+    };
+    let (gxi, gyi) = (gx as i32, gy as i32);
+    if kind == TreeKind::Conifer {
+        let th = 3 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 3 or 4
+        for gz in h..h + th {
+            push_block(verts, idx, gxi, gyi, gz, trunk);
+        }
+        // Two narrow tiers (+ shape) then a single tip — a spire.
+        for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+            leaf_at(verts, idx, gxi + dx, gyi + dy, h + th);
+        }
+        leaf_at(verts, idx, gxi, gyi, h + th + 1);
+        leaf_at(verts, idx, gxi, gyi, h + th + 2);
+    } else {
+        let th = 2 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 2 or 3
+        for gz in h..h + th {
+            push_block(verts, idx, gxi, gyi, gz, trunk);
+        }
+        let top = h + th;
+        for dy in -1i32..=1 {
+            for dx in -1i32..=1 {
+                leaf_at(verts, idx, gxi + dx, gyi + dy, top);
             }
         }
+        leaf_at(verts, idx, gxi, gyi, top + 1);
     }
-    push_block(verts, idx, gx as i32, gy as i32, top + 1, leaf);
 }
 
 #[derive(Clone, Copy)]

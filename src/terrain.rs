@@ -41,6 +41,14 @@ const DETAIL_WEIGHT: f32 = 0.34;
 /// biome (desert↔plains↔forest). Scaled by `MAP_SCALE` so moisture regions are big.
 const MOIST_LATTICE: f32 = 21.0 * MAP_SCALE as f32;
 const MOIST_OCTAVES: u32 = 3;
+/// Temperature: warm at the equator (map middle), cold toward the poles (map top/bottom)
+/// and cold with altitude. With moisture this drives a Whittaker biome matrix. The
+/// latitude band is wiggled by noise so biome belts aren't ruler-straight.
+const TEMP_LATTICE: f32 = 33.0 * MAP_SCALE as f32;
+const TEMP_OCTAVES: u32 = 3;
+const TEMP_WIGGLE: f32 = 0.18;
+/// How much altitude cools (1.0 = a peak is a full band colder than its foot).
+const TEMP_LAPSE: f32 = 0.55;
 /// Ridged-noise field for mountain ridgelines (belts scale with the map). Domain-warped
 /// by a broader field so ridges flow instead of forming blobs.
 const RIDGE_LATTICE: f32 = 30.0 * MAP_SCALE as f32;
@@ -62,6 +70,11 @@ pub enum BiomeKind {
     Desert,
     Mountain,
     Snow,
+    Taiga,
+    Tundra,
+    Savanna,
+    Swamp,
+    Jungle,
 }
 
 impl BiomeKind {
@@ -74,6 +87,11 @@ impl BiomeKind {
             BiomeKind::Desert => 4,
             BiomeKind::Mountain => 5,
             BiomeKind::Snow => 6,
+            BiomeKind::Taiga => 7,
+            BiomeKind::Tundra => 8,
+            BiomeKind::Savanna => 9,
+            BiomeKind::Swamp => 10,
+            BiomeKind::Jungle => 11,
         }
     }
     pub fn from_id(id: u8) -> BiomeKind {
@@ -84,6 +102,11 @@ impl BiomeKind {
             4 => BiomeKind::Desert,
             5 => BiomeKind::Mountain,
             6 => BiomeKind::Snow,
+            7 => BiomeKind::Taiga,
+            8 => BiomeKind::Tundra,
+            9 => BiomeKind::Savanna,
+            10 => BiomeKind::Swamp,
+            11 => BiomeKind::Jungle,
             _ => BiomeKind::Plains,
         }
     }
@@ -219,9 +242,9 @@ fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind, u8) {
     let h = surf.round() as u8;
 
     // Altitude gates the vertical biomes (rock/snow only high, so colour still tracks
-    // height — no "rock at low ground"); below the rock line, MOISTURE picks the
-    // lowland biome, which is a natural same-height transition (dry desert ↔ grassland
-    // ↔ wet forest), not the old spilled-paint look. Bands scale with the relief.
+    // height — no "rock at low ground"); below the rock line, a TEMPERATURE × MOISTURE
+    // Whittaker matrix picks the lowland biome, giving real climate variety across the
+    // giant map (tundra/taiga cold, savanna/desert hot-dry, jungle hot-wet…).
     let biome = if h <= LAND_FOOT {
         BiomeKind::Beach // shore ring
     } else if h >= MAX_H - SNOW_BAND {
@@ -230,15 +253,51 @@ fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind, u8) {
         BiomeKind::Mountain // grey massif
     } else {
         let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7, MOIST_OCTAVES);
-        if moist < 0.38 {
-            BiomeKind::Desert
-        } else if moist > 0.60 {
-            BiomeKind::Forest
-        } else {
-            BiomeKind::Plains
-        }
+        let temp = temperature(seed, cx, cy, h);
+        climate_biome(temp, moist, h)
     };
     (surf, biome, 0)
+}
+
+/// Temperature in `[0, 1]` (0 cold .. 1 hot): warm at the equator (map middle), cooling
+/// toward the poles (top/bottom edges) and with altitude, with a noise-wiggled band edge.
+fn temperature(seed: u64, cx: f32, cy: f32, h: u8) -> f32 {
+    let lat = 1.0 - (2.0 * cy / ROWS as f32 - 1.0).abs(); // 0 poles .. 1 equator
+    let wiggle = (fbm(seed, cx / TEMP_LATTICE, cy / TEMP_LATTICE, 9, TEMP_OCTAVES) - 0.5) * TEMP_WIGGLE;
+    let alt = (h.saturating_sub(LAND_FOOT)) as f32 / SURFACE_RANGE as f32; // 0 foot .. 1 peak
+    (lat + wiggle - alt * TEMP_LAPSE).clamp(0.0, 1.0)
+}
+
+/// Whittaker-style lowland biome from temperature × moisture (+ altitude for swamps,
+/// which want to sit low near water). Thresholds chosen so each biome occupies a sensible
+/// slab of climate space.
+fn climate_biome(temp: f32, moist: f32, h: u8) -> BiomeKind {
+    if temp < 0.32 {
+        // Cold: dry tundra ↔ wet taiga (boreal forest).
+        if moist < 0.40 {
+            BiomeKind::Tundra
+        } else {
+            BiomeKind::Taiga
+        }
+    } else if temp < 0.66 {
+        // Temperate: grassland ↔ forest ↔ swamp (wet + low).
+        if moist < 0.38 {
+            BiomeKind::Plains
+        } else if moist > 0.68 && h <= LAND_FOOT + 2 {
+            BiomeKind::Swamp
+        } else {
+            BiomeKind::Forest
+        }
+    } else {
+        // Hot: desert ↔ savanna ↔ jungle.
+        if moist < 0.34 {
+            BiomeKind::Desert
+        } else if moist < 0.60 {
+            BiomeKind::Savanna
+        } else {
+            BiomeKind::Jungle
+        }
+    }
 }
 
 // ---- Resident world model (flat per-column arrays) ----
@@ -453,6 +512,25 @@ mod tests {
         dump("/tmp/dbg_macro.png", &|x, y| tect.macro_field()[y * COLS + x]);
         dump("/tmp/dbg_mtn.png", &|x, y| tect.mountain_field()[y * COLS + x]);
         dump("/tmp/dbg_height.png", &|x, y| t.height_at(x, y) as f32 / MAX_H as f32);
+        // Biome map: a distinct flat colour per biome id, so the climate distribution is
+        // visible (poles cold, equator hot; dry↔wet bands).
+        let pal: [(f32, f32, f32); 12] = [
+            (0.13, 0.32, 0.55), (0.84, 0.78, 0.54), (0.42, 0.62, 0.30), (0.20, 0.46, 0.24),
+            (0.80, 0.70, 0.44), (0.48, 0.46, 0.45), (0.93, 0.95, 0.98), (0.17, 0.38, 0.29),
+            (0.62, 0.64, 0.56), (0.70, 0.66, 0.34), (0.31, 0.40, 0.25), (0.12, 0.43, 0.17),
+        ];
+        {
+            use macroquad::color::Color;
+            use macroquad::texture::Image;
+            let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    let (r, g, b) = pal[t.biome_at(x, y).id() as usize];
+                    img.set_pixel(x as u32, y as u32, Color::new(r, g, b, 1.0));
+                }
+            }
+            img.export_png("/tmp/dbg_biome.png");
+        }
         // Hillshade of the actual terrain — reveals erosion channels/ridges far better
         // than raw height (slope-lit, sun from the NW).
         dump("/tmp/dbg_shade.png", &|x, y| {
@@ -531,6 +609,35 @@ mod tests {
             COLS * ROWS,
             t0.elapsed().as_secs_f64() * 1000.0
         );
+    }
+
+    /// Climate must give the giant map real biome DIVERSITY: several lowland biomes
+    /// present (temperature × moisture bands), none absurdly dominant. Prints the mix.
+    #[test]
+    fn biome_diversity() {
+        let t = VoxelTerrain::new(1);
+        let mut counts = [0u64; 12];
+        let mut land = 0u64;
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                if t.is_water(x, y) {
+                    continue;
+                }
+                land += 1;
+                counts[t.biome_at(x, y).id() as usize] += 1;
+            }
+        }
+        for id in 1..12u8 {
+            let pct = counts[id as usize] as f64 / land as f64 * 100.0;
+            if pct > 0.1 {
+                eprintln!("  {:?}: {:.1}%", BiomeKind::from_id(id), pct);
+            }
+        }
+        let present = counts.iter().filter(|&&c| c as f64 / land as f64 > 0.01).count();
+        let maxf = *counts.iter().max().unwrap() as f64 / land as f64;
+        eprintln!("distinct biomes (>1%): {present}, largest share {:.0}%", maxf * 100.0);
+        assert!(present >= 6, "too few biomes present: {present}");
+        assert!(maxf < 0.6, "one biome dominates the land: {:.0}%", maxf * 100.0);
     }
 
     #[test]
