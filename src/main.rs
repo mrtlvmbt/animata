@@ -63,8 +63,13 @@ impl IsoCam {
         let elev = 35.264_f32.to_radians();
         let azim = 45_f32.to_radians() + self.yaw;
         let dir = vec3(azim.cos() * elev.cos(), elev.sin(), azim.sin() * elev.cos());
+        // The camera must sit BEYOND the map along the view direction, else the near half
+        // of the ground falls behind the near plane and clips to a triangle when zoomed
+        // out. Push back by the whole map extent (+ zoom), with a far plane to match.
+        // Orthographic depth is linear, so a large range costs no precision.
+        let reach = (COLS as f32 + ROWS as f32) * VOX + self.zoom;
         Camera3D {
-            position: self.target + dir * 400.0,
+            position: self.target + dir * reach,
             target: self.target,
             up: vec3(0.0, 1.0, 0.0),
             fovy: self.zoom,
@@ -73,7 +78,7 @@ impl IsoCam {
             render_target: None,
             viewport: None,
             z_near: 0.1,
-            z_far: 3000.0,
+            z_far: reach * 2.5,
         }
     }
 }
@@ -309,12 +314,20 @@ type ChunkMap = std::collections::HashMap<(i32, i32), LoadedChunk>;
 
 struct Streamer {
     detail: ChunkMap, // per-chunk, in the detail super-tiles
-    coarse: ChunkMap, // per super-tile, whole-map overview
+    coarse: ChunkMap, // per super-tile, whole-map overview (always resident)
+    /// Super-tiles whose detail is FULLY built — the renderer draws their detail chunks
+    /// and SKIPS their coarse twin. Until a super-tile is ready it shows coarse, so a
+    /// detail→coarse swap never flashes empty and the tiers never overlap.
+    ready: std::collections::HashSet<(i32, i32)>,
 }
 
 impl Streamer {
     fn new() -> Self {
-        Streamer { detail: ChunkMap::new(), coarse: ChunkMap::new() }
+        Streamer {
+            detail: ChunkMap::new(),
+            coarse: ChunkMap::new(),
+            ready: std::collections::HashSet::new(),
+        }
     }
 
     fn clear(&mut self, ctx: &mut dyn RenderingBackend) {
@@ -324,6 +337,7 @@ impl Streamer {
         }
         self.detail.clear();
         self.coarse.clear();
+        self.ready.clear();
     }
 
     fn update(&mut self, ctx: &mut dyn RenderingBackend, t: &VoxelTerrain, center: (i32, i32), zoom: f32) {
@@ -380,18 +394,13 @@ impl Streamer {
             self.detail.clear();
         }
 
-        // ---- COARSE tier: every super-tile that ISN'T detail (whole map) ----
+        // ---- COARSE tier: the WHOLE map, ALWAYS resident (never freed for detail). The
+        // detail tier draws on top of it with a depth bias, so freeing a detail chunk just
+        // reveals the coarse underneath — no unload-before-load gap / flicker. ----
         let mut ctodo: Vec<(i64, i32, i32)> = Vec::new();
         for sy in 0..nsy {
             for sx in 0..nsx {
-                let is_detail = detail_on && (sx - scx).abs() <= DETAIL_SUPER_R && (sy - scy).abs() <= DETAIL_SUPER_R;
-                let key = (sx, sy);
-                if is_detail {
-                    if let Some(old) = self.coarse.remove(&key) {
-                        free_chunks(ctx, &old.opaque);
-                        free_chunks(ctx, &old.water);
-                    }
-                } else if !self.coarse.contains_key(&key) {
+                if !self.coarse.contains_key(&(sx, sy)) {
                     let (dx, dy) = ((sx - scx) as i64, (sy - scy) as i64);
                     ctodo.push((dx * dx + dy * dy, sx, sy));
                 }
@@ -406,6 +415,36 @@ impl Streamer {
             let (o, w) = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
             let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), water: upload_chunks(ctx, &w), lod: COARSE_LOD };
             self.coarse.insert((sx, sy), lc);
+        }
+
+        // ---- Readiness: a detail super-tile is ready once ALL its in-map chunks are
+        // present (any LOD is drawable). The renderer draws detail for ready tiles and
+        // coarse for the rest — so the swap is instant, never empty, never overlapping.
+        self.ready.clear();
+        if detail_on {
+            for sy in (scy - DETAIL_SUPER_R)..=(scy + DETAIL_SUPER_R) {
+                for sx in (scx - DETAIL_SUPER_R)..=(scx + DETAIL_SUPER_R) {
+                    if sx < 0 || sy < 0 || sx >= nsx || sy >= nsy {
+                        continue;
+                    }
+                    let cx0 = sx * SUPER;
+                    let cx1 = ((sx + 1) * SUPER).min(t.chunks_x as i32);
+                    let cy0 = sy * SUPER;
+                    let cy1 = ((sy + 1) * SUPER).min(t.chunks_y as i32);
+                    let mut all = true;
+                    'tile: for cy in cy0..cy1 {
+                        for cx in cx0..cx1 {
+                            if !self.detail.contains_key(&(cx, cy)) {
+                                all = false;
+                                break 'tile;
+                            }
+                        }
+                    }
+                    if all {
+                        self.ready.insert((sx, sy));
+                    }
+                }
+            }
         }
     }
 }
@@ -592,10 +631,13 @@ async fn main() {
             ctx.apply_pipeline(&pipeline);
             let dbg = vec4(if topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
             ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
-            // Opaque first (fills the depth buffer) across both tiers, then the translucent
-            // water (skipped in topo). Detail super-tiles have no coarse twin, so the tiers
-            // never overlap. Each GPU buffer is frustum-culled by its AABB.
-            let draw_pass = |ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk], drawn: &mut usize| {
+            // Per super-tile draw EITHER its detail chunks (if ready) OR its coarse buffer
+            // (otherwise) — never both. So the tiers never overlap (no z-fight) and a
+            // not-yet-ready tile shows coarse instead of flashing empty (no flicker). Opaque
+            // across both tiers first, then translucent water (skipped in topo). Frustum-
+            // culled by AABB.
+            let ready = &streamer.ready;
+            let draw = |chunks: &[GpuChunk], drawn: &mut usize, ctx: &mut dyn RenderingBackend| {
                 for c in chunks {
                     if aabb_in_view(&vp, c.lo, c.hi) {
                         ctx.apply_bindings(&c.bindings);
@@ -604,12 +646,28 @@ async fn main() {
                     }
                 }
             };
-            for lc in streamer.coarse.values().chain(streamer.detail.values()) {
-                draw_pass(ctx, &lc.opaque, &mut drawn);
+            // Opaque
+            for (key, lc) in &streamer.coarse {
+                if !ready.contains(key) {
+                    draw(&lc.opaque, &mut drawn, ctx);
+                }
             }
+            for (&(cx, cy), lc) in &streamer.detail {
+                if ready.contains(&(cx.div_euclid(SUPER), cy.div_euclid(SUPER))) {
+                    draw(&lc.opaque, &mut drawn, ctx);
+                }
+            }
+            // Water
             if !topo {
-                for lc in streamer.coarse.values().chain(streamer.detail.values()) {
-                    draw_pass(ctx, &lc.water, &mut drawn);
+                for (key, lc) in &streamer.coarse {
+                    if !ready.contains(key) {
+                        draw(&lc.water, &mut drawn, ctx);
+                    }
+                }
+                for (&(cx, cy), lc) in &streamer.detail {
+                    if ready.contains(&(cx.div_euclid(SUPER), cy.div_euclid(SUPER))) {
+                        draw(&lc.water, &mut drawn, ctx);
+                    }
                 }
             }
             ctx.end_render_pass();
