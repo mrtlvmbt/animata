@@ -22,9 +22,9 @@ mod terrain;
 use config::*;
 use macroquad::miniquad::{
     Bindings, BlendFactor, BlendState, BlendValue, BufferSource, BufferType, BufferUsage,
-    Comparison, Equation, PassAction, Pipeline, PipelineParams, RenderingBackend, ShaderMeta,
-    ShaderSource, UniformBlockLayout, UniformDesc, UniformType, UniformsSource, VertexAttribute,
-    VertexFormat,
+    Comparison, CullFace, Equation, FrontFaceOrder, PassAction, Pipeline, PipelineParams,
+    RenderingBackend, ShaderMeta, ShaderSource, UniformBlockLayout, UniformDesc, UniformType,
+    UniformsSource, VertexAttribute, VertexFormat,
 };
 use macroquad::prelude::*;
 use terrain::{cell_biome, cell_height, feature_unit, BiomeKind, VoxelTerrain};
@@ -66,8 +66,13 @@ impl IsoCam {
         // The camera must sit BEYOND the map along the view direction, else the near half
         // of the ground falls behind the near plane and clips to a triangle when zoomed
         // out. Push back by the whole map extent (+ zoom), with a far plane to match.
-        // Orthographic depth is linear, so a large range costs no precision.
         let reach = (COLS as f32 + ROWS as f32) * VOX + self.zoom;
+        // Fit near/far TIGHTLY around the world. The depth buffer quantises [near, far]
+        // into a fixed number of steps, so a needlessly huge range (the old 0.1 … reach*2.5)
+        // throws away precision and lets cube top/side faces z-fight at their shared rim
+        // (dark speckles on corners). `extent` = the world's depth span along the view ray,
+        // bounded by the ground diagonal; bracket the camera by it.
+        let extent = (COLS as f32).hypot(ROWS as f32) * VOX + SURFACE_RANGE as f32;
         Camera3D {
             position: self.target + dir * reach,
             target: self.target,
@@ -77,8 +82,8 @@ impl IsoCam {
             projection: Projection::Orthographics,
             render_target: None,
             viewport: None,
-            z_near: 0.1,
-            z_far: reach * 2.5,
+            z_near: (reach - extent).max(1.0),
+            z_far: reach + extent,
         }
     }
 }
@@ -133,12 +138,19 @@ fn aabb_in_view(vp: &Mat4, lo: Vec3, hi: Vec3) -> bool {
 
 const CHUNK_VERT: &str = r#"#version 100
 attribute vec3 position;
+attribute vec2 texcoord;
 attribute vec4 color0;
 uniform mat4 mvp;
 varying lowp vec4 color;
 varying highp float vy;
 void main() {
     gl_Position = mvp * vec4(position, 1.0);
+    // texcoord.x is a per-vertex depth nudge flag (-1/0/+1): a face's TOP edge is pushed a
+    // hair toward the far plane (+1) so the column's own top face deterministically wins
+    // their shared rim (otherwise they z-fight into dark corner speckle, whatever the
+    // depth precision); a tree's BOTTOM edge is nudged forward (-1) so the trunk wins the
+    // tie against the ground it stands on. The nudge is far below one voxel.
+    gl_Position.z += texcoord.x * 0.00012 * gl_Position.w;
     color = color0 / 255.0;
     vy = position.y;
 }"#;
@@ -216,8 +228,19 @@ fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
         ],
         shader,
         PipelineParams {
-            depth_test: Comparison::LessOrEqual,
+            // `Less` (not `LessOrEqual`): a cube's top face is meshed BEFORE its side
+            // faces, which share the top edge at the same y. With limited depth-buffer
+            // precision the edge band rounds to equal depth; `LessOrEqual` let the
+            // later-drawn (darker) side overwrite the top there → a dark scalloped fringe
+            // along every cube rim. `Less` keeps the first-drawn top on ties → clean rim.
+            depth_test: Comparison::Less,
             depth_write: true,
+            // Back-face culling. Faces are wound clockwise as seen from OUTSIDE (the top
+            // face's vertex order yields a -y geometric normal), so front = Clockwise.
+            // This drops the inward/back faces of stacked & adjacent cubes (tree canopy),
+            // whose coincident, differently-shaded quads z-fought into dashed seams.
+            cull_face: CullFace::Back,
+            front_face_order: FrontFaceOrder::Clockwise,
             color_blend: Some(BlendState::new(
                 Equation::Add,
                 BlendFactor::Value(BlendValue::SourceAlpha),
@@ -277,32 +300,34 @@ fn free_chunks(ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk]) {
 /// the LOD it was built at (so the streamer rebuilds it when its ring changes).
 struct LoadedChunk {
     opaque: Vec<GpuChunk>,
-    water: Vec<GpuChunk>,
     lod: u32,
 }
 
 /// Detail-tier chunk meshes built+uploaded per frame, and coarse super-tiles per frame.
 const BUILD_BUDGET: usize = 24;
 const COARSE_BUDGET: usize = 16;
-/// Within the detail tier, LOD by chunk distance. The OUTER ring grades down to
-/// `COARSE_LOD` (stride 8) so the detail edge meets the coarse tier at the SAME
-/// resolution → blocks align on the global stride grid → no seam at the boundary.
-const LOD0_RADIUS: i32 = 4;
-const LOD1_RADIUS: i32 = 8;
-const LOD2_RADIUS: i32 = 12;
+/// Within the detail tier, LOD by **Euclidean** chunk distance → concentric circular
+/// rings (not square). The OUTER ring grades down to `COARSE_LOD` (stride 8) so the detail
+/// edge meets the coarse tier at the SAME resolution → blocks align on the global stride
+/// grid → no seam at the boundary.
+const LOD0_RADIUS: i32 = 8;
+const LOD1_RADIUS: i32 = 16;
+const LOD2_RADIUS: i32 = 24;
+/// Deadband (chunks) around each LOD ring boundary — see `lod_hyst`.
+const LOD_HYSTERESIS: i32 = 2;
 /// Two-tier streaming. The DETAIL tier renders per-chunk (LOD by distance) the super-tiles
 /// around the camera; the COARSE tier renders every OTHER super-tile as one merged buffer
 /// at `COARSE_LOD`, covering the WHOLE map cheaply (so a full zoom-out shows all of ×16
 /// at a few hundred draws). A super-tile is detail XOR coarse, so the two never overlap.
 const SUPER: i32 = 8; // chunks per super-tile side
-const DETAIL_SUPER_R: i32 = 1; // super-tiles around the camera kept at per-chunk detail
+const DETAIL_SUPER_R: i32 = 2; // super-tiles around the camera kept at per-chunk detail
 const COARSE_LOD: u32 = 3; // stride-8 overview
 /// Past this zoom the detail tier is dropped entirely — pure coarse whole-map overview,
 /// so a full zoom-out costs only the (few hundred) coarse super-tile draws.
 const DETAIL_ZOOM_CUTOFF: f32 = 520.0;
 
-/// LOD for a detail chunk at Chebyshev distance `d` (chunks) from the camera centre,
-/// grading 0→1→2→`COARSE_LOD` so the detail edge matches the coarse tier.
+/// LOD for a detail chunk at Euclidean distance `d` (chunks) from the camera centre,
+/// grading 0→1→2→`COARSE_LOD` in concentric rings so the detail edge matches the coarse tier.
 fn lod_for(d: i32) -> u32 {
     if d <= LOD0_RADIUS {
         0
@@ -312,6 +337,26 @@ fn lod_for(d: i32) -> u32 {
         2
     } else {
         COARSE_LOD
+    }
+}
+
+/// Chunk distance (chunks) from the camera centre.
+fn chunk_dist(cx: i32, cy: i32, ccx: i32, ccy: i32) -> i32 {
+    let (dx, dy) = (cx - ccx, cy - ccy);
+    ((dx * dx + dy * dy) as f32).sqrt() as i32
+}
+
+/// LOD with HYSTERESIS: a chunk already at `cur` only switches once the camera distance
+/// clears the ring boundary by `LOD_HYSTERESIS` chunks, so a camera hovering on a ring
+/// edge doesn't flip-flop the chunk's LOD (rebuild thrash + visible popping) every frame.
+fn lod_hyst(d: i32, cur: Option<u32>) -> u32 {
+    let raw = lod_for(d);
+    match cur {
+        // Coarsening (moved away): require d past the boundary by the margin.
+        Some(c) if raw > c => if lod_for(d - LOD_HYSTERESIS) > c { raw } else { c },
+        // Refining (moved closer): require d inside the boundary by the margin.
+        Some(c) if raw < c => if lod_for(d + LOD_HYSTERESIS) < c { raw } else { c },
+        _ => raw,
     }
 }
 
@@ -338,7 +383,6 @@ impl Streamer {
     fn clear(&mut self, ctx: &mut dyn RenderingBackend) {
         for lc in self.detail.values().chain(self.coarse.values()) {
             free_chunks(ctx, &lc.opaque);
-            free_chunks(ctx, &lc.water);
         }
         self.detail.clear();
         self.coarse.clear();
@@ -363,19 +407,15 @@ impl Streamer {
                 let inside = (dcx0..dcx1).contains(&cx) && (dcy0..dcy1).contains(&cy);
                 if !inside {
                     free_chunks(ctx, &lc.opaque);
-                    free_chunks(ctx, &lc.water);
                 }
                 inside
             });
             let mut todo: Vec<(i64, i32, i32, u32)> = Vec::new();
             for cy in dcy0..dcy1 {
                 for cx in dcx0..dcx1 {
-                    let want = lod_for((cx - ccx).abs().max((cy - ccy).abs()));
-                    let needs = match self.detail.get(&(cx, cy)) {
-                        None => true,
-                        Some(lc) => lc.lod != want,
-                    };
-                    if needs {
+                    let cur = self.detail.get(&(cx, cy)).map(|lc| lc.lod);
+                    let want = lod_hyst(chunk_dist(cx, cy, ccx, ccy), cur);
+                    if cur != Some(want) {
                         let (dx, dy) = ((cx - ccx) as i64, (cy - ccy) as i64);
                         todo.push((dx * dx + dy * dy, cx, cy, want));
                     }
@@ -385,16 +425,14 @@ impl Streamer {
             for &(_, cx, cy, lod) in todo.iter().take(BUILD_BUDGET) {
                 if let Some(old) = self.detail.remove(&(cx, cy)) {
                     free_chunks(ctx, &old.opaque);
-                    free_chunks(ctx, &old.water);
                 }
-                let (o, w) = build_chunk_mesh(t, cx as usize, cy as usize, lod);
-                let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), water: upload_chunks(ctx, &w), lod };
+                let o = build_chunk_mesh(t, cx as usize, cy as usize, lod);
+                let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod };
                 self.detail.insert((cx, cy), lc);
             }
         } else if !self.detail.is_empty() {
             for lc in self.detail.values() {
                 free_chunks(ctx, &lc.opaque);
-                free_chunks(ctx, &lc.water);
             }
             self.detail.clear();
         }
@@ -417,8 +455,8 @@ impl Streamer {
             let y0 = sy as usize * SUPER as usize * CHUNK;
             let x1 = (x0 + SUPER as usize * CHUNK).min(COLS);
             let y1 = (y0 + SUPER as usize * CHUNK).min(ROWS);
-            let (o, w) = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
-            let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), water: upload_chunks(ctx, &w), lod: COARSE_LOD };
+            let o = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
+            let lc = LoadedChunk { opaque: upload_chunks(ctx, &o), lod: COARSE_LOD };
             self.coarse.insert((sx, sy), lc);
         }
 
@@ -517,8 +555,6 @@ async fn main() {
     // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
     // topology + underwater bed shape that the shaded/translucent normal view obscures.
     let mut topo = false;
-    // `H` hides all water (the surface quads) so the bare bed/terrain is visible.
-    let mut water_on = true;
     // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
     let mut grab: Option<Vec2> = None;
 
@@ -540,9 +576,6 @@ async fn main() {
         // ---- Input (no GUI) ----
         if is_key_pressed(KeyCode::I) {
             show_info = !show_info;
-        }
-        if is_key_pressed(KeyCode::H) {
-            water_on = !water_on;
         }
         if is_key_pressed(KeyCode::G) {
             topo = !topo;
@@ -678,9 +711,8 @@ async fn main() {
             ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
             // Per super-tile draw EITHER its detail chunks (if ready) OR its coarse buffer
             // (otherwise) — never both. So the tiers never overlap (no z-fight) and a
-            // not-yet-ready tile shows coarse instead of flashing empty (no flicker). Opaque
-            // across both tiers first, then translucent water (skipped in topo). Frustum-
-            // culled by AABB.
+            // not-yet-ready tile shows coarse instead of flashing empty (no flicker).
+            // Frustum-culled by AABB.
             let ready = &streamer.ready;
             let draw = |chunks: &[GpuChunk], drawn: &mut usize, ctx: &mut dyn RenderingBackend| {
                 for c in chunks {
@@ -691,7 +723,6 @@ async fn main() {
                     }
                 }
             };
-            // Opaque
             for (key, lc) in &streamer.coarse {
                 if !ready.contains(key) {
                     draw(&lc.opaque, &mut drawn, ctx);
@@ -700,19 +731,6 @@ async fn main() {
             for (&(cx, cy), lc) in &streamer.detail {
                 if ready.contains(&(cx.div_euclid(SUPER), cy.div_euclid(SUPER))) {
                     draw(&lc.opaque, &mut drawn, ctx);
-                }
-            }
-            // Water (skipped in topo mode, or when toggled off with `H`)
-            if !topo && water_on {
-                for (key, lc) in &streamer.coarse {
-                    if !ready.contains(key) {
-                        draw(&lc.water, &mut drawn, ctx);
-                    }
-                }
-                for (&(cx, cy), lc) in &streamer.detail {
-                    if ready.contains(&(cx.div_euclid(SUPER), cy.div_euclid(SUPER))) {
-                        draw(&lc.water, &mut drawn, ctx);
-                    }
                 }
             }
             ctx.end_render_pass();
@@ -736,13 +754,7 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
-        let mode = if topo {
-            "   [TOPO: height/depth, G]"
-        } else if !water_on {
-            "   [water off, H]"
-        } else {
-            ""
-        };
+        let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
         );
@@ -833,15 +845,12 @@ fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
     biome_def(biome).surface
 }
 
-/// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin
-/// biome "lip" just under the surface, then topsoil, then stone deeper down.
-fn strata_rgb(gz: u8, h: u8, biome: BiomeKind) -> (f32, f32, f32) {
-    // Rocky biomes are bare stone all the way down — no brown topsoil band, which read as
-    // out-of-place dirt specks on mountain/snow cliffs.
-    let rocky = matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
+/// Side-wall colour for the exposed level `gz` of a column of height `h`: a thin lip of
+/// the surface colour `top` just under the surface, then (unless `rocky`) topsoil, then
+/// stone. `rocky` biomes (mountain/snow/seabed) skip the brown topsoil band.
+fn strata_rgb(gz: u8, h: u8, top: (f32, f32, f32), rocky: bool) -> (f32, f32, f32) {
     if gz + 1 == h {
-        let (r, g, b) = top_rgb(biome);
-        (r * 0.85, g * 0.85, b * 0.85)
+        (top.0 * 0.85, top.1 * 0.85, top.2 * 0.85)
     } else if !rocky && gz + 3 >= h {
         (0.42, 0.31, 0.20) // topsoil
     } else {
@@ -880,7 +889,7 @@ const MAX_MESH_INDICES: usize = 4800;
 const COLUMN_INDEX_BURST: usize = 1200;
 
 /// Build the meshes for ONE chunk `(cx, cy)` at `lod` — the unit the detail tier streams.
-fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
+fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> Vec<Batch> {
     let x1 = (cx * CHUNK + CHUNK).min(COLS);
     let y1 = (cy * CHUNK + CHUNK).min(ROWS);
     build_region_mesh(t, cx * CHUNK, cy * CHUNK, x1, y1, lod)
@@ -894,16 +903,17 @@ fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Vec<Ba
 /// At LOD>0 columns are read on a `stride` grid (blocks aligned globally because `x0/y0`
 /// are stride multiples) and each block emits one `stride×stride` footprint sampled from
 /// its origin column, with neighbour heights read a stride away. Trees are full-detail
-/// only (too small to read far out). Submerged side faces are skipped (clean water beds).
-fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
+/// only. Water is NOT rendered — submerged columns just show a sand/rock seabed.
+fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> Vec<Batch> {
     let stride = 1usize << lod;
     let si = stride as i32;
     let mut opaque = Vec::new();
-    let mut water = Vec::new();
     let mut verts: Vec<Vertex> = Vec::new();
     let mut idx: Vec<u16> = Vec::new();
-    let mut wv: Vec<Vertex> = Vec::new();
-    let mut wi: Vec<u16> = Vec::new();
+    // Trees are voxelised into a set first, then meshed with EXPOSED faces only (like the
+    // terrain) — so overlapping canopies and adjacent cubes don't leave coincident,
+    // differently-shaded faces that z-fight into dashed seams.
+    let mut tvox: VoxMap = std::collections::HashMap::new();
     let mut gyc = y0;
     while gyc < y1 {
         let mut gxc = x0;
@@ -928,107 +938,124 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
             let wl = t.water_level(ix, iy);
             // Submerged columns get a sand/rock SEABED top (by depth), not the blue Ocean
             // biome colour — the floor reads as a bottom under the blue water surface.
-            let top_col = if wl > h { seabed_rgb(wl - h) } else { top_rgb(biome) };
+            // Submerged columns are a sand/rock seabed (by depth); land uses its biome.
+            // Either way the SIDE faces are drawn (the bed reads as 3D terrain like land,
+            // and culling them left sky showing through the steps as blue edges).
+            let submerged = wl > h;
+            let top_col = if submerged {
+                seabed_rgb(wl - h)
+            } else if matches!(biome, BiomeKind::Mountain) {
+                rock_rgb(gx, gy, t.seed)
+            } else {
+                top_rgb(biome)
+            };
+            let rocky = submerged || matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
             push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col);
-            // Skip the side faces of a SUBMERGED block (water above its top): those
-            // underwater walls showed through shallow water as a dark basin ring; only the
-            // flat bed tops remain. Shore (not submerged) keeps its bank faces.
-            if wl <= h {
-                let nb = [
-                    (t.height(ix + si, iy), Face::Px),
-                    (t.height(ix - si, iy), Face::Nx),
-                    (t.height(ix, iy + si), Face::Pz),
-                    (t.height(ix, iy - si), Face::Nz),
-                ];
-                for (nh, face) in nb {
-                    if nh < h {
-                        push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, biome);
-                    }
+            let nb = [
+                (t.height(ix + si, iy), Face::Px),
+                (t.height(ix - si, iy), Face::Nx),
+                (t.height(ix, iy + si), Face::Pz),
+                (t.height(ix, iy - si), Face::Nz),
+            ];
+            for (nh, face) in nb {
+                if nh < h {
+                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky);
                 }
             }
 
-            // Per-column (per-block) water: a translucent plane at the water level where it
-            // stands above the terrain top. One quad per block ⇒ no overlap ⇒ no sort.
-            if wl > h {
-                if wi.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
-                    flush_mesh(&mut wv, &mut wi, &mut water);
-                }
-                let depth = wl - h;
-                push_water_top(&mut wv, &mut wi, gx, gy, stride, wl, depth);
-                // Connective faces only toward a LOWER neighbouring WATER surface (river
-                // step / water meeting lower water), never onto dry land.
-                for (nx, ny, face) in [
-                    (ix + si, iy, Face::Px),
-                    (ix - si, iy, Face::Nx),
-                    (ix, iy + si, Face::Pz),
-                    (ix, iy - si, Face::Nz),
-                ] {
-                    let nwl = t.water_level(nx, ny);
-                    if nwl > 0 && nwl < wl {
-                        push_water_side(&mut wv, &mut wi, (gx, gy), stride, wl, nwl, depth, face);
-                    }
-                }
-            } else if lod <= 1 {
-                // Trees through LOD1 (one per block) so the canopy fades out a ring later
-                // instead of stopping abruptly at the LOD0 edge.
+            // Trees on dry land (through LOD1, one per block, so the canopy fades a ring
+            // out instead of a hard edge). Water itself is not rendered.
+            if !submerged && lod <= 1 {
                 let bd = biome_def(biome);
-                if bd.tree != TreeKind::None
-                    && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
-                {
-                    push_tree(&mut verts, &mut idx, t, gx, gy, h, bd.tree);
+                if bd.tree != TreeKind::None && feature_unit(t.seed, gx, gy, 101) < bd.tree_density {
+                    collect_tree(&mut tvox, t, gx, gy, h, bd.tree);
                 }
             }
         }
         gyc += stride;
     }
+    mesh_tree_voxels(&mut verts, &mut idx, &mut opaque, &tvox);
     flush_mesh(&mut verts, &mut idx, &mut opaque);
-    flush_mesh(&mut wv, &mut wi, &mut water);
-    (opaque, water)
+    opaque
 }
 
-/// A voxel tree on column `(gx, gy)` standing on surface height `h`. **Broadleaf**: a
-/// short brown trunk under a 3×3 leaf canopy + cap (rounded, deciduous). **Conifer**: a
-/// taller trunk with a narrow tapering spire (1-cell tip over a + of leaves) — gives
-/// taiga/snow a distinct boreal look. Per-column hashes keep it deterministic; canopy
-/// blocks overhanging outside the world are skipped.
-fn push_tree(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, t: &VoxelTerrain, gx: usize, gy: usize, h: u8, kind: TreeKind) {
+/// A sparse voxel set (position → colour) the trees are rasterised into before meshing.
+type VoxMap = std::collections::HashMap<(i32, i32, u8), (f32, f32, f32)>;
+
+/// Voxelise a tree on column `(gx, gy)` standing on surface height `h` into `vox`.
+/// **Broadleaf**: short brown trunk under a 3×3 leaf canopy + cap (rounded, deciduous).
+/// **Conifer**: taller trunk with a narrow tapering spire (1-cell tip over a + of leaves).
+/// Per-column hashes keep it deterministic; canopy blocks overhanging the world / water are
+/// skipped. Writing into a SET de-duplicates overlapping canopies (no coincident faces).
+fn collect_tree(vox: &mut VoxMap, t: &VoxelTerrain, gx: usize, gy: usize, h: u8, kind: TreeKind) {
     let seed = t.seed;
     let trunk = (0.36, 0.26, 0.16);
     let leaf = if kind == TreeKind::Conifer { (0.09, 0.24, 0.16) } else { (0.16, 0.42, 0.20) };
-    // Skip canopy blocks that would overhang a WATER column (leaves floating over a
-    // river/lake) or fall outside the world.
-    let leaf_at = |verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, lx: i32, ly: i32, lz: u8| {
-        if (0..COLS as i32).contains(&lx)
-            && (0..ROWS as i32).contains(&ly)
-            && t.water_level(lx, ly) == 0
-        {
-            push_block(verts, idx, lx, ly, lz, leaf);
+    let (gxi, gyi) = (gx as i32, gy as i32);
+    // Leaves are skipped over water / off-map; the trunk sits on the tree's own (valid) column.
+    let leaf_at = |vox: &mut VoxMap, lx: i32, ly: i32, lz: u8| {
+        if (0..COLS as i32).contains(&lx) && (0..ROWS as i32).contains(&ly) && t.water_level(lx, ly) == 0 {
+            vox.insert((lx, ly, lz), leaf);
         }
     };
-    let (gxi, gyi) = (gx as i32, gy as i32);
     if kind == TreeKind::Conifer {
         let th = 3 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 3 or 4
         for gz in h..h + th {
-            push_block(verts, idx, gxi, gyi, gz, trunk);
+            vox.insert((gxi, gyi, gz), trunk);
         }
-        // Two narrow tiers (+ shape) then a single tip — a spire.
         for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
-            leaf_at(verts, idx, gxi + dx, gyi + dy, h + th);
+            leaf_at(vox, gxi + dx, gyi + dy, h + th);
         }
-        leaf_at(verts, idx, gxi, gyi, h + th + 1);
-        leaf_at(verts, idx, gxi, gyi, h + th + 2);
+        leaf_at(vox, gxi, gyi, h + th + 1);
+        leaf_at(vox, gxi, gyi, h + th + 2);
     } else {
         let th = 2 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 2 or 3
         for gz in h..h + th {
-            push_block(verts, idx, gxi, gyi, gz, trunk);
+            vox.insert((gxi, gyi, gz), trunk);
         }
         let top = h + th;
         for dy in -1i32..=1 {
             for dx in -1i32..=1 {
-                leaf_at(verts, idx, gxi + dx, gyi + dy, top);
+                leaf_at(vox, gxi + dx, gyi + dy, top);
             }
         }
-        leaf_at(verts, idx, gxi, gyi, top + 1);
+        leaf_at(vox, gxi, gyi, top + 1);
+    }
+}
+
+/// Mesh the tree voxel set, emitting only EXPOSED faces (a face is drawn only where the
+/// neighbour voxel is absent) — exactly like the terrain mesher, so there are no interior
+/// or coincident faces to z-fight. Bottom faces are omitted (unseen from the iso top-down
+/// view), matching the terrain. Side faces bias their top edge back (the column's own top
+/// wins the rim, no dark speckle).
+fn mesh_tree_voxels(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, opaque: &mut Vec<Batch>, vox: &VoxMap) {
+    for (&(gx, gy, gz), &rgb) in vox {
+        if idx.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
+            flush_mesh(verts, idx, opaque);
+        }
+        let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
+        let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
+        let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
+        // Side verts are bottom (0,1) then top (2,3). Bias the TOP edge back (the voxel's
+        // own top wins the rim) AND the BOTTOM edge forward (toward camera): a tree is a
+        // SEPARATE mesh sitting on the terrain, so its base edge ties the ground's top and
+        // would otherwise be eaten ("saw") — the forward nudge makes the trunk win there.
+        let top_back = [-1.0, -1.0, 1.0, 1.0];
+        if !vox.contains_key(&(gx, gy, gz + 1)) {
+            push_quad(verts, idx, [vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1)], shaded(rgb, SHADE_TOP), 0.0);
+        }
+        if !vox.contains_key(&(gx + 1, gy, gz)) {
+            push_quad_v(verts, idx, [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)], shaded(rgb, SHADE_PX), top_back);
+        }
+        if !vox.contains_key(&(gx - 1, gy, gz)) {
+            push_quad_v(verts, idx, [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)], shaded(rgb, SHADE_NX), top_back);
+        }
+        if !vox.contains_key(&(gx, gy + 1, gz)) {
+            push_quad_v(verts, idx, [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)], shaded(rgb, SHADE_PZ), top_back);
+        }
+        if !vox.contains_key(&(gx, gy - 1, gz)) {
+            push_quad_v(verts, idx, [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)], shaded(rgb, SHADE_NZ), top_back);
+        }
     }
 }
 
@@ -1061,93 +1088,43 @@ fn flush_mesh(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, out: &mut Vec<Batch>)
     });
 }
 
-fn push_quad(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Color) {
+/// Per-vertex `back` flags (0/1) → uv.x; the shader nudges back=1 verts a hair toward the
+/// far plane. Only the TOP edge of a side wall is flagged: that edge is shared with the
+/// column's own top face (which must win the rim → no dark z-fight speckle), while the
+/// wall's BOTTOM edge stays unbiased so it isn't eaten by the lower neighbour's top face.
+fn push_quad_v(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Color, backs: [f32; 4]) {
     let base = verts.len() as u16;
-    for p in q {
-        verts.push(Vertex::new(p.x, p.y, p.z, 0.0, 0.0, col));
+    for (p, b) in q.into_iter().zip(backs) {
+        verts.push(Vertex::new(p.x, p.y, p.z, b, 0.0, col));
     }
     idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
-/// A whole standalone cube (top + 4 sides, no hidden bottom) at voxel `(gx, gy, gz)`,
-/// with the same baked per-face shading as the terrain. `gx`/`gy` are `i32` so tree
-/// canopies can overhang into (already bounds-checked) neighbour columns.
-fn push_block(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: i32, gy: i32, gz: u8, rgb: (f32, f32, f32)) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
-    let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-    push_quad(verts, idx, [vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1)], shaded(rgb, SHADE_TOP));
-    push_quad(verts, idx, [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)], shaded(rgb, SHADE_PX));
-    push_quad(verts, idx, [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)], shaded(rgb, SHADE_NX));
-    push_quad(verts, idx, [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)], shaded(rgb, SHADE_PZ));
-    push_quad(verts, idx, [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)], shaded(rgb, SHADE_NZ));
+/// Quad with a uniform `back` flag on all four verts.
+fn push_quad(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Color, back: f32) {
+    push_quad_v(verts, idx, q, col, [back; 4]);
 }
 
-/// A translucent water-surface quad at sea level over column `(gx, gy)`. Drawn in the
-/// water pass; the alpha lets the opaque sea floor show through.
-/// Water surface colour by DEPTH (levels of water above the bed): shallows are light and
-/// translucent (the bed shows through, as in clear shoreline water), deeps darken and turn
-/// nearly opaque (hiding the bed, so a basin's sloped walls don't read as a harsh dark
-/// ring through clear water). Standard shallow→deep gradient.
-fn water_color(depth: u8) -> Color {
-    // Keep the surface a coherent water colour: only a SUBTLE darkening with depth (a big
-    // swing made the surface a patchwork mosaic of the bed's bathymetry) and fairly opaque
-    // throughout so the bed doesn't show through and break the read of a flat surface.
-    let t = (depth as f32 / WATER_OPAQUE_DEPTH).clamp(0.0, 1.0);
-    let lerp = |a: f32, b: f32| a + (b - a) * t;
-    Color::new(
-        lerp(0.17, 0.11),
-        lerp(0.41, 0.31),
-        lerp(0.61, 0.50),
-        lerp(0.80, 0.90),
-    )
-}
-/// Depth (levels) over which water reaches its deep tone. SMALL on purpose: water
-/// saturates to the deep colour after ~2 levels, so anything genuinely underwater (a deep
-/// canyon and the flats around it) is ONE uniform tone — the water column hides the bed
-/// relief instead of tracing it. Only the immediate shore lightens.
-const WATER_OPAQUE_DEPTH: f32 = 2.0;
-
-fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, level: u8, depth: u8) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
-    let y = level as f32 * VOX;
-    let col = water_color(depth);
-    push_quad(verts, idx, [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)], col);
-}
-
-/// A translucent water side face on one edge, spanning levels `lo..hi`. Where a river
-/// steps down (or a water body abuts a lower one), this fills the vertical gap between the
-/// two water-surface quads so the ribbon reads as continuous instead of dashed.
-#[allow(clippy::too_many_arguments)]
-fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), s: usize, hi: u8, lo: u8, depth: u8, face: Face) {
-    let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
-    let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
-    let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
-    let shade = match face {
-        Face::Px => SHADE_PX,
-        Face::Nx => SHADE_NX,
-        Face::Pz => SHADE_PZ,
-        Face::Nz => SHADE_NZ,
-    };
-    let base = water_color(depth);
-    let col = Color::new(base.r * shade, base.g * shade, base.b * shade, base.a);
-    let q = match face {
-        Face::Px => [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)],
-        Face::Nx => [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)],
-        Face::Pz => [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)],
-        Face::Nz => [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)],
-    };
-    push_quad(verts, idx, q, col);
-}
-
-/// Sea/lake BED colour by water depth: a sandy shoal in the shallows grading to bare
-/// rock in the deeps — so the floor reads as a real bottom, not a blue tile under the
-/// (separately blue) water surface.
+/// Sea/lake BED colour by water depth: a sandy shoal in the shallows grading to bare rock
+/// in the deeps — submerged columns render this instead of a (removed) water surface.
 fn seabed_rgb(depth: u8) -> (f32, f32, f32) {
     let t = (depth as f32 / 5.0).clamp(0.0, 1.0);
     let lerp = |a: f32, b: f32| a + (b - a) * t;
     (lerp(0.80, 0.40), lerp(0.72, 0.39), lerp(0.52, 0.37)) // sand → rock
+}
+
+/// Varied mountain rock: a coherent (low-frequency) brightness field over the bare grey,
+/// plus greenish mossy patches — so a massif isn't a flat slab of one stone colour.
+fn rock_rgb(gx: usize, gy: usize, seed: u64) -> (f32, f32, f32) {
+    let v = terrain::fbm(seed, gx as f32 / 22.0, gy as f32 / 22.0, 303, 3); // brightness [0,1]
+    let m = terrain::fbm(seed, gx as f32 / 34.0, gy as f32 / 34.0, 305, 2); // moss mask
+    let g = 0.36 + 0.22 * v;
+    let mut c = (g, g * 0.98, g * 0.93); // slightly warm, brightness-varied grey
+    if m > 0.60 {
+        let k = ((m - 0.60) / 0.40).min(1.0) * 0.5;
+        c = (c.0 + (0.33 - c.0) * k, c.1 + (0.45 - c.1) * k, c.2 + (0.29 - c.2) * k); // → moss
+    }
+    c
 }
 
 fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, h: u8, rgb: (f32, f32, f32)) {
@@ -1165,6 +1142,7 @@ fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s
             vec3(x0, y, z1),
         ],
         col,
+        0.0,
     );
 }
 
@@ -1177,7 +1155,8 @@ fn push_side(
     h: u8,
     nh: u8,
     face: Face,
-    biome: BiomeKind,
+    top: (f32, f32, f32),
+    rocky: bool,
 ) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
@@ -1189,7 +1168,7 @@ fn push_side(
     };
     for gz in nh..h {
         let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-        let col = shaded(strata_rgb(gz, h, biome), shade);
+        let col = shaded(strata_rgb(gz, h, top, rocky), shade);
         let q = match face {
             Face::Px => [
                 vec3(x1, y0, z0),
@@ -1216,7 +1195,10 @@ fn push_side(
                 vec3(x0, y1, z0),
             ],
         };
-        push_quad(verts, idx, q, col);
+        // Bias only the wall's TOP edge (the topmost level quad's top verts 2,3) back, so
+        // the column's top face wins that rim; the rest of the wall is unbiased.
+        let backs = if gz + 1 == h { [0.0, 0.0, 1.0, 1.0] } else { [0.0; 4] };
+        push_quad_v(verts, idx, q, col, backs);
     }
 }
 
@@ -1234,8 +1216,8 @@ mod tests {
         let mut any = false;
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy, 0);
-                for b in op.iter().chain(wa.iter()) {
+                let op = build_chunk_mesh(&t, cx, cy, 0);
+                for b in op.iter() {
                     any = true;
                     assert!(b.mesh.vertices.len() < 10_000, "verts {} at chunk ({cx},{cy})", b.mesh.vertices.len());
                     assert!(b.mesh.indices.len() < 5_000, "indices {} at chunk ({cx},{cy})", b.mesh.indices.len());
@@ -1259,9 +1241,9 @@ mod tests {
         for (cx, cy) in sample {
             let mut prev = usize::MAX;
             for lod in 0..3u32 {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy, lod);
+                let op = build_chunk_mesh(&t, cx, cy, lod);
                 let mut verts = 0;
-                for b in op.iter().chain(wa.iter()) {
+                for b in op.iter() {
                     verts += b.mesh.vertices.len();
                     assert!(b.mesh.vertices.len() < 10_000, "lod {lod} verts overflow at ({cx},{cy})");
                     assert!(b.mesh.indices.len() < 5_000, "lod {lod} indices overflow at ({cx},{cy})");
@@ -1285,9 +1267,9 @@ mod tests {
                 continue;
             }
             let (x1, y1) = ((x0 + span).min(COLS), (y0 + span).min(ROWS));
-            let (op, wa) = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
-            let batches = op.len() + wa.len();
-            for b in op.iter().chain(wa.iter()) {
+            let op = build_region_mesh(&t, x0, y0, x1, y1, COARSE_LOD);
+            let batches = op.len();
+            for b in op.iter() {
                 assert!(b.mesh.vertices.len() < 10_000, "coarse verts overflow");
                 assert!(b.mesh.indices.len() < 5_000, "coarse indices overflow");
             }
@@ -1307,8 +1289,8 @@ mod tests {
         let (mut verts, mut batches) = (0usize, 0usize);
         for cy in 0..t.chunks_y {
             for cx in 0..t.chunks_x {
-                let (op, wa) = build_chunk_mesh(&t, cx, cy, 0);
-                for b in op.iter().chain(wa.iter()) {
+                let op = build_chunk_mesh(&t, cx, cy, 0);
+                for b in op.iter() {
                     verts += b.mesh.vertices.len();
                     batches += 1;
                 }
