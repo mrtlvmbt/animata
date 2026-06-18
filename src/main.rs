@@ -284,10 +284,12 @@ struct LoadedChunk {
 /// Detail-tier chunk meshes built+uploaded per frame, and coarse super-tiles per frame.
 const BUILD_BUDGET: usize = 24;
 const COARSE_BUDGET: usize = 16;
-/// Within the detail tier, LOD by chunk distance: full detail within `LOD0`, half-res to
-/// `LOD1`, quarter-res beyond.
-const LOD0_RADIUS: i32 = 5;
-const LOD1_RADIUS: i32 = 12;
+/// Within the detail tier, LOD by chunk distance. The OUTER ring grades down to
+/// `COARSE_LOD` (stride 8) so the detail edge meets the coarse tier at the SAME
+/// resolution → blocks align on the global stride grid → no seam at the boundary.
+const LOD0_RADIUS: i32 = 4;
+const LOD1_RADIUS: i32 = 8;
+const LOD2_RADIUS: i32 = 12;
 /// Two-tier streaming. The DETAIL tier renders per-chunk (LOD by distance) the super-tiles
 /// around the camera; the COARSE tier renders every OTHER super-tile as one merged buffer
 /// at `COARSE_LOD`, covering the WHOLE map cheaply (so a full zoom-out shows all of ×16
@@ -299,14 +301,17 @@ const COARSE_LOD: u32 = 3; // stride-8 overview
 /// so a full zoom-out costs only the (few hundred) coarse super-tile draws.
 const DETAIL_ZOOM_CUTOFF: f32 = 520.0;
 
-/// LOD for a detail chunk at Chebyshev distance `d` (chunks) from the camera centre.
+/// LOD for a detail chunk at Chebyshev distance `d` (chunks) from the camera centre,
+/// grading 0→1→2→`COARSE_LOD` so the detail edge matches the coarse tier.
 fn lod_for(d: i32) -> u32 {
     if d <= LOD0_RADIUS {
         0
     } else if d <= LOD1_RADIUS {
         1
-    } else {
+    } else if d <= LOD2_RADIUS {
         2
+    } else {
+        COARSE_LOD
     }
 }
 
@@ -914,7 +919,9 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
                         push_water_side(&mut wv, &mut wi, (gx, gy), stride, wl, nwl, depth, face);
                     }
                 }
-            } else if lod == 0 {
+            } else if lod <= 1 {
+                // Trees through LOD1 (one per block) so the canopy fades out a ring later
+                // instead of stopping abruptly at the LOD0 edge.
                 let bd = biome_def(biome);
                 if bd.tree != TreeKind::None
                     && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
