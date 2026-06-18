@@ -27,7 +27,7 @@ use macroquad::miniquad::{
     UniformsSource, VertexAttribute, VertexFormat,
 };
 use macroquad::prelude::*;
-use terrain::{cell_biome, cell_height, feature_unit, BiomeKind, VoxelTerrain, SEA_ABS};
+use terrain::{cell_biome, cell_height, feature_unit, BiomeKind, VoxelTerrain};
 
 fn window_conf() -> Conf {
     Conf {
@@ -366,16 +366,18 @@ fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
 }
 
 /// Pipeline for the translucent water surface (second pass). Same vertex layout as the
-/// terrain (so `upload_chunks` feeds it unchanged), but: `depth_write: false` (water is
-/// transparent — it must not occlude itself or hide what's behind it, only be occluded by
-/// terrain in front, via a strict `Less` test against the already-written terrain depth);
-/// no face culling (waves tilt the surface, and it's viewed from above). Alpha blended.
+/// terrain (so `upload_chunks` feeds it unchanged); strict `Less` depth test against the
+/// terrain depth already in the buffer, `depth_write: true` (see below), no face culling
+/// (waves tilt the surface, and it's viewed from above). Alpha blended.
 ///
-/// `Less` (not `LessOrEqual`): with the depth range now fit to the visible slab, a water
-/// surface sits a full voxel — many depth steps — above its own seabed, so it still draws
-/// over the bed, while losing depth TIES to any other terrain. That kills the old shore/
-/// distance bleed without a z-bias (which only worked when precision was too coarse to tell
-/// "my seabed below me" from "unrelated terrain at the same depth").
+/// `depth_write: true`: water is one flat layer per pixel, so writing depth costs nothing,
+/// and on the GL-on-Metal backend (macOS) a blended pass with `depth_write: false` had its
+/// depth TEST mis-applied — water leaked over the far shore/forest (view-dependent). Writing
+/// depth makes the occlusion correct.
+///
+/// `Less` (not `LessOrEqual`): a water surface sits a full voxel above its own seabed (many
+/// depth steps with the visible-slab depth range), so it still draws over the bed while
+/// losing depth TIES to any other terrain.
 fn water_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
     let shader = ctx
         .new_shader(
@@ -402,7 +404,14 @@ fn water_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
         shader,
         PipelineParams {
             depth_test: Comparison::Less,
-            depth_write: false,
+            // depth_write MUST stay true. With `depth_write: false` the GL-on-Metal backend
+            // (Apple's GL→Metal layer, what miniquad runs on macOS) mis-applies the depth
+            // TEST for this blended pass: water fragments that are behind opaque terrain pass
+            // anyway and the surface bleeds over the far shore/forest (view-dependent — only
+            // the shore facing away from the camera). The water surface is a single layer per
+            // pixel, so writing depth is harmless (no self-sorting artifacts) and makes the
+            // occlusion correct.
+            depth_write: true,
             cull_face: CullFace::Nothing,
             color_blend: Some(BlendState::new(
                 Equation::Add,
@@ -1177,14 +1186,17 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
             let rocky = submerged || matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
             push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col);
             let nb = [
-                (t.height(ix + si, iy), Face::Px),
-                (t.height(ix - si, iy), Face::Nx),
-                (t.height(ix, iy + si), Face::Pz),
-                (t.height(ix, iy - si), Face::Nz),
+                (t.height(ix + si, iy), t.water_level(ix + si, iy), Face::Px),
+                (t.height(ix - si, iy), t.water_level(ix - si, iy), Face::Nx),
+                (t.height(ix, iy + si), t.water_level(ix, iy + si), Face::Pz),
+                (t.height(ix, iy - si), t.water_level(ix, iy - si), Face::Nz),
             ];
-            for (nh, face) in nb {
+            for (nh, nwl, face) in nb {
                 if nh < h {
-                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky);
+                    // `nwl` = the neighbour's water surface: levels of this face below it are
+                    // underwater (this neighbour is the water body fronting the face), so the
+                    // mesher colours them as seabed rather than land strata.
+                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky, nwl);
                 }
             }
 
@@ -1450,6 +1462,7 @@ fn push_side(
     face: Face,
     top: (f32, f32, f32),
     rocky: bool,
+    nwl: u8,
 ) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
@@ -1461,12 +1474,14 @@ fn push_side(
     };
     for gz in nh..h {
         let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-        // Levels below the sea surface are seabed, not land strata: a dry shore cliff dropping
-        // into water exposes a tall side face whose underwater part would otherwise show the
-        // land (grass/dirt) colour and, through the translucent water, read as "water drawn
-        // over land". Colour it by depth below the surface, matching the submerged tops.
-        let col = if gz < SEA_ABS {
-            shaded(seabed_rgb(SEA_ABS - gz), shade)
+        // Levels below the fronting water's surface (`nwl`) are seabed, not land strata: a dry
+        // shore column dropping into a lake/sea exposes a side face whose underwater part would
+        // otherwise show the land (grass/dirt) colour and, through the translucent water, read
+        // as "water drawn over land" (and only from the angle the face points at the camera —
+        // hence view-dependent). `nwl` is the NEIGHBOUR's level, so it works for high lakes too,
+        // not just the global sea. Colour by depth below that surface, matching submerged tops.
+        let col = if gz < nwl {
+            shaded(seabed_rgb(nwl - gz), shade)
         } else {
             shaded(strata_rgb(gz, h, top, rocky), shade)
         };
