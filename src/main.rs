@@ -517,6 +517,8 @@ async fn main() {
     // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
     // topology + underwater bed shape that the shaded/translucent normal view obscures.
     let mut topo = false;
+    // `H` hides all water (the surface quads) so the bare bed/terrain is visible.
+    let mut water_on = true;
     // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
     let mut grab: Option<Vec2> = None;
 
@@ -538,6 +540,9 @@ async fn main() {
         // ---- Input (no GUI) ----
         if is_key_pressed(KeyCode::I) {
             show_info = !show_info;
+        }
+        if is_key_pressed(KeyCode::H) {
+            water_on = !water_on;
         }
         if is_key_pressed(KeyCode::G) {
             topo = !topo;
@@ -697,8 +702,8 @@ async fn main() {
                     draw(&lc.opaque, &mut drawn, ctx);
                 }
             }
-            // Water
-            if !topo {
+            // Water (skipped in topo mode, or when toggled off with `H`)
+            if !topo && water_on {
                 for (key, lc) in &streamer.coarse {
                     if !ready.contains(key) {
                         draw(&lc.water, &mut drawn, ctx);
@@ -731,7 +736,13 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
-        let mode = if topo { "   [TOPO: height/depth, G]" } else { "" };
+        let mode = if topo {
+            "   [TOPO: height/depth, G]"
+        } else if !water_on {
+            "   [water off, H]"
+        } else {
+            ""
+        };
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
         );
