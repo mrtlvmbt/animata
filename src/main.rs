@@ -468,6 +468,22 @@ fn max_zoom() -> f32 {
     COLS.max(ROWS) as f32 * VOX * 1.2
 }
 
+/// The ground-plane point (returned as `(x, z)`) under the mouse cursor: unproject the
+/// cursor through the camera and intersect the ray with `y = 0`. Used for zoom-to-cursor.
+fn ground_under_cursor(cam: &IsoCam) -> Vec2 {
+    let (mx, my) = mouse_position();
+    let (sw, sh) = (screen_width().max(1.0), screen_height().max(1.0));
+    let nx = mx / sw * 2.0 - 1.0;
+    let ny = 1.0 - my / sh * 2.0; // screen Y is top-down; NDC Y is bottom-up
+    let inv = cam.camera().matrix().inverse();
+    let near = inv.project_point3(vec3(nx, ny, -1.0));
+    let far = inv.project_point3(vec3(nx, ny, 1.0));
+    let d = far - near;
+    let t = if d.y.abs() > 1e-6 { -near.y / d.y } else { 0.0 };
+    let hit = near + d * t;
+    vec2(hit.x, hit.z)
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut cam = IsoCam::new();
@@ -526,7 +542,13 @@ async fn main() {
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
+            // Zoom toward the cursor: keep the ground point under the mouse fixed by
+            // shifting the target by how much that point would otherwise move.
+            let before = ground_under_cursor(&cam);
             cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(8.0, max_zoom());
+            let after = ground_under_cursor(&cam);
+            cam.target.x += before.x - after.x;
+            cam.target.z += before.y - after.y;
         }
         // Pan in the ground plane (WASD / arrows), rotated by the current yaw.
         let mut pan = Vec2::ZERO;
