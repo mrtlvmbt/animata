@@ -53,6 +53,19 @@ pub const SURFACE_RANGE: u8 = 40;
 /// Water fills columns whose surface sits below this level.
 pub const SEA_LEVEL: u8 = 2;
 
+// ---- Sim time base (the WorldClock; consumed in clock.rs) ----
+/// Fixed sub-step length in **sim-seconds** — the sim's time resolution. 0.1 s = 10 ticks
+/// per sim-second: a compromise between integration accuracy and per-tick cost. The clock
+/// counts whole ticks (`u64`), so this is the only place real and sim time meet.
+pub const TICK_LEN: f32 = 0.1;
+/// Spiral-of-death guard: the most sub-steps one rendered frame may run. Past this the
+/// interactive clock drops the backlog instead of trying to catch up (so a lag spike can't
+/// snowball). Headless `advance(n)` ignores this — it is the deterministic path.
+pub const MAX_SUBSTEPS: u64 = 8;
+/// Length of one in-world day in **sim-seconds**. Only feeds `day_frac()` for now (no
+/// day/night visual yet — that's a later, deferred phase). Tunable.
+pub const DAY_LEN: f32 = 600.0;
+
 // ---- Creature density contract (documented now, consumed by the future sim) ----
 /// Creature body size in metres (mouse-sized).
 #[allow(dead_code)]

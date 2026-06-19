@@ -35,6 +35,8 @@ pub enum Cmd {
     },
     /// Regenerate the world; `seed` omitted → next seed.
     Reseed { seed: Option<u64> },
+    /// Drive the sim clock: set the time scale and/or pause state (either field optional).
+    SetClock { scale: Option<f32>, paused: Option<bool> },
     /// Toggle render flags (diagnostic): `water` draws the translucent surface, `topo` is the
     /// height-debug view (water hidden). Either field optional.
     Render { water: Option<bool>, topo: Option<bool> },
@@ -118,6 +120,10 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             yaw: f("yaw").map(|v| v as f32),
         }),
         "animata/reseed" => Ok(Cmd::Reseed { seed: u("seed") }),
+        "animata/set_timescale" => Ok(Cmd::SetClock {
+            scale: f("scale").map(|v| v as f32),
+            paused: b("paused"),
+        }),
         "animata/render" => Ok(Cmd::Render { water: b("water"), topo: b("topo") }),
         "animata/screenshot" => Ok(Cmd::Screenshot(s("path").unwrap_or_else(|| "shot.png".into()))),
         other => Err(format!("unknown method: {other}")),
