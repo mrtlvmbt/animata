@@ -127,6 +127,18 @@ pub const STORAGE_PER_CELL: f32 = 25.0;
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
 
+// ---- C3: nutrient cycle (minerals ↔ plants ↔ creatures ↔ detritus) ----
+/// Closed-form weathering rate (per sim-second) — nutrient relaxes toward its geology baseline.
+/// Slow (the abiotic anchor): the biological cycle (grazing drain / death return) dominates the
+/// short-term spatial pattern, weathering just keeps the total from drifting.
+pub const NUTRIENT_WEATHER_RATE: f32 = 0.003;
+/// Nutrient drained from a column per unit of plant biomass grazed (carried off by the herbivore,
+/// returned where it later dies). ~1:1 stoichiometry; <1 so grazing doesn't strip ground instantly.
+pub const NUTRIENT_PER_BIOMASS: f32 = 0.8;
+/// Nutrient returned to the death column per creature cell (decomposition). Tuning is forgiving —
+/// the weathering anchor absorbs imbalance between drain and return.
+pub const NUTRIENT_PER_CELL: f32 = 0.03;
+
 // ---- C3: autotrophs (photosynthesis) ----
 /// Energy per photosynthetic cell per sim-second at full light. The autotroph's income.
 pub const PHOTO_RATE: f32 = 3.0;
