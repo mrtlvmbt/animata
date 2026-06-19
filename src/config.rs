@@ -127,6 +127,18 @@ pub const STORAGE_PER_CELL: f32 = 25.0;
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
 
+// ---- C3: vertical strata (air / underground / water column) ----
+/// Fraction of a body that must be flight / burrow / fin cells to occupy that stratum.
+pub const STRATUM_THETA: f32 = 0.15;
+/// Total foraging yield (energy / sim-second) of each non-surface stratum, split among its
+/// occupants (density-dependent: empty strata richly reward first colonisers, then self-limit).
+pub const AIR_CAPACITY: f32 = 320.0;
+pub const UNDERGROUND_CAPACITY: f32 = 480.0;
+pub const WATER_CAPACITY: f32 = 400.0;
+/// Per-stratum metabolic multiplier — flight is dear (lift), burrowing cheap (sheltered).
+pub const AIR_METAB_MULT: f32 = 1.6;
+pub const UNDERGROUND_METAB_MULT: f32 = 0.7;
+
 // ---- C3: habitat / climate niche ----
 /// How steeply FOOD VALUE falls with the mismatch between local temperature and a creature's
 /// evolved thermal preference (climate stress on foraging). `0.9` ⇒ a fully mismatched lineage

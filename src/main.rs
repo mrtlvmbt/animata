@@ -1044,6 +1044,7 @@ async fn main() {
                         "sim": sim.as_ref().map(|s| {
                             let (multi, complex) = s.complexity_mix();
                             let allopatry = terrain.as_ref().map(|t| s.thermal_correlation(t));
+                            let strata = terrain.as_ref().map(|t| s.stratum_mix(t));
                             serde_json::json!({
                                 "population": s.population(),
                                 "avg_energy": s.avg_energy(),
@@ -1052,6 +1053,7 @@ async fn main() {
                                 "frac_complex": complex,
                                 "frac_carnivore": s.frac_carnivore(),
                                 "allopatry": allopatry,
+                                "strata_und_surf_air_water": strata,
                                 "births": s.births,
                                 "deaths": s.deaths,
                                 "kills": s.kills,
@@ -1277,10 +1279,12 @@ async fn main() {
         let life = match (sim.as_ref(), terrain.as_ref()) {
             (Some(s), Some(t)) => {
                 let (multi, complex) = s.complexity_mix();
+                let m = s.stratum_mix(t);
                 format!(
-                    "   pop {}   E {:.0}   biomass {:.2}   multi {:.0}% complex {:.0}% carniv {:.0}%   allopatry {:.2}   on-screen {on_screen}",
+                    "   pop {}   E {:.0}   bm {:.2}   multi {:.0}% cplx {:.0}% carn {:.0}%   allop {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
                     s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0,
-                    s.frac_carnivore() * 100.0, s.thermal_correlation(t)
+                    s.frac_carnivore() * 100.0, s.thermal_correlation(t),
+                    m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
                 )
             }
             _ => String::new(),

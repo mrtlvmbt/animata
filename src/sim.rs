@@ -138,6 +138,64 @@ fn climate_match(temp: f32, pref: f32) -> f32 {
     (1.0 - THERMAL_PENALTY * (temp - pref).abs()).clamp(0.1, 1.0)
 }
 
+/// Vertical strata (C3). Which one a creature occupies is set by its morphology + where it
+/// stands: flight cells → Air, burrow cells → Underground, fins over a water column → Water,
+/// else the Surface base layer. Each is a distinct niche — its own food source and a predator
+/// refuge (predators only hunt within their own stratum).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Stratum {
+    Underground,
+    Surface,
+    Air,
+    Water,
+}
+
+impl Stratum {
+    fn idx(self) -> usize {
+        match self {
+            Stratum::Underground => 0,
+            Stratum::Surface => 1,
+            Stratum::Air => 2,
+            Stratum::Water => 3,
+        }
+    }
+
+    /// Metabolic multiplier for living here — flight is dear (lift), burrowing cheap (sheltered).
+    fn metab_mult(self) -> f32 {
+        match self {
+            Stratum::Air => AIR_METAB_MULT,
+            Stratum::Underground => UNDERGROUND_METAB_MULT,
+            _ => 1.0,
+        }
+    }
+
+    /// Total non-surface foraging yield (energy / sim-second) of this stratum, split among its
+    /// occupants (so an empty stratum richly rewards the first colonisers, then self-limits).
+    /// Surface returns 0 here — it feeds from the positioned S3 plant field instead.
+    fn capacity(self) -> f32 {
+        match self {
+            Stratum::Underground => UNDERGROUND_CAPACITY,
+            Stratum::Air => AIR_CAPACITY,
+            Stratum::Water => WATER_CAPACITY,
+            Stratum::Surface => 0.0,
+        }
+    }
+}
+
+/// The stratum a creature occupies, from its body and whether its column is water. Priority
+/// Air > Underground > Water > Surface (a body able to fly uses the air even over water).
+fn stratum_of(pheno: &Phenotype, is_water_col: bool) -> Stratum {
+    if pheno.flight_frac() > STRATUM_THETA {
+        Stratum::Air
+    } else if pheno.burrow_frac() > STRATUM_THETA {
+        Stratum::Underground
+    } else if is_water_col && pheno.fin_frac() > STRATUM_THETA {
+        Stratum::Water
+    } else {
+        Stratum::Surface
+    }
+}
+
 impl Sim {
     /// Spawn the founder population on land columns, deterministically from `world_seed`.
     pub fn new(world_seed: u64, terrain: &VoxelTerrain) -> Self {
@@ -192,19 +250,36 @@ impl Sim {
         let pos: Vec<Vec2> = self.creatures.iter().map(|c| c.pos).collect();
         let bm: Vec<u32> = self.creatures.iter().map(|c| c.biomass()).collect();
         let carn: Vec<f32> = self.creatures.iter().map(|c| c.pheno.carnivory()).collect();
+        // Each creature's stratum (from its body + whether its column is water) and the per-stratum
+        // headcount (for the density-split non-surface food). A stratum is a predator refuge:
+        // hunting only reaches prey in the SAME stratum.
+        let strata: Vec<Stratum> = self
+            .creatures
+            .iter()
+            .map(|c| {
+                let (cx, cy) = column_index(c.pos);
+                stratum_of(&c.pheno, terrain.is_water(cx, cy))
+            })
+            .collect();
+        let mut stratum_count = [0.0f32; 4];
+        for s in &strata {
+            stratum_count[s.idx()] += 1.0;
+        }
         self.grid.rebuild(&pos, maxx, maxy, GRID_CELL);
         // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
         let mut decisions: Vec<(f32, f32, Option<usize>)> = Vec::with_capacity(n);
         for i in 0..n {
             let predator = carn[i] > CARNIVORE_THRESHOLD;
             let self_bm = bm[i];
+            let self_layer = strata[i];
             // Nearest edible prey (only if predatory) AND nearest threatening predator, one pass.
+            // Both restricted to the SAME stratum — a creature in another layer is out of reach.
             let (prey, threat) = self.grid.nearest2_within(
                 &pos,
                 pos[i],
                 SENSE_RANGE,
-                |j| predator && j != i && bm[j] <= self_bm,
-                |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm,
+                |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer,
+                |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm && strata[j] == self_layer,
             );
             let c = &self.creatures[i];
             let prey_rel = prey.map(|j| rel(pos[i], c.heading, pos[j]));
@@ -263,18 +338,24 @@ impl Sim {
                 c.heading = -c.heading;
             }
             let (cx, cy) = column_index(c.pos);
-            // Graze the column (mutates terrain biomass) → energy. Intake scales with body size;
-            // a carnivore digests plants poorly (diet efficiency = 1 − carnivory), so the trophic
-            // split is a real trade-off, not a free lunch.
+            let layer = strata[idx];
             // Food value is scaled by how well the creature's thermal preference matches the
             // local climate — the C3 habitat pressure acts on the dominant (food) channel.
-            let taken = terrain.graze(cx, cy, c.intake() * TICK_LEN, tick);
-            let herbivory = 1.0 - c.pheno.carnivory();
             let climate = climate_match(terrain.temperature_at(cx, cy), c.genome.thermal_pref);
-            c.energy = (c.energy + taken * PLANT_BIOMASS_TO_ENERGY * herbivory * climate).min(c.max_energy());
-            // Metabolism: Kleiber (biomass^0.75) + movement effort.
+            let food = if layer == Stratum::Surface {
+                // Surface feeds on the positioned S3 plant field; intake scales with body size, a
+                // carnivore digests plants poorly (efficiency = 1 − carnivory).
+                let taken = terrain.graze(cx, cy, c.intake() * TICK_LEN, tick);
+                taken * PLANT_BIOMASS_TO_ENERGY * (1.0 - c.pheno.carnivory())
+            } else {
+                // Non-surface strata: a fixed foraging capacity split among occupants (density-
+                // dependent → an empty stratum richly rewards colonisers, then self-limits).
+                layer.capacity() / stratum_count[layer.idx()].max(1.0) * TICK_LEN
+            };
+            c.energy = (c.energy + food * climate).min(c.max_energy());
+            // Metabolism: Kleiber (biomass^0.75) × stratum cost + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
-            c.energy -= (SIM_BASE_METABOLISM * kleiber + MOVE_COST * throttle) * TICK_LEN;
+            c.energy -= (SIM_BASE_METABOLISM * kleiber * layer.metab_mult() + MOVE_COST * throttle) * TICK_LEN;
             c.age += 1;
             // Death by starvation.
             if c.energy <= 0.0 {
@@ -445,6 +526,24 @@ impl Sim {
         }
     }
 
+    /// Fraction of the population in each stratum `[underground, surface, air, water]` — shows
+    /// whether vertical niches (burrowers / fliers / swimmers) have been colonised.
+    pub fn stratum_mix(&self, terrain: &VoxelTerrain) -> [f32; 4] {
+        let n = self.creatures.len();
+        if n == 0 {
+            return [0.0; 4];
+        }
+        let mut m = [0.0f32; 4];
+        for c in &self.creatures {
+            let (cx, cy) = column_index(c.pos);
+            m[stratum_of(&c.pheno, terrain.is_water(cx, cy)).idx()] += 1.0;
+        }
+        for v in &mut m {
+            *v /= n as f32;
+        }
+        m
+    }
+
     /// Fraction of the population that is predatory (a second trophic level has appeared).
     pub fn frac_carnivore(&self) -> f32 {
         let n = self.creatures.len();
@@ -568,6 +667,24 @@ mod tests {
         assert!(end > 0.3, "no habitat sorting emerged (thermal corr {end:.3})");
     }
 
+    /// C3-strata acceptance: the vertical niches get colonised — burrowers, fliers AND swimmers
+    /// each appear as a persistent minority alongside the surface majority (their morphology
+    /// evolves the flight/burrow/fin cells that grant access). Single seed ⇒ deterministic.
+    #[test]
+    fn vertical_strata_get_colonised() {
+        let mut t = world();
+        let mut s = Sim::new(1, &t);
+        for tick in 0..7000 {
+            s.step(&mut t, tick);
+        }
+        let m = s.stratum_mix(&t);
+        eprintln!("strata: underground {:.1}% surface {:.1}% air {:.1}% water {:.1}%", m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0);
+        assert!(m[0] > 0.01, "underground unoccupied ({:.2}%)", m[0] * 100.0);
+        assert!(m[2] > 0.01, "air unoccupied ({:.2}%)", m[2] * 100.0);
+        assert!(m[3] > 0.01, "water unoccupied ({:.2}%)", m[3] * 100.0);
+        assert!(m[1] > 0.5, "surface should stay the majority ({:.1}%)", m[1] * 100.0);
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -578,10 +695,12 @@ mod tests {
         for tick in 0..12000 {
             s.step(&mut t, tick);
             if tick % 1000 == 0 {
-                let (multi, complex) = s.complexity_mix();
+                let (multi, _) = s.complexity_mix();
+                let m = s.stratum_mix(&t);
                 eprintln!(
-                    "tick {tick}: pop {} biomass {:.2} multi {:.0}% complex {:.0}% carniv {:.1}% allopatry {:.2} kills {}",
-                    s.population(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.frac_carnivore() * 100.0, s.thermal_correlation(&t), s.kills
+                    "tick {tick}: pop {} biomass {:.2} multi {:.0}% carniv {:.1}% allopatry {:.2} | strata und {:.0}% surf {:.0}% air {:.0}% water {:.0}%",
+                    s.population(), s.avg_biomass(), multi * 100.0, s.frac_carnivore() * 100.0, s.thermal_correlation(&t),
+                    m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
                 );
             }
         }
