@@ -8,10 +8,12 @@
 
 pub mod clock;
 pub mod config;
+pub mod env;
 pub mod erosion;
 pub mod genome;
 pub mod grid;
 pub mod hydrology;
+pub mod pressure;
 pub mod rng;
 pub mod sim;
 pub mod tectonics;

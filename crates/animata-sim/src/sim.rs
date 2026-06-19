@@ -785,3 +785,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 #[path = "sim_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "pressure_tests.rs"]
+mod pressure_tests;
+
