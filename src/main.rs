@@ -52,6 +52,7 @@ enum DebugView {
     Moist,
     WaterDist,
     Slope,
+    Biomass,
 }
 
 impl DebugView {
@@ -62,20 +63,30 @@ impl DebugView {
             DebugView::Temp => DebugView::Moist,
             DebugView::Moist => DebugView::WaterDist,
             DebugView::WaterDist => DebugView::Slope,
-            DebugView::Slope => DebugView::None,
+            DebugView::Slope => DebugView::Biomass,
+            DebugView::Biomass => DebugView::None,
         }
     }
     /// The views drawn as a 2D field minimap (vs the 3D scene reshade / no overlay).
     fn is_field_map(self) -> bool {
-        matches!(self, DebugView::Temp | DebugView::Moist | DebugView::WaterDist | DebugView::Slope)
+        matches!(
+            self,
+            DebugView::Temp | DebugView::Moist | DebugView::WaterDist | DebugView::Slope | DebugView::Biomass
+        )
+    }
+    /// Views whose field changes over time (biomass regrows / is grazed) → the minimap must be
+    /// rebuilt every frame, not cached by seed.
+    fn is_dynamic(self) -> bool {
+        matches!(self, DebugView::Biomass)
     }
 }
 
 /// Build a small colourmap texture of a per-column environment field for the debug minimap.
-/// Samples the whole map down to a fixed pixel size, so the cost is bounded and paid only on
-/// a view/seed change. The colour ramps are chosen to read at a glance: temp blue→red,
-/// moisture tan→teal, water-distance bright(near)→dark(far).
-fn build_field_minimap(t: &VoxelTerrain, view: DebugView) -> Texture2D {
+/// Samples the whole map down to a fixed pixel size, so the cost is bounded. Static fields are
+/// cached (paid on a view/seed change); the dynamic biomass field is rebuilt each frame at the
+/// current `tick`. Ramps read at a glance: temp blue→red, moisture tan→teal, water-distance
+/// bright(near)→dark(far), slope dark→yellow, biomass barren brown→lush green.
+fn build_field_minimap(t: &VoxelTerrain, view: DebugView, tick: u64) -> Texture2D {
     const MW: usize = 220;
     let mh = (MW * ROWS / COLS).max(1);
     let mut img = Image::gen_image_color(MW as u16, mh as u16, BLANK);
@@ -104,6 +115,14 @@ fn build_field_minimap(t: &VoxelTerrain, view: DebugView) -> Texture2D {
                 DebugView::Slope => {
                     let v = t.slope_at(x, y); // flat dark → steep yellow-white
                     Color::new(v, v, 0.25 * v, 1.0)
+                }
+                DebugView::Biomass => {
+                    if t.is_water(x, y) {
+                        Color::new(0.18, 0.32, 0.5, 1.0) // water: no vegetation
+                    } else {
+                        let v = t.biomass_at(x, y, tick); // barren brown → lush green
+                        Color::new(0.45 * (1.0 - v) + 0.1, 0.25 + 0.6 * v, 0.12, 1.0)
+                    }
                 }
                 _ => BLANK,
             };
@@ -919,6 +938,23 @@ async fn main() {
             cam.target.x += g.x - cur.x;
             cam.target.z += g.y - cur.y;
         }
+        // Right-drag GRAZE (debug): clear-cut the vegetation in a patch under the cursor —
+        // the default-build consumer of `graze`, and a manual way to verify regrowth (graze a
+        // spot in the Biomass view, watch it grow back). Patch radius so it shows on the
+        // down-sampled minimap.
+        if is_mouse_button_down(MouseButton::Right) {
+            if let Some(t) = &mut terrain {
+                let g = ground_under_cursor(&cam);
+                let (gx, gy) = ((g.x / VOX).floor() as i32, (g.y / VOX).floor() as i32);
+                let r = 24i32;
+                let tick = clock.tick();
+                for yy in (gy - r).max(0)..(gy + r).min(ROWS as i32) {
+                    for xx in (gx - r).max(0)..(gx + r).min(COLS as i32) {
+                        t.graze(xx as usize, yy as usize, 1.0, tick); // clear-cut (take all)
+                    }
+                }
+            }
+        }
         // Pan in the ground plane (WASD / arrows), rotated by the current yaw.
         let mut pan = Vec2::ZERO;
         if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
@@ -973,6 +1009,7 @@ async fn main() {
                             "slope": t.slope_at(x, y),
                             "water_dist": t.water_dist_at(x, y),
                             "biome": format!("{:?}", t.biome_at(x, y)),
+                            "biomass": t.biomass_at(x, y, clock.tick()),
                         })
                     });
                     let _ = reply.send(serde_json::json!({
@@ -998,6 +1035,22 @@ async fn main() {
                     }
                     let _ = reply.send(serde_json::json!({
                         "time_scale": clock.time_scale, "paused": clock.paused,
+                    }));
+                }
+                dev_bridge::Cmd::Graze { x, y, amount } => {
+                    let taken = terrain.as_mut().and_then(|t| {
+                        (x < COLS && y < ROWS).then(|| t.graze(x, y, amount, clock.tick()))
+                    });
+                    let _ = reply.send(serde_json::json!({
+                        "taken": taken, "tick": clock.tick(),
+                    }));
+                }
+                dev_bridge::Cmd::Biomass { x, y } => {
+                    let biomass = terrain.as_ref().and_then(|t| {
+                        (x < COLS && y < ROWS).then(|| t.biomass_at(x, y, clock.tick()))
+                    });
+                    let _ = reply.send(serde_json::json!({
+                        "biomass": biomass, "tick": clock.tick(),
                     }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
@@ -1146,6 +1199,7 @@ async fn main() {
             DebugView::Moist => "   [MOIST map, G]",
             DebugView::WaterDist => "   [WATER-DIST map, G]",
             DebugView::Slope => "   [SLOPE map, G]",
+            DebugView::Biomass => "   [BIOMASS map, G — right-drag to graze]",
             DebugView::None if !water_on => "   [water off, H]",
             DebugView::None => "",
         };
@@ -1165,17 +1219,18 @@ async fn main() {
             draw_text(&clock_line, 8.0, 44.0, 22.0, Color::new(0.85, 0.92, 1.0, 1.0));
         }
 
-        // Field colourmap minimap (the S1 env-getter consumer): rebuild the texture only
-        // when the view or seed changes, then blit it top-right with a label. Off for the
-        // None/Topo views (Topo reshades the 3D scene itself).
+        // Field colourmap minimap (the env-getter consumer): rebuild the texture on a view/seed
+        // change (static fields) or every frame (the dynamic biomass field), then blit it
+        // top-right with a label. Off for the None/Topo views (Topo reshades the 3D scene).
         if debug_view.is_field_map() {
             if let Some(t) = &terrain {
-                let stale = field_map
-                    .as_ref()
-                    .map(|(v, s, _)| *v != debug_view || *s != seed)
-                    .unwrap_or(true);
+                let stale = debug_view.is_dynamic()
+                    || field_map
+                        .as_ref()
+                        .map(|(v, s, _)| *v != debug_view || *s != seed)
+                        .unwrap_or(true);
                 if stale {
-                    field_map = Some((debug_view, seed, build_field_minimap(t, debug_view)));
+                    field_map = Some((debug_view, seed, build_field_minimap(t, debug_view, clock.tick())));
                 }
             }
             if let Some((_, _, tex)) = &field_map {
