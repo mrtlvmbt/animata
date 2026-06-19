@@ -36,6 +36,7 @@ const SALT_MUTATE: u64 = 0x111;
 const SALT_CULL: u64 = 0xC011;
 const SALT_DEATH: u64 = 0xDEAD;
 const SALT_BIRTH: u64 = 0xB127;
+const SALT_CAMO: u64 = 0xCA30;
 
 /// One creature. Its `genome` (developmental GRN + brain weights) is grown once into `pheno`
 /// (the cell body) at creation; biomass and the stat modifiers below read from `pheno`.
@@ -56,6 +57,11 @@ impl Creature {
     /// and it is the energy a predator gets in C2).
     pub fn biomass(&self) -> u32 {
         self.pheno.n_cells
+    }
+
+    /// Evolved body coloration `[0,1]` (for the camouflage render tint).
+    pub fn coloration(&self) -> f32 {
+        self.genome.coloration
     }
 
     /// Top speed: effector cells add locomotor thrust (emergent — a body that develops more
@@ -109,6 +115,28 @@ pub struct Sim {
     pub kills: u64,
     /// Reused spatial index over creature positions, rebuilt each tick for prey/threat queries.
     grid: SpatialGrid,
+}
+
+/// Pearson correlation of two equal-length samples (`0` if undefined). Shared by the niche
+/// metrics — how well an evolved trait tracks the local environment (allopatry, crypsis).
+fn pearson(a: &[f32], b: &[f32]) -> f32 {
+    let n = a.len() as f32;
+    if a.len() < 2 {
+        return 0.0;
+    }
+    let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
+    let (mut cov, mut va, mut vb) = (0.0, 0.0, 0.0);
+    for (&x, &y) in a.iter().zip(b) {
+        cov += (x - ma) * (y - mb);
+        va += (x - ma).powi(2);
+        vb += (y - mb).powi(2);
+    }
+    let denom = (va * vb).sqrt();
+    if denom > 1e-6 {
+        cov / denom
+    } else {
+        0.0
+    }
 }
 
 /// Closeness `[0,1]` (1 = adjacent, 0 = at/over the sense range) and the left/right bearing of
@@ -269,6 +297,16 @@ impl Sim {
         let pos: Vec<Vec2> = self.creatures.iter().map(|c| c.pos).collect();
         let bm: Vec<u32> = self.creatures.iter().map(|c| c.biomass()).collect();
         let carn: Vec<f32> = self.creatures.iter().map(|c| c.pheno.carnivory()).collect();
+        let color: Vec<f32> = self.creatures.iter().map(|c| c.genome.coloration).collect();
+        // Ground tone each creature stands on (camouflage background, snapshot — read-only).
+        let bg: Vec<f32> = self
+            .creatures
+            .iter()
+            .map(|c| {
+                let (cx, cy) = column_index(c.pos);
+                terrain.ground_tone_at(cx, cy)
+            })
+            .collect();
         // Each creature's stratum (from its body + whether its column is water) and the per-stratum
         // headcount (for the density-split non-surface food). A stratum is a predator refuge:
         // hunting only reaches prey in the SAME stratum.
@@ -297,11 +335,20 @@ impl Sim {
             let self_layer = strata[i];
             // Nearest edible prey (only if predatory) AND nearest threatening predator, one pass.
             // Both restricted to the SAME stratum — a creature in another layer is out of reach.
+            // Camouflage gates DETECTION: a predator only sees (and so only targets) a prey it
+            // spots, with probability rising in the contrast of the prey's coloration vs its
+            // ground. A cryptic prey is often invisible — strong, habitat-specific selection for
+            // matching the background (coevolution). Deterministic per (predator, prey, tick).
+            let detected = |j: usize| {
+                let contrast = (color[j] - bg[j]).abs();
+                let p = CAMO_BASE_DETECT + (1.0 - CAMO_BASE_DETECT) * contrast;
+                Rng::new(seed_fold(self.world_seed, &[SALT_CAMO, i as u64, j as u64, tick])).unit() <= p
+            };
             let (prey, threat) = self.grid.nearest2_within(
                 &pos,
                 pos[i],
                 SENSE_RANGE,
-                |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer,
+                |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),
                 |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm && strata[j] == self_layer,
             );
             let c = &self.creatures[i];
@@ -320,6 +367,7 @@ impl Sim {
             if !self.creatures[i].alive || !self.creatures[j].alive {
                 continue; // predator died, or prey already eaten by a lower-index predator
             }
+            // (Camouflage already gated targeting at sensing — a chosen prey was detectable.)
             let gain = (bm[j] as f32 * CELL_BIOMASS_COST + self.creatures[j].energy.max(0.0))
                 * MEAT_EFFICIENCY
                 * carn[i];
@@ -550,22 +598,7 @@ impl Sim {
             prefs.push(c.genome.thermal_pref);
             temps.push(terrain.temperature_at(cx, cy));
         }
-        let nf = n as f32;
-        let (mp, mt) = (prefs.iter().sum::<f32>() / nf, temps.iter().sum::<f32>() / nf);
-        let mut cov = 0.0;
-        let mut vp = 0.0;
-        let mut vt = 0.0;
-        for (&p, &t) in prefs.iter().zip(&temps) {
-            cov += (p - mp) * (t - mt);
-            vp += (p - mp).powi(2);
-            vt += (t - mt).powi(2);
-        }
-        let denom = (vp * vt).sqrt();
-        if denom > 1e-6 {
-            cov / denom
-        } else {
-            0.0
-        }
+        pearson(&prefs, &temps)
     }
 
     /// Fraction of the population in each stratum `[underground, surface, air, water]` — shows
@@ -602,6 +635,23 @@ impl Sim {
             })
             .sum();
         s / self.creatures.len() as f32
+    }
+
+    /// Crypsis metric: Pearson correlation between each creature's coloration and the ground tone
+    /// where it lives. ~0 = random colours; → 1 = creatures have evolved to match their background
+    /// (camouflage), differently per habitat — a coevolutionary outcome of the detection channel.
+    pub fn crypsis_correlation(&self, terrain: &VoxelTerrain) -> f32 {
+        let n = self.creatures.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let (mut cols, mut tones) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for c in &self.creatures {
+            let (cx, cy) = column_index(c.pos);
+            cols.push(c.genome.coloration);
+            tones.push(terrain.ground_tone_at(cx, cy));
+        }
+        pearson(&cols, &tones)
     }
 
     /// Fraction of the population that is autotrophic (photosynthesises — a producer tier inside
@@ -794,6 +844,26 @@ mod tests {
         assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
     }
 
+    /// C3-camouflage acceptance: prey evolve coloration MATCHING their local ground (crypsis) —
+    /// the appearance↔background correlation rises well above 0, driven by the predator detection
+    /// channel. Founders are colour-random. Single seed ⇒ deterministic.
+    #[test]
+    fn camouflage_emerges_against_background() {
+        let mut t = world();
+        let mut s = Sim::new(1, &t);
+        let start = s.crypsis_correlation(&t);
+        for tick in 0..8000 {
+            s.step(&mut t, tick);
+        }
+        let end = s.crypsis_correlation(&t);
+        eprintln!("crypsis correlation: start {start:.3} → end {end:.3}");
+        assert!(start.abs() < 0.1, "founders should be colour-random (corr {start:.3})");
+        // Crypsis is bounded by predation INTENSITY (predators are a ~2% mortality source — a
+        // correct trophic pyramid), so the global signal is modest but clearly positive: prey
+        // coloration tracks the local ground where predation actually presses.
+        assert!(end > 0.1, "no crypsis emerged — coloration didn't track background ({end:.3})");
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -806,9 +876,9 @@ mod tests {
             if tick % 1000 == 0 {
                 let (multi, _) = s.complexity_mix();
                 eprintln!(
-                    "tick {tick}: pop {} bm {:.2} multi {:.0}% carniv {:.1}% auto {:.1}% nutrient {:.2} allop {:.2}",
+                    "tick {tick}: pop {} bm {:.2} multi {:.0}% carniv {:.1}% auto {:.1}% nutri {:.2} allop {:.2} crypsis {:.2}",
                     s.population(), s.avg_biomass(), multi * 100.0, s.frac_carnivore() * 100.0,
-                    s.frac_autotroph() * 100.0, s.avg_nutrient(&t, tick), s.thermal_correlation(&t)
+                    s.frac_autotroph() * 100.0, s.avg_nutrient(&t, tick), s.thermal_correlation(&t), s.crypsis_correlation(&t)
                 );
             }
         }
