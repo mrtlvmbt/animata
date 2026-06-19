@@ -17,19 +17,21 @@
 use crate::rng::Rng;
 
 /// Morphogen genes per cell (the GRN state width).
-pub const G: usize = 8;
+pub const G: usize = 10;
 /// Development steps (bounded → cheap + deterministic).
 pub const DEV_STEPS: usize = 10;
 /// Hard cap on cells per body (bounds dev cost AND the per-tick brain/biomass cost).
 pub const MAX_CELLS: usize = 32;
 
-// Gene roles (the rest, 5..G, are free regulatory genes the GRN can use as it likes).
+// Gene roles (the rest, 8..G, are free regulatory genes the GRN can use as it likes).
 const GENE_DIVIDE: usize = 0; // > THETA ⇒ the cell divides this step
 const GENE_POLARITY: usize = 1; // negated in the daughter so sisters can differentiate
-const GENE_EFFECTOR: usize = 2; // expressed ⇒ contractile/locomotor cell
+const GENE_EFFECTOR: usize = 2; // expressed ⇒ contractile/locomotor cell (also fins in water)
 const GENE_STORAGE: usize = 3; // expressed ⇒ energy-storage cell
 const GENE_SENSOR: usize = 4; // expressed ⇒ sensory cell
 const GENE_PREDATOR: usize = 5; // expressed ⇒ predatory/meat-digesting cell (C2)
+const GENE_FLIGHT: usize = 6; // expressed ⇒ wing/lift cell — access to the AIR stratum (C3)
+const GENE_BURROW: usize = 7; // expressed ⇒ digging cell — access to the UNDERGROUND stratum (C3)
 /// Division fires when the divide gene exceeds this. Low enough that a few accumulated GRN
 /// mutations can reach it from the empty founder (so multicellularity is evolutionarily
 /// reachable, not stranded behind an unmutatable threshold).
@@ -51,6 +53,8 @@ pub struct Phenotype {
     pub storage: u32,
     pub sensor: u32,
     pub predator: u32,
+    pub flight: u32,
+    pub burrow: u32,
     pub structural: u32,
 }
 
@@ -61,7 +65,7 @@ impl Phenotype {
         if self.n_cells <= 1 {
             return 0;
         }
-        let types = [self.effector, self.storage, self.sensor, self.predator]
+        let types = [self.effector, self.storage, self.sensor, self.predator, self.flight, self.burrow]
             .iter()
             .filter(|&&c| c > 0)
             .count();
@@ -76,10 +80,30 @@ impl Phenotype {
     /// well the creature digests meat vs plants (a body with no predator cells is a pure
     /// herbivore; an all-predator body is a pure carnivore).
     pub fn carnivory(&self) -> f32 {
+        self.frac(self.predator)
+    }
+
+    /// Fraction of the body that is flight cells (gates access to the AIR stratum).
+    pub fn flight_frac(&self) -> f32 {
+        self.frac(self.flight)
+    }
+
+    /// Fraction of the body that is burrow cells (gates access to the UNDERGROUND stratum).
+    pub fn burrow_frac(&self) -> f32 {
+        self.frac(self.burrow)
+    }
+
+    /// Fraction of the body that is effector/fin cells (gates the WATER stratum in water biomes).
+    pub fn fin_frac(&self) -> f32 {
+        self.frac(self.effector)
+    }
+
+    fn frac(&self, count: u32) -> f32 {
         if self.n_cells == 0 {
-            return 0.0;
+            0.0
+        } else {
+            count as f32 / self.n_cells as f32
         }
-        self.predator as f32 / self.n_cells as f32
     }
 }
 
@@ -167,18 +191,27 @@ impl Genome {
         }
         let mut p = Phenotype { n_cells: states.len() as u32, ..Default::default() };
         for s in &states {
-            let (eff, sto, sen, pre) = (s[GENE_EFFECTOR], s[GENE_STORAGE], s[GENE_SENSOR], s[GENE_PREDATOR]);
-            let best = eff.max(sto).max(sen).max(pre);
+            // The cell takes the identity of its most-expressed function gene (if any beats the
+            // baseline; else it's structural). One arg-max over all the function genes.
+            let funcs = [
+                (GENE_EFFECTOR, &mut p.effector),
+                (GENE_STORAGE, &mut p.storage),
+                (GENE_SENSOR, &mut p.sensor),
+                (GENE_PREDATOR, &mut p.predator),
+                (GENE_FLIGHT, &mut p.flight),
+                (GENE_BURROW, &mut p.burrow),
+            ];
+            let best = funcs.iter().map(|&(g, _)| s[g]).fold(f32::MIN, f32::max);
             if best < SPECIALISE_THETA {
                 p.structural += 1;
-            } else if best == eff {
-                p.effector += 1;
-            } else if best == sto {
-                p.storage += 1;
-            } else if best == sen {
-                p.sensor += 1;
             } else {
-                p.predator += 1;
+                // First gene reaching the max wins the tie (deterministic).
+                for (g, count) in funcs {
+                    if s[g] == best {
+                        *count += 1;
+                        break;
+                    }
+                }
             }
         }
         p
@@ -212,7 +245,8 @@ mod tests {
             let p2 = g.develop();
             assert_eq!(p1, p2, "development not deterministic");
             assert!(p1.n_cells >= 1 && p1.n_cells as usize <= MAX_CELLS, "cell count out of range: {}", p1.n_cells);
-            assert_eq!(p1.effector + p1.storage + p1.sensor + p1.predator + p1.structural, p1.n_cells);
+            let typed = p1.effector + p1.storage + p1.sensor + p1.predator + p1.flight + p1.burrow;
+            assert_eq!(typed + p1.structural, p1.n_cells);
         }
     }
 
