@@ -1443,7 +1443,7 @@ mod tests {
                         elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
                 }
             }
-            crate::erosion::erode(seed, &mut elev);
+            crate::erosion::erode(seed, &mut elev, &|_| {});
             let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
 
             let (mut holes, mut as_lake, mut as_river, mut as_ocean, mut as_none) =
