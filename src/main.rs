@@ -17,6 +17,7 @@ mod config;
 mod dev_bridge;
 mod erosion;
 mod genome;
+mod grid;
 mod hydrology;
 mod rng;
 mod sim;
@@ -1048,8 +1049,10 @@ async fn main() {
                                 "avg_biomass": s.avg_biomass(),
                                 "frac_multicellular": multi,
                                 "frac_complex": complex,
+                                "frac_carnivore": s.frac_carnivore(),
                                 "births": s.births,
                                 "deaths": s.deaths,
+                                "kills": s.kills,
                             })
                         }),
                     }));
@@ -1274,8 +1277,8 @@ async fn main() {
             .map(|s| {
                 let (multi, complex) = s.complexity_mix();
                 format!(
-                    "   pop {}   E {:.0}   biomass {:.2}   multi {:.0}% complex {:.0}%   on-screen {on_screen}",
-                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0
+                    "   pop {}   E {:.0}   biomass {:.2}   multi {:.0}% complex {:.0}% carniv {:.0}%   on-screen {on_screen}",
+                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.frac_carnivore() * 100.0
                 )
             })
             .unwrap_or_default();

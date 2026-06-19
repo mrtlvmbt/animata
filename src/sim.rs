@@ -18,12 +18,15 @@ use macroquad::math::{vec2, Vec2};
 
 use crate::config::*;
 use crate::genome::{Genome, Phenotype};
+use crate::grid::SpatialGrid;
 use crate::rng::{seed_fold, splitmix64, Rng};
 use crate::terrain::VoxelTerrain;
 
 // Fixed brain topology: inputs → tanh hidden → tanh outputs. The genome's `brain` vector holds
 // the weights (length = `genome::BRAIN_WEIGHTS` = N_INPUTS*N_HIDDEN + N_HIDDEN*N_OUTPUTS).
-const N_INPUTS: usize = 7; // [biomass_here, fwd, left, right, energy, water_dist, bias]
+// Inputs: [plant_here, plant_fwd, plant_left, plant_right, energy, water_dist,
+//          prey_prox, prey_bearing, threat_prox, threat_bearing, bias].
+const N_INPUTS: usize = 11;
 const N_HIDDEN: usize = 6;
 const N_OUTPUTS: usize = 2; // [throttle (pre-squash), turn (pre-squash)]
 
@@ -103,6 +106,19 @@ pub struct Sim {
     next_id: u64,
     pub births: u64,
     pub deaths: u64,
+    pub kills: u64,
+    /// Reused spatial index over creature positions, rebuilt each tick for prey/threat queries.
+    grid: SpatialGrid,
+}
+
+/// Closeness `[0,1]` (1 = adjacent, 0 = at/over the sense range) and the left/right bearing of
+/// a target relative to a creature's heading — the two cues the brain needs to steer to/from it.
+fn rel(from: Vec2, heading: f32, target: Vec2) -> (f32, f32) {
+    let d = target - from;
+    let dist = d.length();
+    let prox = (1.0 - dist / SENSE_RANGE).clamp(0.0, 1.0);
+    let bearing = (d.y.atan2(d.x) - heading).sin();
+    (prox, bearing)
 }
 
 /// Clamp a continuous world position to an in-world column index (single conversion point —
@@ -147,30 +163,81 @@ impl Sim {
                 pheno,
             });
         }
-        Sim { creatures, world_seed, next_id: START_CREATURES as u64, births: 0, deaths: 0 }
+        Sim {
+            creatures,
+            world_seed,
+            next_id: START_CREATURES as u64,
+            births: 0,
+            deaths: 0,
+            kills: 0,
+            grid: SpatialGrid::default(),
+        }
     }
 
     /// One fixed sim tick. Multi-phase so the outcome is independent of iteration order:
-    /// (a/b) all creatures sense the unmutated world and decide; (c) apply in index order
-    /// (move, graze — which mutates the terrain — metabolise, mark deaths, buffer births);
-    /// (d) compact dead out, append births, cull to the cap deterministically.
+    /// (a) snapshot the world + a spatial index, every creature senses (plant field + nearest
+    /// prey/threat) and decides; (b) predation pass — resolve hunts by snapshot index, flagging
+    /// eaten prey dead and crediting predators (trophic transfer); (c) apply per survivor in
+    /// index order (move, graze — diet-scaled, mutates the terrain — metabolise, deaths,
+    /// births); (d) compact dead out, append births, cull to the cap deterministically.
     pub fn step(&mut self, terrain: &mut VoxelTerrain, tick: u64) {
         let n = self.creatures.len();
-        // (a/b) snapshot + decide — reads only, terrain unmutated.
-        let mut decisions: Vec<(f32, f32)> = Vec::with_capacity(n);
-        for c in &self.creatures {
-            let inputs = self.sense(c, terrain, tick);
-            decisions.push(c.think(&inputs));
-        }
-        // (c) apply in index order.
         let (maxx, maxy) = (COLS as f32 * VOX, ROWS as f32 * VOX);
+        // (a) snapshot + decide — reads only, terrain unmutated. Snapshot arrays feed the grid
+        // predicates without borrowing `self.creatures` inside the closures.
+        let pos: Vec<Vec2> = self.creatures.iter().map(|c| c.pos).collect();
+        let bm: Vec<u32> = self.creatures.iter().map(|c| c.biomass()).collect();
+        let carn: Vec<f32> = self.creatures.iter().map(|c| c.pheno.carnivory()).collect();
+        self.grid.rebuild(&pos, maxx, maxy, GRID_CELL);
+        // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
+        let mut decisions: Vec<(f32, f32, Option<usize>)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let predator = carn[i] > CARNIVORE_THRESHOLD;
+            let self_bm = bm[i];
+            // Nearest edible prey (only if predatory) AND nearest threatening predator, one pass.
+            let (prey, threat) = self.grid.nearest2_within(
+                &pos,
+                pos[i],
+                SENSE_RANGE,
+                |j| predator && j != i && bm[j] <= self_bm,
+                |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm,
+            );
+            let c = &self.creatures[i];
+            let prey_rel = prey.map(|j| rel(pos[i], c.heading, pos[j]));
+            let threat_rel = threat.map(|j| rel(pos[i], c.heading, pos[j]));
+            let inputs = self.sense(c, terrain, tick, prey_rel, threat_rel);
+            let (throttle, turn) = c.think(&inputs);
+            // Attack if the targeted prey is within striking distance at snapshot positions.
+            let hunt = prey.filter(|&j| (pos[j] - pos[i]).length() <= ATTACK_RANGE);
+            decisions.push((throttle, turn, hunt));
+        }
+        // (b) predation: resolve hunts by snapshot index. Flag prey dead (never remove mid-pass
+        // — indices must stay stable, F7); credit the predator with the trophic-scaled energy.
+        for i in 0..n {
+            let Some(j) = decisions[i].2 else { continue };
+            if !self.creatures[i].alive || !self.creatures[j].alive {
+                continue; // predator died, or prey already eaten by a lower-index predator
+            }
+            let gain = (bm[j] as f32 * CELL_BIOMASS_COST + self.creatures[j].energy.max(0.0))
+                * MEAT_EFFICIENCY
+                * carn[i];
+            self.creatures[j].alive = false;
+            self.deaths += 1;
+            self.kills += 1;
+            let cap = self.creatures[i].max_energy();
+            self.creatures[i].energy = (self.creatures[i].energy + gain).min(cap);
+        }
+        // (c) apply per surviving creature in index order.
         // Logistic birth gate from the population at the START of the tick (deterministic;
         // doesn't shift as births accrue). On the over-provisioned map this aggregate
         // competition term — not food — sets the equilibrium near `SOFT_CAP`.
         let birth_gate = (1.0 - n as f32 / SOFT_CAP).clamp(0.0, 1.0);
         let mut births: Vec<Creature> = Vec::new();
         for (idx, c) in self.creatures.iter_mut().enumerate() {
-            let (throttle, turn) = decisions[idx];
+            if !c.alive {
+                continue; // eaten in the predation pass
+            }
+            let (throttle, turn, _) = decisions[idx];
             // Move.
             c.heading += turn * TURN_RATE * TICK_LEN;
             let step = throttle * c.speed() * TICK_LEN;
@@ -192,9 +259,12 @@ impl Sim {
                 c.heading = -c.heading;
             }
             let (cx, cy) = column_index(c.pos);
-            // Graze the column (mutates terrain biomass) → energy. Intake scales with body size.
+            // Graze the column (mutates terrain biomass) → energy. Intake scales with body size;
+            // a carnivore digests plants poorly (diet efficiency = 1 − carnivory), so the trophic
+            // split is a real trade-off, not a free lunch.
             let taken = terrain.graze(cx, cy, c.intake() * TICK_LEN, tick);
-            c.energy = (c.energy + taken * PLANT_BIOMASS_TO_ENERGY).min(c.max_energy());
+            let herbivory = 1.0 - c.pheno.carnivory();
+            c.energy = (c.energy + taken * PLANT_BIOMASS_TO_ENERGY * herbivory).min(c.max_energy());
             // Metabolism: Kleiber (biomass^0.75) × climate, + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
             let metab = SIM_BASE_METABOLISM * kleiber * climate_factor(terrain.temperature_at(cx, cy));
@@ -257,15 +327,25 @@ impl Sim {
         self.cull_to_cap(tick);
     }
 
-    /// Sense the plant-biomass field ahead / left / right (a gradient to climb), plus own
-    /// energy, the column's water distance and a bias. Read-only on the terrain.
-    fn sense(&self, c: &Creature, terrain: &VoxelTerrain, tick: u64) -> [f32; N_INPUTS] {
+    /// Build the brain inputs: the plant-biomass field ahead / left / right (a gradient to
+    /// climb), own energy, the column's water distance, the nearest prey + threat cues (closeness
+    /// and left/right bearing), and a bias. Read-only on the terrain.
+    fn sense(
+        &self,
+        c: &Creature,
+        terrain: &VoxelTerrain,
+        tick: u64,
+        prey: Option<(f32, f32)>,
+        threat: Option<(f32, f32)>,
+    ) -> [f32; N_INPUTS] {
         let sample = |angle: f32| {
             let p = vec2(c.pos.x + angle.cos() * SENSE_RADIUS, c.pos.y + angle.sin() * SENSE_RADIUS);
             let (cx, cy) = column_index(p);
             terrain.biomass_at(cx, cy, tick)
         };
         let (cx, cy) = column_index(c.pos);
+        let (prey_prox, prey_bearing) = prey.unwrap_or((0.0, 0.0));
+        let (threat_prox, threat_bearing) = threat.unwrap_or((0.0, 0.0));
         [
             terrain.biomass_at(cx, cy, tick),
             sample(c.heading),
@@ -273,6 +353,10 @@ impl Sim {
             sample(c.heading - std::f32::consts::FRAC_PI_2),
             (c.energy / REPRO_ENERGY).min(1.0),
             terrain.water_dist_at(cx, cy) as f32 / 255.0,
+            prey_prox,
+            prey_bearing,
+            threat_prox,
+            threat_bearing,
             1.0,
         ]
     }
@@ -321,6 +405,16 @@ impl Sim {
         let complex = self.creatures.iter().filter(|c| c.pheno.complexity() == 2).count();
         (multi as f32 / n as f32, complex as f32 / n as f32)
     }
+
+    /// Fraction of the population that is predatory (a second trophic level has appeared).
+    pub fn frac_carnivore(&self) -> f32 {
+        let n = self.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let carn = self.creatures.iter().filter(|c| c.pheno.carnivory() > CARNIVORE_THRESHOLD).count();
+        carn as f32 / n as f32
+    }
 }
 
 #[cfg(test)]
@@ -335,6 +429,12 @@ mod tests {
     fn column_index_clamps_out_of_world() {
         assert_eq!(column_index(vec2(-100.0, -100.0)), (0, 0));
         assert_eq!(column_index(vec2(1e9, 1e9)), (COLS - 1, ROWS - 1));
+    }
+
+    /// The genome's brain-weight count must match this module's brain topology.
+    #[test]
+    fn brain_weight_count_matches_topology() {
+        assert_eq!(crate::genome::BRAIN_WEIGHTS, N_INPUTS * N_HIDDEN + N_HIDDEN * N_OUTPUTS);
     }
 
     /// A run is reproducible from the world seed: two sims stepped the same number of fixed
@@ -394,6 +494,24 @@ mod tests {
         assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
     }
 
+    /// C2 acceptance: a predatory second trophic level EMERGES — some creatures evolve predator
+    /// cells, hunt and kill prey — and predators stay RARER than prey (a trophic pyramid, the
+    /// ~10% rule), with the population staying alive. Single seed ⇒ deterministic.
+    #[test]
+    fn predation_emerges_as_a_trophic_level() {
+        let mut t = world();
+        let mut s = Sim::new(1, &t);
+        for tick in 0..8000 {
+            s.step(&mut t, tick);
+        }
+        let carn = s.frac_carnivore();
+        eprintln!("after 8000 ticks: pop {} kills {} carnivore {:.1}%", s.population(), s.kills, carn * 100.0);
+        assert!(s.kills > 1000, "no predation happened (kills {})", s.kills);
+        assert!(carn > 0.003, "no predator niche persisted ({:.2}%)", carn * 100.0);
+        assert!(carn < 0.5, "predators outnumber prey — inverted pyramid ({:.0}%)", carn * 100.0);
+        assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -401,13 +519,13 @@ mod tests {
     fn tune_trajectory() {
         let mut t = world();
         let mut s = Sim::new(1, &t);
-        for tick in 0..6000 {
+        for tick in 0..12000 {
             s.step(&mut t, tick);
-            if tick % 500 == 0 {
+            if tick % 1000 == 0 {
                 let (multi, complex) = s.complexity_mix();
                 eprintln!(
-                    "tick {tick}: pop {} avg_E {:.1} biomass {:.2} multi {:.0}% complex {:.0}% births {}",
-                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.births
+                    "tick {tick}: pop {} biomass {:.2} multi {:.0}% complex {:.0}% carniv {:.1}% kills {}",
+                    s.population(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.frac_carnivore() * 100.0, s.kills
                 );
             }
         }
