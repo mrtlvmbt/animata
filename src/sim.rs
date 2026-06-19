@@ -196,6 +196,25 @@ fn stratum_of(pheno: &Phenotype, is_water_col: bool) -> Stratum {
     }
 }
 
+/// Light available to photosynthesis at a creature's stratum, latitude row and tick, in `[0,1]`.
+/// Activates the dormant S2 day/night (a sinusoid in `day_frac` with a dim-night floor) and the
+/// S1 latitude (poles dimmer). Underground = no light; water = attenuated; surface/air = full.
+fn light_for(stratum: Stratum, cy: usize, tick: u64) -> f32 {
+    if stratum == Stratum::Underground {
+        return 0.0;
+    }
+    let day_frac = (tick as f64 * TICK_LEN as f64 / DAY_LEN as f64).fract() as f32;
+    let daylight = LIGHT_NIGHT_FLOOR
+        + (1.0 - LIGHT_NIGHT_FLOOR) * (0.5 + 0.5 * (std::f32::consts::TAU * day_frac).sin());
+    let lat = 1.0 - (2.0 * cy as f32 / ROWS as f32 - 1.0).abs(); // 0 poles .. 1 equator
+    let l = daylight * (0.4 + 0.6 * lat);
+    if stratum == Stratum::Water {
+        l * WATER_LIGHT_MULT
+    } else {
+        l
+    }
+}
+
 impl Sim {
     /// Spawn the founder population on land columns, deterministically from `world_seed`.
     pub fn new(world_seed: u64, terrain: &VoxelTerrain) -> Self {
@@ -265,6 +284,10 @@ impl Sim {
         for s in &strata {
             stratum_count[s.idx()] += 1.0;
         }
+        // Autotroph self-shading (F3: computed in the snapshot phase, order-independent). Light is
+        // a finite flux, so more autotrophs ⇒ less photosynthesis per head ⇒ the niche self-limits.
+        let n_auto = self.creatures.iter().filter(|c| c.pheno.photo_frac() > PHOTO_THETA).count();
+        let autotroph_shading = 1.0 / (1.0 + n_auto as f32 / PHOTO_SOFTCAP);
         self.grid.rebuild(&pos, maxx, maxy, GRID_CELL);
         // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
         let mut decisions: Vec<(f32, f32, Option<usize>)> = Vec::with_capacity(n);
@@ -352,7 +375,17 @@ impl Sim {
                 // dependent → an empty stratum richly rewards colonisers, then self-limits).
                 layer.capacity() / stratum_count[layer.idx()].max(1.0) * TICK_LEN
             };
-            c.energy = (c.energy + food * climate).min(c.max_energy());
+            // Photosynthesis (C3 autotrophs): light-driven energy from photo cells, on top of any
+            // foraging — so a mixotroph (photo + grazing) is possible. Light is 0 underground and
+            // at night, so an autotroph must hold light (surface/shallow, daytime) — that, plus
+            // the cell slots photo takes, is the trade-off against mobility/predation.
+            let photo = c.pheno.photo as f32;
+            let photo_gain = if photo > 0.0 {
+                PHOTO_RATE * photo * light_for(layer, cy, tick) * autotroph_shading * TICK_LEN
+            } else {
+                0.0
+            };
+            c.energy = (c.energy + food * climate + photo_gain).min(c.max_energy());
             // Metabolism: Kleiber (biomass^0.75) × stratum cost + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
             c.energy -= (SIM_BASE_METABOLISM * kleiber * layer.metab_mult() + MOVE_COST * throttle) * TICK_LEN;
@@ -544,6 +577,17 @@ impl Sim {
         m
     }
 
+    /// Fraction of the population that is autotrophic (photosynthesises — a producer tier inside
+    /// the creature substrate, not just the exogenous plant field).
+    pub fn frac_autotroph(&self) -> f32 {
+        let n = self.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let auto = self.creatures.iter().filter(|c| c.pheno.photo_frac() > PHOTO_THETA).count();
+        auto as f32 / n as f32
+    }
+
     /// Fraction of the population that is predatory (a second trophic level has appeared).
     pub fn frac_carnivore(&self) -> f32 {
         let n = self.creatures.len();
@@ -685,6 +729,24 @@ mod tests {
         assert!(m[1] > 0.5, "surface should stay the majority ({:.1}%)", m[1] * 100.0);
     }
 
+    /// C3-autotrophs acceptance: a photosynthetic producer tier emerges INSIDE the creature
+    /// substrate (a real fraction evolve photo cells and persist), without taking over — the
+    /// self-shading keeps it a niche. Single seed ⇒ deterministic.
+    #[test]
+    fn autotrophs_emerge_as_a_producer_niche() {
+        let mut t = world();
+        let mut s = Sim::new(1, &t);
+        assert_eq!(s.frac_autotroph(), 0.0, "founders must be heterotrophs (no photo cells)");
+        for tick in 0..7000 {
+            s.step(&mut t, tick);
+        }
+        let auto = s.frac_autotroph();
+        eprintln!("after 7000 ticks: autotrophs {:.1}% pop {}", auto * 100.0, s.population());
+        assert!(auto > 0.05, "no autotroph niche emerged ({:.1}%)", auto * 100.0);
+        assert!(auto < 0.9, "autotrophs took over — shading too weak ({:.0}%)", auto * 100.0);
+        assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -698,9 +760,9 @@ mod tests {
                 let (multi, _) = s.complexity_mix();
                 let m = s.stratum_mix(&t);
                 eprintln!(
-                    "tick {tick}: pop {} biomass {:.2} multi {:.0}% carniv {:.1}% allopatry {:.2} | strata und {:.0}% surf {:.0}% air {:.0}% water {:.0}%",
-                    s.population(), s.avg_biomass(), multi * 100.0, s.frac_carnivore() * 100.0, s.thermal_correlation(&t),
-                    m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
+                    "tick {tick}: pop {} bm {:.2} multi {:.0}% carniv {:.1}% auto {:.1}% allop {:.2} | strata u{:.0}/s{:.0}/a{:.0}/w{:.0}",
+                    s.population(), s.avg_biomass(), multi * 100.0, s.frac_carnivore() * 100.0, s.frac_autotroph() * 100.0,
+                    s.thermal_correlation(&t), m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
                 );
             }
         }

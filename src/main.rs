@@ -1108,6 +1108,7 @@ async fn main() {
                                 "frac_multicellular": multi,
                                 "frac_complex": complex,
                                 "frac_carnivore": s.frac_carnivore(),
+                                "frac_autotroph": s.frac_autotroph(),
                                 "allopatry": allopatry,
                                 "strata_und_surf_air_water": strata,
                                 "births": s.births,
@@ -1350,9 +1351,9 @@ async fn main() {
                 let (multi, complex) = s.complexity_mix();
                 let m = s.stratum_mix(t);
                 format!(
-                    "   pop {}   E {:.0}   bm {:.2}   multi {:.0}% cplx {:.0}% carn {:.0}%   allop {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
+                    "   pop {}   E {:.0}   bm {:.2}   multi {:.0}% cplx {:.0}% carn {:.0}% auto {:.0}%   allop {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
                     s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0,
-                    s.frac_carnivore() * 100.0, s.thermal_correlation(t),
+                    s.frac_carnivore() * 100.0, s.frac_autotroph() * 100.0, s.thermal_correlation(t),
                     m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
                 )
             }
@@ -2021,6 +2022,7 @@ const RIM_LINE_SHADE: f32 = 0.6;
 /// `uv.x=-1` so it wins the top plane without z-fight). Only step edges get it and the
 /// strips run the full edge, so adjacent rim cells join into ONE continuous contour around
 /// the terrace — interior cube joins (same height, no drop) stay unmarked.
+#[allow(clippy::too_many_arguments)]
 fn push_top(
     verts: &mut Vec<Vertex>,
     idx: &mut Vec<u16>,
