@@ -1,5 +1,26 @@
     use super::*;
 
+    // Std-only image dump (binary PPM / P6) for the `#[ignore]` diagnostics — keeps the sim crate
+    // macroquad-free. View with any image tool (Preview, GIMP, `pnmtopng`).
+    #[allow(dead_code)]
+    fn dump_ppm(path: &str, w: usize, h: usize, px: impl Fn(usize, usize) -> (u8, u8, u8)) {
+        use std::io::Write;
+        let mut buf = Vec::with_capacity(w * h * 3 + 32);
+        write!(buf, "P6\n{w} {h}\n255\n").unwrap();
+        for y in 0..h {
+            for x in 0..w {
+                let (r, g, b) = px(x, y);
+                buf.extend_from_slice(&[r, g, b]);
+            }
+        }
+        let _ = std::fs::write(path, buf);
+    }
+    /// Quantise a `[0,1]` channel to `u8` for the PPM dumps.
+    #[allow(dead_code)]
+    fn u8c(v: f32) -> u8 {
+        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
     /// Guard the "mountains are LOCAL" invariant: rock + snow must stay a minority of
     /// the land, so added worldgen complexity (ridged noise now; tectonics/erosion
     /// later) can't quietly turn the map into one mountain mess. Prints the fraction.
@@ -90,24 +111,18 @@
     #[test]
     #[ignore]
     fn dump_debug_fields() {
-        use macroquad::color::Color;
-        use macroquad::texture::Image;
         let seed = 1u64;
         let t = VoxelTerrain::new(seed);
         let tect = TectonicField::generate(seed);
         let dump = |path: &str, f: &dyn Fn(usize, usize) -> f32| {
-            let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
-            for y in 0..ROWS {
-                for x in 0..COLS {
-                    let v = f(x, y).clamp(0.0, 1.0);
-                    img.set_pixel(x as u32, y as u32, Color::new(v, v, v, 1.0));
-                }
-            }
-            img.export_png(path);
+            dump_ppm(path, COLS, ROWS, |x, y| {
+                let v = u8c(f(x, y));
+                (v, v, v)
+            });
         };
-        dump("/tmp/dbg_macro.png", &|x, y| tect.macro_field()[y * COLS + x]);
-        dump("/tmp/dbg_mtn.png", &|x, y| tect.mountain_field()[y * COLS + x]);
-        dump("/tmp/dbg_height.png", &|x, y| t.height_at(x, y) as f32 / MAX_H as f32);
+        dump("/tmp/dbg_macro.ppm", &|x, y| tect.macro_field()[y * COLS + x]);
+        dump("/tmp/dbg_mtn.ppm", &|x, y| tect.mountain_field()[y * COLS + x]);
+        dump("/tmp/dbg_height.ppm", &|x, y| t.height_at(x, y) as f32 / MAX_H as f32);
         // Biome map: a distinct flat colour per biome id, so the climate distribution is
         // visible (poles cold, equator hot; dry↔wet bands).
         let pal: [(f32, f32, f32); 12] = [
@@ -115,21 +130,13 @@
             (0.80, 0.70, 0.44), (0.48, 0.46, 0.45), (0.93, 0.95, 0.98), (0.17, 0.38, 0.29),
             (0.62, 0.64, 0.56), (0.70, 0.66, 0.34), (0.31, 0.40, 0.25), (0.12, 0.43, 0.17),
         ];
-        {
-            use macroquad::color::Color;
-            use macroquad::texture::Image;
-            let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
-            for y in 0..ROWS {
-                for x in 0..COLS {
-                    let (r, g, b) = pal[t.biome_at(x, y).id() as usize];
-                    img.set_pixel(x as u32, y as u32, Color::new(r, g, b, 1.0));
-                }
-            }
-            img.export_png("/tmp/dbg_biome.png");
-        }
+        dump_ppm("/tmp/dbg_biome.ppm", COLS, ROWS, |x, y| {
+            let (r, g, b) = pal[t.biome_at(x, y).id() as usize];
+            (u8c(r), u8c(g), u8c(b))
+        });
         // Hillshade of the actual terrain — reveals erosion channels/ridges far better
         // than raw height (slope-lit, sun from the NW).
-        dump("/tmp/dbg_shade.png", &|x, y| {
+        dump("/tmp/dbg_shade.ppm", &|x, y| {
             let xi = x as i32;
             let yi = y as i32;
             let gx = (t.height(xi + 1, yi) as f32 - t.height(xi - 1, yi) as f32) * 0.5;
@@ -142,7 +149,7 @@
         // Cliff map: the largest DOWNWARD step from a column to any 4-neighbour, in
         // levels, scaled so a ~10-level drop is white. This isolates where the knife
         // cliffs actually are, independent of biome colour.
-        dump("/tmp/dbg_cliff.png", &|x, y| {
+        dump("/tmp/dbg_cliff.ppm", &|x, y| {
             let h = t.height(x as i32, y as i32) as i32;
             let mut drop = 0i32;
             for (nx, ny) in [(x as i32 + 1, y as i32), (x as i32 - 1, y as i32), (x as i32, y as i32 + 1), (x as i32, y as i32 - 1)] {
@@ -150,7 +157,7 @@
             }
             drop as f32 / 10.0
         });
-        eprintln!("dumped /tmp/dbg_macro.png dbg_mtn.png dbg_height.png dbg_cliff.png");
+        eprintln!("dumped /tmp/dbg_macro.ppm dbg_mtn.ppm dbg_height.ppm dbg_cliff.ppm");
     }
 
     /// Guard against KNIFE CLIFFS — the artifact where the macro field stepped a full
@@ -344,8 +351,6 @@
     #[test]
     #[ignore]
     fn dump_water() {
-        use macroquad::color::Color;
-        use macroquad::texture::Image;
         let seed = 1u64;
         let tect = TectonicField::generate(seed);
         let n = COLS * ROWS;
@@ -359,31 +364,27 @@
         crate::erosion::erode(seed, &mut elev, &|_| {});
         let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         let (mut land, mut river, mut lake) = (0u64, 0u64, 0u64);
-        let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
-        for y in 0..ROWS {
-            for x in 0..COLS {
-                let i = y * COLS + x;
-                let sea = elev[i] < SEA_FRACTION;
-                let c = if sea {
-                    Color::new(0.10, 0.22, 0.42, 1.0) // ocean
-                } else if hydro.lake[i] {
-                    lake += 1;
-                    Color::new(0.30, 0.65, 0.85, 1.0) // lake
-                } else if hydro.river[i] {
-                    river += 1;
-                    land += 1;
-                    Color::new(0.55, 0.80, 1.0, 1.0) // river
-                } else {
-                    land += 1;
-                    let v = 0.25 + 0.5 * ((elev[i] - SEA_FRACTION) / (1.0 - SEA_FRACTION)).clamp(0.0, 1.0);
-                    Color::new(v, v * 0.95, v * 0.8, 1.0)
-                };
-                img.set_pixel(x as u32, y as u32, c);
-            }
+        let mut cols: Vec<(u8, u8, u8)> = vec![(0, 0, 0); n];
+        for i in 0..n {
+            let sea = elev[i] < SEA_FRACTION;
+            cols[i] = if sea {
+                (u8c(0.10), u8c(0.22), u8c(0.42)) // ocean
+            } else if hydro.lake[i] {
+                lake += 1;
+                (u8c(0.30), u8c(0.65), u8c(0.85)) // lake
+            } else if hydro.river[i] {
+                river += 1;
+                land += 1;
+                (u8c(0.55), u8c(0.80), u8c(1.0)) // river
+            } else {
+                land += 1;
+                let v = 0.25 + 0.5 * ((elev[i] - SEA_FRACTION) / (1.0 - SEA_FRACTION)).clamp(0.0, 1.0);
+                (u8c(v), u8c(v * 0.95), u8c(v * 0.8))
+            };
         }
-        img.export_png("/tmp/dbg_water.png");
+        dump_ppm("/tmp/dbg_water.ppm", COLS, ROWS, |x, y| cols[y * COLS + x]);
         eprintln!(
-            "rivers {:.2}% of land, lakes {} cells; dumped /tmp/dbg_water.png",
+            "rivers {:.2}% of land, lakes {} cells; dumped /tmp/dbg_water.ppm",
             river as f64 / land.max(1) as f64 * 100.0,
             lake
         );
@@ -430,8 +431,6 @@
     #[test]
     #[ignore]
     fn dump_water_height() {
-        use macroquad::color::Color;
-        use macroquad::texture::Image;
         let t = VoxelTerrain::new(1);
         let n = COLS * ROWS;
         // Range of water surface levels present (for normalising the colour ramp).
@@ -445,7 +444,7 @@
         }
         let span = (hi - lo).max(1) as f32;
         // Blue(low) → cyan → green → yellow → red(high) ramp.
-        let ramp = |u: f32| -> Color {
+        let ramp = |u: f32| -> (u8, u8, u8) {
             let stops = [
                 (0.00, (0.10, 0.20, 0.70)),
                 (0.25, (0.10, 0.75, 0.85)),
@@ -458,32 +457,26 @@
                 let (b, cb) = w[1];
                 if u <= b {
                     let f = ((u - a) / (b - a)).clamp(0.0, 1.0);
-                    return Color::new(
-                        ca.0 + (cb.0 - ca.0) * f,
-                        ca.1 + (cb.1 - ca.1) * f,
-                        ca.2 + (cb.2 - ca.2) * f,
-                        1.0,
+                    return (
+                        u8c(ca.0 + (cb.0 - ca.0) * f),
+                        u8c(ca.1 + (cb.1 - ca.1) * f),
+                        u8c(ca.2 + (cb.2 - ca.2) * f),
                     );
                 }
             }
-            Color::new(0.85, 0.15, 0.10, 1.0)
+            (u8c(0.85), u8c(0.15), u8c(0.10))
         };
-        let mut img = Image::gen_image_color(COLS as u16, ROWS as u16, Color::new(0.0, 0.0, 0.0, 1.0));
+        dump_ppm("/tmp/dbg_water_height.ppm", COLS, ROWS, |x, y| {
+            let wl = t.water[y * COLS + x];
+            if wl == 0 {
+                (u8c(0.12), u8c(0.12), u8c(0.13)) // dry land
+            } else {
+                ramp((wl - lo) as f32 / span)
+            }
+        });
         let (mut bodies, mut water_cells) = (0u64, 0u64);
         let mut seen = vec![false; n];
         let mut stack: Vec<usize> = Vec::new();
-        for y in 0..ROWS {
-            for x in 0..COLS {
-                let i = y * COLS + x;
-                let wl = t.water[i];
-                let c = if wl == 0 {
-                    Color::new(0.12, 0.12, 0.13, 1.0) // dry land
-                } else {
-                    ramp((wl - lo) as f32 / span)
-                };
-                img.set_pixel(x as u32, y as u32, c);
-            }
-        }
         // Count connected water bodies (4-connected over water_level > 0).
         for start in 0..n {
             if t.water[start] == 0 || seen[start] {
@@ -507,9 +500,8 @@
                 }
             }
         }
-        img.export_png("/tmp/dbg_water_height.png");
         eprintln!(
-            "water levels {lo}..{hi}; connected bodies={bodies}, water cells={water_cells}; dumped /tmp/dbg_water_height.png"
+            "water levels {lo}..{hi}; connected bodies={bodies}, water cells={water_cells}; dumped /tmp/dbg_water_height.ppm"
         );
     }
 

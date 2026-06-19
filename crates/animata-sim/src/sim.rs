@@ -14,7 +14,7 @@
 //! result is independent of iteration order; deaths flag-then-compact (never `swap_remove`
 //! mid-apply); over-cap cull is deterministic-random, not tail-truncation.
 
-use macroquad::math::{vec2, Vec2};
+use glam::{vec2, Vec2};
 
 use crate::config::*;
 use crate::genome::{Genome, Phenotype};

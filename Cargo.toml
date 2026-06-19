@@ -1,20 +1,9 @@
-[package]
-name = "animata"
-version = "0.2.0"
-edition = "2021"
-description = "Voxel isometric world on macroquad-3D — environment viewer"
+[workspace]
+members = ["crates/animata-sim", "crates/animata"]
+resolver = "2"
 
-[dependencies]
-macroquad = "0.4"
-tiny_http = { version = "0.12", optional = true }
-serde_json = { version = "1", optional = true }
-
-[features]
-# Localhost JSON-RPC control/inspection bridge for autonomous verification (drive the
-# camera, reseed, capture screenshots). Off by default. See DEV_BRIDGE.md.
-# Run with: cargo run --features dev
-dev = ["dep:tiny_http", "dep:serde_json"]
-
+# Profiles live in the workspace root. `lto`/`opt-level=3` for the perf-sensitive sim runs
+# (worldgen, erosion, the headless acceptance corridors).
 [profile.release]
 opt-level = 3
 lto = true
