@@ -127,6 +127,12 @@ pub const STORAGE_PER_CELL: f32 = 25.0;
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
 
+// ---- C3: speciation (observability) ----
+/// Feature-space radius for leader clustering into species: a creature within this Euclidean
+/// distance of a leader joins its species, else founds a new one. Tuned so the count is
+/// interpretable (distinct body plans / niches separate; minor variation doesn't fragment).
+pub const SPECIES_THRESHOLD: f32 = 0.45;
+
 // ---- C3: camouflage (crypsis) ----
 /// Detection probability of a PERFECTLY camouflaged prey (coloration == ground tone). Full
 /// contrast detects at 1.0; this is the floor. Low ⇒ strong reward for matching the background.
