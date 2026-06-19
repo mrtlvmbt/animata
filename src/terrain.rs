@@ -339,11 +339,52 @@ pub struct VoxelTerrain {
     /// saturating at 255. `0` on water itself; the gradient near a shore is exact (far inland
     /// plateaus all read the 255 floor — fine for the sim's "far = far").
     water_dist: Vec<u8>,
+    /// Vegetation biomass per column (S3), quantised `[0,1]→[0,255]` — the consumable base of
+    /// the food chain. The value is what biomass was AS OF `last_update[i]`; the live amount
+    /// is recovered LAZILY (see [`biomass_at`](Self::biomass_at)) by regrowing it toward the
+    /// column's `carrying_capacity` over the ticks elapsed since. So an untouched column costs
+    /// nothing — there is no per-tick global sweep over the 3.69M columns.
+    biomass: Vec<u8>,
+    /// The `WorldClock` tick at which `biomass[i]` was last written (by a graze). Lazy regrow
+    /// reads `tick - last_update[i]`. Integer ticks (not an `f32` time) so the timestamp never
+    /// drifts. `0` at generation, when biomass starts at full capacity.
+    last_update: Vec<u32>,
 }
 
 /// Quantise a `[0,1]` field value into a `u8` (saturating). De-quantise with `/ 255.0`.
 fn quant_unit(v: f32) -> u8 {
     (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Vegetation carrying capacity in `[0,1]` for a column — the biomass it tends toward when
+/// undisturbed. A per-biome base (water/desert/rock low, forest/jungle high) modulated mildly
+/// by moisture so wetter columns of the same biome carry a little more. Water carries nothing.
+fn carrying_capacity(biome: BiomeKind, moist: f32) -> f32 {
+    let base = match biome {
+        BiomeKind::Ocean => 0.0, // water: no land vegetation
+        BiomeKind::Snow => 0.05,
+        BiomeKind::Desert => 0.10,
+        BiomeKind::Beach => 0.12,
+        BiomeKind::Mountain => 0.15,
+        BiomeKind::Tundra => 0.22,
+        BiomeKind::Savanna => 0.42,
+        BiomeKind::Plains => 0.52,
+        BiomeKind::Taiga => 0.62,
+        BiomeKind::Swamp => 0.72,
+        BiomeKind::Forest => 0.85,
+        BiomeKind::Jungle => 1.0,
+    };
+    (base * (0.7 + 0.3 * moist)).clamp(0.0, 1.0)
+}
+
+/// Lazy regrow law: biomass `b` relaxes toward `cap` over `elapsed` sim-seconds by
+/// `b' = cap − (cap − b)·e^(−RATE·elapsed)` (linear-with-saturation). Monotonic, never
+/// exceeds `cap`, and crucially **recovers from 0** (`b=0 ⇒ cap·(1−e^…)`, no fixed point at
+/// zero) — so a grazed-to-bare column regrows instead of staying a permanent bald patch. The
+/// closed form makes the amortised (skip-the-untouched-ticks) update exact.
+fn regrow(b: f32, cap: f32, elapsed: f32) -> f32 {
+    let grown = cap - (cap - b) * (-BIOMASS_REGROW_RATE * elapsed).exp();
+    grown.clamp(0.0, cap)
 }
 
 /// Multi-source BFS distance (in columns) from the nearest water column, over the whole
@@ -419,6 +460,7 @@ impl VoxelTerrain {
         let mut water = vec![0u8; n];
         let mut temp = vec![0u8; n];
         let mut moist = vec![0u8; n];
+        let mut biomass = vec![0u8; n];
         for y in 0..ROWS {
             for x in 0..COLS {
                 let i = y * COLS + x;
@@ -456,6 +498,9 @@ impl VoxelTerrain {
                 surf[i] = s;
                 biome[i] = b.id();
                 flags[i] = f;
+                // Vegetation starts mature (at capacity) on the FINAL biome + moisture; water
+                // columns get 0. The lazy regrow keeps an untouched column here forever.
+                biomass[i] = quant_unit(carrying_capacity(b, cm));
             }
             progress(0.72 + 0.28 * (y + 1) as f32 / ROWS as f32);
         }
@@ -473,6 +518,8 @@ impl VoxelTerrain {
             temp,
             moist,
             water_dist,
+            biomass,
+            last_update: vec![0u32; n],
         }
     }
 
@@ -571,6 +618,39 @@ impl VoxelTerrain {
             max_d = max_d.max((hn - h0).abs());
         }
         (max_d / SURFACE_RANGE as f32).clamp(0.0, 1.0)
+    }
+
+    /// Vegetation capacity `[0,1]` for a column (lazy-regrow target). Recomputed from the
+    /// stored biome + moisture — a table lookup + a couple of muls, so it is not stored.
+    fn cap_at(&self, i: usize) -> f32 {
+        carrying_capacity(BiomeKind::from_id(self.biome[i]), self.moist[i] as f32 / 255.0)
+    }
+
+    /// Live biomass at column index `i` and clock `tick`: the stored value (as of its last
+    /// update) regrown toward capacity over the elapsed ticks. Pure read — does NOT write back.
+    fn current_biomass(&self, i: usize, tick: u64) -> f32 {
+        let elapsed = (tick - self.last_update[i] as u64) as f32 * TICK_LEN;
+        regrow(self.biomass[i] as f32 / 255.0, self.cap_at(i), elapsed)
+    }
+
+    /// Live vegetation biomass in `[0,1]` at a column for clock `tick` (the lazy regrow is
+    /// applied on read but NOT persisted — a read-only estimate). `tick` is passed explicitly
+    /// (never cached in the model) so the time reference can't silently desync from the clock.
+    pub fn biomass_at(&self, x: usize, y: usize, tick: u64) -> f32 {
+        self.current_biomass(y * COLS + x, tick)
+    }
+
+    /// Graze up to `amount` (in `[0,1]` biomass units) from a column at clock `tick`: applies
+    /// the lazy regrow to now, removes what's available, and PERSISTS the new value + `tick`.
+    /// Returns the biomass actually taken (≤ what was present, so over-grazing yields the rest,
+    /// not negative food). Regrowth afterwards is handled lazily by the next read/graze.
+    pub fn graze(&mut self, x: usize, y: usize, amount: f32, tick: u64) -> f32 {
+        let i = y * COLS + x;
+        let cur = self.current_biomass(i, tick);
+        let taken = amount.clamp(0.0, cur);
+        self.biomass[i] = quant_unit(cur - taken);
+        self.last_update[i] = tick as u32;
+        taken
     }
 }
 
@@ -1454,5 +1534,115 @@ mod tests {
             assert_eq!(a.water_dist_at(x, y), b.water_dist_at(x, y));
             assert_eq!(a.slope_at(x, y), b.slope_at(x, y));
         }
+    }
+
+    // ---- S3: vegetation (pure-law tests, no world generation needed) ----
+
+    /// The regrow law recovers from 0 (no fixed point there — the bug a logistic law would
+    /// have had), is monotonic, and never overshoots capacity.
+    #[test]
+    fn regrow_recovers_from_zero_and_saturates() {
+        let cap = 0.8;
+        assert_eq!(regrow(0.0, cap, 0.0), 0.0); // no time → no growth
+        let a = regrow(0.0, cap, 50.0);
+        let b = regrow(0.0, cap, 100.0);
+        assert!(0.0 < a && a < b && b < cap, "not monotonic toward cap: {a} {b} {cap}");
+        assert!(regrow(0.0, cap, 1e6) <= cap + 1e-6, "overshot cap");
+        assert!((regrow(0.0, cap, 1e6) - cap).abs() < 1e-3, "did not saturate to cap");
+        // From a non-zero start it still only ever climbs to cap.
+        assert!(regrow(0.5, cap, 1e6) <= cap + 1e-6);
+    }
+
+    /// Closed-form ⇒ the lazy (skip-the-untouched-ticks) update equals the stepwise one:
+    /// regrowing once over `t1+t2` matches regrowing over `t1` then `t2`. This is what makes
+    /// amortised regen exact, so a column the sim ignores for a million ticks is still correct.
+    #[test]
+    fn regrow_is_semigroup() {
+        let cap = 0.9;
+        let (t1, t2) = (37.0, 121.0);
+        let lazy = regrow(0.1, cap, t1 + t2);
+        let stepwise = regrow(regrow(0.1, cap, t1), cap, t2);
+        assert!((lazy - stepwise).abs() < 1e-6, "lazy {lazy} ≠ stepwise {stepwise}");
+    }
+
+    /// Capacity: water carries nothing, wetter biomes carry more, and moisture nudges it up.
+    #[test]
+    fn carrying_capacity_ordering() {
+        assert_eq!(carrying_capacity(BiomeKind::Ocean, 1.0), 0.0);
+        let jungle = carrying_capacity(BiomeKind::Jungle, 0.5);
+        let plains = carrying_capacity(BiomeKind::Plains, 0.5);
+        let desert = carrying_capacity(BiomeKind::Desert, 0.5);
+        assert!(jungle > plains && plains > desert, "{jungle} {plains} {desert}");
+        assert!(
+            carrying_capacity(BiomeKind::Forest, 0.9) > carrying_capacity(BiomeKind::Forest, 0.1),
+            "moisture should raise capacity"
+        );
+    }
+
+    /// S3 on the real world model (one generation): vegetation starts mature, water is bare,
+    /// grazing removes ≤ what's present, a cleared column regrows from 0, and a long chain of
+    /// graze→requant doesn't drift (the F5 quantisation-noise guard).
+    #[test]
+    fn vegetation_field_grazing_and_regrowth() {
+        let mut t = VoxelTerrain::new(1);
+        // Find a high-capacity land column and a water column.
+        let (mut land, mut wet) = (None, None);
+        'scan: for y in (0..ROWS).step_by(13) {
+            for x in (0..COLS).step_by(13) {
+                if land.is_none() && !t.is_water(x, y) {
+                    let cap = carrying_capacity(t.biome_at(x, y), t.moisture_at(x, y));
+                    if cap > 0.3 {
+                        land = Some((x, y, cap));
+                    }
+                }
+                if wet.is_none() && t.is_water(x, y) {
+                    wet = Some((x, y));
+                }
+                if land.is_some() && wet.is_some() {
+                    break 'scan;
+                }
+            }
+        }
+        let (lx, ly, cap) = land.expect("no high-capacity land column found");
+        let (wx, wy) = wet.expect("no water column found");
+
+        // Mature start: biomass ≈ capacity at tick 0 (within one quant step).
+        assert!((t.biomass_at(lx, ly, 0) - cap).abs() <= 1.0 / 255.0 + 1e-6, "veg not mature at gen");
+        // Water is bare at any tick.
+        assert_eq!(t.biomass_at(wx, wy, 0), 0.0);
+        assert_eq!(t.biomass_at(wx, wy, 100_000), 0.0);
+        assert_eq!(t.graze(wx, wy, 1.0, 5), 0.0, "grazed biomass off water");
+
+        // Clear-cut the land column: takes ≈ all of it, leaves ~0.
+        let taken = t.graze(lx, ly, 1.0, 0);
+        assert!((taken - cap).abs() <= 2.0 / 255.0, "clear-cut took {taken}, expected ≈{cap}");
+        assert!(t.biomass_at(lx, ly, 0) <= 1.0 / 255.0, "column not bare right after clear-cut");
+        // Over-graze immediately: nothing left to take.
+        assert!(t.graze(lx, ly, 1.0, 0) <= 1.0 / 255.0, "over-graze produced food from nothing");
+
+        // Regrows from 0 back toward cap, monotonically, with NO downward drift across 200
+        // graze→requantise cycles (F5 quantisation-noise guard).
+        let mut prev = 0.0f32;
+        for k in 1..=200u64 {
+            let tick = k * 50;
+            t.graze(lx, ly, 0.0, tick); // take nothing, but re-quantise current at this tick
+            let b = t.biomass_at(lx, ly, tick);
+            assert!(b >= prev - 2.0 / 255.0, "biomass drifted DOWN at step {k}: {b} < {prev}");
+            assert!(b <= cap + 1.0 / 255.0, "biomass exceeded cap at step {k}: {b} > {cap}");
+            prev = b;
+        }
+        assert!((prev - cap).abs() < 0.05, "did not regrow to cap: {prev} vs {cap}");
+    }
+
+    /// Biomass replays deterministically: same graze sequence ⇒ same readings.
+    #[test]
+    fn biomass_is_deterministic() {
+        let (mut a, mut b) = (VoxelTerrain::new(5), VoxelTerrain::new(5));
+        let col = (COLS / 2 + 7, ROWS / 3 + 3);
+        for k in 0..10u64 {
+            a.graze(col.0, col.1, 0.05, k * 20);
+            b.graze(col.0, col.1, 0.05, k * 20);
+        }
+        assert_eq!(a.biomass_at(col.0, col.1, 500), b.biomass_at(col.0, col.1, 500));
     }
 }

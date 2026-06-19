@@ -37,6 +37,10 @@ pub enum Cmd {
     Reseed { seed: Option<u64> },
     /// Drive the sim clock: set the time scale and/or pause state (either field optional).
     SetClock { scale: Option<f32>, paused: Option<bool> },
+    /// Graze vegetation at a column: remove up to `amount` biomass, reply with what was taken.
+    Graze { x: usize, y: usize, amount: f32 },
+    /// Read the live vegetation biomass at a column.
+    Biomass { x: usize, y: usize },
     /// Toggle render flags (diagnostic): `water` draws the translucent surface, `topo` is the
     /// height-debug view (water hidden). Either field optional.
     Render { water: Option<bool>, topo: Option<bool> },
@@ -123,6 +127,15 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
         "animata/set_timescale" => Ok(Cmd::SetClock {
             scale: f("scale").map(|v| v as f32),
             paused: b("paused"),
+        }),
+        "animata/graze" => Ok(Cmd::Graze {
+            x: u("x").ok_or("graze: missing x")? as usize,
+            y: u("y").ok_or("graze: missing y")? as usize,
+            amount: f("amount").unwrap_or(1.0) as f32,
+        }),
+        "animata/biomass" => Ok(Cmd::Biomass {
+            x: u("x").ok_or("biomass: missing x")? as usize,
+            y: u("y").ok_or("biomass: missing y")? as usize,
         }),
         "animata/render" => Ok(Cmd::Render { water: b("water"), topo: b("topo") }),
         "animata/screenshot" => Ok(Cmd::Screenshot(s("path").unwrap_or_else(|| "shot.png".into()))),

@@ -66,6 +66,12 @@ pub const MAX_SUBSTEPS: u64 = 8;
 /// day/night visual yet — that's a later, deferred phase). Tunable.
 pub const DAY_LEN: f32 = 600.0;
 
+// ---- Vegetation (S3; consumed in terrain.rs) ----
+/// Biomass regrow rate (per sim-second) for the linear-with-saturation law
+/// `b' = cap − (cap − b)·e^(−RATE·elapsed)`. `0.01` ⇒ a ~100 s time-constant (a grazed
+/// patch is most of the way back within a sim-day). Tunable.
+pub const BIOMASS_REGROW_RATE: f32 = 0.01;
+
 // ---- Creature density contract (documented now, consumed by the future sim) ----
 /// Creature body size in metres (mouse-sized).
 #[allow(dead_code)]
