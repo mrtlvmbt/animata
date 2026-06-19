@@ -127,6 +127,20 @@ pub const STORAGE_PER_CELL: f32 = 25.0;
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
 
+// ---- C3: autotrophs (photosynthesis) ----
+/// Energy per photosynthetic cell per sim-second at full light. The autotroph's income.
+pub const PHOTO_RATE: f32 = 3.0;
+/// Fraction of a body that must be photo cells to count as an autotroph (stats + shading).
+pub const PHOTO_THETA: f32 = 0.15;
+/// Self-shading soft cap: photosynthesis income is scaled by `1/(1 + n_autotrophs/PHOTO_SOFTCAP)`
+/// — light is a finite flux, so autotrophs compete and the niche self-limits (like a stratum).
+pub const PHOTO_SOFTCAP: f32 = 1500.0;
+/// Dim-night light floor (so a global night doesn't starve every autotroph at once → wild
+/// oscillation); enough day/night swing to reward STORAGE cells as a night buffer.
+pub const LIGHT_NIGHT_FLOOR: f32 = 0.15;
+/// Light reaching the water column (shallow-water simplification; depth-resolved later).
+pub const WATER_LIGHT_MULT: f32 = 0.5;
+
 // ---- C3: vertical strata (air / underground / water column) ----
 /// Fraction of a body that must be flight / burrow / fin cells to occupy that stratum.
 pub const STRATUM_THETA: f32 = 0.15;

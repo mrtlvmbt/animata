@@ -23,7 +23,7 @@ pub const DEV_STEPS: usize = 10;
 /// Hard cap on cells per body (bounds dev cost AND the per-tick brain/biomass cost).
 pub const MAX_CELLS: usize = 32;
 
-// Gene roles (the rest, 8..G, are free regulatory genes the GRN can use as it likes).
+// Gene roles (the rest, 9..G, are free regulatory genes the GRN can use as it likes).
 const GENE_DIVIDE: usize = 0; // > THETA ⇒ the cell divides this step
 const GENE_POLARITY: usize = 1; // negated in the daughter so sisters can differentiate
 const GENE_EFFECTOR: usize = 2; // expressed ⇒ contractile/locomotor cell (also fins in water)
@@ -32,6 +32,7 @@ const GENE_SENSOR: usize = 4; // expressed ⇒ sensory cell
 const GENE_PREDATOR: usize = 5; // expressed ⇒ predatory/meat-digesting cell (C2)
 const GENE_FLIGHT: usize = 6; // expressed ⇒ wing/lift cell — access to the AIR stratum (C3)
 const GENE_BURROW: usize = 7; // expressed ⇒ digging cell — access to the UNDERGROUND stratum (C3)
+const GENE_PHOTO: usize = 8; // expressed ⇒ photosynthetic cell — makes energy from light (C3)
 /// Division fires when the divide gene exceeds this. Low enough that a few accumulated GRN
 /// mutations can reach it from the empty founder (so multicellularity is evolutionarily
 /// reachable, not stranded behind an unmutatable threshold).
@@ -55,6 +56,7 @@ pub struct Phenotype {
     pub predator: u32,
     pub flight: u32,
     pub burrow: u32,
+    pub photo: u32,
     pub structural: u32,
 }
 
@@ -65,7 +67,7 @@ impl Phenotype {
         if self.n_cells <= 1 {
             return 0;
         }
-        let types = [self.effector, self.storage, self.sensor, self.predator, self.flight, self.burrow]
+        let types = [self.effector, self.storage, self.sensor, self.predator, self.flight, self.burrow, self.photo]
             .iter()
             .filter(|&&c| c > 0)
             .count();
@@ -96,6 +98,11 @@ impl Phenotype {
     /// Fraction of the body that is effector/fin cells (gates the WATER stratum in water biomes).
     pub fn fin_frac(&self) -> f32 {
         self.frac(self.effector)
+    }
+
+    /// Fraction of the body that is photosynthetic cells (the autotroph investment; C3).
+    pub fn photo_frac(&self) -> f32 {
+        self.frac(self.photo)
     }
 
     fn frac(&self, count: u32) -> f32 {
@@ -200,6 +207,7 @@ impl Genome {
                 (GENE_PREDATOR, &mut p.predator),
                 (GENE_FLIGHT, &mut p.flight),
                 (GENE_BURROW, &mut p.burrow),
+                (GENE_PHOTO, &mut p.photo),
             ];
             let best = funcs.iter().map(|&(g, _)| s[g]).fold(f32::MIN, f32::max);
             if best < SPECIALISE_THETA {
@@ -245,7 +253,7 @@ mod tests {
             let p2 = g.develop();
             assert_eq!(p1, p2, "development not deterministic");
             assert!(p1.n_cells >= 1 && p1.n_cells as usize <= MAX_CELLS, "cell count out of range: {}", p1.n_cells);
-            let typed = p1.effector + p1.storage + p1.sensor + p1.predator + p1.flight + p1.burrow;
+            let typed = p1.effector + p1.storage + p1.sensor + p1.predator + p1.flight + p1.burrow + p1.photo;
             assert_eq!(typed + p1.structural, p1.n_cells);
         }
     }
