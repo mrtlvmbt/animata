@@ -240,13 +240,20 @@ fn elev_to_level(e: f32) -> f32 {
 /// from hydrology (connectivity), which overrides the biome to `Ocean` (seabed) where water
 /// stands. A sub-sea column that ends up dry (a landlocked below-sea floor) therefore reads as
 /// a low-`h` land biome (Beach), not a stray blue seabed.
-fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind) {
+fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind, f32, f32) {
     let (cx, cy) = (x as f32, y as f32);
     let surf = elev_to_level(e);
 
     // The same field drives BOTH height and biome (altitude bands + climate matrix); a sub-sea
     // floor lands in the lowest band (`h <= LAND_FOOT` ⇒ Beach).
     let h = surf.round() as u8;
+
+    // Climate fields, computed for EVERY column (not only lowland) so the sim can read
+    // temperature/moisture anywhere — including beach/mountain/snow columns the biome
+    // choice below decides on altitude alone. The biome result is unchanged: rock/snow/
+    // beach still ignore climate; only the lowland `else` branch consults it.
+    let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7, MOIST_OCTAVES);
+    let temp = temperature(seed, cx, cy, h);
 
     // Altitude gates the vertical biomes (rock/snow only high, so colour still tracks
     // height — no "rock at low ground"); below the rock line, a TEMPERATURE × MOISTURE
@@ -259,11 +266,9 @@ fn classify(seed: u64, x: usize, y: usize, e: f32) -> (f32, BiomeKind) {
     } else if h >= MAX_H - MOUNTAIN_BAND {
         BiomeKind::Mountain // grey massif
     } else {
-        let moist = fbm(seed, cx / MOIST_LATTICE, cy / MOIST_LATTICE, 7, MOIST_OCTAVES);
-        let temp = temperature(seed, cx, cy, h);
         climate_biome(temp, moist, h)
     };
-    (surf, biome)
+    (surf, biome, temp, moist)
 }
 
 /// Temperature in `[0, 1]` (0 cold .. 1 hot): warm at the equator (map middle), cooling
@@ -325,6 +330,59 @@ pub struct VoxelTerrain {
     /// for lakes, the channel top for rivers, `0` = dry. The renderer floats a translucent
     /// plane here when it sits above the column's terrain.
     water: Vec<u8>,
+    /// Climate fields the SIM reads (the renderer only uses biome). Quantised `[0,1]→[0,255]`
+    /// (≈0.4% step — coarser than the climate itself; saves 3× the RAM of `f32` at ×16).
+    /// `temp`: 0 cold .. 1 hot. `moist`: 0 dry .. 1 wet. Present for every column.
+    temp: Vec<u8>,
+    moist: Vec<u8>,
+    /// Chebyshev-ish BFS distance (in columns, 4-connectivity) to the nearest water column,
+    /// saturating at 255. `0` on water itself; the gradient near a shore is exact (far inland
+    /// plateaus all read the 255 floor — fine for the sim's "far = far").
+    water_dist: Vec<u8>,
+}
+
+/// Quantise a `[0,1]` field value into a `u8` (saturating). De-quantise with `/ 255.0`.
+fn quant_unit(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Multi-source BFS distance (in columns) from the nearest water column, over the whole
+/// grid (4-connectivity, unit edges). Distance is computed in `u16` then clamped into the
+/// `u8` field, so the cap (255) and the "unvisited" sentinel never collide. A map with no
+/// water at all leaves every column at the 255 floor.
+fn compute_water_dist(water: &[u8]) -> Vec<u8> {
+    let n = COLS * ROWS;
+    let mut dist = vec![u16::MAX; n];
+    let mut q = std::collections::VecDeque::new();
+    for (i, &w) in water.iter().enumerate() {
+        if w != 0 {
+            dist[i] = 0;
+            q.push_back(i);
+        }
+    }
+    while let Some(i) = q.pop_front() {
+        let nd = dist[i] + 1;
+        let (x, y) = (i % COLS, i / COLS);
+        let step = |j: usize, dist: &mut [u16], q: &mut std::collections::VecDeque<usize>| {
+            if dist[j] > nd {
+                dist[j] = nd;
+                q.push_back(j);
+            }
+        };
+        if x + 1 < COLS {
+            step(i + 1, &mut dist, &mut q);
+        }
+        if x > 0 {
+            step(i - 1, &mut dist, &mut q);
+        }
+        if y + 1 < ROWS {
+            step(i + COLS, &mut dist, &mut q);
+        }
+        if y > 0 {
+            step(i - COLS, &mut dist, &mut q);
+        }
+    }
+    dist.iter().map(|&d| d.min(255) as u8).collect()
 }
 
 impl VoxelTerrain {
@@ -359,10 +417,14 @@ impl VoxelTerrain {
         let mut biome = vec![0u8; n];
         let mut flags = vec![0u8; n];
         let mut water = vec![0u8; n];
+        let mut temp = vec![0u8; n];
+        let mut moist = vec![0u8; n];
         for y in 0..ROWS {
             for x in 0..COLS {
                 let i = y * COLS + x;
-                let (mut s, mut b) = classify(seed, x, y, elev[i]);
+                let (mut s, mut b, ct, cm) = classify(seed, x, y, elev[i]);
+                temp[i] = quant_unit(ct);
+                moist[i] = quant_unit(cm);
                 let mut f = 0u8;
                 // Water priority on connectivity, not absolute height: ocean (sea-connected)
                 // wins, else a depression lake, else a river. `hydro` already cleared lake/river
@@ -397,6 +459,9 @@ impl VoxelTerrain {
             }
             progress(0.72 + 0.28 * (y + 1) as f32 / ROWS as f32);
         }
+        // Distance-to-water: a multi-source BFS from every water column over the eroded
+        // grid (one O(N) pass, like hydrology). The sim reads it for hydration / water-seeking.
+        let water_dist = compute_water_dist(&water);
         VoxelTerrain {
             seed,
             chunks_x: COLS.div_ceil(CHUNK),
@@ -405,6 +470,9 @@ impl VoxelTerrain {
             biome,
             flags,
             water,
+            temp,
+            moist,
+            water_dist,
         }
     }
 
@@ -467,6 +535,42 @@ impl VoxelTerrain {
     }
     pub fn is_water(&self, x: usize, y: usize) -> bool {
         self.flags[y * COLS + x] & FLAG_WATER != 0
+    }
+}
+
+/// Environment fields the SIM (and the debug overlay) read under a creature's column.
+/// These have live callers (dev bridge + the `G` colourmap overlay), so they are not
+/// `dead_code`-gated. All take in-world `0..COLS × 0..ROWS` indices.
+impl VoxelTerrain {
+    /// Temperature in `[0,1]` (0 cold .. 1 hot) at a column. De-quantised from the `u8` field.
+    pub fn temperature_at(&self, x: usize, y: usize) -> f32 {
+        self.temp[y * COLS + x] as f32 / 255.0
+    }
+    /// Moisture in `[0,1]` (0 dry .. 1 wet) at a column. De-quantised from the `u8` field.
+    pub fn moisture_at(&self, x: usize, y: usize) -> f32 {
+        self.moist[y * COLS + x] as f32 / 255.0
+    }
+    /// Distance (in columns) to the nearest water, saturating at 255. `0` on water.
+    pub fn water_dist_at(&self, x: usize, y: usize) -> u8 {
+        self.water_dist[y * COLS + x]
+    }
+    /// Terrain steepness in `[0,1]`: the largest absolute surface-level difference to a
+    /// 4-neighbour, normalised by the land relief (`SURFACE_RANGE`) and clamped — so `1.0`
+    /// is a full-relief cliff in one column, `0` is flat. Computed on demand from `surf`
+    /// (not stored). An out-of-world neighbour contributes nothing (no false cliff at the
+    /// map edge): it is treated as level with this column.
+    pub fn slope_at(&self, x: usize, y: usize) -> f32 {
+        let h0 = self.surf[y * COLS + x];
+        let (ix, iy) = (x as i32, y as i32);
+        let mut max_d = 0.0f32;
+        for (nx, ny) in [(ix + 1, iy), (ix - 1, iy), (ix, iy + 1), (ix, iy - 1)] {
+            let hn = match self.index(nx, ny) {
+                Some(j) => self.surf[j],
+                None => h0,
+            };
+            max_d = max_d.max((hn - h0).abs());
+        }
+        (max_d / SURFACE_RANGE as f32).clamp(0.0, 1.0)
     }
 }
 
@@ -1246,6 +1350,109 @@ mod tests {
         for &(x, y) in &[(0usize, 0usize), (CHUNK - 1, 1), (CHUNK, 1), (COLS - 1, ROWS - 1)] {
             assert_eq!(t.height(x as i32, y as i32), t.height_at(x, y));
             assert_eq!(cell_height(t.cell(x as i32, y as i32)), t.height_at(x, y));
+        }
+    }
+
+    /// `quant_unit` ↔ `/255.0` round-trips within one quantisation step (≤ 1/255).
+    #[test]
+    fn quant_roundtrip_within_one_step() {
+        for k in 0..=1000u32 {
+            let v = k as f32 / 1000.0;
+            let back = quant_unit(v) as f32 / 255.0;
+            assert!((back - v).abs() <= 1.0 / 255.0 + 1e-6, "quant({v}) round-trips to {back}");
+        }
+        // Saturates, doesn't wrap.
+        assert_eq!(quant_unit(-0.5), 0);
+        assert_eq!(quant_unit(1.5), 255);
+    }
+
+    /// S1: temperature/moisture are now populated for EVERY column (not just lowland), and
+    /// temperature is a REAL latitude field everywhere — the equator row is warmer on average
+    /// than the poles. (If climate were left unset on beach/mountain/snow columns, those rows
+    /// would read a flat 0 and the gradient would vanish.) Also bounds every value to `[0,1]`.
+    #[test]
+    fn env_fields_populated_and_latitude_gradient() {
+        let t = VoxelTerrain::new(1);
+        let row_mean_temp = |y: usize| {
+            let s: f32 = (0..COLS).map(|x| t.temperature_at(x, y)).sum();
+            s / COLS as f32
+        };
+        let equator = row_mean_temp(ROWS / 2);
+        let pole = (row_mean_temp(0) + row_mean_temp(ROWS - 1)) * 0.5;
+        eprintln!("mean temp: equator {equator:.3}, poles {pole:.3}");
+        assert!(equator > pole + 0.1, "no latitude temp gradient: equator {equator:.3} ≤ poles {pole:.3}");
+        // Every sampled column (across all biome bands) has in-range, defined climate.
+        let mut moist_seen_low = false;
+        let mut moist_seen_high = false;
+        for y in (0..ROWS).step_by(ROWS / 20) {
+            for x in (0..COLS).step_by(COLS / 20) {
+                let (te, mo) = (t.temperature_at(x, y), t.moisture_at(x, y));
+                assert!((0.0..=1.0).contains(&te) && (0.0..=1.0).contains(&mo));
+                moist_seen_low |= mo < 0.35;
+                moist_seen_high |= mo > 0.65;
+            }
+        }
+        assert!(moist_seen_low && moist_seen_high, "moisture field has no variety");
+    }
+
+    /// S1: distance-to-water is 0 exactly on water, grows off the shore, and is a valid BFS
+    /// (every non-source column under the cap has a 4-neighbour one step closer). The far
+    /// inland plateau reaching the 255 floor is expected, not a bug.
+    #[test]
+    fn water_dist_is_a_valid_bfs() {
+        let t = VoxelTerrain::new(1);
+        let mut max_d = 0u8;
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let d = t.water_dist_at(x, y);
+                // Source set agrees with the water flag (they're set together in `generate`).
+                assert_eq!(d == 0, t.is_water(x, y), "water_dist 0 vs is_water disagree at ({x},{y})");
+                max_d = max_d.max(d);
+                // BFS invariant: an interior column with finite distance has a strictly closer
+                // neighbour (skip the saturated 255 rim, where the true distance is clipped).
+                if (1..255).contains(&d) && x > 0 && y > 0 && x + 1 < COLS && y + 1 < ROWS {
+                    let closer = [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)]
+                        .iter()
+                        .any(|&(a, b)| t.water_dist_at(a, b) == d - 1);
+                    assert!(closer, "water_dist not a BFS at ({x},{y}): d={d}, no neighbour at d-1");
+                }
+            }
+        }
+        eprintln!("max water_dist = {max_d}");
+        assert!(max_d > 1, "distance-to-water never grows (no inland?)");
+    }
+
+    /// S1: slope is in `[0,1]`, zero on flat ground (open-sea floor is flat), positive where
+    /// the terrain steps, and shows NO false cliff at the map edge (out-of-world neighbours
+    /// are treated as level, so the corner column isn't read as a wall).
+    #[test]
+    fn slope_bounds_and_no_edge_cliff() {
+        let t = VoxelTerrain::new(1);
+        let mut max_s = 0.0f32;
+        for y in (0..ROWS).step_by(7) {
+            for x in (0..COLS).step_by(7) {
+                let s = t.slope_at(x, y);
+                assert!((0.0..=1.0).contains(&s), "slope out of range at ({x},{y}): {s}");
+                max_s = max_s.max(s);
+            }
+        }
+        assert!(max_s > 0.0, "slope is zero everywhere (no relief?)");
+        // Corners: bounded, and not a spurious full-relief cliff from the world edge.
+        for &(x, y) in &[(0, 0), (COLS - 1, 0), (0, ROWS - 1), (COLS - 1, ROWS - 1)] {
+            let s = t.slope_at(x, y);
+            assert!((0.0..1.0).contains(&s), "edge column ({x},{y}) reads a false cliff: {s}");
+        }
+    }
+
+    /// S1: the new fields are deterministic per seed (the sim must replay).
+    #[test]
+    fn env_fields_are_deterministic() {
+        let (a, b) = (VoxelTerrain::new(7), VoxelTerrain::new(7));
+        for &(x, y) in &[(0, 0), (COLS / 3, ROWS / 2), (COLS - 1, ROWS - 1), (CHUNK, CHUNK)] {
+            assert_eq!(a.temperature_at(x, y), b.temperature_at(x, y));
+            assert_eq!(a.moisture_at(x, y), b.moisture_at(x, y));
+            assert_eq!(a.water_dist_at(x, y), b.water_dist_at(x, y));
+            assert_eq!(a.slope_at(x, y), b.slope_at(x, y));
         }
     }
 }
