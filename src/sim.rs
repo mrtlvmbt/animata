@@ -117,6 +117,32 @@ pub struct Sim {
     grid: SpatialGrid,
 }
 
+/// Dimensions of the species feature vector: 7 cell-type fractions (the developmental body plan)
+/// plus normalised size. Speciation is by BODY, per the plan ("topological speciation on the
+/// developmental bodies") — climate/colour are continuous within-species niche traits, not here.
+const FEATURES: usize = 8;
+
+/// The body-plan feature vector a creature is clustered by into a species — its cell-type
+/// composition and size. Each component is ~`[0,1]`.
+fn feature(c: &Creature) -> [f32; FEATURES] {
+    let p = &c.pheno;
+    [
+        p.effector as f32 / p.n_cells as f32,
+        p.storage as f32 / p.n_cells as f32,
+        p.sensor as f32 / p.n_cells as f32,
+        p.predator as f32 / p.n_cells as f32,
+        p.flight as f32 / p.n_cells as f32,
+        p.burrow as f32 / p.n_cells as f32,
+        p.photo as f32 / p.n_cells as f32,
+        (p.n_cells as f32 / crate::genome::MAX_CELLS as f32).min(1.0),
+    ]
+}
+
+/// Squared Euclidean distance between two feature vectors.
+fn feature_dist2(a: &[f32; FEATURES], b: &[f32; FEATURES]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| (x - y).powi(2)).sum()
+}
+
 /// Pearson correlation of two equal-length samples (`0` if undefined). Shared by the niche
 /// metrics — how well an evolved trait tracks the local environment (allopatry, crypsis).
 fn pearson(a: &[f32], b: &[f32]) -> f32 {
@@ -637,6 +663,39 @@ impl Sim {
         s / self.creatures.len() as f32
     }
 
+    /// Niche coverage: how many DISTINCT ecological niches are occupied — the cross-product of
+    /// stratum × diet (herbivore/carnivore) × autotrophy × climate band × complexity tier, counted
+    /// over distinct occupied combinations. Rises as the population radiates into the niche space
+    /// C3 built; a single-niche monoculture would score ~1. Cheap (O(N) + a small set).
+    pub fn niche_coverage(&self, terrain: &VoxelTerrain) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for c in &self.creatures {
+            let (cx, cy) = column_index(c.pos);
+            let stratum = stratum_of(&c.pheno, terrain.is_water(cx, cy)).idx() as u32;
+            let carn = (c.pheno.carnivory() > CARNIVORE_THRESHOLD) as u32;
+            let auto = (c.pheno.photo_frac() > PHOTO_THETA) as u32;
+            let climate = (c.genome.thermal_pref * 2.99) as u32; // 0 cold .. 2 hot
+            let cplx = c.pheno.complexity() as u32;
+            seen.insert(stratum + 4 * (carn + 2 * (auto + 2 * (climate + 3 * cplx))));
+        }
+        seen.len()
+    }
+
+    /// Species count by LEADER clustering on a phenotype feature vector (body-type composition +
+    /// size + climate + colour): a creature joins the first leader within `SPECIES_THRESHOLD`,
+    /// else founds a new one. So distinct body plans / niches separate into clades. O(N × species)
+    /// — call occasionally (it backs a throttled HUD readout + the dev bridge), not every tick.
+    pub fn species_count(&self) -> usize {
+        let mut leaders: Vec<[f32; FEATURES]> = Vec::new();
+        for c in &self.creatures {
+            let f = feature(c);
+            if !leaders.iter().any(|l| feature_dist2(l, &f) <= SPECIES_THRESHOLD * SPECIES_THRESHOLD) {
+                leaders.push(f);
+            }
+        }
+        leaders.len()
+    }
+
     /// Crypsis metric: Pearson correlation between each creature's coloration and the ground tone
     /// where it lives. ~0 = random colours; → 1 = creatures have evolved to match their background
     /// (camouflage), differently per habitat — a coevolutionary outcome of the detection channel.
@@ -864,6 +923,25 @@ mod tests {
         assert!(end > 0.1, "no crypsis emerged — coloration didn't track background ({end:.3})");
     }
 
+    /// C3-speciation acceptance: the population RADIATES — founders are one species (identical
+    /// founder body/genome class), and over time the leader-clustering resolves MANY species and
+    /// a broad niche coverage (multiple strata × diets × climates × complexity tiers occupied),
+    /// not a monoculture. Single seed ⇒ deterministic.
+    #[test]
+    fn population_radiates_into_many_species_and_niches() {
+        let mut t = world();
+        let mut s = Sim::new(1, &t);
+        let s0 = s.species_count();
+        for tick in 0..8000 {
+            s.step(&mut t, tick);
+        }
+        let (sp, nc) = (s.species_count(), s.niche_coverage(&t));
+        eprintln!("founders {s0} species → {sp} species, {nc} niches occupied");
+        assert!(s0 <= 3, "founders should cluster into ~one species, got {s0}");
+        assert!(sp > 20, "no radiation — too few species emerged ({sp})");
+        assert!(nc > 6, "niche space barely occupied ({nc} niches)");
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -876,9 +954,9 @@ mod tests {
             if tick % 1000 == 0 {
                 let (multi, _) = s.complexity_mix();
                 eprintln!(
-                    "tick {tick}: pop {} bm {:.2} multi {:.0}% carniv {:.1}% auto {:.1}% nutri {:.2} allop {:.2} crypsis {:.2}",
+                    "tick {tick}: pop {} bm {:.2} multi {:.0}% carniv {:.1}% auto {:.1}% species {} niches {} allop {:.2} crypsis {:.2}",
                     s.population(), s.avg_biomass(), multi * 100.0, s.frac_carnivore() * 100.0,
-                    s.frac_autotroph() * 100.0, s.avg_nutrient(&t, tick), s.thermal_correlation(&t), s.crypsis_correlation(&t)
+                    s.frac_autotroph() * 100.0, s.species_count(), s.niche_coverage(&t), s.thermal_correlation(&t), s.crypsis_correlation(&t)
                 );
             }
         }

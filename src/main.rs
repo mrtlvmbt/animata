@@ -1112,6 +1112,8 @@ async fn main() {
                                 "avg_nutrient": terrain.as_ref().map(|t| s.avg_nutrient(t, clock.tick())),
                                 "allopatry": allopatry,
                                 "crypsis": terrain.as_ref().map(|t| s.crypsis_correlation(t)),
+                                "species": s.species_count(),
+                                "niche_coverage": terrain.as_ref().map(|t| s.niche_coverage(t)),
                                 "strata_und_surf_air_water": strata,
                                 "births": s.births,
                                 "deaths": s.deaths,
@@ -1353,10 +1355,10 @@ async fn main() {
                 let (multi, _) = s.complexity_mix();
                 let m = s.stratum_mix(t);
                 format!(
-                    "   pop {}   E {:.0}   bm {:.2}   multi {:.0}% carn {:.0}% auto {:.0}%   allop {:.2} crypsis {:.2}   nutri {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
+                    "   pop {} E {:.0}   bm {:.2}   multi {:.0}% carn {:.0}% auto {:.0}%   species {} niches {}   allop {:.2} crypsis {:.2}   nutri {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
                     s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0,
-                    s.frac_carnivore() * 100.0, s.frac_autotroph() * 100.0, s.thermal_correlation(t),
-                    s.crypsis_correlation(t), s.avg_nutrient(t, clock.tick()),
+                    s.frac_carnivore() * 100.0, s.frac_autotroph() * 100.0, s.species_count(), s.niche_coverage(t),
+                    s.thermal_correlation(t), s.crypsis_correlation(t), s.avg_nutrient(t, clock.tick()),
                     m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
                 )
             }
