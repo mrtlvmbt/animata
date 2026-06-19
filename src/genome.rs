@@ -29,6 +29,7 @@ const GENE_POLARITY: usize = 1; // negated in the daughter so sisters can differ
 const GENE_EFFECTOR: usize = 2; // expressed ⇒ contractile/locomotor cell
 const GENE_STORAGE: usize = 3; // expressed ⇒ energy-storage cell
 const GENE_SENSOR: usize = 4; // expressed ⇒ sensory cell
+const GENE_PREDATOR: usize = 5; // expressed ⇒ predatory/meat-digesting cell (C2)
 /// Division fires when the divide gene exceeds this. Low enough that a few accumulated GRN
 /// mutations can reach it from the empty founder (so multicellularity is evolutionarily
 /// reachable, not stranded behind an unmutatable threshold).
@@ -36,9 +37,10 @@ const DIVIDE_THETA: f32 = 0.35;
 /// A function gene must beat this baseline to specialise the cell (else it stays structural).
 const SPECIALISE_THETA: f32 = 0.3;
 
-/// Brain (controller) weights — same fixed 7→6→2 topology as C0, carried in the genome and
-/// evolved. (C1 keeps the C0 controller; wiring it to cell-derived ports is a later step.)
-pub const BRAIN_WEIGHTS: usize = 7 * 6 + 6 * 2;
+/// Brain (controller) weights for the fixed 11→6→2 topology (C2 added prey/threat senses to
+/// the C0/C1 plant-field + interoception inputs), carried in the genome and evolved. Must equal
+/// `sim::N_INPUTS*N_HIDDEN + N_HIDDEN*N_OUTPUTS` (a test guards this).
+pub const BRAIN_WEIGHTS: usize = 11 * 6 + 6 * 2;
 
 /// The grown body: just the counts C1 needs (cell positions/adhesion come later). Cell count
 /// is the integer biomass; the type tallies drive the emergent stats.
@@ -48,6 +50,7 @@ pub struct Phenotype {
     pub effector: u32,
     pub storage: u32,
     pub sensor: u32,
+    pub predator: u32,
     pub structural: u32,
 }
 
@@ -58,12 +61,25 @@ impl Phenotype {
         if self.n_cells <= 1 {
             return 0;
         }
-        let types = [self.effector, self.storage, self.sensor].iter().filter(|&&c| c > 0).count();
+        let types = [self.effector, self.storage, self.sensor, self.predator]
+            .iter()
+            .filter(|&&c| c > 0)
+            .count();
         if types >= 2 {
             2
         } else {
             1
         }
+    }
+
+    /// Carnivory in `[0,1]` — the fraction of the body that is predatory cells. Drives how
+    /// well the creature digests meat vs plants (a body with no predator cells is a pure
+    /// herbivore; an all-predator body is a pure carnivore).
+    pub fn carnivory(&self) -> f32 {
+        if self.n_cells == 0 {
+            return 0.0;
+        }
+        self.predator as f32 / self.n_cells as f32
     }
 }
 
@@ -145,16 +161,18 @@ impl Genome {
         }
         let mut p = Phenotype { n_cells: states.len() as u32, ..Default::default() };
         for s in &states {
-            let (eff, sto, sen) = (s[GENE_EFFECTOR], s[GENE_STORAGE], s[GENE_SENSOR]);
-            let best = eff.max(sto).max(sen);
+            let (eff, sto, sen, pre) = (s[GENE_EFFECTOR], s[GENE_STORAGE], s[GENE_SENSOR], s[GENE_PREDATOR]);
+            let best = eff.max(sto).max(sen).max(pre);
             if best < SPECIALISE_THETA {
                 p.structural += 1;
             } else if best == eff {
                 p.effector += 1;
             } else if best == sto {
                 p.storage += 1;
-            } else {
+            } else if best == sen {
                 p.sensor += 1;
+            } else {
+                p.predator += 1;
             }
         }
         p
@@ -188,7 +206,7 @@ mod tests {
             let p2 = g.develop();
             assert_eq!(p1, p2, "development not deterministic");
             assert!(p1.n_cells >= 1 && p1.n_cells as usize <= MAX_CELLS, "cell count out of range: {}", p1.n_cells);
-            assert_eq!(p1.effector + p1.storage + p1.sensor + p1.structural, p1.n_cells);
+            assert_eq!(p1.effector + p1.storage + p1.sensor + p1.predator + p1.structural, p1.n_cells);
         }
     }
 

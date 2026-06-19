@@ -127,6 +127,20 @@ pub const STORAGE_PER_CELL: f32 = 25.0;
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
 
+// ---- C2: predation / trophic web ----
+/// A creature is predatory once predator cells make up this fraction of its body.
+pub const CARNIVORE_THRESHOLD: f32 = 0.2;
+/// World-unit radius at which a creature senses the nearest prey / threat (brain input).
+pub const SENSE_RANGE: f32 = 30.0;
+/// World-unit radius within which a predator actually strikes its targeted prey.
+pub const ATTACK_RANGE: f32 = 3.5;
+/// Spatial-grid cell size for prey/threat queries (≈ the sense range so each query touches a
+/// small ring of cells).
+pub const GRID_CELL: f32 = 32.0;
+/// Trophic transfer efficiency: a predator gets this fraction of the prey's (structural mass +
+/// reserve) energy, further scaled by the predator's carnivory. ~10% rule (real 5–20%).
+pub const MEAT_EFFICIENCY: f32 = 0.35;
+
 // ---- Creature density contract (documented now, consumed by the future sim) ----
 /// Creature body size in metres (mouse-sized).
 #[allow(dead_code)]
