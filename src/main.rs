@@ -39,6 +39,78 @@ fn window_conf() -> Conf {
     }
 }
 
+/// Debug overlay selected by `G` (cycles in this order). `Topo` reshades the 3D scene on the
+/// GPU; the climate / water-distance views overlay a per-column colourmap MINIMAP — the live
+/// in-app consumer of the S1 environment getters.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DebugView {
+    None,
+    Topo,
+    Temp,
+    Moist,
+    WaterDist,
+    Slope,
+}
+
+impl DebugView {
+    fn next(self) -> Self {
+        match self {
+            DebugView::None => DebugView::Topo,
+            DebugView::Topo => DebugView::Temp,
+            DebugView::Temp => DebugView::Moist,
+            DebugView::Moist => DebugView::WaterDist,
+            DebugView::WaterDist => DebugView::Slope,
+            DebugView::Slope => DebugView::None,
+        }
+    }
+    /// The views drawn as a 2D field minimap (vs the 3D scene reshade / no overlay).
+    fn is_field_map(self) -> bool {
+        matches!(self, DebugView::Temp | DebugView::Moist | DebugView::WaterDist | DebugView::Slope)
+    }
+}
+
+/// Build a small colourmap texture of a per-column environment field for the debug minimap.
+/// Samples the whole map down to a fixed pixel size, so the cost is bounded and paid only on
+/// a view/seed change. The colour ramps are chosen to read at a glance: temp blue→red,
+/// moisture tan→teal, water-distance bright(near)→dark(far).
+fn build_field_minimap(t: &VoxelTerrain, view: DebugView) -> Texture2D {
+    const MW: usize = 220;
+    let mh = (MW * ROWS / COLS).max(1);
+    let mut img = Image::gen_image_color(MW as u16, mh as u16, BLANK);
+    for py in 0..mh {
+        for px in 0..MW {
+            let x = (px * COLS / MW).min(COLS - 1);
+            let y = (py * ROWS / mh).min(ROWS - 1);
+            let c = match view {
+                DebugView::Temp => {
+                    let v = t.temperature_at(x, y);
+                    Color::new(v, 0.15, 1.0 - v, 1.0) // cold blue → hot red
+                }
+                DebugView::Moist => {
+                    let v = t.moisture_at(x, y);
+                    Color::new(0.65 * (1.0 - v) + 0.1, 0.35 + 0.45 * v, 0.25 + 0.5 * v, 1.0) // dry tan → wet teal
+                }
+                DebugView::WaterDist => {
+                    let f = t.water_dist_at(x, y) as f32 / 255.0;
+                    if f == 0.0 {
+                        Color::new(0.2, 0.5, 1.0, 1.0) // water itself
+                    } else {
+                        let b = 1.0 - 0.85 * f; // near bright → far dark
+                        Color::new(b, b, b, 1.0)
+                    }
+                }
+                DebugView::Slope => {
+                    let v = t.slope_at(x, y); // flat dark → steep yellow-white
+                    Color::new(v, v, 0.25 * v, 1.0)
+                }
+                _ => BLANK,
+            };
+            img.set_pixel(px as u32, py as u32, c);
+        }
+    }
+    Texture2D::from_image(&img)
+}
+
 /// Orthographic isometric camera: looks down a fixed iso angle at `target`, with
 /// `zoom` = world-height visible (smaller = closer) and `yaw` rotating in 90° steps.
 struct IsoCam {
@@ -767,9 +839,14 @@ async fn main() {
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
     let mut show_info = true;
-    // `G` toggles the TOPO debug view (height colourmap, water hidden) — reveals the cube
-    // topology + underwater bed shape that the shaded/translucent normal view obscures.
-    let mut topo = false;
+    // `G` cycles the debug view: off → Topo (GPU height/depth, water hidden) → Temp → Moist
+    // → WaterDist → off. Topo reshades the 3D scene; the climate/water-dist modes overlay a
+    // colourmap MINIMAP of the per-column field (the live consumer of the S1 env getters, so
+    // they verify visually — poles cold / equator hot — and aren't dead code in any build).
+    let mut debug_view = DebugView::None;
+    // Cached minimap texture for the field views, rebuilt only when the view or seed changes
+    // (sampling the field every frame would be wasteful). `None` for the Off/Topo views.
+    let mut field_map: Option<(DebugView, u64, Texture2D)> = None;
     // `H` hides the translucent water surface, baring the seabed/terrain underneath.
     let mut water_on = true;
     // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
@@ -805,7 +882,7 @@ async fn main() {
             show_info = !show_info;
         }
         if is_key_pressed(KeyCode::G) {
-            topo = !topo;
+            debug_view = debug_view.next();
         }
         if is_key_pressed(KeyCode::H) {
             water_on = !water_on;
@@ -873,6 +950,20 @@ async fn main() {
             match cmd {
                 dev_bridge::Cmd::Status => {
                     let c = cam.camera();
+                    // Environment fields under the camera-centre column (steerable numeric
+                    // assert surface for the S1 substrate). `null` until the world is ready.
+                    let env = terrain.as_ref().map(|t| {
+                        let x = (cam.target.x / VOX).floor().clamp(0.0, (COLS - 1) as f32) as usize;
+                        let y = (cam.target.z / VOX).floor().clamp(0.0, (ROWS - 1) as f32) as usize;
+                        serde_json::json!({
+                            "col": [x, y],
+                            "temp": t.temperature_at(x, y),
+                            "moist": t.moisture_at(x, y),
+                            "slope": t.slope_at(x, y),
+                            "water_dist": t.water_dist_at(x, y),
+                            "biome": format!("{:?}", t.biome_at(x, y)),
+                        })
+                    });
                     let _ = reply.send(serde_json::json!({
                         "fps": fps,
                         "frame_ms": frame_ms,
@@ -881,6 +972,7 @@ async fn main() {
                         "view": { "cx": cam.target.x, "cz": cam.target.z, "zoom": cam.zoom, "yaw": cam.yaw },
                         "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
                                  "detail_chunks": streamer.detail.len(), "coarse_tiles": streamer.coarse.len() },
+                        "env": env,
                     }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
@@ -913,9 +1005,11 @@ async fn main() {
                         water_on = w;
                     }
                     if let Some(tp) = tp {
-                        topo = tp;
+                        // `topo` stays a bool over the wire: true selects the Topo view, false
+                        // clears to Off (the climate minimaps are driven by `G` interactively).
+                        debug_view = if tp { DebugView::Topo } else { DebugView::None };
                     }
-                    let _ = reply.send(serde_json::json!({"water": water_on, "topo": topo}));
+                    let _ = reply.send(serde_json::json!({"water": water_on, "topo": debug_view == DebugView::Topo}));
                 }
                 dev_bridge::Cmd::Screenshot(path) => {
                     pending_shots.push((path, reply)); // serviced post-draw below
@@ -955,7 +1049,7 @@ async fn main() {
                 },
             );
             ctx.apply_pipeline(&pipeline);
-            let dbg = vec4(if topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
+            let dbg = vec4(if debug_view == DebugView::Topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
             ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
             // Per super-tile draw EITHER its detail chunks (if ready) OR its coarse buffer
             // (otherwise) — never both. So the tiers never overlap (no z-fight) and a
@@ -985,7 +1079,7 @@ async fn main() {
             // topo mode (bed laid bare) or when toggled off with `H`. Same draw rule as the
             // opaque tiers so the two never overlap; `depth_write:false` lets terrain in
             // front still occlude it without the water occluding itself.
-            if !topo && water_on {
+            if debug_view != DebugView::Topo && water_on {
                 ctx.apply_pipeline(&water_pipe);
                 let params = vec4(get_time() as f32, 0.0, 0.0, 0.0);
                 ctx.apply_uniforms(UniformsSource::table(&WaterUniforms { mvp: vp, params }));
@@ -1021,12 +1115,14 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
-        let mode = if topo {
-            "   [TOPO: height/depth, G]"
-        } else if !water_on {
-            "   [water off, H]"
-        } else {
-            ""
+        let mode = match debug_view {
+            DebugView::Topo => "   [TOPO: height/depth, G]",
+            DebugView::Temp => "   [TEMP map, G]",
+            DebugView::Moist => "   [MOIST map, G]",
+            DebugView::WaterDist => "   [WATER-DIST map, G]",
+            DebugView::Slope => "   [SLOPE map, G]",
+            DebugView::None if !water_on => "   [water off, H]",
+            DebugView::None => "",
         };
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
@@ -1034,6 +1130,30 @@ async fn main() {
         if show_info {
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
             draw_text(&line, 8.0, 22.0, 24.0, Color::new(0.95, 0.97, 1.0, 1.0));
+        }
+
+        // Field colourmap minimap (the S1 env-getter consumer): rebuild the texture only
+        // when the view or seed changes, then blit it top-right with a label. Off for the
+        // None/Topo views (Topo reshades the 3D scene itself).
+        if debug_view.is_field_map() {
+            if let Some(t) = &terrain {
+                let stale = field_map
+                    .as_ref()
+                    .map(|(v, s, _)| *v != debug_view || *s != seed)
+                    .unwrap_or(true);
+                if stale {
+                    field_map = Some((debug_view, seed, build_field_minimap(t, debug_view)));
+                }
+            }
+            if let Some((_, _, tex)) = &field_map {
+                let (mw, mh) = (tex.width() * 1.4, tex.height() * 1.4);
+                let (mx, my) = (screen_width() - mw - 12.0, 40.0);
+                draw_rectangle(mx - 3.0, my - 3.0, mw + 6.0, mh + 6.0, Color::new(0.0, 0.0, 0.0, 0.6));
+                draw_texture_ex(tex, mx, my, WHITE,
+                    DrawTextureParams { dest_size: Some(vec2(mw, mh)), ..Default::default() });
+            }
+        } else if field_map.is_some() {
+            field_map = None; // drop the cached texture when leaving the field views
         }
 
         // Background generation progress bar (only while a world is being built). Centred

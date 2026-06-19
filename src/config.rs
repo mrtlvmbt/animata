@@ -23,10 +23,10 @@ pub const WIN_H: i32 = 760;
 /// so logical and world coordinates differ only by the axis remap above.
 pub const VOX: f32 = 1.0;
 
-/// Single knob to scale the whole map. The base footprint is 138×95 columns (metres);
-/// the **eventual target is ×16 per side** (×256 area) — keep at 1 for now, because
-/// `MAP_SCALE = 16` is 2208×1520 ≈ 3.36M columns and will need chunk *streaming*
-/// (don't hold every chunk mesh at once) + aggressive culling, a separate phase.
+/// Single knob to scale the whole map. The base footprint is 120×120 columns (metres);
+/// at the **×16 per-side target** (×256 area) that is 1920×1920 = 3.69M columns, which
+/// needs chunk *streaming* (don't hold every chunk mesh at once) + aggressive culling
+/// (both landed in the worldgen E/F phases).
 pub const MAP_SCALE: usize = 16;
 // Square footprint (×16 ⇒ 1920×1920 columns = 120×120 chunks = 15×15 super-tiles).
 const BASE_COLS: usize = 120;
