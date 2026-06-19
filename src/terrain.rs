@@ -349,6 +349,12 @@ pub struct VoxelTerrain {
     /// reads `tick - last_update[i]`. Integer ticks (not an `f32` time) so the timestamp never
     /// drifts. `0` at generation, when biomass starts at full capacity.
     last_update: Vec<u32>,
+    /// Inorganic nutrient pool per column (C3 nutrient cycle), `[0,255]`. Plant capacity is
+    /// scaled by it (Liebig limit), grazing CARRIES it away with the herbivore, creature death
+    /// returns it (decomposition), and it weathers toward a geology baseline. Lazy like biomass:
+    /// updated only on events (graze/deposit), weathered closed-form from `nutrient_update`.
+    nutrient: Vec<u8>,
+    nutrient_update: Vec<u32>,
 }
 
 /// Quantise a `[0,1]` field value into a `u8` (saturating). De-quantise with `/ 255.0`.
@@ -385,6 +391,28 @@ fn carrying_capacity(biome: BiomeKind, moist: f32) -> f32 {
 fn regrow(b: f32, cap: f32, elapsed: f32) -> f32 {
     let grown = cap - (cap - b) * (-BIOMASS_REGROW_RATE * elapsed).exp();
     grown.clamp(0.0, cap)
+}
+
+/// Geology nutrient baseline for a column in `[0,1]`: lowlands fertile, high ground poor (thin,
+/// leached soils), water beds moderate. The level weathering relaxes toward — the slow abiotic
+/// anchor that keeps the cycle from running down or up without bound.
+fn nutrient_baseline(biome: BiomeKind, h: u8) -> f32 {
+    let alt = (h.saturating_sub(LAND_FOOT)) as f32 / SURFACE_RANGE as f32; // 0 foot .. 1 peak
+    let base = match biome {
+        BiomeKind::Mountain | BiomeKind::Snow => 0.25,
+        BiomeKind::Desert => 0.35,
+        BiomeKind::Swamp | BiomeKind::Jungle => 0.85, // rich wet lowlands
+        _ => 0.6,
+    };
+    (base * (1.0 - 0.5 * alt)).clamp(0.05, 1.0)
+}
+
+/// Closed-form weathering: nutrient `n` relaxes toward the geology `baseline` over `elapsed`
+/// sim-seconds — `n' = base + (n − base)·e^(−RATE·elapsed)`. Same lazy shape as regrow (so it is
+/// updated only on events, never per-tick), and bounded both ways (a death-enriched column decays
+/// back down, a leached one weathers back up) → total matter stays anchored, not drifting.
+fn weather(n: f32, baseline: f32, elapsed: f32) -> f32 {
+    (baseline + (n - baseline) * (-NUTRIENT_WEATHER_RATE * elapsed).exp()).clamp(0.0, 1.0)
 }
 
 /// Multi-source BFS distance (in columns) from the nearest water column, over the whole
@@ -461,6 +489,7 @@ impl VoxelTerrain {
         let mut temp = vec![0u8; n];
         let mut moist = vec![0u8; n];
         let mut biomass = vec![0u8; n];
+        let mut nutrient = vec![0u8; n];
         for y in 0..ROWS {
             for x in 0..COLS {
                 let i = y * COLS + x;
@@ -505,9 +534,13 @@ impl VoxelTerrain {
                 surf[i] = s;
                 biome[i] = b.id();
                 flags[i] = f;
-                // Vegetation starts mature (at capacity) on the FINAL biome + moisture; water
-                // columns get 0. The lazy regrow keeps an untouched column here forever.
-                biomass[i] = quant_unit(carrying_capacity(b, cm));
+                // Nutrient starts at the geology baseline (the level weathering relaxes toward).
+                let nb = nutrient_baseline(b, s.round() as u8);
+                nutrient[i] = quant_unit(nb);
+                // Vegetation starts mature at the NUTRIENT-LIMITED capacity (carrying capacity ×
+                // nutrient fraction) on the FINAL biome + moisture; water columns get 0. Starting
+                // at the un-limited cap would overshoot and clamp down on the first read.
+                biomass[i] = quant_unit(carrying_capacity(b, cm) * nb);
             }
             progress(0.72 + 0.28 * (y + 1) as f32 / ROWS as f32);
         }
@@ -585,6 +618,8 @@ impl VoxelTerrain {
             water_dist,
             biomass,
             last_update: vec![0u32; n],
+            nutrient,
+            nutrient_update: vec![0u32; n],
         }
     }
 
@@ -685,10 +720,28 @@ impl VoxelTerrain {
         (max_d / SURFACE_RANGE as f32).clamp(0.0, 1.0)
     }
 
-    /// Vegetation capacity `[0,1]` for a column (lazy-regrow target). Recomputed from the
-    /// stored biome + moisture — a table lookup + a couple of muls, so it is not stored.
+    /// Vegetation capacity `[0,1]` for a column (lazy-regrow target): the biome/moisture base
+    /// SCALED by the column's nutrient pool (Liebig limit — a nutrient-poor column grows less
+    /// plant). Uses the STORED nutrient (frozen since the last event), so the cap is constant
+    /// between events and the lazy biomass regrow stays a valid closed form (F4 discipline).
     fn cap_at(&self, i: usize) -> f32 {
-        carrying_capacity(BiomeKind::from_id(self.biome[i]), self.moist[i] as f32 / 255.0)
+        let base = carrying_capacity(BiomeKind::from_id(self.biome[i]), self.moist[i] as f32 / 255.0);
+        base * (self.nutrient[i] as f32 / 255.0)
+    }
+
+    /// Geology nutrient baseline (`[0,1]`) for a column — what weathering relaxes toward.
+    fn nutrient_base_at(&self, i: usize) -> f32 {
+        nutrient_baseline(BiomeKind::from_id(self.biome[i]), self.surf[i].round() as u8)
+    }
+
+    /// Materialise the lazy nutrient weathering up to `tick` and persist it (an event touched
+    /// this column). Between events the column is frozen, so this is the only place nutrient
+    /// moves on its own — no per-tick sweep.
+    fn materialize_nutrient(&mut self, i: usize, tick: u64) {
+        let elapsed = (tick - self.nutrient_update[i] as u64) as f32 * TICK_LEN;
+        let n = weather(self.nutrient[i] as f32 / 255.0, self.nutrient_base_at(i), elapsed);
+        self.nutrient[i] = quant_unit(n);
+        self.nutrient_update[i] = tick as u32;
     }
 
     /// Live biomass at column index `i` and clock `tick`: the stored value (as of its last
@@ -711,11 +764,36 @@ impl VoxelTerrain {
     /// not negative food). Regrowth afterwards is handled lazily by the next read/graze.
     pub fn graze(&mut self, x: usize, y: usize, amount: f32, tick: u64) -> f32 {
         let i = y * COLS + x;
+        // Weather the nutrient to now FIRST, so `cap_at` (and thus the regrow target) reflects
+        // the current pool; then grow + graze.
+        self.materialize_nutrient(i, tick);
         let cur = self.current_biomass(i, tick);
         let taken = amount.clamp(0.0, cur);
         self.biomass[i] = quant_unit(cur - taken);
         self.last_update[i] = tick as u32;
+        // The grazed plant matter LEAVES the column with the herbivore (carried, to be returned
+        // as nutrient where the creature later dies) — the nutrient pool drops accordingly. This
+        // is what makes heavily-grazed ground go nutrient-poor (and depend on the death recycle).
+        let drained = taken * NUTRIENT_PER_BIOMASS;
+        self.nutrient[i] = quant_unit((self.nutrient[i] as f32 / 255.0 - drained).max(0.0));
         taken
+    }
+
+    /// Deposit `amount` (`[0,1]` nutrient units) into a column — the decomposition return when a
+    /// creature dies here (its locked matter goes back to the inorganic pool). Weathers first so
+    /// the addition lands on the up-to-date pool.
+    pub fn deposit_nutrient(&mut self, x: usize, y: usize, amount: f32, tick: u64) {
+        let i = y * COLS + x;
+        self.materialize_nutrient(i, tick);
+        self.nutrient[i] = quant_unit((self.nutrient[i] as f32 / 255.0 + amount).min(1.0));
+    }
+
+    /// Live nutrient level `[0,1]` at a column (weathered to `tick`, read-only — does not persist,
+    /// like `biomass_at`). For the sim's foraging-quality sense + observability.
+    pub fn nutrient_at(&self, x: usize, y: usize, tick: u64) -> f32 {
+        let i = y * COLS + x;
+        let elapsed = (tick - self.nutrient_update[i] as u64) as f32 * TICK_LEN;
+        weather(self.nutrient[i] as f32 / 255.0, self.nutrient_base_at(i), elapsed)
     }
 }
 
@@ -1790,35 +1868,39 @@ mod tests {
                 }
             }
         }
-        let (lx, ly, cap) = land.expect("no high-capacity land column found");
+        let (lx, ly, base_cap) = land.expect("no high-capacity land column found");
         let (wx, wy) = wet.expect("no water column found");
 
-        // Mature start: biomass ≈ capacity at tick 0 (within one quant step).
-        assert!((t.biomass_at(lx, ly, 0) - cap).abs() <= 1.0 / 255.0 + 1e-6, "veg not mature at gen");
+        // Effective capacity is the carrying capacity SCALED by the column's nutrient (C3 Liebig
+        // limit). Plants start mature at THAT, not the un-limited carrying capacity.
+        let eff_cap = base_cap * t.nutrient_at(lx, ly, 0);
+        let b0 = t.biomass_at(lx, ly, 0);
+        assert!((b0 - eff_cap).abs() <= 1.0 / 255.0 + 1e-6, "veg not mature at gen: b0={b0} eff_cap={eff_cap}");
         // Water is bare at any tick.
         assert_eq!(t.biomass_at(wx, wy, 0), 0.0);
         assert_eq!(t.biomass_at(wx, wy, 100_000), 0.0);
         assert_eq!(t.graze(wx, wy, 1.0, 5), 0.0, "grazed biomass off water");
 
-        // Clear-cut the land column: takes ≈ all of it, leaves ~0.
+        // Clear-cut the land column: takes ≈ the mature biomass, leaves ~0.
         let taken = t.graze(lx, ly, 1.0, 0);
-        assert!((taken - cap).abs() <= 2.0 / 255.0, "clear-cut took {taken}, expected ≈{cap}");
+        assert!((taken - eff_cap).abs() <= 2.0 / 255.0, "clear-cut took {taken}, expected ≈{eff_cap}");
         assert!(t.biomass_at(lx, ly, 0) <= 1.0 / 255.0, "column not bare right after clear-cut");
         // Over-graze immediately: nothing left to take.
         assert!(t.graze(lx, ly, 1.0, 0) <= 1.0 / 255.0, "over-graze produced food from nothing");
 
-        // Regrows from 0 back toward cap, monotonically, with NO downward drift across 200
-        // graze→requantise cycles (F5 quantisation-noise guard).
+        // Regrows from 0 upward, monotonically (no downward drift across 200 graze→requantise
+        // cycles — the F5 quant-noise guard), never above the un-limited carrying capacity, and
+        // recovers a real fraction of capacity as nutrient weathers back toward its baseline.
         let mut prev = 0.0f32;
         for k in 1..=200u64 {
             let tick = k * 50;
             t.graze(lx, ly, 0.0, tick); // take nothing, but re-quantise current at this tick
             let b = t.biomass_at(lx, ly, tick);
             assert!(b >= prev - 2.0 / 255.0, "biomass drifted DOWN at step {k}: {b} < {prev}");
-            assert!(b <= cap + 1.0 / 255.0, "biomass exceeded cap at step {k}: {b} > {cap}");
+            assert!(b <= base_cap + 1.0 / 255.0, "biomass exceeded carrying capacity at step {k}: {b} > {base_cap}");
             prev = b;
         }
-        assert!((prev - cap).abs() < 0.05, "did not regrow to cap: {prev} vs {cap}");
+        assert!(prev > 0.4 * eff_cap, "did not regrow a meaningful fraction of cap: {prev} vs eff {eff_cap}");
     }
 
     /// Biomass replays deterministically: same graze sequence ⇒ same readings.

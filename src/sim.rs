@@ -328,6 +328,10 @@ impl Sim {
             self.kills += 1;
             let cap = self.creatures[i].max_energy();
             self.creatures[i].energy = (self.creatures[i].energy + gain).min(cap);
+            // The predator gained ENERGY; the prey's MATTER returns to the nutrient pool at its
+            // column (a kill site fertilises the ground — energy and matter are separate currencies).
+            let (dx, dy) = column_index(pos[j]);
+            terrain.deposit_nutrient(dx, dy, bm[j] as f32 * NUTRIENT_PER_CELL, tick);
         }
         // (c) apply per surviving creature in index order.
         // Logistic birth gate from the population at the START of the tick (deterministic;
@@ -390,10 +394,13 @@ impl Sim {
             let kleiber = (c.biomass() as f32).powf(0.75);
             c.energy -= (SIM_BASE_METABOLISM * kleiber * layer.metab_mult() + MOVE_COST * throttle) * TICK_LEN;
             c.age += 1;
-            // Death by starvation.
+            // Death by starvation. The creature's matter returns to the nutrient pool here
+            // (decomposition) — closing the cycle and re-fertilising the death site.
             if c.energy <= 0.0 {
                 c.alive = false;
                 self.deaths += 1;
+                let (dx, dy) = column_index(c.pos);
+                terrain.deposit_nutrient(dx, dy, c.biomass() as f32 * NUTRIENT_PER_CELL, tick);
                 continue;
             }
             // Death by senescence: old-age probability rising with age² gives demographic
@@ -403,6 +410,8 @@ impl Sim {
             if sp > 0.0 && Rng::new(seed_fold(self.world_seed, &[SALT_DEATH, c.id, tick])).unit() < sp {
                 c.alive = false;
                 self.deaths += 1;
+                let (dx, dy) = column_index(c.pos);
+                terrain.deposit_nutrient(dx, dy, c.biomass() as f32 * NUTRIENT_PER_CELL, tick);
                 continue;
             }
             // Reproduction: bud a mutated child, splitting energy in half. Gated by the logistic
@@ -577,6 +586,24 @@ impl Sim {
         m
     }
 
+    /// Mean nutrient level (`[0,1]`) at the columns creatures occupy — the realised fertility of
+    /// the inhabited landscape. Falls where grazing strips the ground, rises where deaths return
+    /// matter + weathering replenishes; a healthy bounded value means the cycle is self-sustaining.
+    pub fn avg_nutrient(&self, terrain: &VoxelTerrain, tick: u64) -> f32 {
+        if self.creatures.is_empty() {
+            return 0.0;
+        }
+        let s: f32 = self
+            .creatures
+            .iter()
+            .map(|c| {
+                let (cx, cy) = column_index(c.pos);
+                terrain.nutrient_at(cx, cy, tick)
+            })
+            .sum();
+        s / self.creatures.len() as f32
+    }
+
     /// Fraction of the population that is autotrophic (photosynthesises — a producer tier inside
     /// the creature substrate, not just the exogenous plant field).
     pub fn frac_autotroph(&self) -> f32 {
@@ -747,6 +774,26 @@ mod tests {
         assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
     }
 
+    /// C3-nutrient-cycle acceptance: the mineral pool stays BOUNDED and self-sustaining — it
+    /// neither drains to zero (grazing without return) nor pins the ceiling (death return without
+    /// loss). Inhabited ground is drawn DOWN from its baseline by grazing (the drain works), the
+    /// death-return + weathering keep it from collapsing, and the population stays healthy.
+    #[test]
+    fn nutrient_cycle_is_bounded_and_self_sustaining() {
+        let mut t = world();
+        let start = t.nutrient_at(COLS / 2, ROWS / 2, 0); // a baseline sample before any grazing
+        let mut s = Sim::new(1, &t);
+        for tick in 0..6000 {
+            s.step(&mut t, tick);
+        }
+        let n = s.avg_nutrient(&t, 6000);
+        eprintln!("nutrient: baseline≈{start:.2} → inhabited {n:.2}, pop {}", s.population());
+        assert!(n > 0.05, "nutrient pool collapsed to zero ({n:.3}) — death return too weak");
+        assert!(n < 0.95, "nutrient pinned the ceiling ({n:.3}) — drain too weak");
+        assert!(n < start, "grazing did not draw inhabited nutrient below baseline ({n:.2} vs {start:.2})");
+        assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -758,11 +805,10 @@ mod tests {
             s.step(&mut t, tick);
             if tick % 1000 == 0 {
                 let (multi, _) = s.complexity_mix();
-                let m = s.stratum_mix(&t);
                 eprintln!(
-                    "tick {tick}: pop {} bm {:.2} multi {:.0}% carniv {:.1}% auto {:.1}% allop {:.2} | strata u{:.0}/s{:.0}/a{:.0}/w{:.0}",
-                    s.population(), s.avg_biomass(), multi * 100.0, s.frac_carnivore() * 100.0, s.frac_autotroph() * 100.0,
-                    s.thermal_correlation(&t), m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
+                    "tick {tick}: pop {} bm {:.2} multi {:.0}% carniv {:.1}% auto {:.1}% nutrient {:.2} allop {:.2}",
+                    s.population(), s.avg_biomass(), multi * 100.0, s.frac_carnivore() * 100.0,
+                    s.frac_autotroph() * 100.0, s.avg_nutrient(&t, tick), s.thermal_correlation(&t)
                 );
             }
         }
