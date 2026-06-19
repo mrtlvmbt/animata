@@ -68,11 +68,16 @@ impl WorldClock {
         n
     }
 
-    /// Fold a real frame `dt` (seconds) into whole sub-steps and run them, returning how many
-    /// ran. Paused ⇒ zero. The accumulator carries the sub-tick remainder so the average rate
-    /// tracks `time_scale` exactly; a frame that would owe more than [`MAX_SUBSTEPS`] is capped
-    /// and its backlog dropped (a lag spike resets rather than snowballing).
-    pub fn frame(&mut self, dt: f32) -> u64 {
+    /// Fold a real frame `dt` (seconds) into a count of whole sub-steps to run this frame —
+    /// but DO NOT advance: the caller loops `for _ in 0..n { clock.advance(1); sim_step(..) }`
+    /// so the sim runs exactly one fixed tick per sub-step (each sees its own `tick()`), and
+    /// `advance` stays a pure counter. Paused ⇒ zero. The accumulator carries the sub-tick
+    /// remainder so the average rate tracks `time_scale` exactly; a frame owing more than
+    /// [`MAX_SUBSTEPS`] is capped and its backlog dropped (a lag spike resets, not snowballs).
+    ///
+    /// This is the **interactive** (wall-clock-driven) path → best-effort, NOT for seed replay.
+    /// Headless replay drives `advance(1)` + `sim_step` a FIXED number of times instead.
+    pub fn substeps(&mut self, dt: f32) -> u64 {
         if self.paused {
             return 0;
         }
@@ -85,7 +90,7 @@ impl WorldClock {
             // catch up. Drop the backlog so we don't run the cap every frame for a while.
             self.accum = 0.0;
         }
-        self.advance(n)
+        n
     }
 }
 
@@ -106,38 +111,42 @@ mod tests {
         assert!((c.sim_time() - 15.0 * TICK_LEN as f64).abs() < 1e-12);
     }
 
-    /// The interactive wrapper accumulates a steady `dt` into whole sub-steps at the right
-    /// average rate (here: dt = half a tick at scale 1 ⇒ one sub-step every two frames).
+    /// The interactive scheduler accumulates a steady `dt` into whole sub-steps at the right
+    /// average rate (here: dt = half a tick at scale 1 ⇒ one sub-step every two frames). The
+    /// caller is what advances; `substeps` only schedules.
     #[test]
-    fn frame_accumulates_at_the_right_rate() {
+    fn substeps_accumulate_at_the_right_rate() {
         let mut c = WorldClock::new();
         let dt = TICK_LEN / 2.0; // two frames per sub-step
         let mut ran = 0u64;
         for _ in 0..20 {
-            ran += c.frame(dt);
+            let n = c.substeps(dt);
+            for _ in 0..n {
+                c.advance(1);
+            }
+            ran += n;
         }
         assert_eq!(ran, c.tick());
         assert_eq!(c.tick(), 10, "20 half-tick frames should yield 10 sub-steps");
     }
 
-    /// Spiral-of-death guard: a single giant `dt` never runs more than `MAX_SUBSTEPS`, and the
-    /// backlog is dropped (the next normal frame doesn't keep firing the cap).
+    /// Spiral-of-death guard: a single giant `dt` never schedules more than `MAX_SUBSTEPS`, and
+    /// the backlog is dropped (the next normal frame doesn't keep firing the cap).
     #[test]
-    fn frame_caps_a_lag_spike() {
+    fn substeps_cap_a_lag_spike() {
         let mut c = WorldClock::new();
-        let n = c.frame(1000.0 * TICK_LEN); // would owe 1000 sub-steps
+        let n = c.substeps(1000.0 * TICK_LEN); // would owe 1000 sub-steps
         assert_eq!(n, MAX_SUBSTEPS, "lag spike not clamped to MAX_SUBSTEPS");
-        // Backlog dropped: a tiny following frame runs ~no sub-steps, not a flood.
-        let n2 = c.frame(TICK_LEN / 2.0);
-        assert!(n2 <= 1, "backlog was not dropped after the spike: ran {n2}");
+        let n2 = c.substeps(TICK_LEN / 2.0);
+        assert!(n2 <= 1, "backlog was not dropped after the spike: scheduled {n2}");
     }
 
-    /// Pause freezes the interactive clock but not the canonical `advance`.
+    /// Pause freezes the interactive scheduler but not the canonical `advance`.
     #[test]
-    fn pause_freezes_frame_only() {
+    fn pause_freezes_substeps_only() {
         let mut c = WorldClock::new();
         c.paused = true;
-        assert_eq!(c.frame(10.0 * TICK_LEN), 0);
+        assert_eq!(c.substeps(10.0 * TICK_LEN), 0);
         assert_eq!(c.tick(), 0);
         c.advance(3); // deterministic path ignores pause
         assert_eq!(c.tick(), 3);

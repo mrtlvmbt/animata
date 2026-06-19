@@ -72,6 +72,50 @@ pub const DAY_LEN: f32 = 600.0;
 /// patch is most of the way back within a sim-day). Tunable.
 pub const BIOMASS_REGROW_RATE: f32 = 0.01;
 
+// ---- Life simulation: C0 unicellular ecosystem (consumed in sim.rs) ----
+/// Founder creatures spawned at world start (on land columns).
+pub const START_CREATURES: usize = 2000;
+/// Hard population ceiling (deterministic random cull above it).
+pub const SIM_POP_CAP: usize = 12000;
+/// Energy a founder / newborn starts with.
+pub const START_ENERGY: f32 = 50.0;
+/// Energy at/above which a creature buds off a child (splitting its energy in half).
+pub const REPRO_ENERGY: f32 = 100.0;
+/// Energy is capped here so a well-fed creature that the logistic gate keeps from breeding
+/// doesn't hoard energy without bound (it just sits full until it gets to reproduce).
+pub const MAX_ENERGY: f32 = 200.0;
+/// Base metabolic energy drain per **sim-second** at biomass 1 — scaled by `biomass^0.75`
+/// (Kleiber) and by a climate factor. Movement adds on top.
+pub const SIM_BASE_METABOLISM: f32 = 0.05;
+/// Extra energy per sim-second at full throttle (movement effort).
+pub const MOVE_COST: f32 = 0.05;
+/// World units travelled per sim-second at full throttle.
+pub const CREATURE_SPEED: f32 = 6.0;
+/// Max turn rate (radians per sim-second).
+pub const TURN_RATE: f32 = 3.0;
+/// How much plant biomass (`[0,1]` field units) a creature grazes per sim-second (capped by
+/// what the column holds).
+pub const EAT_RATE: f32 = 0.8;
+/// Energy gained per unit of grazed plant biomass (the herbivore conversion of the trophic
+/// loop). Plant biomass is `[0,1]` per column; this sets its caloric worth.
+pub const PLANT_BIOMASS_TO_ENERGY: f32 = 8.0;
+/// Soft carrying capacity: reproduction is gated by `1 - N/SOFT_CAP`, so the population
+/// self-limits HERE (well below the hard `SIM_POP_CAP` safety net). On the ×16 map the
+/// vegetation supports far more than the single-thread budget, so food alone can't regulate a
+/// ≤12k population — this aggregate competition term stands in until spatially food-limited
+/// densities are reachable (chunked millions, a later scale phase).
+pub const SOFT_CAP: f32 = 6000.0;
+/// Senescence reference lifespan in ticks: per-tick old-age death probability rises as
+/// `SENESCENCE_RATE·(age/LIFESPAN)²`, giving demographic turnover (so death isn't only the
+/// random over-cap cull) and a real survival-to-reproduce selection pressure.
+pub const LIFESPAN: f32 = 1500.0;
+pub const SENESCENCE_RATE: f32 = 0.02;
+/// Distance (world units) at which a creature samples the plant-biomass field to feel a
+/// gradient (forward / left / right of its heading).
+pub const SENSE_RADIUS: f32 = 5.0;
+/// Std-dev of the Gaussian-ish weight perturbation applied to a child's brain on reproduction.
+pub const MUTATION_STD: f32 = 0.12;
+
 // ---- Creature density contract (documented now, consumed by the future sim) ----
 /// Creature body size in metres (mouse-sized).
 #[allow(dead_code)]

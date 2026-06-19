@@ -37,20 +37,7 @@ const THERMAL_PASSES: u32 = 8;
 const TALUS: f32 = 0.012;
 const THERMAL_RATE: f32 = 0.5;
 
-/// Deterministic per-droplet PRNG (splitmix64).
-struct Rng(u64);
-impl Rng {
-    fn next_u64(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
-        let mut z = self.0;
-        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-        z ^ (z >> 31)
-    }
-    fn unit(&mut self) -> f32 {
-        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
-    }
-}
+use crate::rng::Rng;
 
 /// Bilinear height + gradient at a float position inside `[0, W-1) × [0, H-1)`.
 fn height_grad(elev: &[f32], px: f32, py: f32) -> (f32, f32, f32) {
@@ -96,7 +83,7 @@ fn hydraulic(seed: u64, elev: &mut [f32], progress: &dyn Fn(f32)) {
         *w /= wsum;
     }
 
-    let mut rng = Rng(seed ^ 0xE051_0051_0051_0051);
+    let mut rng = Rng::new(seed ^ 0xE051_0051_0051_0051);
     let num = ((COLS * ROWS) as f32 * DROPLET_FRACTION) as u64;
     // Report progress every ~1% of droplets — cheap, keeps the bar moving smoothly.
     let report_every = (num / 100).max(1);

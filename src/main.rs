@@ -17,11 +17,14 @@ mod config;
 mod dev_bridge;
 mod erosion;
 mod hydrology;
+mod rng;
+mod sim;
 mod tectonics;
 mod terrain;
 
 use clock::WorldClock;
 use config::*;
+use sim::Sim;
 use macroquad::miniquad::{
     Bindings, BlendFactor, BlendState, BlendValue, BufferSource, BufferType, BufferUsage,
     Comparison, CullFace, Equation, FrontFaceOrder, PassAction, Pipeline, PipelineParams,
@@ -860,9 +863,11 @@ async fn main() {
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
     let mut show_info = true;
-    // Sim time base (S2). Advances in fixed sub-steps folded from the real frame `dt`; `P`
-    // pauses it. No sim body yet — only the tick counter moves (shown in the HUD / bridge).
+    // Sim time base (S2). The main loop schedules fixed sub-steps from the real frame `dt`
+    // (`clock.substeps`) and drives one `sim.step` per sub-step; `P` pauses. `advance` stays a
+    // pure counter (HUD/day-frac). The creature sim (C0) is created once the world is ready.
     let mut clock = WorldClock::new();
+    let mut sim: Option<Sim> = None;
     // `G` cycles the debug view: off → Topo (GPU height/depth, water hidden) → Temp → Moist
     // → WaterDist → off. Topo reshades the 3D scene; the climate/water-dist modes overlay a
     // colourmap MINIMAP of the per-column field (the live consumer of the S1 env getters, so
@@ -889,6 +894,8 @@ async fn main() {
         // reset the streamer so meshes rebuild around the camera from the new terrain.
         if let Some(job) = &gen {
             if let Ok(t) = job.rx.try_recv() {
+                // Seed the creature population from the new world (deterministic from its seed).
+                sim = Some(Sim::new(seed, &t));
                 terrain = Some(t);
                 gen = None;
                 let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
@@ -900,9 +907,17 @@ async fn main() {
         if dt > 0.0 {
             fps = 0.9 * fps + 0.1 / dt;
         }
-        // Advance the sim clock: fold this frame's real `dt` into fixed sub-steps (capped, so
-        // a lag spike can't spiral). The sim body is empty in S2 — only the tick counter moves.
-        clock.frame(dt);
+        // Drive the sim: schedule whole sub-steps from real `dt` (capped, so a lag spike can't
+        // spiral), then run EXACTLY one fixed `sim.step` per sub-step, each at its own tick.
+        // `advance` stays a pure counter (HUD/day-frac); the interactive cadence is best-effort
+        // (not for seed replay — that path is the fixed-step headless harness).
+        let substeps = clock.substeps(dt);
+        for _ in 0..substeps {
+            clock.advance(1);
+            if let (Some(sim), Some(terrain)) = (sim.as_mut(), terrain.as_mut()) {
+                sim.step(terrain, clock.tick());
+            }
+        }
 
         // ---- Input (no GUI) ----
         if is_key_pressed(KeyCode::I) {
@@ -1024,6 +1039,12 @@ async fn main() {
                         "clock": { "tick": clock.tick(), "sim_time": clock.sim_time(),
                                    "day_frac": clock.day_frac(), "time_scale": clock.time_scale,
                                    "paused": clock.paused },
+                        "sim": sim.as_ref().map(|s| serde_json::json!({
+                            "population": s.population(),
+                            "avg_energy": s.avg_energy(),
+                            "births": s.births,
+                            "deaths": s.deaths,
+                        })),
                     }));
                 }
                 dev_bridge::Cmd::SetClock { scale, paused } => {
@@ -1073,7 +1094,9 @@ async fn main() {
                     // (e.g. an immediate screenshot) deterministically, so we block here.
                     seed = s.unwrap_or(seed.wrapping_add(1));
                     gen = None; // cancel any in-flight background regen — this wins
-                    terrain = Some(VoxelTerrain::new(seed));
+                    let t = VoxelTerrain::new(seed);
+                    sim = Some(Sim::new(seed, &t)); // re-seed the population from the new world
+                    terrain = Some(t);
                     let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                     streamer.clear(ctx);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
@@ -1188,6 +1211,34 @@ async fn main() {
             },
         );
 
+        // Creatures: LOD dots over the blitted scene (C0). Project each creature's column-top
+        // world point through the same camera matrix; draw a small dot, tinted by lineage so
+        // clusters are visible. Off-screen ones are culled by the projection.
+        let mut on_screen = 0usize;
+        if let (Some(sim), Some(terrain)) = (sim.as_ref(), terrain.as_ref()) {
+            let (sw, sh) = (screen_width(), screen_height());
+            for c in &sim.creatures {
+                let (cx, cy) = sim::column_index(c.pos);
+                let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
+                let clip = vp * vec4(c.pos.x, wy, c.pos.y, 1.0);
+                if clip.w <= 0.0 {
+                    continue;
+                }
+                let (nx, ny) = (clip.x / clip.w, clip.y / clip.w);
+                if !(-1.0..=1.0).contains(&nx) || !(-1.0..=1.0).contains(&ny) {
+                    continue;
+                }
+                let (px, py) = ((nx * 0.5 + 0.5) * sw, (1.0 - (ny * 0.5 + 0.5)) * sh);
+                // Lineage tint: hash the founder id into a bright RGB so clusters are visible.
+                // A thin dark ring keeps the dot legible over any terrain colour.
+                let hsh = c.founder.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let rgb = |sh: u32| 0.45 + 0.55 * (((hsh >> sh) & 0xFF) as f32 / 255.0);
+                draw_circle(px, py, 3.0, Color::new(0.0, 0.0, 0.0, 0.6));
+                draw_circle(px, py, 2.2, Color::new(rgb(0), rgb(20), rgb(40), 1.0));
+                on_screen += 1;
+            }
+        }
+
         // Minimal debug readout (toggle `I`): fps + frame time. Drawn with a 1px
         // shadow so it stays legible over any terrain colour.
         // Build the readout unconditionally (reads `drawn` in every build config),
@@ -1206,10 +1257,15 @@ async fn main() {
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
         );
-        // Sim-clock readout (S2): the always-built consumer of the WorldClock getters.
+        // Sim-clock + population readout. The creature count is the always-built consumer of
+        // the sim getters; absent until the world is ready.
         let pause = if clock.paused { "  [PAUSED, P]" } else { "" };
+        let life = sim
+            .as_ref()
+            .map(|s| format!("   pop {}   E {:.0}   on-screen {on_screen}", s.population(), s.avg_energy()))
+            .unwrap_or_default();
         let clock_line = format!(
-            "tick {}   sim {:.1}s   day {:.2}   x{:.1}{pause}",
+            "tick {}   sim {:.1}s   day {:.2}   x{:.1}{life}{pause}",
             clock.tick(), clock.sim_time(), clock.day_frac(), clock.time_scale
         );
         if show_info {
