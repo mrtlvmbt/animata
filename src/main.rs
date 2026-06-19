@@ -265,8 +265,12 @@ attribute vec4 color0;
 uniform mat4 mvp;
 varying lowp vec4 color;
 varying highp float vy;
+varying lowp float rim;
 void main() {
     gl_Position = mvp * vec4(position, 1.0);
+    // texcoord.y flags a contour-overlay vert (1.0 = the dark edge strips); the fragment
+    // shader hides them when the outline toggle is off. Terrain/tree faces leave it 0.0.
+    rim = texcoord.y;
     // texcoord.x is a per-vertex depth nudge flag (-1/0/+1): a face's TOP edge is pushed a
     // hair toward the far plane (+1) so the column's own top face deterministically wins
     // their shared rim (otherwise they z-fight into dark corner speckle, whatever the
@@ -284,9 +288,18 @@ void main() {
 const CHUNK_FRAG: &str = r#"#version 100
 varying lowp vec4 color;
 varying highp float vy;
+varying lowp float rim;
 uniform highp vec4 dbg;
 void main() {
-    if (dbg.x > 0.5) {
+    // dbg.z = outline on. A contour-overlay frag (rim) is discarded when it's off, baring the
+    // face behind it (the strip is a nudged overlay, so there is always geometry under it).
+    if (rim > 0.5 && dbg.z < 0.5) discard;
+    if (dbg.y > 0.5) {
+        // WATER/LAND mask debug (key J): every opaque column flat grey = "land". The water
+        // pass paints flat blue over the columns generation flagged as water, so a dry cell
+        // that SHOULD be flooded shows through as a grey hole inside the blue.
+        gl_FragColor = vec4(0.62, 0.60, 0.54, 1.0);
+    } else if (dbg.x > 0.5) {
         // Quantise to integer levels and colour each by height, with STRONG per-level
         // brightness alternation + a dark line every 5 levels — so every cube step reads
         // as its own band (a topographic-map look). Waterline is at level 6.
@@ -363,6 +376,11 @@ highp float vnoise(highp vec2 p) {
 }
 
 void main() {
+    if (params.y > 0.5) {
+        // WATER/LAND mask debug (key J): flat OPAQUE blue over every flagged-water column.
+        gl_FragColor = vec4(0.16, 0.42, 0.70, 1.0);
+        return;
+    }
     highp float t = params.x;
     highp vec2 p = vWorld * 0.20; // ripple scale (world units per noise cell)
     // Domain warp: two slow scrolling noise layers warp a third → organic, living surface.
@@ -418,7 +436,10 @@ struct GpuChunk {
 fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
     let shader = ctx
         .new_shader(
-            ShaderSource::Glsl { vertex: CHUNK_VERT, fragment: CHUNK_FRAG },
+            ShaderSource::Glsl {
+                vertex: CHUNK_VERT,
+                fragment: CHUNK_FRAG,
+            },
             ShaderMeta {
                 images: vec![],
                 uniforms: UniformBlockLayout {
@@ -479,7 +500,10 @@ fn chunk_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
 fn water_pipeline(ctx: &mut dyn RenderingBackend) -> Pipeline {
     let shader = ctx
         .new_shader(
-            ShaderSource::Glsl { vertex: WATER_VERT, fragment: WATER_FRAG },
+            ShaderSource::Glsl {
+                vertex: WATER_VERT,
+                fragment: WATER_FRAG,
+            },
             ShaderMeta {
                 images: vec![],
                 uniforms: UniformBlockLayout {
@@ -624,9 +648,21 @@ fn lod_hyst(d: i32, cur: Option<u32>) -> u32 {
     let raw = lod_for(d);
     match cur {
         // Coarsening (moved away): require d past the boundary by the margin.
-        Some(c) if raw > c => if lod_for(d - LOD_HYSTERESIS) > c { raw } else { c },
+        Some(c) if raw > c => {
+            if lod_for(d - LOD_HYSTERESIS) > c {
+                raw
+            } else {
+                c
+            }
+        }
         // Refining (moved closer): require d inside the boundary by the margin.
-        Some(c) if raw < c => if lod_for(d + LOD_HYSTERESIS) < c { raw } else { c },
+        Some(c) if raw < c => {
+            if lod_for(d + LOD_HYSTERESIS) < c {
+                raw
+            } else {
+                c
+            }
+        }
         _ => raw,
     }
 }
@@ -661,7 +697,13 @@ impl Streamer {
         self.ready.clear();
     }
 
-    fn update(&mut self, ctx: &mut dyn RenderingBackend, t: &VoxelTerrain, center: (i32, i32), zoom: f32) {
+    fn update(
+        &mut self,
+        ctx: &mut dyn RenderingBackend,
+        t: &VoxelTerrain,
+        center: (i32, i32),
+        zoom: f32,
+    ) {
         let (ccx, ccy) = center;
         let nsx = (t.chunks_x as i32 + SUPER - 1) / SUPER;
         let nsy = (t.chunks_y as i32 + SUPER - 1) / SUPER;
@@ -846,7 +888,9 @@ async fn main() {
     let water_pipe;
     let mut streamer = Streamer::new();
     {
-        let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+        let InternalGlContext {
+            quad_context: ctx, ..
+        } = unsafe { get_internal_gl() };
         pipeline = chunk_pipeline(ctx);
         water_pipe = water_pipeline(ctx);
     }
@@ -880,6 +924,12 @@ async fn main() {
     let mut field_map: Option<(DebugView, u64, Texture2D)> = None;
     // `H` hides the translucent water surface, baring the seabed/terrain underneath.
     let mut water_on = true;
+    // `J` toggles the WATER/LAND mask: land flat grey, generation-flagged water flat blue —
+    // dry cells that should be flooded show as grey holes inside the blue (a gen bug probe).
+    let mut mask = false;
+    // `O` toggles the dark step-edge outline (the contour strips baked along every terrace
+    // rim). On by default; off bares the plain shaded faces.
+    let mut outline = true;
     // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
     let mut grab: Option<Vec2> = None;
 
@@ -933,6 +983,12 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::P) {
             clock.paused = !clock.paused;
+        }
+        if is_key_pressed(KeyCode::J) {
+            mask = !mask;
+        }
+        if is_key_pressed(KeyCode::O) {
+            outline = !outline;
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
@@ -1164,7 +1220,13 @@ async fn main() {
                 },
             );
             ctx.apply_pipeline(&pipeline);
-            let dbg = vec4(if debug_view == DebugView::Topo { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0);
+            // dbg.x = topo height view, dbg.y = water/land mask, dbg.z = step-edge outline on.
+            let dbg = vec4(
+                if debug_view == DebugView::Topo { 1.0 } else { 0.0 },
+                if mask { 1.0 } else { 0.0 },
+                if outline { 1.0 } else { 0.0 },
+                0.0,
+            );
             ctx.apply_uniforms(UniformsSource::table(&ChunkUniforms { mvp: vp, dbg }));
             // Per super-tile draw EITHER its detail chunks (if ready) OR its coarse buffer
             // (otherwise) — never both. So the tiers never overlap (no z-fight) and a
@@ -1194,9 +1256,11 @@ async fn main() {
             // topo mode (bed laid bare) or when toggled off with `H`. Same draw rule as the
             // opaque tiers so the two never overlap; `depth_write:false` lets terrain in
             // front still occlude it without the water occluding itself.
-            if debug_view != DebugView::Topo && water_on {
+            // Mask mode forces the water pass on (flat blue) even over the topo gate; normal
+            // mode draws it unless topo or `H` hid it.
+            if mask || (debug_view != DebugView::Topo && water_on) {
                 ctx.apply_pipeline(&water_pipe);
-                let params = vec4(get_time() as f32, 0.0, 0.0, 0.0);
+                let params = vec4(get_time() as f32, if mask { 1.0 } else { 0.0 }, 0.0, 0.0);
                 ctx.apply_uniforms(UniformsSource::table(&WaterUniforms { mvp: vp, params }));
                 for (key, lc) in &streamer.coarse {
                     if !ready.contains(key) {
@@ -1260,18 +1324,23 @@ async fn main() {
         // Build the readout unconditionally (reads `drawn` in every build config),
         // draw it only when toggled on.
         let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
-        let mode = match debug_view {
-            DebugView::Topo => "   [TOPO: height/depth, G]",
-            DebugView::Temp => "   [TEMP map, G]",
-            DebugView::Moist => "   [MOIST map, G]",
-            DebugView::WaterDist => "   [WATER-DIST map, G]",
-            DebugView::Slope => "   [SLOPE map, G]",
-            DebugView::Biomass => "   [BIOMASS map, G — right-drag to graze]",
-            DebugView::None if !water_on => "   [water off, H]",
-            DebugView::None => "",
+        let mode = if mask {
+            "   [WATER/LAND mask, J]"
+        } else {
+            match debug_view {
+                DebugView::Topo => "   [TOPO: height/depth, G]",
+                DebugView::Temp => "   [TEMP map, G]",
+                DebugView::Moist => "   [MOIST map, G]",
+                DebugView::WaterDist => "   [WATER-DIST map, G]",
+                DebugView::Slope => "   [SLOPE map, G]",
+                DebugView::Biomass => "   [BIOMASS map, G — right-drag to graze]",
+                DebugView::None if !water_on => "   [water off, H]",
+                DebugView::None => "",
+            }
         };
+        let outl = if outline { "" } else { "   [outline off, O]" };
         let line = format!(
-            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
+            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}{outl}"
         );
         // Sim-clock + population readout. The creature count is the always-built consumer of
         // the sim getters; absent until the world is ready.
@@ -1391,24 +1460,28 @@ struct BiomeDef {
 }
 
 const fn def(surface: (f32, f32, f32), tree_density: f32, tree: TreeKind) -> BiomeDef {
-    BiomeDef { surface, tree_density, tree }
+    BiomeDef {
+        surface,
+        tree_density,
+        tree,
+    }
 }
 
 /// Indexed by `BiomeKind::id()` (0..12 used, 12..16 padded). Order matches the enum.
 static BIOME_DEFS: [BiomeDef; 16] = [
-    def((0.13, 0.32, 0.55), 0.0, TreeKind::None),       // 0 Ocean
-    def((0.84, 0.78, 0.54), 0.0, TreeKind::None),       // 1 Beach
+    def((0.13, 0.32, 0.55), 0.0, TreeKind::None), // 0 Ocean
+    def((0.84, 0.78, 0.54), 0.0, TreeKind::None), // 1 Beach
     def((0.42, 0.62, 0.30), 0.04, TreeKind::Broadleaf), // 2 Plains
     def((0.20, 0.46, 0.24), 0.30, TreeKind::Broadleaf), // 3 Forest
-    def((0.80, 0.70, 0.44), 0.0, TreeKind::None),       // 4 Desert
-    def((0.48, 0.46, 0.45), 0.0, TreeKind::None),       // 5 Mountain
-    def((0.93, 0.95, 0.98), 0.02, TreeKind::Conifer),   // 6 Snow
-    def((0.17, 0.38, 0.29), 0.30, TreeKind::Conifer),   // 7 Taiga
-    def((0.62, 0.64, 0.56), 0.0, TreeKind::None),       // 8 Tundra
+    def((0.80, 0.70, 0.44), 0.0, TreeKind::None), // 4 Desert
+    def((0.48, 0.46, 0.45), 0.0, TreeKind::None), // 5 Mountain
+    def((0.93, 0.95, 0.98), 0.02, TreeKind::Conifer), // 6 Snow
+    def((0.17, 0.38, 0.29), 0.30, TreeKind::Conifer), // 7 Taiga
+    def((0.62, 0.64, 0.56), 0.0, TreeKind::None), // 8 Tundra
     def((0.70, 0.66, 0.34), 0.03, TreeKind::Broadleaf), // 9 Savanna
     def((0.31, 0.40, 0.25), 0.14, TreeKind::Broadleaf), // 10 Swamp
     def((0.12, 0.43, 0.17), 0.50, TreeKind::Broadleaf), // 11 Jungle
-    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),       // 12-15 padding
+    def((0.42, 0.62, 0.30), 0.0, TreeKind::None), // 12-15 padding
     def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
     def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
     def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
@@ -1485,7 +1558,14 @@ fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Vec<Ba
 /// only. Returns `(opaque, water)`: the opaque seabed/land/trees, plus a translucent
 /// water surface (one quad per submerged column + connective faces for river steps),
 /// drawn in a second, animated pass.
-fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usize, lod: u32) -> (Vec<Batch>, Vec<Batch>) {
+fn build_region_mesh(
+    t: &VoxelTerrain,
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+    lod: u32,
+) -> (Vec<Batch>, Vec<Batch>) {
     let stride = 1usize << lod;
     let si = stride as i32;
     let mut opaque = Vec::new();
@@ -1534,19 +1614,35 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
                 top_rgb(biome)
             };
             let rocky = submerged || matches!(biome, BiomeKind::Mountain | BiomeKind::Snow);
-            push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col);
             let nb = [
                 (t.height(ix + si, iy), t.water_level(ix + si, iy), Face::Px),
                 (t.height(ix - si, iy), t.water_level(ix - si, iy), Face::Nx),
                 (t.height(ix, iy + si), t.water_level(ix, iy + si), Face::Pz),
                 (t.height(ix, iy - si), t.water_level(ix, iy - si), Face::Nz),
             ];
+            // A face that fronts a LOWER neighbour is a step edge; the top's rim verts on that
+            // edge get darkened (fake AO), so a 1-cell dark band traces every height boundary —
+            // otherwise two same-biome plateaus at different heights read as one flat tone.
+            let drops = [nb[0].0 < h, nb[1].0 < h, nb[2].0 < h, nb[3].0 < h]; // [Px,Nx,Pz,Nz]
+            push_top(&mut verts, &mut idx, gx, gy, stride, h, top_col, drops);
             for (nh, nwl, face) in nb {
                 if nh < h {
                     // `nwl` = the neighbour's water surface: levels of this face below it are
                     // underwater (this neighbour is the water body fronting the face), so the
                     // mesher colours them as seabed rather than land strata.
-                    push_side(&mut verts, &mut idx, (gx, gy), stride, h, nh, face, top_col, rocky, nwl);
+                    push_side(
+                        &mut verts,
+                        &mut idx,
+                        (gx, gy),
+                        stride,
+                        h,
+                        nh,
+                        face,
+                        top_col,
+                        rocky,
+                        nwl,
+                        lod == 0,
+                    );
                 }
             }
 
@@ -1578,7 +1674,8 @@ fn build_region_mesh(t: &VoxelTerrain, x0: usize, y0: usize, x1: usize, y1: usiz
             // out instead of a hard edge). Water itself is a separate translucent pass.
             if !submerged && lod <= 1 {
                 let bd = biome_def(biome);
-                if bd.tree != TreeKind::None && feature_unit(t.seed, gx, gy, 101) < bd.tree_density {
+                if bd.tree != TreeKind::None && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
+                {
                     collect_tree(&mut tvox, t, gx, gy, h, bd.tree);
                 }
             }
@@ -1602,11 +1699,18 @@ type VoxMap = std::collections::HashMap<(i32, i32, u8), (f32, f32, f32)>;
 fn collect_tree(vox: &mut VoxMap, t: &VoxelTerrain, gx: usize, gy: usize, h: u8, kind: TreeKind) {
     let seed = t.seed;
     let trunk = (0.36, 0.26, 0.16);
-    let leaf = if kind == TreeKind::Conifer { (0.09, 0.24, 0.16) } else { (0.16, 0.42, 0.20) };
+    let leaf = if kind == TreeKind::Conifer {
+        (0.09, 0.24, 0.16)
+    } else {
+        (0.16, 0.42, 0.20)
+    };
     let (gxi, gyi) = (gx as i32, gy as i32);
     // Leaves are skipped over water / off-map; the trunk sits on the tree's own (valid) column.
     let leaf_at = |vox: &mut VoxMap, lx: i32, ly: i32, lz: u8| {
-        if (0..COLS as i32).contains(&lx) && (0..ROWS as i32).contains(&ly) && t.water_level(lx, ly) == 0 {
+        if (0..COLS as i32).contains(&lx)
+            && (0..ROWS as i32).contains(&ly)
+            && t.water_level(lx, ly) == 0
+        {
             vox.insert((lx, ly, lz), leaf);
         }
     };
@@ -1640,7 +1744,12 @@ fn collect_tree(vox: &mut VoxMap, t: &VoxelTerrain, gx: usize, gy: usize, h: u8,
 /// or coincident faces to z-fight. Bottom faces are omitted (unseen from the iso top-down
 /// view), matching the terrain. Side faces bias their top edge back (the column's own top
 /// wins the rim, no dark speckle).
-fn mesh_tree_voxels(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, opaque: &mut Vec<Batch>, vox: &VoxMap) {
+fn mesh_tree_voxels(
+    verts: &mut Vec<Vertex>,
+    idx: &mut Vec<u16>,
+    opaque: &mut Vec<Batch>,
+    vox: &VoxMap,
+) {
     for (&(gx, gy, gz), &rgb) in vox {
         if idx.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
             flush_mesh(verts, idx, opaque);
@@ -1654,19 +1763,74 @@ fn mesh_tree_voxels(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, opaque: &mut Ve
         // would otherwise be eaten ("saw") — the forward nudge makes the trunk win there.
         let top_back = [-1.0, -1.0, 1.0, 1.0];
         if !vox.contains_key(&(gx, gy, gz + 1)) {
-            push_quad(verts, idx, [vec3(x0, y1, z0), vec3(x1, y1, z0), vec3(x1, y1, z1), vec3(x0, y1, z1)], shaded(rgb, SHADE_TOP), 0.0);
+            push_quad(
+                verts,
+                idx,
+                [
+                    vec3(x0, y1, z0),
+                    vec3(x1, y1, z0),
+                    vec3(x1, y1, z1),
+                    vec3(x0, y1, z1),
+                ],
+                shaded(rgb, SHADE_TOP),
+                0.0,
+            );
         }
         if !vox.contains_key(&(gx + 1, gy, gz)) {
-            push_quad_v(verts, idx, [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)], shaded(rgb, SHADE_PX), top_back);
+            push_quad_v(
+                verts,
+                idx,
+                [
+                    vec3(x1, y0, z0),
+                    vec3(x1, y0, z1),
+                    vec3(x1, y1, z1),
+                    vec3(x1, y1, z0),
+                ],
+                shaded(rgb, SHADE_PX),
+                top_back,
+            );
         }
         if !vox.contains_key(&(gx - 1, gy, gz)) {
-            push_quad_v(verts, idx, [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)], shaded(rgb, SHADE_NX), top_back);
+            push_quad_v(
+                verts,
+                idx,
+                [
+                    vec3(x0, y0, z1),
+                    vec3(x0, y0, z0),
+                    vec3(x0, y1, z0),
+                    vec3(x0, y1, z1),
+                ],
+                shaded(rgb, SHADE_NX),
+                top_back,
+            );
         }
         if !vox.contains_key(&(gx, gy + 1, gz)) {
-            push_quad_v(verts, idx, [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)], shaded(rgb, SHADE_PZ), top_back);
+            push_quad_v(
+                verts,
+                idx,
+                [
+                    vec3(x1, y0, z1),
+                    vec3(x0, y0, z1),
+                    vec3(x0, y1, z1),
+                    vec3(x1, y1, z1),
+                ],
+                shaded(rgb, SHADE_PZ),
+                top_back,
+            );
         }
         if !vox.contains_key(&(gx, gy - 1, gz)) {
-            push_quad_v(verts, idx, [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)], shaded(rgb, SHADE_NZ), top_back);
+            push_quad_v(
+                verts,
+                idx,
+                [
+                    vec3(x0, y0, z0),
+                    vec3(x1, y0, z0),
+                    vec3(x1, y1, z0),
+                    vec3(x0, y1, z0),
+                ],
+                shaded(rgb, SHADE_NZ),
+                top_back,
+            );
         }
     }
 }
@@ -1704,10 +1868,28 @@ fn flush_mesh(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, out: &mut Vec<Batch>)
 /// far plane. Only the TOP edge of a side wall is flagged: that edge is shared with the
 /// column's own top face (which must win the rim → no dark z-fight speckle), while the
 /// wall's BOTTOM edge stays unbiased so it isn't eaten by the lower neighbour's top face.
-fn push_quad_v(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Color, backs: [f32; 4]) {
+fn push_quad_v(
+    verts: &mut Vec<Vertex>,
+    idx: &mut Vec<u16>,
+    q: [Vec3; 4],
+    col: Color,
+    backs: [f32; 4],
+) {
+    push_quad_c(verts, idx, q, [col; 4], backs);
+}
+
+/// Quad with a PER-VERTEX colour (`cols`) and per-vertex `back` flag — used by the top face
+/// to bake rim AO into individual corners.
+fn push_quad_c(
+    verts: &mut Vec<Vertex>,
+    idx: &mut Vec<u16>,
+    q: [Vec3; 4],
+    cols: [Color; 4],
+    backs: [f32; 4],
+) {
     let base = verts.len() as u16;
-    for (p, b) in q.into_iter().zip(backs) {
-        verts.push(Vertex::new(p.x, p.y, p.z, b, 0.0, col));
+    for ((p, b), c) in q.into_iter().zip(backs).zip(cols) {
+        verts.push(Vertex::new(p.x, p.y, p.z, b, 0.0, c));
     }
     idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
@@ -1725,26 +1907,68 @@ const WATER_STEP_MAX: u8 = 2;
 /// A water-surface quad covering column `(gx, gy)`'s `stride×stride` footprint at level
 /// `wl`. `depth` (= `wl - terrain_h`, voxel levels) goes in every vertex's `uv.y` for the
 /// water shader's depth shading; vertex colour is unused by the shader (placeholder WHITE).
-fn push_water_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, wl: u8, depth: u8) {
+fn push_water_top(
+    verts: &mut Vec<Vertex>,
+    idx: &mut Vec<u16>,
+    gx: usize,
+    gy: usize,
+    s: usize,
+    wl: u8,
+    depth: u8,
+) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let y = wl as f32 * VOX;
-    let q = [vec3(x0, y, z0), vec3(x1, y, z0), vec3(x1, y, z1), vec3(x0, y, z1)];
+    let q = [
+        vec3(x0, y, z0),
+        vec3(x1, y, z0),
+        vec3(x1, y, z1),
+        vec3(x0, y, z1),
+    ];
     push_water_quad(verts, idx, q, depth);
 }
 
 /// A water side face on one edge, from the lower neighbour surface `lo` up to this water
 /// level `hi` — fills the vertical gap at a river step so the ribbon reads continuous.
 #[allow(clippy::too_many_arguments)]
-fn push_water_side(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, (gx, gy): (usize, usize), s: usize, hi: u8, lo: u8, depth: u8, face: Face) {
+fn push_water_side(
+    verts: &mut Vec<Vertex>,
+    idx: &mut Vec<u16>,
+    (gx, gy): (usize, usize),
+    s: usize,
+    hi: u8,
+    lo: u8,
+    depth: u8,
+    face: Face,
+) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let (y0, y1) = (lo as f32 * VOX, hi as f32 * VOX);
     let q = match face {
-        Face::Px => [vec3(x1, y0, z0), vec3(x1, y0, z1), vec3(x1, y1, z1), vec3(x1, y1, z0)],
-        Face::Nx => [vec3(x0, y0, z1), vec3(x0, y0, z0), vec3(x0, y1, z0), vec3(x0, y1, z1)],
-        Face::Pz => [vec3(x1, y0, z1), vec3(x0, y0, z1), vec3(x0, y1, z1), vec3(x1, y1, z1)],
-        Face::Nz => [vec3(x0, y0, z0), vec3(x1, y0, z0), vec3(x1, y1, z0), vec3(x0, y1, z0)],
+        Face::Px => [
+            vec3(x1, y0, z0),
+            vec3(x1, y0, z1),
+            vec3(x1, y1, z1),
+            vec3(x1, y1, z0),
+        ],
+        Face::Nx => [
+            vec3(x0, y0, z1),
+            vec3(x0, y0, z0),
+            vec3(x0, y1, z0),
+            vec3(x0, y1, z1),
+        ],
+        Face::Pz => [
+            vec3(x1, y0, z1),
+            vec3(x0, y0, z1),
+            vec3(x0, y1, z1),
+            vec3(x1, y1, z1),
+        ],
+        Face::Nz => [
+            vec3(x0, y0, z0),
+            vec3(x1, y0, z0),
+            vec3(x1, y1, z0),
+            vec3(x0, y1, z0),
+        ],
     };
     push_water_quad(verts, idx, q, depth);
 }
@@ -1777,16 +2001,39 @@ fn rock_rgb(gx: usize, gy: usize, seed: u64) -> (f32, f32, f32) {
     let mut c = (g, g * 0.98, g * 0.93); // slightly warm, brightness-varied grey
     if m > 0.60 {
         let k = ((m - 0.60) / 0.40).min(1.0) * 0.5;
-        c = (c.0 + (0.33 - c.0) * k, c.1 + (0.45 - c.1) * k, c.2 + (0.29 - c.2) * k); // → moss
+        c = (
+            c.0 + (0.33 - c.0) * k,
+            c.1 + (0.45 - c.1) * k,
+            c.2 + (0.29 - c.2) * k,
+        ); // → moss
     }
     c
 }
 
-fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s: usize, h: u8, rgb: (f32, f32, f32)) {
+/// Contour line: width of the dark rim strip overlaid along a terrace edge, as a fraction
+/// of ONE voxel (kept constant in world space, not scaled by LOD stride, so the line stays
+/// thin on coarse far tiles). And how much it darkens the top colour.
+const RIM_LINE_W: f32 = 0.02;
+const RIM_LINE_SHADE: f32 = 0.6;
+
+/// `drops` = [Px, Nx, Pz, Nz]: whether each neighbour edge steps DOWN from this column. A
+/// thin dark strip is overlaid along every dropping edge (nudged toward the camera via
+/// `uv.x=-1` so it wins the top plane without z-fight). Only step edges get it and the
+/// strips run the full edge, so adjacent rim cells join into ONE continuous contour around
+/// the terrace — interior cube joins (same height, no drop) stay unmarked.
+fn push_top(
+    verts: &mut Vec<Vertex>,
+    idx: &mut Vec<u16>,
+    gx: usize,
+    gy: usize,
+    s: usize,
+    h: u8,
+    rgb: (f32, f32, f32),
+    drops: [bool; 4],
+) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
     let y = h as f32 * VOX;
-    let col = shaded(rgb, SHADE_TOP);
     push_quad(
         verts,
         idx,
@@ -1796,9 +2043,41 @@ fn push_top(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, gx: usize, gy: usize, s
             vec3(x1, y, z1),
             vec3(x0, y, z1),
         ],
-        col,
+        shaded(rgb, SHADE_TOP),
         0.0,
     );
+    let [dpx, dnx, dpz, dnz] = drops;
+    if dpx || dnx || dpz || dnz {
+        let line = shaded(rgb, RIM_LINE_SHADE);
+        let w = RIM_LINE_W * VOX;
+        // Each strip keeps the top winding [(-,-),(+,-),(+,+),(-,+)]; `back=-1` nudges it
+        // toward the camera so it deterministically wins the shared top plane.
+        let mut strip = |ax0: f32, ax1: f32, az0: f32, az1: f32| {
+            push_rim(
+                verts,
+                idx,
+                [
+                    vec3(ax0, y, az0),
+                    vec3(ax1, y, az0),
+                    vec3(ax1, y, az1),
+                    vec3(ax0, y, az1),
+                ],
+                line,
+            );
+        };
+        if dpx {
+            strip(x1 - w, x1, z0, z1);
+        }
+        if dnx {
+            strip(x0, x0 + w, z0, z1);
+        }
+        if dpz {
+            strip(x0, x1, z1 - w, z1);
+        }
+        if dnz {
+            strip(x0, x1, z0, z0 + w);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1813,9 +2092,38 @@ fn push_side(
     top: (f32, f32, f32),
     rocky: bool,
     nwl: u8,
+    rim: bool,
 ) {
     let (x0, x1) = (gx as f32 * VOX, (gx + s) as f32 * VOX);
     let (z0, z1) = (gy as f32 * VOX, (gy + s) as f32 * VOX);
+    // Face quad for a vertical [y0,y1] band, winding outward per face (shared by the strata
+    // quads and the rim strip below).
+    let wall = |y0: f32, y1: f32| match face {
+        Face::Px => [
+            vec3(x1, y0, z0),
+            vec3(x1, y0, z1),
+            vec3(x1, y1, z1),
+            vec3(x1, y1, z0),
+        ],
+        Face::Nx => [
+            vec3(x0, y0, z1),
+            vec3(x0, y0, z0),
+            vec3(x0, y1, z0),
+            vec3(x0, y1, z1),
+        ],
+        Face::Pz => [
+            vec3(x1, y0, z1),
+            vec3(x0, y0, z1),
+            vec3(x0, y1, z1),
+            vec3(x1, y1, z1),
+        ],
+        Face::Nz => [
+            vec3(x0, y0, z0),
+            vec3(x1, y0, z0),
+            vec3(x1, y1, z0),
+            vec3(x0, y1, z0),
+        ],
+    };
     let shade = match face {
         Face::Px => SHADE_PX,
         Face::Nx => SHADE_NX,
@@ -1835,37 +2143,35 @@ fn push_side(
         } else {
             shaded(strata_rgb(gz, h, top, rocky), shade)
         };
-        let q = match face {
-            Face::Px => [
-                vec3(x1, y0, z0),
-                vec3(x1, y0, z1),
-                vec3(x1, y1, z1),
-                vec3(x1, y1, z0),
-            ],
-            Face::Nx => [
-                vec3(x0, y0, z1),
-                vec3(x0, y0, z0),
-                vec3(x0, y1, z0),
-                vec3(x0, y1, z1),
-            ],
-            Face::Pz => [
-                vec3(x1, y0, z1),
-                vec3(x0, y0, z1),
-                vec3(x0, y1, z1),
-                vec3(x1, y1, z1),
-            ],
-            Face::Nz => [
-                vec3(x0, y0, z0),
-                vec3(x1, y0, z0),
-                vec3(x1, y1, z0),
-                vec3(x0, y1, z0),
-            ],
-        };
+        let q = wall(y0, y1);
         // Bias only the wall's TOP edge (the topmost level quad's top verts 2,3) back, so
         // the column's top face wins that rim; the rest of the wall is unbiased.
-        let backs = if gz + 1 == h { [0.0, 0.0, 1.0, 1.0] } else { [0.0; 4] };
+        let backs = if gz + 1 == h {
+            [0.0, 0.0, 1.0, 1.0]
+        } else {
+            [0.0; 4]
+        };
         push_quad_v(verts, idx, q, col, backs);
     }
+    // Vertical leg of the contour: a thin dark strip down the TOP of the wall from the rim,
+    // overlaid (nudged toward the camera) so it wins the strata face. Together with the top
+    // strip it wraps the edge in an L, so the step reads from the side too. LOD0 only.
+    if rim {
+        let yt = h as f32 * VOX;
+        let yb = (yt - RIM_LINE_W * VOX).max(nh as f32 * VOX);
+        push_rim(verts, idx, wall(yb, yt), shaded(top, RIM_LINE_SHADE));
+    }
+}
+
+/// Emit a contour-overlay quad: `uv.x = -1` nudges it toward the camera so it wins the face
+/// it sits on (no z-fight), `uv.y = 1` flags it so the fragment shader can hide the whole
+/// outline when toggled off (key `O`), baring the face underneath.
+fn push_rim(verts: &mut Vec<Vertex>, idx: &mut Vec<u16>, q: [Vec3; 4], col: Color) {
+    let base = verts.len() as u16;
+    for p in q {
+        verts.push(Vertex::new(p.x, p.y, p.z, -1.0, 1.0, col));
+    }
+    idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
 #[cfg(test)]
@@ -1885,8 +2191,16 @@ mod tests {
                 let (op, wt) = build_chunk_mesh(&t, cx, cy, 0);
                 for b in op.iter().chain(wt.iter()) {
                     any = true;
-                    assert!(b.mesh.vertices.len() < 10_000, "verts {} at chunk ({cx},{cy})", b.mesh.vertices.len());
-                    assert!(b.mesh.indices.len() < 5_000, "indices {} at chunk ({cx},{cy})", b.mesh.indices.len());
+                    assert!(
+                        b.mesh.vertices.len() < 10_000,
+                        "verts {} at chunk ({cx},{cy})",
+                        b.mesh.vertices.len()
+                    );
+                    assert!(
+                        b.mesh.indices.len() < 5_000,
+                        "indices {} at chunk ({cx},{cy})",
+                        b.mesh.indices.len()
+                    );
                 }
             }
         }
@@ -1911,10 +2225,19 @@ mod tests {
                 let mut verts = 0;
                 for b in op.iter().chain(wt.iter()) {
                     verts += b.mesh.vertices.len();
-                    assert!(b.mesh.vertices.len() < 10_000, "lod {lod} verts overflow at ({cx},{cy})");
-                    assert!(b.mesh.indices.len() < 5_000, "lod {lod} indices overflow at ({cx},{cy})");
+                    assert!(
+                        b.mesh.vertices.len() < 10_000,
+                        "lod {lod} verts overflow at ({cx},{cy})"
+                    );
+                    assert!(
+                        b.mesh.indices.len() < 5_000,
+                        "lod {lod} indices overflow at ({cx},{cy})"
+                    );
                 }
-                assert!(verts <= prev, "lod {lod} not coarser at ({cx},{cy}): {verts} > {prev}");
+                assert!(
+                    verts <= prev,
+                    "lod {lod} not coarser at ({cx},{cy}): {verts} > {prev}"
+                );
                 prev = verts;
             }
         }
@@ -1941,7 +2264,10 @@ mod tests {
             }
             // A super-tile is SUPER² chunks; the merged coarse mesh must be far fewer
             // buffers than that (else the overview buys no draw-call reduction).
-            assert!(batches < (SUPER * SUPER) as usize, "coarse not merged: {batches} batches");
+            assert!(
+                batches < (SUPER * SUPER) as usize,
+                "coarse not merged: {batches} batches"
+            );
         }
     }
 

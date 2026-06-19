@@ -477,14 +477,21 @@ impl VoxelTerrain {
                     b = BiomeKind::Ocean;
                     f = FLAG_WATER;
                 } else if hydro.lake[i] {
-                    // Lake (incl. inland sub-sea pits, NOT pinned to sea level): standing water
-                    // at the depression fill level over the bed.
+                    // Lake (incl. inland sub-sea pits, NOT pinned to sea level): a FLAT mirror at
+                    // the depression fill level over the bed. The whole body shares `lvl`, so keep
+                    // it flat — do NOT gate on `lvl > bed`: that dropped shallow-margin cells (depth
+                    // rounding under half a voxel) to dry land and punched grey holes in the lake.
+                    // Instead carve any rim cell whose rounded bed reaches the mirror down one level
+                    // so the renderer (`wl > h`) still floats water over it. `bed <= lvl` always
+                    // (monotone `elev_to_level`, `filled >= elev`), so the carve is at most one
+                    // voxel — like a river channel.
                     let lvl = elev_to_level(hydro.filled[i]).round() as u8;
-                    if lvl > s.round() as u8 {
-                        water[i] = lvl;
-                        b = BiomeKind::Ocean; // underwater bed
-                        f = FLAG_WATER;
+                    if s.round() as u8 >= lvl {
+                        s = lvl.saturating_sub(1) as f32;
                     }
+                    water[i] = lvl;
+                    b = BiomeKind::Ocean; // underwater bed
+                    f = FLAG_WATER;
                 } else if hydro.river[i] {
                     // River: carve the channel one level and float water at the old top.
                     let top = s.round() as u8;
@@ -504,8 +511,66 @@ impl VoxelTerrain {
             }
             progress(0.72 + 0.28 * (y + 1) as f32 / ROWS as f32);
         }
+        // Shoreline reconciliation (one pass, ALL water types). Terrain height and the water
+        // surface are quantised to voxels INDEPENDENTLY (`surf.round()` vs
+        // `round(elev_to_level(filled))`), and wet/dry is decided by comparing the two — so at a
+        // shoreline these two correlated continuous fields can fall on opposite sides of the .5
+        // boundary, leaving ±1 voxel noise: a dry cell a step BELOW the water it touches (a moat),
+        // or a step ABOVE it while ringed by water (a 1-cell spit/pillar). Both are the same root;
+        // a morphological CLOSE + a bank LIFT kill the whole class, uniformly for ocean/lake/river.
+        let w0 = water.clone();
+        let wl_at = |w: &[u8], nx: i32, ny: i32| -> u8 {
+            if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                0
+            } else {
+                w[ny as usize * COLS + nx as usize]
+            }
+        };
+        // CLOSE: a dry cell ringed by water on >=3 sides is a 1-cell nub jutting into the water.
+        // Flood it to the highest neighbour level (bed carved one below, like a lake rim) so the
+        // shoreline reads convex instead of sprouting pillars. Capped to shallow nubs
+        // (`h - wl <= SHORE_NUB_CAP`) so a genuine tall island / sea stack is preserved.
+        const SHORE_NUB_CAP: u8 = 2;
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let i = y * COLS + x;
+                if flags[i] & FLAG_WATER != 0 {
+                    continue;
+                }
+                let (xi, yi) = (x as i32, y as i32);
+                let nbr = [wl_at(&w0, xi + 1, yi), wl_at(&w0, xi - 1, yi), wl_at(&w0, xi, yi + 1), wl_at(&w0, xi, yi - 1)];
+                let water_nb = nbr.iter().filter(|&&w| w > 0).count();
+                let wl = nbr.iter().copied().max().unwrap_or(0);
+                if water_nb >= 3 && wl > 0 && surf[i].round() as u8 <= wl + SHORE_NUB_CAP {
+                    water[i] = wl;
+                    surf[i] = wl.saturating_sub(1) as f32; // bed one below the mirror ⇒ renders as water
+                    flags[i] = FLAG_WATER;
+                    biome[i] = BiomeKind::Ocean.id();
+                }
+            }
+        }
+        // LIFT: any still-dry cell whose top sits BELOW an adjacent water surface is raised to it,
+        // closing the moat. Reads the post-close `water`. Rivers are skipped — lifting a low outlet
+        // would dam the channel — and water cells are already at/above their own surface.
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let i = y * COLS + x;
+                if flags[i] & FLAG_WATER != 0 || hydro.river[i] {
+                    continue;
+                }
+                let (xi, yi) = (x as i32, y as i32);
+                let h = surf[i].round() as u8;
+                let lift = [wl_at(&water, xi + 1, yi), wl_at(&water, xi - 1, yi), wl_at(&water, xi, yi + 1), wl_at(&water, xi, yi - 1)]
+                    .into_iter()
+                    .fold(h, u8::max);
+                if lift > h {
+                    surf[i] = lift as f32;
+                }
+            }
+        }
         // Distance-to-water: a multi-source BFS from every water column over the eroded
         // grid (one O(N) pass, like hydrology). The sim reads it for hydration / water-seeking.
+        // Computed AFTER shoreline reconciliation so it reflects the reconciled water mask.
         let water_dist = compute_water_dist(&water);
         VoxelTerrain {
             seed,
@@ -1356,6 +1421,128 @@ mod tests {
             "lake bodies={bodies}, STEPPED bodies={stepped_bodies} ({:.0}%), cells in stepped bodies={stepped_cells}, worst intra-lake span={worst_span} levels",
             stepped_bodies as f64 / bodies.max(1) as f64 * 100.0
         );
+    }
+
+    /// Shore HOLES: dry cells whose top sits BELOW an adjacent water cell's surface — the
+    /// gap between bank and water the user reported. Counts them and attributes each to WHY
+    /// it stayed dry (ocean/lake/river flag vs none), so we can tell a hydrology
+    /// classification gap from a pure discretisation artefact. Run: `cargo test
+    /// diagnose_shore_holes -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn diagnose_shore_holes() {
+        for seed in [1u64, 7, 42] {
+            let t = VoxelTerrain::new(seed);
+            // Recompute hydrology to attribute each hole (same inputs as `VoxelTerrain::new`).
+            let tect = TectonicField::generate(seed);
+            let n = COLS * ROWS;
+            let mut elev = vec![0.0f32; n];
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    elev[y * COLS + x] =
+                        elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+                }
+            }
+            crate::erosion::erode(seed, &mut elev, &|_| {});
+            let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
+
+            let (mut holes, mut as_lake, mut as_river, mut as_ocean, mut as_none) =
+                (0u64, 0u64, 0u64, 0u64, 0u64);
+            let mut holes_by_lake = 0u64; // holes whose deepest adjacent water is a LAKE
+            let mut max_drop = 0u8;
+            let mut sample = None;
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    let i = y * COLS + x;
+                    let (xi, yi) = (x as i32, y as i32);
+                    if t.water_level(xi, yi) != 0 {
+                        continue; // this cell is water — not a hole
+                    }
+                    let h = t.height(xi, yi);
+                    // Deepest adjacent water surface standing ABOVE this dry cell's top, and
+                    // whether the deepest such neighbour is a LAKE (vs a river channel wall).
+                    let mut below_wl = 0u8;
+                    let mut adj_is_lake = false;
+                    for (nx, ny) in [(xi + 1, yi), (xi - 1, yi), (xi, yi + 1), (xi, yi - 1)] {
+                        let nwl = t.water_level(nx, ny);
+                        if nwl > h && nwl > below_wl {
+                            below_wl = nwl;
+                            let j = (ny as usize) * COLS + nx as usize;
+                            adj_is_lake = (0..COLS as i32).contains(&nx)
+                                && (0..ROWS as i32).contains(&ny)
+                                && hydro.lake[j];
+                        }
+                    }
+                    if below_wl == 0 {
+                        continue; // sits above all neighbouring water — a normal bank, not a hole
+                    }
+                    holes += 1;
+                    if adj_is_lake {
+                        holes_by_lake += 1;
+                    }
+                    max_drop = max_drop.max(below_wl - h);
+                    if hydro.ocean[i] {
+                        as_ocean += 1;
+                    } else if hydro.lake[i] {
+                        as_lake += 1;
+                    } else if hydro.river[i] {
+                        as_river += 1;
+                    } else {
+                        as_none += 1;
+                    }
+                    if sample.is_none() {
+                        sample = Some((x, y, h, below_wl, hydro.filled[i] - elev[i]));
+                    }
+                }
+            }
+
+            // SPIKES: dry cells ringed by water on >=3 sides that poke ABOVE every adjacent
+            // water surface — a lone pillar standing in the water. Also flag how many were
+            // pushed up by the shore-lift pass (height now exceeds the raw classify height),
+            // to tell a manufactured spike from a natural island.
+            let (mut spikes, mut spikes_lifted) = (0u64, 0u64);
+            let mut spike_sample = None;
+            for y in 0..ROWS {
+                for x in 0..COLS {
+                    let (xi, yi) = (x as i32, y as i32);
+                    if t.water_level(xi, yi) != 0 {
+                        continue;
+                    }
+                    let h = t.height(xi, yi);
+                    let (mut water_nb, mut above_all) = (0u8, true);
+                    for (nx, ny) in [(xi + 1, yi), (xi - 1, yi), (xi, yi + 1), (xi, yi - 1)] {
+                        let nwl = t.water_level(nx, ny);
+                        if nwl > 0 {
+                            water_nb += 1;
+                            if nwl >= h {
+                                above_all = false; // some neighbour water reaches this cell's top
+                            }
+                        }
+                    }
+                    if water_nb >= 3 && above_all {
+                        spikes += 1;
+                        // Raw classify height (pre shore-lift) for this column.
+                        let raw = elev_to_level(elev[y * COLS + x]).round() as u8;
+                        if h > raw {
+                            spikes_lifted += 1;
+                        }
+                        if spike_sample.is_none() {
+                            spike_sample = Some((x, y, h, raw, water_nb));
+                        }
+                    }
+                }
+            }
+
+            eprintln!(
+                "seed {seed}: shore holes={holes} (dry but below adj water), of which adjacent-to-LAKE={holes_by_lake}, max drop={max_drop} lvl; \
+                 hole-cell class: ocean={as_ocean} lake={as_lake} river={as_river} none={as_none}; \
+                 sample (x,y,h,adjwl,filled-elev)={sample:?}"
+            );
+            eprintln!(
+                "seed {seed}: SPIKES={spikes} (dry pillar, >=3 water nbrs, above all), of which shore-lifted={spikes_lifted}; \
+                 sample (x,y,h,raw,water_nbrs)={spike_sample:?}"
+            );
+        }
     }
 
     #[test]
