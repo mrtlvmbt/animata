@@ -83,30 +83,35 @@ impl Phenotype {
     }
 }
 
-/// The heritable genome: the developmental GRN (weight matrix + bias) plus the controller
-/// weights. A "founder" has a zero GRN (→ single cell == C0) and random brain weights.
+/// The heritable genome: the developmental GRN (weight matrix + bias), the controller weights,
+/// and the climate-niche trait. A "founder" has a zero GRN (→ single cell == C0), random brain
+/// weights, and a random thermal preference. `thermal_pref` in `[0,1]` is the temperature this
+/// lineage is adapted to (0 cold .. 1 hot); living far from it costs extra metabolism (C3), so
+/// different climate bands favour different prefs → habitats / allopatry.
 #[derive(Clone)]
 pub struct Genome {
     grn_w: Vec<f32>, // G×G, row-major
     grn_b: Vec<f32>, // G
     pub brain: Vec<f32>,
+    pub thermal_pref: f32,
 }
 
 impl Genome {
-    /// Founder genome: empty GRN (develops to one cell) + random brain weights from `rng`.
-    /// The single random source is threaded so founders are deterministic from the world seed.
+    /// Founder genome: empty GRN (develops to one cell) + random brain weights + random thermal
+    /// preference, all from `rng` (threaded so founders are deterministic from the world seed).
     pub fn founder(rng: &mut Rng) -> Self {
         Genome {
             grn_w: vec![0.0; G * G],
             grn_b: vec![0.0; G],
             brain: (0..BRAIN_WEIGHTS).map(|_| rng.signed()).collect(),
+            thermal_pref: rng.unit(),
         }
     }
 
-    /// A mutated child genome: every gene (GRN weights, GRN bias, brain weights) is nudged by
-    /// `±std` Gaussian-ish noise from `rng`. GRN mutations grow/shrink/retype the body; brain
-    /// mutations tune behaviour. `grn_std` is kept smaller so body plans change by rarer,
-    /// gentler steps than behaviour (avoids a mutational flood of giant bodies).
+    /// A mutated child genome: every gene (GRN weights, GRN bias, brain weights, thermal pref)
+    /// is nudged by `±std` noise from `rng`. GRN mutations grow/shrink/retype the body; brain
+    /// mutations tune behaviour; the thermal pref drifts to track the climate it lives in.
+    /// `grn_std` is kept smaller so body plans change by rarer, gentler steps than behaviour.
     pub fn mutate(&self, rng: &mut Rng, brain_std: f32, grn_std: f32) -> Self {
         let m = |v: &[f32], std: f32, rng: &mut Rng| -> Vec<f32> {
             v.iter().map(|&w| w + rng.signed() * std).collect()
@@ -115,6 +120,7 @@ impl Genome {
             grn_w: m(&self.grn_w, grn_std, rng),
             grn_b: m(&self.grn_b, grn_std, rng),
             brain: m(&self.brain, brain_std, rng),
+            thermal_pref: (self.thermal_pref + rng.signed() * grn_std).clamp(0.0, 1.0),
         }
     }
 

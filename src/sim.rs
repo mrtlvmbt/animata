@@ -129,9 +129,13 @@ pub fn column_index(pos: Vec2) -> (usize, usize) {
     (x, y)
 }
 
-/// Colder columns cost more to live in (a mild climate tax that seeds habitat pressure later).
-fn climate_factor(temp: f32) -> f32 {
-    1.0 + 0.6 * (1.0 - temp)
+/// Climate match in `[0.1, 1]`: how well a creature feeds at the local temperature given its
+/// evolved preference. Matched ⇒ 1 (full food value); fully mismatched ⇒ 0.1 (climate stress
+/// cripples foraging). This hits the DOMINANT energy channel (food), so it is a real selective
+/// force on the over-provisioned map — cold bands favour low-pref lineages, hot bands high-pref,
+/// and lineages sort into the climate they're suited to (C3 habitats / allopatry).
+fn climate_match(temp: f32, pref: f32) -> f32 {
+    (1.0 - THERMAL_PENALTY * (temp - pref).abs()).clamp(0.1, 1.0)
 }
 
 impl Sim {
@@ -262,13 +266,15 @@ impl Sim {
             // Graze the column (mutates terrain biomass) → energy. Intake scales with body size;
             // a carnivore digests plants poorly (diet efficiency = 1 − carnivory), so the trophic
             // split is a real trade-off, not a free lunch.
+            // Food value is scaled by how well the creature's thermal preference matches the
+            // local climate — the C3 habitat pressure acts on the dominant (food) channel.
             let taken = terrain.graze(cx, cy, c.intake() * TICK_LEN, tick);
             let herbivory = 1.0 - c.pheno.carnivory();
-            c.energy = (c.energy + taken * PLANT_BIOMASS_TO_ENERGY * herbivory).min(c.max_energy());
-            // Metabolism: Kleiber (biomass^0.75) × climate, + movement effort.
+            let climate = climate_match(terrain.temperature_at(cx, cy), c.genome.thermal_pref);
+            c.energy = (c.energy + taken * PLANT_BIOMASS_TO_ENERGY * herbivory * climate).min(c.max_energy());
+            // Metabolism: Kleiber (biomass^0.75) + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
-            let metab = SIM_BASE_METABOLISM * kleiber * climate_factor(terrain.temperature_at(cx, cy));
-            c.energy -= (metab + MOVE_COST * throttle) * TICK_LEN;
+            c.energy -= (SIM_BASE_METABOLISM * kleiber + MOVE_COST * throttle) * TICK_LEN;
             c.age += 1;
             // Death by starvation.
             if c.energy <= 0.0 {
@@ -406,6 +412,39 @@ impl Sim {
         (multi as f32 / n as f32, complex as f32 / n as f32)
     }
 
+    /// Allopatry metric: Pearson correlation between each creature's evolved thermal preference
+    /// and the actual temperature where it lives. ~0 = no climate adaptation (generalists
+    /// everywhere); → 1 = lineages have sorted into the climate band they're suited to (habitats).
+    pub fn thermal_correlation(&self, terrain: &VoxelTerrain) -> f32 {
+        let n = self.creatures.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let mut prefs = Vec::with_capacity(n);
+        let mut temps = Vec::with_capacity(n);
+        for c in &self.creatures {
+            let (cx, cy) = column_index(c.pos);
+            prefs.push(c.genome.thermal_pref);
+            temps.push(terrain.temperature_at(cx, cy));
+        }
+        let nf = n as f32;
+        let (mp, mt) = (prefs.iter().sum::<f32>() / nf, temps.iter().sum::<f32>() / nf);
+        let mut cov = 0.0;
+        let mut vp = 0.0;
+        let mut vt = 0.0;
+        for (&p, &t) in prefs.iter().zip(&temps) {
+            cov += (p - mp) * (t - mt);
+            vp += (p - mp).powi(2);
+            vt += (t - mt).powi(2);
+        }
+        let denom = (vp * vt).sqrt();
+        if denom > 1e-6 {
+            cov / denom
+        } else {
+            0.0
+        }
+    }
+
     /// Fraction of the population that is predatory (a second trophic level has appeared).
     pub fn frac_carnivore(&self) -> f32 {
         let n = self.creatures.len();
@@ -512,6 +551,23 @@ mod tests {
         assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
     }
 
+    /// C3-habitats acceptance: lineages sort into the climate band they're adapted to —
+    /// the thermal-preference↔local-temperature correlation rises well above 0 (allopatry /
+    /// habitats), starting from ~0 (random founders). Single seed ⇒ deterministic.
+    #[test]
+    fn habitats_emerge_by_climate_adaptation() {
+        let mut t = world();
+        let mut s = Sim::new(1, &t);
+        let start = s.thermal_correlation(&t);
+        for tick in 0..6000 {
+            s.step(&mut t, tick);
+        }
+        let end = s.thermal_correlation(&t);
+        eprintln!("thermal correlation: start {start:.3} → end {end:.3}");
+        assert!(start.abs() < 0.15, "founders should be climate-random (corr {start:.3})");
+        assert!(end > 0.3, "no habitat sorting emerged (thermal corr {end:.3})");
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -524,8 +580,8 @@ mod tests {
             if tick % 1000 == 0 {
                 let (multi, complex) = s.complexity_mix();
                 eprintln!(
-                    "tick {tick}: pop {} biomass {:.2} multi {:.0}% complex {:.0}% carniv {:.1}% kills {}",
-                    s.population(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.frac_carnivore() * 100.0, s.kills
+                    "tick {tick}: pop {} biomass {:.2} multi {:.0}% complex {:.0}% carniv {:.1}% allopatry {:.2} kills {}",
+                    s.population(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.frac_carnivore() * 100.0, s.thermal_correlation(&t), s.kills
                 );
             }
         }

@@ -127,6 +127,13 @@ pub const STORAGE_PER_CELL: f32 = 25.0;
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
 
+// ---- C3: habitat / climate niche ----
+/// How steeply FOOD VALUE falls with the mismatch between local temperature and a creature's
+/// evolved thermal preference (climate stress on foraging). `0.9` ⇒ a fully mismatched lineage
+/// feeds at the `0.1` floor — strong pressure to adapt to the local climate band ⇒ allopatric
+/// sorting. (Acts on food, the dominant energy channel, so it actually bites.)
+pub const THERMAL_PENALTY: f32 = 0.9;
+
 // ---- C2: predation / trophic web ----
 /// A creature is predatory once predator cells make up this fraction of its body.
 pub const CARNIVORE_THRESHOLD: f32 = 0.2;

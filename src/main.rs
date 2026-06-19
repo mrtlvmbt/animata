@@ -1043,6 +1043,7 @@ async fn main() {
                                    "paused": clock.paused },
                         "sim": sim.as_ref().map(|s| {
                             let (multi, complex) = s.complexity_mix();
+                            let allopatry = terrain.as_ref().map(|t| s.thermal_correlation(t));
                             serde_json::json!({
                                 "population": s.population(),
                                 "avg_energy": s.avg_energy(),
@@ -1050,6 +1051,7 @@ async fn main() {
                                 "frac_multicellular": multi,
                                 "frac_complex": complex,
                                 "frac_carnivore": s.frac_carnivore(),
+                                "allopatry": allopatry,
                                 "births": s.births,
                                 "deaths": s.deaths,
                                 "kills": s.kills,
@@ -1272,16 +1274,17 @@ async fn main() {
         // Sim-clock + population readout. The creature count is the always-built consumer of
         // the sim getters; absent until the world is ready.
         let pause = if clock.paused { "  [PAUSED, P]" } else { "" };
-        let life = sim
-            .as_ref()
-            .map(|s| {
+        let life = match (sim.as_ref(), terrain.as_ref()) {
+            (Some(s), Some(t)) => {
                 let (multi, complex) = s.complexity_mix();
                 format!(
-                    "   pop {}   E {:.0}   biomass {:.2}   multi {:.0}% complex {:.0}% carniv {:.0}%   on-screen {on_screen}",
-                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.frac_carnivore() * 100.0
+                    "   pop {}   E {:.0}   biomass {:.2}   multi {:.0}% complex {:.0}% carniv {:.0}%   allopatry {:.2}   on-screen {on_screen}",
+                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0,
+                    s.frac_carnivore() * 100.0, s.thermal_correlation(t)
                 )
-            })
-            .unwrap_or_default();
+            }
+            _ => String::new(),
+        };
         let clock_line = format!(
             "tick {}   sim {:.1}s   day {:.2}   x{:.1}{life}{pause}",
             clock.tick(), clock.sim_time(), clock.day_frac(), clock.time_scale
