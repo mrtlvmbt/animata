@@ -16,6 +16,7 @@ mod config;
 #[cfg(feature = "dev")]
 mod dev_bridge;
 mod erosion;
+mod genome;
 mod hydrology;
 mod rng;
 mod sim;
@@ -1039,12 +1040,18 @@ async fn main() {
                         "clock": { "tick": clock.tick(), "sim_time": clock.sim_time(),
                                    "day_frac": clock.day_frac(), "time_scale": clock.time_scale,
                                    "paused": clock.paused },
-                        "sim": sim.as_ref().map(|s| serde_json::json!({
-                            "population": s.population(),
-                            "avg_energy": s.avg_energy(),
-                            "births": s.births,
-                            "deaths": s.deaths,
-                        })),
+                        "sim": sim.as_ref().map(|s| {
+                            let (multi, complex) = s.complexity_mix();
+                            serde_json::json!({
+                                "population": s.population(),
+                                "avg_energy": s.avg_energy(),
+                                "avg_biomass": s.avg_biomass(),
+                                "frac_multicellular": multi,
+                                "frac_complex": complex,
+                                "births": s.births,
+                                "deaths": s.deaths,
+                            })
+                        }),
                     }));
                 }
                 dev_bridge::Cmd::SetClock { scale, paused } => {
@@ -1233,8 +1240,10 @@ async fn main() {
                 // A thin dark ring keeps the dot legible over any terrain colour.
                 let hsh = c.founder.wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 let rgb = |sh: u32| 0.45 + 0.55 * (((hsh >> sh) & 0xFF) as f32 / 255.0);
-                draw_circle(px, py, 3.0, Color::new(0.0, 0.0, 0.0, 0.6));
-                draw_circle(px, py, 2.2, Color::new(rgb(0), rgb(20), rgb(40), 1.0));
+                // Dot size grows with body size (√biomass) so multicellular creatures read bigger.
+                let r = 2.0 + 1.2 * (c.biomass() as f32).sqrt();
+                draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
+                draw_circle(px, py, r, Color::new(rgb(0), rgb(20), rgb(40), 1.0));
                 on_screen += 1;
             }
         }
@@ -1262,7 +1271,13 @@ async fn main() {
         let pause = if clock.paused { "  [PAUSED, P]" } else { "" };
         let life = sim
             .as_ref()
-            .map(|s| format!("   pop {}   E {:.0}   on-screen {on_screen}", s.population(), s.avg_energy()))
+            .map(|s| {
+                let (multi, complex) = s.complexity_mix();
+                format!(
+                    "   pop {}   E {:.0}   biomass {:.2}   multi {:.0}% complex {:.0}%   on-screen {on_screen}",
+                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0
+                )
+            })
             .unwrap_or_default();
         let clock_line = format!(
             "tick {}   sim {:.1}s   day {:.2}   x{:.1}{life}{pause}",

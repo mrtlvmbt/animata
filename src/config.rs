@@ -115,6 +115,17 @@ pub const SENESCENCE_RATE: f32 = 0.02;
 pub const SENSE_RADIUS: f32 = 5.0;
 /// Std-dev of the Gaussian-ish weight perturbation applied to a child's brain on reproduction.
 pub const MUTATION_STD: f32 = 0.12;
+/// Std-dev for the developmental GRN genes on reproduction. Smaller than `MUTATION_STD` so the
+/// BODY PLAN changes by rarer, gentler steps than behaviour — no mutational flood of giant
+/// bodies (the body is the costly part).
+pub const GRN_MUTATION_STD: f32 = 0.10;
+/// C1 body-stat coupling: each effector cell adds this fraction to top speed.
+pub const EFFECTOR_GAIN: f32 = 0.12;
+/// Each storage cell adds this much to the energy cap.
+pub const STORAGE_PER_CELL: f32 = 25.0;
+/// Energy to build one cell beyond the first when budding a child — so a larger body costs
+/// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
+pub const CELL_BIOMASS_COST: f32 = 8.0;
 
 // ---- Creature density contract (documented now, consumed by the future sim) ----
 /// Creature body size in metres (mouse-sized).
