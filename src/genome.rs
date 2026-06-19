@@ -125,17 +125,22 @@ pub struct Genome {
     grn_b: Vec<f32>, // G
     pub brain: Vec<f32>,
     pub thermal_pref: f32,
+    /// Body coloration in `[0,1]` (dark .. light) — a heritable appearance trait. A predator
+    /// detects prey with a probability rising with the CONTRAST between this and the local
+    /// ground tone, so matching the background (crypsis / camouflage) lowers predation (C3).
+    pub coloration: f32,
 }
 
 impl Genome {
     /// Founder genome: empty GRN (develops to one cell) + random brain weights + random thermal
-    /// preference, all from `rng` (threaded so founders are deterministic from the world seed).
+    /// preference + random coloration (deterministic from the threaded `rng`).
     pub fn founder(rng: &mut Rng) -> Self {
         Genome {
             grn_w: vec![0.0; G * G],
             grn_b: vec![0.0; G],
             brain: (0..BRAIN_WEIGHTS).map(|_| rng.signed()).collect(),
             thermal_pref: rng.unit(),
+            coloration: rng.unit(),
         }
     }
 
@@ -152,6 +157,7 @@ impl Genome {
             grn_b: m(&self.grn_b, grn_std, rng),
             brain: m(&self.brain, brain_std, rng),
             thermal_pref: (self.thermal_pref + rng.signed() * grn_std).clamp(0.0, 1.0),
+            coloration: (self.coloration + rng.signed() * grn_std).clamp(0.0, 1.0),
         }
     }
 

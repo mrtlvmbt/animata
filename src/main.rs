@@ -1111,6 +1111,7 @@ async fn main() {
                                 "frac_autotroph": s.frac_autotroph(),
                                 "avg_nutrient": terrain.as_ref().map(|t| s.avg_nutrient(t, clock.tick())),
                                 "allopatry": allopatry,
+                                "crypsis": terrain.as_ref().map(|t| s.crypsis_correlation(t)),
                                 "strata_und_surf_air_water": strata,
                                 "births": s.births,
                                 "deaths": s.deaths,
@@ -1309,14 +1310,14 @@ async fn main() {
                     continue;
                 }
                 let (px, py) = ((nx * 0.5 + 0.5) * sw, (1.0 - (ny * 0.5 + 0.5)) * sh);
-                // Lineage tint: hash the founder id into a bright RGB so clusters are visible.
-                // A thin dark ring keeps the dot legible over any terrain colour.
-                let hsh = c.founder.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                let rgb = |sh: u32| 0.45 + 0.55 * (((hsh >> sh) & 0xFF) as f32 / 255.0);
+                // Fill = the creature's evolved coloration (greyscale, dark..light) so camouflage
+                // is visible: cryptic creatures blend into their biome, conspicuous ones stand out.
+                // A thin dark ring keeps even a light dot legible over any terrain.
+                let g = c.coloration();
                 // Dot size grows with body size (√biomass) so multicellular creatures read bigger.
                 let r = 2.0 + 1.2 * (c.biomass() as f32).sqrt();
                 draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
-                draw_circle(px, py, r, Color::new(rgb(0), rgb(20), rgb(40), 1.0));
+                draw_circle(px, py, r, Color::new(g, g, g, 1.0));
                 on_screen += 1;
             }
         }
@@ -1349,13 +1350,13 @@ async fn main() {
         let pause = if clock.paused { "  [PAUSED, P]" } else { "" };
         let life = match (sim.as_ref(), terrain.as_ref()) {
             (Some(s), Some(t)) => {
-                let (multi, complex) = s.complexity_mix();
+                let (multi, _) = s.complexity_mix();
                 let m = s.stratum_mix(t);
                 format!(
-                    "   pop {}   E {:.0}   bm {:.2}   multi {:.0}% cplx {:.0}% carn {:.0}% auto {:.0}%   allop {:.2}   nutri {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
-                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0,
+                    "   pop {}   E {:.0}   bm {:.2}   multi {:.0}% carn {:.0}% auto {:.0}%   allop {:.2} crypsis {:.2}   nutri {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
+                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0,
                     s.frac_carnivore() * 100.0, s.frac_autotroph() * 100.0, s.thermal_correlation(t),
-                    s.avg_nutrient(t, clock.tick()),
+                    s.crypsis_correlation(t), s.avg_nutrient(t, clock.tick()),
                     m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
                 )
             }

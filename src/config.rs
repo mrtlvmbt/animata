@@ -127,6 +127,11 @@ pub const STORAGE_PER_CELL: f32 = 25.0;
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
 
+// ---- C3: camouflage (crypsis) ----
+/// Detection probability of a PERFECTLY camouflaged prey (coloration == ground tone). Full
+/// contrast detects at 1.0; this is the floor. Low ⇒ strong reward for matching the background.
+pub const CAMO_BASE_DETECT: f32 = 0.12;
+
 // ---- C3: nutrient cycle (minerals ↔ plants ↔ creatures ↔ detritus) ----
 /// Closed-form weathering rate (per sim-second) — nutrient relaxes toward its geology baseline.
 /// Slow (the abiotic anchor): the biological cycle (grazing drain / death return) dominates the

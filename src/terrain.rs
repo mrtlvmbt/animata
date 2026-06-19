@@ -795,6 +795,22 @@ impl VoxelTerrain {
         let elapsed = (tick - self.nutrient_update[i] as u64) as f32 * TICK_LEN;
         weather(self.nutrient[i] as f32 / 255.0, self.nutrient_base_at(i), elapsed)
     }
+
+    /// Ground tone `[0,1]` (dark .. light) a creature is seen AGAINST at a column — the camouflage
+    /// background (C3). Derived from the biome (sand/snow light, forest/jungle dark, …) so a prey
+    /// whose coloration matches the local ground is hard for a predator to spot.
+    pub fn ground_tone_at(&self, x: usize, y: usize) -> f32 {
+        match BiomeKind::from_id(self.biome[y * COLS + x]) {
+            BiomeKind::Snow => 0.95,
+            BiomeKind::Beach | BiomeKind::Desert => 0.82,
+            BiomeKind::Tundra | BiomeKind::Savanna => 0.6,
+            BiomeKind::Plains | BiomeKind::Mountain => 0.5,
+            BiomeKind::Ocean => 0.4,
+            BiomeKind::Swamp | BiomeKind::Taiga => 0.3,
+            BiomeKind::Forest => 0.25,
+            BiomeKind::Jungle => 0.2,
+        }
+    }
 }
 
 #[cfg(test)]
