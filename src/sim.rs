@@ -1,11 +1,12 @@
-//! Life simulation — phase C0: a single-cell herbivore ecosystem on the voxel world.
+//! Life simulation — herbivore ecosystem on the voxel world (C0 loop + C1 developmental body).
 //!
-//! The simplest possible living population, built to validate the energy / biomass / trophic
-//! loop and the world integration BEFORE any developmental complexity (that is C1). A creature
-//! is one cell: it senses the plant-biomass field (S3) around it, a tiny fixed-topology brain
-//! with **evolvable weights** decides throttle + turn, it grazes the column it stands on,
-//! pays a Kleiber-scaled metabolic cost, buds a mutated child when well-fed, and dies at zero
-//! energy. No development, no morphology, no inter-creature interaction yet.
+//! A creature senses the plant-biomass field (S3) around it, a fixed-topology brain with
+//! evolvable weights decides throttle + turn, it grazes the column it stands on, pays a
+//! Kleiber-scaled metabolic cost, buds a mutated child when well-fed, and dies of starvation
+//! or senescence. **C1:** the body is no longer a fixed single cell — it is *grown* from the
+//! genome's gene-regulatory network ([`crate::genome`]); biomass = the developed cell count
+//! and the cell-type mix modulates the creature's stats (effector→speed, storage→energy cap).
+//! The founder's empty GRN develops to one structural cell, recovering the C0 organism.
 //!
 //! Determinism invariants (see plan): randomness is a pure function of the world seed via
 //! [`crate::rng`] (no `rand` crate); creatures live in a `Vec` (stable index); the tick is
@@ -16,14 +17,15 @@
 use macroquad::math::{vec2, Vec2};
 
 use crate::config::*;
+use crate::genome::{Genome, Phenotype};
 use crate::rng::{seed_fold, splitmix64, Rng};
 use crate::terrain::VoxelTerrain;
 
-// Fixed brain topology for C0 (the genome is just the weight vector — evolvable, fixed length).
+// Fixed brain topology: inputs → tanh hidden → tanh outputs. The genome's `brain` vector holds
+// the weights (length = `genome::BRAIN_WEIGHTS` = N_INPUTS*N_HIDDEN + N_HIDDEN*N_OUTPUTS).
 const N_INPUTS: usize = 7; // [biomass_here, fwd, left, right, energy, water_dist, bias]
 const N_HIDDEN: usize = 6;
 const N_OUTPUTS: usize = 2; // [throttle (pre-squash), turn (pre-squash)]
-const N_WEIGHTS: usize = N_INPUTS * N_HIDDEN + N_HIDDEN * N_OUTPUTS;
 
 // Seed salts (keep distinct so independent draws on the same (id, tick) don't correlate).
 const SALT_FOUNDER: u64 = 0x0F00;
@@ -32,8 +34,8 @@ const SALT_CULL: u64 = 0xC011;
 const SALT_DEATH: u64 = 0xDEAD;
 const SALT_BIRTH: u64 = 0xB127;
 
-/// One creature. In C0 every creature is a single cell, so biomass is the constant 1; the
-/// `weights` are its heritable genome.
+/// One creature. Its `genome` (developmental GRN + brain weights) is grown once into `pheno`
+/// (the cell body) at creation; biomass and the stat modifiers below read from `pheno`.
 pub struct Creature {
     pub id: u64,
     pub founder: u64,
@@ -42,19 +44,37 @@ pub struct Creature {
     pub energy: f32,
     pub age: u32,
     alive: bool,
-    weights: Vec<f32>,
+    genome: Genome,
+    pub pheno: Phenotype,
 }
 
 impl Creature {
-    /// Biomass in integer cells. Fixed at 1 for C0; C1's development makes this Σ cells.
+    /// Biomass in integer cells = the developed cell count (Kleiber metabolism scales with it,
+    /// and it is the energy a predator gets in C2).
     pub fn biomass(&self) -> u32 {
-        1
+        self.pheno.n_cells
+    }
+
+    /// Top speed: effector cells add locomotor thrust (emergent — a body that develops more
+    /// contractile cells moves faster, at the metabolic cost of carrying them).
+    fn speed(&self) -> f32 {
+        CREATURE_SPEED * (1.0 + EFFECTOR_GAIN * self.pheno.effector as f32)
+    }
+
+    /// Energy capacity: storage cells enlarge the buffer (survive lean spells, bigger broods).
+    fn max_energy(&self) -> f32 {
+        MAX_ENERGY + STORAGE_PER_CELL * self.pheno.storage as f32
+    }
+
+    /// Grazing throughput: a bigger body crops a little faster (sublinear, so size isn't free).
+    fn intake(&self) -> f32 {
+        EAT_RATE * (self.pheno.n_cells as f32).sqrt()
     }
 
     /// Forward brain pass: inputs → tanh hidden → tanh outputs. Returns `(throttle∈[0,1],
     /// turn∈[-1,1])`. Plain matmul (ported shape from the archived `brain.rs`).
     fn think(&self, inputs: &[f32; N_INPUTS]) -> (f32, f32) {
-        let w = &self.weights;
+        let w = &self.genome.brain;
         let mut hidden = [0.0f32; N_HIDDEN];
         for (h, hv) in hidden.iter_mut().enumerate() {
             let mut sum = 0.0;
@@ -113,7 +133,8 @@ impl Sim {
                     break;
                 }
             }
-            let weights = (0..N_WEIGHTS).map(|_| rng.signed()).collect();
+            let genome = Genome::founder(&mut rng); // empty GRN → single cell (== C0)
+            let pheno = genome.develop();
             creatures.push(Creature {
                 id: i,
                 founder: i,
@@ -122,7 +143,8 @@ impl Sim {
                 energy: START_ENERGY,
                 age: 0,
                 alive: true,
-                weights,
+                genome,
+                pheno,
             });
         }
         Sim { creatures, world_seed, next_id: START_CREATURES as u64, births: 0, deaths: 0 }
@@ -151,7 +173,7 @@ impl Sim {
             let (throttle, turn) = decisions[idx];
             // Move.
             c.heading += turn * TURN_RATE * TICK_LEN;
-            let step = throttle * CREATURE_SPEED * TICK_LEN;
+            let step = throttle * c.speed() * TICK_LEN;
             c.pos.x += c.heading.cos() * step;
             c.pos.y += c.heading.sin() * step;
             // Map edge = wall (reflect), via the single clamp helper for the column.
@@ -170,9 +192,9 @@ impl Sim {
                 c.heading = -c.heading;
             }
             let (cx, cy) = column_index(c.pos);
-            // Graze the column (mutates terrain biomass) → energy.
-            let taken = terrain.graze(cx, cy, EAT_RATE * TICK_LEN, tick);
-            c.energy = (c.energy + taken * PLANT_BIOMASS_TO_ENERGY).min(MAX_ENERGY);
+            // Graze the column (mutates terrain biomass) → energy. Intake scales with body size.
+            let taken = terrain.graze(cx, cy, c.intake() * TICK_LEN, tick);
+            c.energy = (c.energy + taken * PLANT_BIOMASS_TO_ENERGY).min(c.max_energy());
             // Metabolism: Kleiber (biomass^0.75) × climate, + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
             let metab = SIM_BASE_METABOLISM * kleiber * climate_factor(terrain.temperature_at(cx, cy));
@@ -185,8 +207,9 @@ impl Sim {
                 continue;
             }
             // Death by senescence: old-age probability rising with age² gives demographic
-            // turnover (so death isn't only the over-cap cull) and selection to reproduce young.
-            let sp = SENESCENCE_RATE * (c.age as f32 / LIFESPAN).powi(2);
+            // turnover. Scaled by 1/biomass — bigger bodies live longer (a real size benefit),
+            // so multicellularity has a gradient to climb against its build + Kleiber costs.
+            let sp = SENESCENCE_RATE * (c.age as f32 / LIFESPAN).powi(2) / c.biomass() as f32;
             if sp > 0.0 && Rng::new(seed_fold(self.world_seed, &[SALT_DEATH, c.id, tick])).unit() < sp {
                 c.alive = false;
                 self.deaths += 1;
@@ -197,25 +220,35 @@ impl Sim {
             let lucky = birth_gate >= 1.0
                 || Rng::new(seed_fold(self.world_seed, &[SALT_BIRTH, c.id, tick])).unit() < birth_gate;
             if c.energy >= REPRO_ENERGY && lucky {
-                c.energy *= 0.5;
                 let mut rng = Rng::new(seed_fold(self.world_seed, &[SALT_MUTATE, c.id, tick]));
-                let weights = c.weights.iter().map(|&w| w + rng.signed() * MUTATION_STD).collect();
-                let child = Creature {
-                    id: self.next_id,
-                    founder: c.founder,
-                    pos: vec2(
-                        (c.pos.x + rng.signed() * 2.0).clamp(0.0, maxx),
-                        (c.pos.y + rng.signed() * 2.0).clamp(0.0, maxy),
-                    ),
-                    heading: rng.unit() * std::f32::consts::TAU,
-                    energy: c.energy,
-                    age: 0,
-                    alive: true,
-                    weights,
-                };
-                self.next_id += 1;
-                self.births += 1;
-                births.push(child);
+                // Mutate the genome (brain + GRN) and DEVELOP the child's body up front, so its
+                // build cost (energy per cell beyond the first) is known.
+                let genome = c.genome.mutate(&mut rng, MUTATION_STD, GRN_MUTATION_STD);
+                let pheno = genome.develop();
+                c.energy *= 0.5;
+                let build = CELL_BIOMASS_COST * pheno.n_cells.saturating_sub(1) as f32;
+                let child_energy = c.energy - build;
+                // A child the parent can't afford to build is stillborn (the parent still paid
+                // half its energy — a real reproductive cost that penalises over-large bodies).
+                if child_energy > 0.0 {
+                    let child = Creature {
+                        id: self.next_id,
+                        founder: c.founder,
+                        pos: vec2(
+                            (c.pos.x + rng.signed() * 2.0).clamp(0.0, maxx),
+                            (c.pos.y + rng.signed() * 2.0).clamp(0.0, maxy),
+                        ),
+                        heading: rng.unit() * std::f32::consts::TAU,
+                        energy: child_energy,
+                        age: 0,
+                        alive: true,
+                        genome,
+                        pheno,
+                    };
+                    self.next_id += 1;
+                    self.births += 1;
+                    births.push(child);
+                }
             }
         }
         // (d) compact: drop the dead, append births, cull to the cap.
@@ -268,6 +301,25 @@ impl Sim {
             return 0.0;
         }
         self.creatures.iter().map(|c| c.energy).sum::<f32>() / self.creatures.len() as f32
+    }
+
+    /// Mean body size (cells) — the emergent biomass; >1 means multicellular bodies took hold.
+    pub fn avg_biomass(&self) -> f32 {
+        if self.creatures.is_empty() {
+            return 0.0;
+        }
+        self.creatures.iter().map(|c| c.biomass() as f32).sum::<f32>() / self.creatures.len() as f32
+    }
+
+    /// Fraction of the population that is multicellular (biomass > 1) and complex (≥2 cell types).
+    pub fn complexity_mix(&self) -> (f32, f32) {
+        let n = self.creatures.len();
+        if n == 0 {
+            return (0.0, 0.0);
+        }
+        let multi = self.creatures.iter().filter(|c| c.pheno.complexity() >= 1).count();
+        let complex = self.creatures.iter().filter(|c| c.pheno.complexity() == 2).count();
+        (multi as f32 / n as f32, complex as f32 / n as f32)
     }
 }
 
@@ -322,6 +374,26 @@ mod tests {
         }
     }
 
+    /// C1 acceptance: under the size→longevity gradient, multicellularity EMERGES from the
+    /// empty-GRN founders (biomass climbs above 1, a real fraction of the population becomes
+    /// multicellular) — the developmental mechanism is exercised live, not just in unit tests —
+    /// while the population stays alive and below the cap. Single seed ⇒ deterministic, not flaky.
+    #[test]
+    fn multicellularity_emerges_under_selection() {
+        let mut t = world();
+        let mut s = Sim::new(1, &t);
+        assert_eq!(s.avg_biomass(), 1.0, "founders must start unicellular (C0 continuity)");
+        for tick in 0..5000 {
+            s.step(&mut t, tick);
+        }
+        let (multi, _) = s.complexity_mix();
+        let bm = s.avg_biomass();
+        eprintln!("after 5000 ticks: pop {} avg_biomass {bm:.3} multi {:.1}%", s.population(), multi * 100.0);
+        assert!(bm > 1.1, "multicellularity did not emerge (avg_biomass {bm:.3})");
+        assert!(multi > 0.05, "too few multicellular creatures emerged ({:.1}%)", multi * 100.0);
+        assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
+    }
+
     /// Tuning aid (ignored): print the population trajectory for one seed so the energy
     /// constants can be balanced into a food-limited corridor below the cap.
     #[test]
@@ -332,7 +404,11 @@ mod tests {
         for tick in 0..6000 {
             s.step(&mut t, tick);
             if tick % 500 == 0 {
-                eprintln!("tick {tick}: pop {} avg_E {:.1} births {} deaths {}", s.population(), s.avg_energy(), s.births, s.deaths);
+                let (multi, complex) = s.complexity_mix();
+                eprintln!(
+                    "tick {tick}: pop {} avg_E {:.1} biomass {:.2} multi {:.0}% complex {:.0}% births {}",
+                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0, complex * 100.0, s.births
+                );
             }
         }
     }
