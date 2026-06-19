@@ -11,6 +11,7 @@
 //! normal. The GPU depth buffer handles all occlusion. Replaces the phase-1 pillar
 //! preview. (Macro-culling / streaming come with the ×16 map; ~54 chunks draw fine.)
 
+mod clock;
 mod config;
 #[cfg(feature = "dev")]
 mod dev_bridge;
@@ -19,6 +20,7 @@ mod hydrology;
 mod tectonics;
 mod terrain;
 
+use clock::WorldClock;
 use config::*;
 use macroquad::miniquad::{
     Bindings, BlendFactor, BlendState, BlendValue, BufferSource, BufferType, BufferUsage,
@@ -839,6 +841,9 @@ async fn main() {
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
     let mut show_info = true;
+    // Sim time base (S2). Advances in fixed sub-steps folded from the real frame `dt`; `P`
+    // pauses it. No sim body yet — only the tick counter moves (shown in the HUD / bridge).
+    let mut clock = WorldClock::new();
     // `G` cycles the debug view: off → Topo (GPU height/depth, water hidden) → Temp → Moist
     // → WaterDist → off. Topo reshades the 3D scene; the climate/water-dist modes overlay a
     // colourmap MINIMAP of the per-column field (the live consumer of the S1 env getters, so
@@ -876,6 +881,9 @@ async fn main() {
         if dt > 0.0 {
             fps = 0.9 * fps + 0.1 / dt;
         }
+        // Advance the sim clock: fold this frame's real `dt` into fixed sub-steps (capped, so
+        // a lag spike can't spiral). The sim body is empty in S2 — only the tick counter moves.
+        clock.frame(dt);
 
         // ---- Input (no GUI) ----
         if is_key_pressed(KeyCode::I) {
@@ -886,6 +894,9 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::H) {
             water_on = !water_on;
+        }
+        if is_key_pressed(KeyCode::P) {
+            clock.paused = !clock.paused;
         }
         let wheel = mouse_wheel().1;
         if wheel != 0.0 {
@@ -973,6 +984,20 @@ async fn main() {
                         "map": { "cols": COLS, "rows": ROWS, "vox_m": VOX, "map_scale": MAP_SCALE,
                                  "detail_chunks": streamer.detail.len(), "coarse_tiles": streamer.coarse.len() },
                         "env": env,
+                        "clock": { "tick": clock.tick(), "sim_time": clock.sim_time(),
+                                   "day_frac": clock.day_frac(), "time_scale": clock.time_scale,
+                                   "paused": clock.paused },
+                    }));
+                }
+                dev_bridge::Cmd::SetClock { scale, paused } => {
+                    if let Some(s) = scale {
+                        clock.time_scale = s.max(0.0);
+                    }
+                    if let Some(p) = paused {
+                        clock.paused = p;
+                    }
+                    let _ = reply.send(serde_json::json!({
+                        "time_scale": clock.time_scale, "paused": clock.paused,
                     }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
@@ -1127,9 +1152,17 @@ async fn main() {
         let line = format!(
             "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}"
         );
+        // Sim-clock readout (S2): the always-built consumer of the WorldClock getters.
+        let pause = if clock.paused { "  [PAUSED, P]" } else { "" };
+        let clock_line = format!(
+            "tick {}   sim {:.1}s   day {:.2}   x{:.1}{pause}",
+            clock.tick(), clock.sim_time(), clock.day_frac(), clock.time_scale
+        );
         if show_info {
             draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
             draw_text(&line, 8.0, 22.0, 24.0, Color::new(0.95, 0.97, 1.0, 1.0));
+            draw_text(&clock_line, 9.0, 45.0, 22.0, Color::new(0.0, 0.0, 0.0, 0.6));
+            draw_text(&clock_line, 8.0, 44.0, 22.0, Color::new(0.85, 0.92, 1.0, 1.0));
         }
 
         // Field colourmap minimap (the S1 env-getter consumer): rebuild the texture only
