@@ -19,6 +19,7 @@ use glam::{vec2, Vec2};
 use crate::config::*;
 use crate::genome::{Genome, Phenotype};
 use crate::grid::SpatialGrid;
+use crate::pressure::{PressureRegistry, Sample};
 use crate::rng::{seed_fold, splitmix64, Rng};
 use crate::terrain::VoxelTerrain;
 
@@ -115,6 +116,9 @@ pub struct Sim {
     pub kills: u64,
     /// Reused spatial index over creature positions, rebuilt each tick for prey/threat queries.
     grid: SpatialGrid,
+    /// The active environmental selection pressures (climate / autotrophy / metabolism), composed
+    /// per creature each tick. Behaviour config, not state — not part of `state_checksum`.
+    registry: PressureRegistry,
 }
 
 /// Dimensions of the species feature vector: 7 cell-type fractions (the developmental body plan)
@@ -183,15 +187,6 @@ pub fn column_index(pos: Vec2) -> (usize, usize) {
     (x, y)
 }
 
-/// Climate match in `[0.1, 1]`: how well a creature feeds at the local temperature given its
-/// evolved preference. Matched ⇒ 1 (full food value); fully mismatched ⇒ 0.1 (climate stress
-/// cripples foraging). This hits the DOMINANT energy channel (food), so it is a real selective
-/// force on the over-provisioned map — cold bands favour low-pref lineages, hot bands high-pref,
-/// and lineages sort into the climate they're suited to (C3 habitats / allopatry).
-fn climate_match(temp: f32, pref: f32) -> f32 {
-    (1.0 - THERMAL_PENALTY * (temp - pref).abs()).clamp(0.1, 1.0)
-}
-
 /// Vertical strata (C3). Which one a creature occupies is set by its morphology + where it
 /// stands: flight cells → Air, burrow cells → Underground, fins over a water column → Water,
 /// else the Surface base layer. Each is a distinct niche — its own food source and a predator
@@ -211,15 +206,6 @@ impl Stratum {
             Stratum::Surface => 1,
             Stratum::Air => 2,
             Stratum::Water => 3,
-        }
-    }
-
-    /// Metabolic multiplier for living here — flight is dear (lift), burrowing cheap (sheltered).
-    fn metab_mult(self) -> f32 {
-        match self {
-            Stratum::Air => AIR_METAB_MULT,
-            Stratum::Underground => UNDERGROUND_METAB_MULT,
-            _ => 1.0,
         }
     }
 
@@ -306,6 +292,7 @@ impl Sim {
             deaths: 0,
             kills: 0,
             grid: SpatialGrid::default(),
+            registry: PressureRegistry::default(),
         }
     }
 
@@ -440,9 +427,21 @@ impl Sim {
             }
             let (cx, cy) = column_index(c.pos);
             let layer = strata[idx];
-            // Food value is scaled by how well the creature's thermal preference matches the
-            // local climate — the C3 habitat pressure acts on the dominant (food) channel.
-            let climate = climate_match(terrain.temperature_at(cx, cy), c.genome.thermal_pref);
+            // Environmental selection pressures (climate / autotrophy / metabolism) compose into
+            // one Effect for this creature; its channels plug into the energy budget below, bit-for-
+            // bit as the former inline formulas (food_mult ← climate, energy_add ← photosynthesis,
+            // metab_mult ← stratum cost). Predation, camouflage and the nutrient cycle are MECHANIC
+            // pressures (a multi-creature pass / a per-pair detection roll / terrain mutation), not
+            // pure per-creature channel effects, so they stay explicit phases in `step`.
+            let sample = Sample {
+                pheno: &c.pheno,
+                genome: &c.genome,
+                layer,
+                temperature: terrain.temperature_at(cx, cy),
+                light: light_for(layer, cy, tick),
+                autotroph_shading,
+            };
+            let eff = self.registry.eval_all(&sample);
             let food = if layer == Stratum::Surface {
                 // Surface feeds on the positioned S3 plant field; intake scales with body size, a
                 // carnivore digests plants poorly (efficiency = 1 − carnivory).
@@ -453,20 +452,10 @@ impl Sim {
                 // dependent → an empty stratum richly rewards colonisers, then self-limits).
                 layer.capacity() / stratum_count[layer.idx()].max(1.0) * TICK_LEN
             };
-            // Photosynthesis (C3 autotrophs): light-driven energy from photo cells, on top of any
-            // foraging — so a mixotroph (photo + grazing) is possible. Light is 0 underground and
-            // at night, so an autotroph must hold light (surface/shallow, daytime) — that, plus
-            // the cell slots photo takes, is the trade-off against mobility/predation.
-            let photo = c.pheno.photo as f32;
-            let photo_gain = if photo > 0.0 {
-                PHOTO_RATE * photo * light_for(layer, cy, tick) * autotroph_shading * TICK_LEN
-            } else {
-                0.0
-            };
-            c.energy = (c.energy + food * climate + photo_gain).min(c.max_energy());
-            // Metabolism: Kleiber (biomass^0.75) × stratum cost + movement effort.
+            c.energy = (c.energy + food * eff.food_mult + eff.energy_add).min(c.max_energy());
+            // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
-            c.energy -= (SIM_BASE_METABOLISM * kleiber * layer.metab_mult() + MOVE_COST * throttle) * TICK_LEN;
+            c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle) * TICK_LEN;
             c.age += 1;
             // Death by starvation. The creature's matter returns to the nutrient pool here
             // (decomposition) — closing the cycle and re-fertilising the death site.
