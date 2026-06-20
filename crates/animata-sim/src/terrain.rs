@@ -174,7 +174,7 @@ fn value_noise(seed: u64, x: f32, y: f32, salt: u64) -> f32 {
 /// Fractal value-noise (fBm) in `[0, 1]`: `octaves` octaves, each at double frequency
 /// and half amplitude. (Value-noise fractal — same multi-scale look as Perlin fBm,
 /// cheaper.) More octaves = finer detail; the highest octaves carry little amplitude.
-pub(crate) fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
+pub fn fbm(seed: u64, x: f32, y: f32, salt: u64, octaves: u32) -> f32 {
     let mut sum = 0.0;
     let mut amp = 1.0;
     let mut freq = 1.0;

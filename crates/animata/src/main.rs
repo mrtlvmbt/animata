@@ -11,18 +11,13 @@
 //! normal. The GPU depth buffer handles all occlusion. Replaces the phase-1 pillar
 //! preview. (Macro-culling / streaming come with the ×16 map; ~54 chunks draw fine.)
 
-mod clock;
-mod config;
 #[cfg(feature = "dev")]
 mod dev_bridge;
-mod erosion;
-mod genome;
-mod grid;
-mod hydrology;
-mod rng;
-mod sim;
-mod tectonics;
-mod terrain;
+
+// The simulation + world model live in the graphics-free `animata-sim` crate. The renderer only
+// needs these modules by name; the rest (genome/grid/rng/tectonics/erosion/hydrology) are internal
+// to the sim. `Vec2` comes from the same glam major macroquad re-exports, so types line up.
+use animata_sim::{clock, config, sim, terrain};
 
 use clock::WorldClock;
 use config::*;

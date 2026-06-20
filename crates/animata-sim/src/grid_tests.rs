@@ -1,6 +1,6 @@
 use super::*;
 use crate::rng::Rng;
-use macroquad::math::vec2;
+use glam::vec2;
 
 fn brute_nearest(points: &[Vec2], from: Vec2, max: f32, ok: impl Fn(usize) -> bool) -> Option<usize> {
     points

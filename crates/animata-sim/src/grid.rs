@@ -4,7 +4,7 @@
 //!
 //! Queries use plain (non-wrapped) distance: creatures near the map edge don't sense across it.
 
-use macroquad::math::Vec2;
+use glam::Vec2;
 
 #[derive(Default)]
 pub struct SpatialGrid {

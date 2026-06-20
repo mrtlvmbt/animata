@@ -1,0 +1,14 @@
+[package]
+name = "animata-sim"
+version = "0.2.0"
+edition = "2021"
+description = "Deterministic simulation + world model for animata — fully decoupled from graphics"
+
+[lib]
+name = "animata_sim"
+path = "src/lib.rs"
+
+[dependencies]
+# Vector math only. Pinned to the same major version macroquad 0.4 re-exports, so `Vec2` is the
+# identical type across the crate boundary (no conversion in the renderer). Deliberately NO macroquad.
+glam = "0.27"
