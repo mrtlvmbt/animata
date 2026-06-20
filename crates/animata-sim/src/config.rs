@@ -77,8 +77,10 @@ pub const BIOMASS_REGROW_RATE: f32 = 0.01;
 pub const START_CREATURES: usize = 2000;
 /// Tries to land a founder on a non-water column before accepting wherever it fell (clamped).
 pub const FOUNDER_PLACE_TRIES: u32 = 8;
-/// Hard population ceiling (deterministic random cull above it).
-pub const SIM_POP_CAP: usize = 12000;
+/// Hard population ceiling (deterministic random cull above it). Raised ×1000 (12k → 12M) to lift the
+/// biomass ceiling; NB the single-thread per-tick budget means the realistic interactive ceiling is far
+/// lower — this only un-clamps the headroom, the `SOFT_CAP` birth gate sets the working equilibrium.
+pub const SIM_POP_CAP: usize = 12_000_000;
 /// Energy a founder / newborn starts with.
 pub const START_ENERGY: f32 = 50.0;
 /// Energy at/above which a creature buds off a child (splitting its energy in half).
@@ -104,9 +106,11 @@ pub const PLANT_BIOMASS_TO_ENERGY: f32 = 8.0;
 /// Soft carrying capacity: reproduction is gated by `1 - N/SOFT_CAP`, so the population
 /// self-limits HERE (well below the hard `SIM_POP_CAP` safety net). On the ×16 map the
 /// vegetation supports far more than the single-thread budget, so food alone can't regulate a
-/// ≤12k population — this aggregate competition term stands in until spatially food-limited
-/// densities are reachable (chunked millions, a later scale phase).
-pub const SOFT_CAP: f32 = 6000.0;
+/// large population — this aggregate competition term stands in until spatially food-limited
+/// densities are reachable (chunked millions, a later scale phase). Raised ×1000 (6k → 6M) to lift
+/// the biomass ceiling: the birth gate now stays ≈1 across any sane interactive population, so growth
+/// is bounded by the energy economy + senescence + `SIM_POP_CAP`, not this aggregate term.
+pub const SOFT_CAP: f32 = 6_000_000.0;
 /// Senescence reference lifespan in ticks: per-tick old-age death probability rises as
 /// `SENESCENCE_RATE·(age/LIFESPAN)²`, giving demographic turnover (so death isn't only the
 /// random over-cap cull) and a real survival-to-reproduce selection pressure.
