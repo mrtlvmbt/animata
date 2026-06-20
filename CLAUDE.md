@@ -26,3 +26,16 @@ The kit is **read-only** here — it is a shared mechanism layer, not project co
   the source of truth. After editing an overlay, **re-run install.sh** — a commit gate
   (kit-generated-guard) blocks commits when a generated agent drifts from its overlay/base.
 <!-- claude-dev-kit:rules END -->
+
+## Running tests (ALL agents — mandatory)
+
+Run tests through **`./scripts/test-bar.sh`**, never bare `cargo test`. It wraps `cargo test`, streams
+a progress indicator (so the human sees how far a long run is), and passes failure detail through
+(panic body, assert `left:`/`right:` — needed when re-pinning the golden checksum).
+
+- Full suite: `./scripts/test-bar.sh` (defaults to `--release --workspace`).
+- Filtered: `./scripts/test-bar.sh -p animata-sim --release state_checksum` (any `cargo test` args pass through).
+- It runs raw `cargo test` internally (bypasses the rtk proxy that otherwise swallows test output), and
+  honours `.cargo/config.toml`'s `RUST_TEST_THREADS=1`. In a non-TTY context (a captured/backgrounded
+  run) it prints periodic checkpoint lines instead of a `\r` bar — set cadence with `BAR_EVERY=N`.
+- The canonical green gate is still a full **`--release`** run (acceptance corridors are tuned there).
