@@ -19,8 +19,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-/// A timed region of one tick. Top-level phases of `Sim::step` plus the two sub-spans worth breaking
-/// out (`GridRebuild` inside snapshot, `Develop` inside apply). Order = display order = array index.
+/// A timed region of one tick. Top-level phases of `Sim::step` plus the `GridRebuild` sub-span broken
+/// out of snapshot. `Develop` is its own (parallel) phase run after apply. Order = display = index.
 #[non_exhaustive]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Span {
@@ -59,10 +59,11 @@ impl Span {
     }
 
     /// Nesting depth for indented display: `0` = a top-level phase, `1` = a sub-span of the phase
-    /// above it (`GridRebuild` under `Snapshot`, `Develop` under `Apply`).
+    /// above it (`GridRebuild` under `Snapshot`). `Develop` is its own top-level (parallel) phase that
+    /// runs after `Apply` — `Apply` no longer includes it.
     pub fn depth(self) -> u8 {
         match self {
-            Span::GridRebuild | Span::Develop => 1,
+            Span::GridRebuild => 1,
             _ => 0,
         }
     }

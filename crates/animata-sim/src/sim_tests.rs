@@ -55,6 +55,24 @@ fn state_checksum_replays_to_golden() {
     assert_eq!(a, GOLDEN_CHECKSUM_SEED42_300, "state diverged from golden (some change shifted the trajectory)");
 }
 
+/// Multi-cell trajectory lock (release only): an 8000-tick seed-1 run develops complex multicellular
+/// bodies, so it bit-locks the develop / reproduction FP path that the unicellular seed-42/300 golden
+/// can't reach. Far stronger against `Sim::step` refactors that reassociate that path's float math.
+#[cfg(not(debug_assertions))]
+#[test]
+fn state_checksum_multicell_lock() {
+    let mut t = VoxelTerrain::new(1);
+    let mut s = Sim::new(1, &t);
+    for tick in 0..8000 {
+        s.step(&mut t, tick);
+    }
+    assert_eq!(
+        state_checksum(&s, &t),
+        GOLDEN_CHECKSUM_SEED1_8000,
+        "multi-cell trajectory diverged from the pinned lock"
+    );
+}
+
 /// Save/load is verified by the determinism lock itself: a full-state snapshot, round-tripped
 /// through bytes and restored onto a regenerated world, must reproduce the exact `state_checksum`
 /// — AND continue bit-identically. (Geometry is regenerated from the seed; only the overlay +
