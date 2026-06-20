@@ -936,6 +936,7 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
         for &o in &p.organ {
             fnv_fold_u32(&mut h, o as u32); // organ coherence per type (PR-C; part of the body state)
         }
+        fnv_fold_u32(&mut h, p.axis_order as u32); // axial body-plan order (PR-D1; part of the body state)
     }
     fnv_fold_u64(&mut h, terrain.mut_state_checksum());
     h
@@ -949,9 +950,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    6857269672853979342 // debug profile
+    8328727706105271575 // debug profile (re-pinned at PR-D1: checksum now folds the inert morphogen fields)
 } else {
-    16421358658108191288 // release profile (FMA contraction shifts the trajectory)
+    480162056762806937 // release profile (FMA contraction shifts the trajectory)
 };
 
 #[cfg(test)]
