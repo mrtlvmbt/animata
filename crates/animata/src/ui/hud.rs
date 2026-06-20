@@ -53,6 +53,11 @@ fn caps(text: &str) -> RichText {
         .color(theme::TEXT_FAINT)
 }
 
+/// Two-decimal format that snaps a near-zero magnitude to a clean `0.00` (avoids `-0.00`).
+fn fmt2(v: f32) -> String {
+    format!("{:.2}", if v.abs() < 0.005 { 0.0 } else { v })
+}
+
 /// `label … value` row (label sans dim left, value mono right).
 fn kv(ui: &mut egui::Ui, label: &str, value: String) {
     ui.horizontal(|ui| {
@@ -190,15 +195,17 @@ fn vitals_hairline(ui: &mut egui::Ui) {
 }
 
 fn sun_dial(ui: &mut egui::Ui, frac: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::hover());
     let c = rect.center();
     let r = 10.0;
     let p = ui.painter();
     p.circle_stroke(c, r, Stroke::new(1.0, egui::Color32::from_white_alpha(46)));
-    // angle: 0 at top, clockwise
+    // Needle: 0 at top, clockwise; from the centre to just inside the ring.
     let ang = frac * std::f32::consts::TAU - std::f32::consts::FRAC_PI_2;
-    let tip = c + Vec2::new(ang.cos(), ang.sin()) * r;
-    p.line_segment([c, tip], Stroke::new(1.5, theme::ACCENT));
+    let dir = Vec2::new(ang.cos(), ang.sin());
+    p.line_segment([c, c + dir * (r - 1.5)], Stroke::new(2.0, theme::ACCENT));
+    p.circle_filled(c, 1.6, theme::ACCENT); // hub
+    p.circle_filled(c + dir * (r - 1.5), 1.6, theme::ACCENT); // sun bead at the tip
 }
 
 fn sparkline(ui: &mut egui::Ui, data: &[f32], size: Vec2, col: egui::Color32) {
@@ -376,6 +383,7 @@ fn minimap_panel(
                                 )
                             })
                             .collect();
+                        darken_outside(ui.painter(), rect, &pts);
                         ui.painter()
                             .add(egui::Shape::closed_line(pts, Stroke::new(1.5, theme::ACCENT)));
                     }
@@ -390,6 +398,35 @@ fn minimap_panel(
                     }
                 });
         });
+}
+
+/// Darken the minimap area OUTSIDE the (convex) viewport quad: a ring of 4 convex quads between the
+/// panel rect and the viewport, with rect corners ↔ quad vertices paired by angle around the centre
+/// (robust for any rotation/zoom; degenerates harmlessly when a vertex sits on the rect edge).
+fn darken_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) {
+    if quad.len() != 4 {
+        return;
+    }
+    let c = rect.center();
+    let ang = |p: egui::Pos2| (p.y - c.y).atan2(p.x - c.x);
+    let mut outer = [
+        rect.left_top(),
+        rect.right_top(),
+        rect.right_bottom(),
+        rect.left_bottom(),
+    ];
+    let mut inner = [quad[0], quad[1], quad[2], quad[3]];
+    outer.sort_by(|a, b| ang(*a).total_cmp(&ang(*b)));
+    inner.sort_by(|a, b| ang(*a).total_cmp(&ang(*b)));
+    let veil = egui::Color32::from_rgba_unmultiplied(5, 7, 10, 87); // ~0.34
+    for i in 0..4 {
+        let j = (i + 1) % 4;
+        painter.add(egui::Shape::convex_polygon(
+            vec![outer[i], outer[j], inner[j], inner[i]],
+            veil,
+            Stroke::NONE,
+        ));
+    }
 }
 
 // ---------- control rail (bottom-right) ----------
@@ -542,9 +579,9 @@ fn pop_panel(ui: &mut egui::Ui, m: &SimMetrics) {
     ui.label(caps("Diversity"));
     kv(ui, "species", format!("{}", l.species));
     kv(ui, "niches", format!("{}", l.niches));
-    kv(ui, "allopatry", format!("{:.2}", l.allop));
-    kv(ui, "crypsis", format!("{:.2}", l.crypsis));
-    kv(ui, "nutrient", format!("{:.2}", l.nutri));
+    kv(ui, "allopatry", fmt2(l.allop));
+    kv(ui, "crypsis", fmt2(l.crypsis));
+    kv(ui, "nutrient", fmt2(l.nutri));
     hairline(ui);
     ui.label(caps("Strata mix"));
     strata_bar(ui, l.strata);
@@ -570,7 +607,12 @@ fn labelled_bar(ui: &mut egui::Ui, label: &str, frac: f32, col: egui::Color32) {
 fn strata_bar(ui: &mut egui::Ui, strata: [f32; 4]) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 10.0), Sense::hover());
-    let cols = [theme::DATA_AUTO, theme::GOOD_GREEN, theme::ACCENT, theme::DATA_CARN];
+    let cols = [
+        theme::STRATA_UNDER,
+        theme::STRATA_SURF,
+        theme::STRATA_AIR,
+        theme::STRATA_WATER,
+    ];
     let p = ui.painter();
     let mut x = rect.left();
     for (i, &f) in strata.iter().enumerate() {
