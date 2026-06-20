@@ -15,5 +15,6 @@ pub mod hydrology;
 pub mod pressure;
 pub mod rng;
 pub mod sim;
+pub mod sim_config;
 pub mod tectonics;
 pub mod terrain;

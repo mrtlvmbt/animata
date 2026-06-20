@@ -19,6 +19,7 @@
 
 use crate::genome::{Genome, Phenotype};
 use crate::sim::Stratum;
+use crate::sim_config::{Features, Params};
 
 mod autotrophy;
 mod climate;
@@ -83,6 +84,25 @@ pub struct PressureRegistry {
 }
 
 impl PressureRegistry {
+    /// Build the active set from a config: a pure energy-budget pressure is present iff its feature
+    /// is on (membership = toggle). Metabolism is intrinsic (every body pays it), so it is always
+    /// present — its per-stratum variation is what the `strata` feature governs (via `stratum_of`).
+    /// Each pressure is given its tunable parameters from `Params` (defaults reproduce the consts).
+    pub fn build(f: &Features, p: &Params) -> Self {
+        let mut active: Vec<Box<dyn SelectionPressure>> = Vec::new();
+        if f.climate {
+            active.push(Box::new(climate::Climate { thermal_penalty: p.thermal_penalty }));
+        }
+        if f.autotrophy {
+            active.push(Box::new(autotrophy::Autotrophy { photo_rate: p.photo_rate }));
+        }
+        active.push(Box::new(metabolism::Metabolism {
+            air: p.air_metab_mult,
+            underground: p.underground_metab_mult,
+        }));
+        PressureRegistry { active }
+    }
+
     /// Compose every active pressure's effect for one creature.
     pub fn eval_all(&self, s: &Sample) -> Effect {
         let mut e = Effect::identity();
@@ -99,16 +119,9 @@ impl PressureRegistry {
 }
 
 impl Default for PressureRegistry {
-    /// The default set: every pure energy-budget pressure, all on. (PR4 will gate membership by a
-    /// runtime config; for now the all-on set reproduces the pre-framework behaviour exactly.)
+    /// The all-on, default-params set (the determinism golden).
     fn default() -> Self {
-        PressureRegistry {
-            active: vec![
-                Box::new(climate::Climate),
-                Box::new(autotrophy::Autotrophy),
-                Box::new(metabolism::Metabolism),
-            ],
-        }
+        PressureRegistry::build(&Features::default(), &Params::default())
     }
 }
 

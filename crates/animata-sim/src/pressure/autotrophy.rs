@@ -3,9 +3,11 @@
 //! a per-tick aggregate) makes the niche self-limit. The cell slots photo takes are the trade-off.
 
 use super::{Effect, Sample, SelectionPressure};
-use crate::config::{PHOTO_RATE, TICK_LEN};
+use crate::config::TICK_LEN;
 
-pub struct Autotrophy;
+pub struct Autotrophy {
+    pub photo_rate: f32,
+}
 
 impl SelectionPressure for Autotrophy {
     fn id(&self) -> &'static str {
@@ -13,10 +15,10 @@ impl SelectionPressure for Autotrophy {
     }
 
     fn eval(&self, s: &Sample) -> Effect {
-        // Bit-identical to the former inline `photo_gain`.
+        // Bit-identical to the former inline `photo_gain` (param defaults to PHOTO_RATE).
         let photo = s.pheno.photo as f32;
         let energy_add = if photo > 0.0 {
-            PHOTO_RATE * photo * s.light * s.autotroph_shading * TICK_LEN
+            self.photo_rate * photo * s.light * s.autotroph_shading * TICK_LEN
         } else {
             0.0
         };

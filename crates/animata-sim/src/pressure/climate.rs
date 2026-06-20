@@ -3,9 +3,10 @@
 //! Acts on the dominant energy channel (food), so it actually bites.
 
 use super::{Effect, Sample, SelectionPressure};
-use crate::config::THERMAL_PENALTY;
 
-pub struct Climate;
+pub struct Climate {
+    pub thermal_penalty: f32,
+}
 
 impl SelectionPressure for Climate {
     fn id(&self) -> &'static str {
@@ -13,8 +14,8 @@ impl SelectionPressure for Climate {
     }
 
     fn eval(&self, s: &Sample) -> Effect {
-        // Bit-identical to the former `climate_match(temp, pref)`.
-        let m = (1.0 - THERMAL_PENALTY * (s.temperature - s.genome.thermal_pref).abs()).clamp(0.1, 1.0);
+        // Bit-identical to the former `climate_match(temp, pref)` (param defaults to THERMAL_PENALTY).
+        let m = (1.0 - self.thermal_penalty * (s.temperature - s.genome.thermal_pref).abs()).clamp(0.1, 1.0);
         Effect { food_mult: m, ..Effect::identity() }
     }
 }

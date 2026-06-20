@@ -75,6 +75,8 @@ pub const BIOMASS_REGROW_RATE: f32 = 0.01;
 // ---- Life simulation: C0 unicellular ecosystem (consumed in sim.rs) ----
 /// Founder creatures spawned at world start (on land columns).
 pub const START_CREATURES: usize = 2000;
+/// Tries to land a founder on a non-water column before accepting wherever it fell (clamped).
+pub const FOUNDER_PLACE_TRIES: u32 = 8;
 /// Hard population ceiling (deterministic random cull above it).
 pub const SIM_POP_CAP: usize = 12000;
 /// Energy a founder / newborn starts with.

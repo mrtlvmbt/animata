@@ -21,6 +21,7 @@ use crate::genome::{Genome, Phenotype};
 use crate::grid::SpatialGrid;
 use crate::pressure::{PressureRegistry, Sample};
 use crate::rng::{seed_fold, splitmix64, Rng};
+use crate::sim_config::SimConfig;
 use crate::terrain::VoxelTerrain;
 
 // Fixed brain topology: inputs → tanh hidden → tanh outputs. The genome's `brain` vector holds
@@ -119,6 +120,9 @@ pub struct Sim {
     /// The active environmental selection pressures (climate / autotrophy / metabolism), composed
     /// per creature each tick. Behaviour config, not state — not part of `state_checksum`.
     registry: PressureRegistry,
+    /// Runtime feature toggles + parameters. Part of the sim's INPUT (with the seed); the golden is
+    /// at `SimConfig::default()`. Behaviour config, not state.
+    cfg: SimConfig,
 }
 
 /// Dimensions of the species feature vector: 7 cell-type fractions (the developmental body plan)
@@ -256,14 +260,20 @@ fn light_for(stratum: Stratum, cy: usize, tick: u64) -> f32 {
 }
 
 impl Sim {
-    /// Spawn the founder population on land columns, deterministically from `world_seed`.
+    /// Spawn the founder population with the default config (all features on) — the golden path.
     pub fn new(world_seed: u64, terrain: &VoxelTerrain) -> Self {
+        Self::with_config(world_seed, terrain, SimConfig::default())
+    }
+
+    /// Spawn the founder population on land columns, deterministically from `world_seed`, under a
+    /// given runtime config. `cfg` is part of the sim's input, so `(seed, cfg)` replays exactly.
+    pub fn with_config(world_seed: u64, terrain: &VoxelTerrain, cfg: SimConfig) -> Self {
         let mut creatures = Vec::with_capacity(START_CREATURES);
         for i in 0..START_CREATURES as u64 {
             let mut rng = Rng::new(seed_fold(world_seed, &[SALT_FOUNDER, i]));
             // Place on land: a few tries to dodge water, else accept (clamped) wherever.
             let mut pos = vec2(0.0, 0.0);
-            for _ in 0..8 {
+            for _ in 0..FOUNDER_PLACE_TRIES {
                 pos = vec2(rng.unit() * COLS as f32 * VOX, rng.unit() * ROWS as f32 * VOX);
                 let (cx, cy) = column_index(pos);
                 if !terrain.is_water(cx, cy) {
@@ -292,7 +302,8 @@ impl Sim {
             deaths: 0,
             kills: 0,
             grid: SpatialGrid::default(),
-            registry: PressureRegistry::default(),
+            registry: PressureRegistry::build(&cfg.features, &cfg.params),
+            cfg,
         }
     }
 
@@ -305,6 +316,10 @@ impl Sim {
     pub fn step(&mut self, terrain: &mut VoxelTerrain, tick: u64) {
         let n = self.creatures.len();
         let (maxx, maxy) = (COLS as f32 * VOX, ROWS as f32 * VOX);
+        // Feature toggles + params, read once as `Copy` locals so the hot closures don't borrow
+        // `self`. All-on/default reproduces the pre-config behaviour bit-for-bit.
+        let feat = self.cfg.features;
+        let camo_base = self.cfg.params.camo_base_detect;
         // (a) snapshot + decide — reads only, terrain unmutated. Snapshot arrays feed the grid
         // predicates without borrowing `self.creatures` inside the closures.
         let pos: Vec<Vec2> = self.creatures.iter().map(|c| c.pos).collect();
@@ -327,6 +342,9 @@ impl Sim {
             .creatures
             .iter()
             .map(|c| {
+                if !feat.strata {
+                    return Stratum::Surface; // strata off ⇒ one flat layer
+                }
                 let (cx, cy) = column_index(c.pos);
                 stratum_of(&c.pheno, terrain.is_water(cx, cy))
             })
@@ -343,7 +361,8 @@ impl Sim {
         // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
         let mut decisions: Vec<(f32, f32, Option<usize>)> = Vec::with_capacity(n);
         for i in 0..n {
-            let predator = carn[i] > CARNIVORE_THRESHOLD;
+            // Predation off ⇒ no creature targets prey ⇒ the predation pass resolves nothing.
+            let predator = feat.predation && carn[i] > CARNIVORE_THRESHOLD;
             let self_bm = bm[i];
             let self_layer = strata[i];
             // Nearest edible prey (only if predatory) AND nearest threatening predator, one pass.
@@ -353,8 +372,11 @@ impl Sim {
             // ground. A cryptic prey is often invisible — strong, habitat-specific selection for
             // matching the background (coevolution). Deterministic per (predator, prey, tick).
             let detected = |j: usize| {
+                if !feat.camouflage {
+                    return true; // camouflage off ⇒ prey always detectable
+                }
                 let contrast = (color[j] - bg[j]).abs();
-                let p = CAMO_BASE_DETECT + (1.0 - CAMO_BASE_DETECT) * contrast;
+                let p = camo_base + (1.0 - camo_base) * contrast;
                 Rng::new(seed_fold(self.world_seed, &[SALT_CAMO, i as u64, j as u64, tick])).unit() <= p
             };
             let (prey, threat) = self.grid.nearest2_within(
@@ -486,7 +508,13 @@ impl Sim {
                 // Mutate the genome (brain + GRN) and DEVELOP the child's body up front, so its
                 // build cost (energy per cell beyond the first) is known.
                 let genome = c.genome.mutate(&mut rng, MUTATION_STD, GRN_MUTATION_STD);
-                let pheno = genome.develop();
+                // Development off ⇒ the body never grows past one cell (C0); the genome still mutates
+                // (brain evolves), so the RNG stream is unchanged — only the phenotype differs.
+                let pheno = if feat.development {
+                    genome.develop()
+                } else {
+                    Phenotype { n_cells: 1, structural: 1, ..Default::default() }
+                };
                 c.energy *= 0.5;
                 let build = CELL_BIOMASS_COST * pheno.n_cells.saturating_sub(1) as f32;
                 let child_energy = c.energy - build;
