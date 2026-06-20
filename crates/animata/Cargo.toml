@@ -17,6 +17,13 @@ animata-sim = { path = "../animata-sim" }
 tiny_http = { version = "0.12", optional = true }
 serde_json = { version = "1", optional = true }
 
+# macOS-only: swap the Dock icon to the light/dark variant at runtime via AppKit (the bundle .icns
+# is static; macOS never switches it by appearance, so we set NSApp.applicationIconImage live).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSData", "NSString"] }
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "NSImage", "NSAppearance"] }
+
 [features]
 # Localhost JSON-RPC control/inspection bridge for autonomous verification (drive the camera,
 # reseed, capture screenshots). Off by default. See DEV_BRIDGE.md. Run: cargo run -p animata --features dev
