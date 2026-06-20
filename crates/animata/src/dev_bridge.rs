@@ -44,8 +44,10 @@ pub enum Cmd {
     /// Toggle render flags (diagnostic): `water` draws the translucent surface, `topo` is the
     /// height-debug view (water hidden). Either field optional.
     Render { water: Option<bool>, topo: Option<bool> },
-    /// Capture the current frame to a PNG (serviced post-draw on the main loop).
-    Screenshot(String),
+    /// Capture a PNG (serviced post-draw on the main loop). `window` true → the whole window
+    /// back-buffer incl. the egui HUD (`get_screen_data`); false → the offscreen 3D target only
+    /// (no HUD, no foreground needed).
+    Screenshot { path: String, window: bool },
     /// Read the live `SimConfig` (every feature flag + parameter).
     GetConfig,
     /// Toggle a simulation feature by name (climate / autotrophy / strata / predation /
@@ -152,7 +154,10 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             y: u("y").ok_or("biomass: missing y")? as usize,
         }),
         "animata/render" => Ok(Cmd::Render { water: b("water"), topo: b("topo") }),
-        "animata/screenshot" => Ok(Cmd::Screenshot(s("path").unwrap_or_else(|| "shot.png".into()))),
+        "animata/screenshot" => Ok(Cmd::Screenshot {
+            path: s("path").unwrap_or_else(|| "shot.png".into()),
+            window: b("window").unwrap_or(true), // default: whole window incl. HUD
+        }),
         "animata/get_config" => Ok(Cmd::GetConfig),
         "animata/set_feature" => Ok(Cmd::SetFeature {
             name: s("name").ok_or("set_feature: missing name")?,
