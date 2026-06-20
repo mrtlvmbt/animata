@@ -38,7 +38,9 @@ Fix a hit with a Phosphor glyph (`ph::ARROW_RIGHT`) or an ASCII form.
 
 ## Requirements
 Google Chrome (`/Applications/Google Chrome.app`), `python3` with `pillow` + `numpy`, the app
-running with `--features dev` (dev-bridge on 127.0.0.1:8127, incl. the `animata/set_panel` method).
+running with `--features dev`. The dev-bridge port is per-branch; the tool reads it from
+`.animata-dev-port` (written by the app in its cwd), falling back to 8127. Needs the
+`animata/set_panel` method.
 
 ## Caveats
 - Live values (population/tick/fps/percentages) differ from the static template → expected text noise.

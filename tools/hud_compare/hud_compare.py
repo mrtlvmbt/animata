@@ -28,9 +28,17 @@ from PIL import Image
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
+ROOT_ = HERE.parents[1]
 TEMPLATE = HERE / "template.html"
 OUT = Path("/tmp/hud_cmp")
-BRIDGE = "http://127.0.0.1:8127"
+# The dev-bridge port is per-branch now; the app writes it to .animata-dev-port in its cwd.
+def _port():
+    pf = ROOT_ / ".animata-dev-port"
+    try:
+        return int(pf.read_text().strip())
+    except Exception:
+        return 8127
+BRIDGE = f"http://127.0.0.1:{_port()}"
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 W, H = 1100, 760          # logical
 SCALE = 2                 # backbuffer = 2200×1520
