@@ -902,9 +902,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    4028216738331231112 // debug profile
+    10572991899119710295 // debug profile
 } else {
-    2002045662948495743 // release profile (FMA contraction shifts the trajectory)
+    15250152079906823249 // release profile (FMA contraction shifts the trajectory)
 };
 
 #[cfg(test)]

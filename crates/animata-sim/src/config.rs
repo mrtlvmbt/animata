@@ -122,14 +122,17 @@ pub const MUTATION_STD: f32 = 0.12;
 /// bodies (the body is the costly part).
 pub const GRN_MUTATION_STD: f32 = 0.10;
 /// Locomotion floor: the share of `CREATURE_SPEED` a body with NO effector cells can manage —
-/// passive drift, not powered motility. A founder single cell would creep at `CREATURE_SPEED·DRIFT_FLOOR`,
-/// real speed EARNED by developing effector cells (cf. `EFFECTOR_GAIN`).
-/// NB: held at `1.0` (== the old free baseline, bit-identical) PENDING the ecosystem rebalance —
-/// lowering it slows the WHOLE population (predation/foraging tuned around the old scale), which
-/// collapses the camouflage + seasonality demonstrations until those are re-tuned to the new regime.
-pub const DRIFT_FLOOR: f32 = 1.0;
-/// C1 body-stat coupling: each effector cell adds this fraction to top speed.
-pub const EFFECTOR_GAIN: f32 = 0.12;
+/// passive drift, not powered motility. A founder single cell drifts at `CREATURE_SPEED·DRIFT_FLOOR`
+/// = 3 m/s — HALF the old free baseline (a clear slowdown, and tiny on screen now), while real speed
+/// is EARNED by developing effector cells (`EFFECTOR_GAIN`). Not pushed lower because predation —
+/// hence the camouflage signal — collapses on the over-provisioned map once predators can't close on
+/// prey; 0.5 is the floor that keeps the trophic web (and crypsis) alive. Motility is now an
+/// emergent, selected trait, with a PREDATOR's earned effectors letting it outrun drifting prey.
+pub const DRIFT_FLOOR: f32 = 0.5;
+/// C1 body-stat coupling: each effector cell adds this fraction of `CREATURE_SPEED` to top speed.
+/// Raised with the `DRIFT_FLOOR` rebalance so a few contractile cells recover full speed (≈3 effectors
+/// ⇒ ~1.0×): the cost of motility is the body that carries it, paid in metabolism + development.
+pub const EFFECTOR_GAIN: f32 = 0.35;
 /// Each storage cell adds this much to the energy cap.
 pub const STORAGE_PER_CELL: f32 = 25.0;
 /// Energy to build one cell beyond the first when budding a child — so a larger body costs
