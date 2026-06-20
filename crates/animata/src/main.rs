@@ -14,6 +14,9 @@
 #[cfg(feature = "dev")]
 mod dev_bridge;
 
+#[cfg(target_os = "macos")]
+mod mac_icon;
+
 mod render;
 mod ui;
 
@@ -493,8 +496,14 @@ async fn main() {
     #[cfg(feature = "dev")]
     let mut pending_shots: Vec<(String, bool, std::sync::mpsc::Sender<serde_json::Value>)> = Vec::new();
 
+    // Last applied Dock-icon appearance (macOS); `None` until the first sync sets it.
+    #[cfg(target_os = "macos")]
+    let mut icon_dark: Option<bool> = None;
+
     loop {
         let dt = get_frame_time();
+        #[cfg(target_os = "macos")]
+        mac_icon::sync(&mut icon_dark);
         // Pick up a finished background world (non-blocking). On readiness, swap it in and
         // reset the streamer so meshes rebuild around the camera from the new terrain.
         if let Some(job) = &gen {
