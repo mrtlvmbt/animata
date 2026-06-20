@@ -232,34 +232,19 @@ fn transport(ctx: &egui::Context, m: &SimMetrics, act: &mut UiActions) {
         .show(ctx, |ui| {
             theme::panel_frame().show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 10.0;
+                    ui.spacing_mut().item_spacing.x = 12.0;
 
-                    // Pause/Play — accent button.
+                    // Pause/Play — accent button (custom painted for crisp contrast).
                     let glyph = if m.paused { ph::PLAY } else { ph::PAUSE };
-                    let resp = ui.add(
-                        egui::Button::new(RichText::new(glyph).font(theme::mono(16.0)).color(theme::ACCENT_TEXT))
-                            .fill(theme::ACCENT_FILL)
-                            .stroke(Stroke::new(1.0, theme::ACCENT_LINE))
-                            .min_size(egui::vec2(34.0, 26.0)),
-                    );
-                    if resp.clicked() {
+                    if play_button(ui, glyph).clicked() {
                         act.toggle_pause = true;
                     }
 
                     vitals_hairline(ui);
 
-                    // Log speed slider (no +/- buttons — spec).
-                    let mut scale = m.time_scale;
-                    ui.spacing_mut().slider_width = 130.0;
-                    if ui
-                        .add(
-                            egui::Slider::new(&mut scale, MIN_TIME_SCALE..=MAX_TIME_SCALE)
-                                .logarithmic(true)
-                                .show_value(false),
-                        )
-                        .changed()
-                    {
-                        act.set_time_scale = Some(scale);
+                    // Log speed slider — thin track + amber handle (no +/- buttons, spec).
+                    if let Some(v) = speed_slider(ui, m.time_scale) {
+                        act.set_time_scale = Some(v);
                     }
                     let val = if m.time_scale < 10.0 {
                         format!("{:.1}×", m.time_scale)
@@ -274,6 +259,54 @@ fn transport(ctx: &egui::Context, m: &SimMetrics, act: &mut UiActions) {
                 });
             });
         });
+}
+
+/// Accent pause/play button: amber-filled rounded square, bright glyph (high contrast).
+fn play_button(ui: &mut egui::Ui, glyph: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 28.0), Sense::click());
+    let p = ui.painter();
+    // Solid amber fill + dark glyph = a crisp, unmistakable play/pause (amber-on-amber was invisible).
+    let fill = if resp.hovered() {
+        theme::ACCENT_TEXT
+    } else {
+        theme::ACCENT
+    };
+    p.rect_filled(rect, 8.0, fill);
+    p.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        glyph,
+        theme::mono(16.0),
+        egui::Color32::from_rgb(10, 12, 11),
+    );
+    resp
+}
+
+/// Custom logarithmic speed slider (0.1×–64×): thin track, filled amber lead, round amber handle.
+/// Returns the new scale while being dragged/clicked.
+fn speed_slider(ui: &mut egui::Ui, current: f32) -> Option<f32> {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(132.0, 24.0), Sense::click_and_drag());
+    let cy = rect.center().y;
+    let (lmin, lmax) = (MIN_TIME_SCALE.ln(), MAX_TIME_SCALE.ln());
+    let t = ((current.ln() - lmin) / (lmax - lmin)).clamp(0.0, 1.0);
+    let hx = rect.left() + t * rect.width();
+    let p = ui.painter();
+    p.line_segment(
+        [egui::pos2(rect.left(), cy), egui::pos2(rect.right(), cy)],
+        Stroke::new(3.0, egui::Color32::from_white_alpha(40)),
+    );
+    p.line_segment(
+        [egui::pos2(rect.left(), cy), egui::pos2(hx, cy)],
+        Stroke::new(3.0, theme::ACCENT_LINE),
+    );
+    p.circle_filled(egui::pos2(hx, cy), 6.0, theme::ACCENT);
+    if resp.dragged() || resp.clicked() {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            let nt = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            return Some((lmin + nt * (lmax - lmin)).exp());
+        }
+    }
+    None
 }
 
 fn badge(ui: &mut egui::Ui, text: &str) {
