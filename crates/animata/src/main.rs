@@ -262,12 +262,12 @@ fn creature_view(c: &sim::Creature, terrain: &VoxelTerrain) -> ui::CreatureView 
     let n = p.n_cells.max(1) as f32;
     let frac = |x: u32| (x as f32 / n).clamp(0.0, 1.0);
 
-    let kind = if p.photo_frac() > PHOTO_THETA {
-        ui::TrophicKind::Autotroph
-    } else if p.carnivory() > CARNIVORE_THRESHOLD {
-        ui::TrophicKind::Carnivore
-    } else {
-        ui::TrophicKind::Herbivore
+    // Classify through the sim's single source of truth so the inspector and the population panel
+    // always agree on a creature's diet.
+    let kind = match animata_sim::genome::TrophicNiche::classify(p) {
+        animata_sim::genome::TrophicNiche::Autotroph => ui::TrophicKind::Autotroph,
+        animata_sim::genome::TrophicNiche::Carnivore => ui::TrophicKind::Carnivore,
+        _ => ui::TrophicKind::Herbivore,
     };
     let diet = match kind {
         ui::TrophicKind::Autotroph => "Phototroph",
@@ -583,8 +583,7 @@ async fn main() {
                     avg_energy: s.avg_energy(),
                     avg_biomass: s.avg_biomass(),
                     multi,
-                    carn: s.frac_carnivore(),
-                    auto: s.frac_autotroph(),
+                    trophic: s.trophic_fractions(),
                     species: s.species_count() as u64,
                     niches: s.niche_coverage(t) as u64,
                     allop: s.thermal_correlation(t),
@@ -750,16 +749,19 @@ async fn main() {
         if is_key_pressed(KeyCode::H) {
             ui_state.water_on = !ui_state.water_on;
         }
-        if is_key_pressed(KeyCode::P) || actions.toggle_pause {
+        if is_key_pressed(KeyCode::Space) || actions.toggle_pause {
             clock.paused = !clock.paused;
         }
-        // Time speed: `[` slows, `]` speeds (multiplicative, clamped); the panel slider/buttons feed
-        // `actions.set_time_scale`. Same `time_scale` the dev-bridge `set_timescale` drives.
-        if is_key_pressed(KeyCode::LeftBracket) {
+        // Time speed: `,` slows, `.` speeds (multiplicative, clamped), `/` resets to 1×; the panel
+        // slider/buttons feed `actions.set_time_scale`. Same `time_scale` the dev-bridge drives.
+        if is_key_pressed(KeyCode::Comma) {
             clock.time_scale = (clock.time_scale / TIME_SCALE_STEP).max(MIN_TIME_SCALE);
         }
-        if is_key_pressed(KeyCode::RightBracket) {
+        if is_key_pressed(KeyCode::Period) {
             clock.time_scale = (clock.time_scale * TIME_SCALE_STEP).min(MAX_TIME_SCALE);
+        }
+        if is_key_pressed(KeyCode::Slash) {
+            clock.time_scale = 1.0;
         }
         if let Some(ts) = actions.set_time_scale {
             clock.time_scale = ts.clamp(MIN_TIME_SCALE, MAX_TIME_SCALE);

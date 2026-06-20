@@ -75,8 +75,9 @@ pub struct LifeStats {
     pub avg_energy: f32,
     pub avg_biomass: f32,
     pub multi: f32,
-    pub carn: f32,
-    pub auto: f32,
+    /// Population fraction in each trophic (food) niche, in `TrophicNiche::ALL` order. Built from
+    /// `Sim::trophic_fractions` so the population panel renders one bar per niche, auto-extending.
+    pub trophic: Vec<(animata_sim::genome::TrophicNiche, f32)>,
     pub species: u64,
     pub niches: u64,
     pub allop: f32,
