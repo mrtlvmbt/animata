@@ -397,24 +397,43 @@ fn minimap_panel(
                     }
                     let tex = &cache.minimap.as_ref().unwrap().1;
                     let size = egui::vec2(minimap::MW as f32, minimap::MH as f32);
-                    let rect = ui.image(egui::load::SizedTexture::new(tex.id(), size)).rect;
+                    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                    let painter = ui.painter_at(rect);
 
-                    // Viewport frame: the 4 ground-projected screen corners as a closed polygon
-                    // (exact at any yaw — the iso view is a rotated quad on the map, not an AABB).
+                    // Project map fractions (u,v) into the panel the same way the iso camera frames
+                    // the world on screen, so the minimap reads as the on-screen diamond rather than
+                    // a top-down square. Azimuth 45° → screen-x ∝ (x−z); the ~35.26° elevation
+                    // foreshortens depth → screen-y ∝ (x+z)·FS (a wider-than-tall diamond).
+                    const FS: f32 = 0.577_350_3; // sin(35.264°)
+                    let s = ((rect.width() * 0.5 - 6.0) / 1.0).min((rect.height() * 0.5 - 6.0) / FS);
+                    let c = rect.center();
+                    let proj = |u: f32, v: f32| {
+                        let (cu, cv) = (u - 0.5, v - 0.5);
+                        egui::pos2(c.x + (cu - cv) * s, c.y + (cu + cv) * FS * s)
+                    };
+
+                    // Map texture as a rotated/foreshortened quad (the four map corners → diamond).
+                    let mut mesh = egui::Mesh::with_texture(tex.id());
+                    for &(u, v) in &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                        mesh.vertices.push(egui::epaint::Vertex {
+                            pos: proj(u, v),
+                            uv: egui::pos2(u, v),
+                            color: egui::Color32::WHITE,
+                        });
+                    }
+                    mesh.add_triangle(0, 1, 2);
+                    mesh.add_triangle(0, 2, 3);
+                    painter.add(egui::Shape::mesh(mesh));
+
+                    // Viewport frame: the 4 ground-projected screen corners through the SAME iso
+                    // projection. `proj` exactly inverts the camera's ground unprojection, so the
+                    // footprint maps back to the upright screen rectangle — but only WITHOUT the old
+                    // [0,1] clamp, which skewed it into a trapezoid. The painter clips it to the panel.
                     if m.minimap_view.len() == 4 {
-                        let pts: Vec<egui::Pos2> = m
-                            .minimap_view
-                            .iter()
-                            .map(|f| {
-                                egui::pos2(
-                                    rect.left() + f[0].clamp(0.0, 1.0) * rect.width(),
-                                    rect.top() + f[1].clamp(0.0, 1.0) * rect.height(),
-                                )
-                            })
-                            .collect();
-                        darken_outside(ui.painter(), rect, &pts);
-                        ui.painter()
-                            .add(egui::Shape::closed_line(pts, Stroke::new(1.5, theme::ACCENT)));
+                        let pts: Vec<egui::Pos2> =
+                            m.minimap_view.iter().map(|f| proj(f[0], f[1])).collect();
+                        veil_outside(&painter, rect, &pts);
+                        painter.add(egui::Shape::closed_line(pts, Stroke::new(1.5, theme::ACCENT)));
                     }
 
                     if st.debug_view.is_field_map() {
@@ -429,33 +448,30 @@ fn minimap_panel(
         });
 }
 
-/// Darken the minimap area OUTSIDE the (convex) viewport quad: a ring of 4 convex quads between the
-/// panel rect and the viewport, with rect corners ↔ quad vertices paired by angle around the centre
-/// (robust for any rotation/zoom; degenerates harmlessly when a vertex sits on the rect edge).
-fn darken_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) {
-    if quad.len() != 4 {
-        return;
+/// Dim the panel OUTSIDE the viewport rectangle. The frame is an upright (axis-aligned) screen rect,
+/// so the veil is just four bands around its bounding box clamped to the panel — robust for any
+/// position (an off-centre or partly-offscreen frame no longer twists into crossing triangles, as
+/// the old corner-paired ring did). Bands collapse to nothing once the view encloses the whole map.
+fn veil_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) {
+    let mut lo = rect.max;
+    let mut hi = rect.min;
+    for p in quad {
+        let x = p.x.clamp(rect.left(), rect.right());
+        let y = p.y.clamp(rect.top(), rect.bottom());
+        lo = egui::pos2(lo.x.min(x), lo.y.min(y));
+        hi = egui::pos2(hi.x.max(x), hi.y.max(y));
     }
-    let c = rect.center();
-    let ang = |p: egui::Pos2| (p.y - c.y).atan2(p.x - c.x);
-    let mut outer = [
-        rect.left_top(),
-        rect.right_top(),
-        rect.right_bottom(),
-        rect.left_bottom(),
-    ];
-    let mut inner = [quad[0], quad[1], quad[2], quad[3]];
-    outer.sort_by(|a, b| ang(*a).total_cmp(&ang(*b)));
-    inner.sort_by(|a, b| ang(*a).total_cmp(&ang(*b)));
     let veil = egui::Color32::from_rgba_unmultiplied(5, 7, 10, 87); // ~0.34
-    for i in 0..4 {
-        let j = (i + 1) % 4;
-        painter.add(egui::Shape::convex_polygon(
-            vec![outer[i], outer[j], inner[j], inner[i]],
-            veil,
-            Stroke::NONE,
-        ));
-    }
+    let band = |a: egui::Pos2, b: egui::Pos2| {
+        let r = egui::Rect::from_two_pos(a, b);
+        if r.width() > 0.5 && r.height() > 0.5 {
+            painter.rect_filled(r, 0.0, veil);
+        }
+    };
+    band(rect.left_top(), egui::pos2(rect.right(), lo.y)); // top
+    band(egui::pos2(rect.left(), hi.y), rect.right_bottom()); // bottom
+    band(egui::pos2(rect.left(), lo.y), egui::pos2(lo.x, hi.y)); // left
+    band(egui::pos2(hi.x, lo.y), egui::pos2(rect.right(), hi.y)); // right
 }
 
 // ---------- control rail (bottom-right) ----------
