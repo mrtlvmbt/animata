@@ -361,8 +361,10 @@ pub struct TerrainGeo {
 }
 
 /// The sim-mutated per-column overlay: vegetation biomass + the inorganic nutrient pool, each with
-/// its lazy-update timestamp. The ONLY mutable terrain data — hashed into the checksum, and (later)
-/// the part the sim thread ships to the renderer.
+/// its lazy-update timestamp. The ONLY mutable terrain data — hashed into the checksum, the part a
+/// save snapshot carries (the `geo` is regenerated from `seed`), and (later) what the sim thread
+/// ships to the renderer.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct TerrainState {
     /// Vegetation biomass per column (S3), quantised `[0,1]→[0,255]` — the consumable base of
     /// the food chain. The value is what biomass was AS OF `last_update[i]`; the live amount
@@ -405,6 +407,27 @@ impl VoxelTerrain {
             crate::rng::fnv_fold_u32(&mut h, u);
         }
         h
+    }
+
+    /// Clone out the mutable overlay for a save snapshot. The geometry is NOT saved (it is
+    /// regenerated from `seed` on load), so this is the only terrain data a snapshot carries.
+    pub fn clone_state(&self) -> TerrainState {
+        self.state.clone()
+    }
+
+    /// Restore the mutable overlay on load, AFTER regenerating the geometry from the saved seed.
+    /// Rejects a snapshot whose column count differs from this build's (e.g. a different
+    /// `MAP_SCALE`), since the overlay vectors would no longer line up with the geometry.
+    pub fn set_state(&mut self, state: TerrainState) -> Result<(), String> {
+        if state.biomass.len() != self.state.biomass.len() {
+            return Err(format!(
+                "snapshot terrain has {} columns, this build has {} (different MAP_SCALE?)",
+                state.biomass.len(),
+                self.state.biomass.len()
+            ));
+        }
+        self.state = state;
+        Ok(())
     }
 }
 

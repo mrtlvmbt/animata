@@ -8,6 +8,7 @@
 .claude/settings.local.json
 
 # Generated simulation outputs (saves, stat/tree dumps, sweeps)
+/animata-save.bin
 /animata_save.txt
 /animata_save.txt.tree
 /animata_stats.csv

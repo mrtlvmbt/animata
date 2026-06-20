@@ -11,7 +11,8 @@ path = "src/lib.rs"
 [dependencies]
 # Vector math only. Pinned to the same major version macroquad 0.4 re-exports, so `Vec2` is the
 # identical type across the crate boundary (no conversion in the renderer). Deliberately NO macroquad.
-glam = "0.27"
+# `serde` feature so `Vec2` (creature position) round-trips through a save snapshot.
+glam = { version = "0.27", features = ["serde"] }
 # Data parallelism for the read-only decision phase of a tick. `par_iter().map().collect()` keeps
 # index order, so the result is bit-identical to the serial path (determinism preserved).
 rayon = "1"
@@ -19,3 +20,7 @@ rayon = "1"
 # Pure data — no effect on determinism; the headless path and tests still use `SimConfig::default()`.
 serde = { version = "1", features = ["derive"] }
 ron = "0.8"
+# Compact binary (de)serialisation for the full-state save snapshot (~48 MB of creatures + terrain
+# overlay) — RON text would be many× larger and slow. Pure data path; determinism is verified by a
+# state_checksum round-trip test, not by the format.
+bincode = "1.3"

@@ -47,7 +47,7 @@ pub const BRAIN_WEIGHTS: usize = 11 * 6 + 6 * 2;
 
 /// The grown body: just the counts C1 needs (cell positions/adhesion come later). Cell count
 /// is the integer biomass; the type tallies drive the emergent stats.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Phenotype {
     pub n_cells: u32,
     pub effector: u32,
@@ -119,7 +119,7 @@ impl Phenotype {
 /// weights, and a random thermal preference. `thermal_pref` in `[0,1]` is the temperature this
 /// lineage is adapted to (0 cold .. 1 hot); living far from it costs extra metabolism (C3), so
 /// different climate bands favour different prefs → habitats / allopatry.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Genome {
     grn_w: Vec<f32>, // G×G, row-major
     grn_b: Vec<f32>, // G

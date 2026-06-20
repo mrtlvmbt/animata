@@ -55,6 +55,43 @@ fn state_checksum_replays_to_golden() {
     assert_eq!(a, GOLDEN_CHECKSUM_SEED42_300, "state diverged from golden (some change shifted the trajectory)");
 }
 
+/// Save/load is verified by the determinism lock itself: a full-state snapshot, round-tripped
+/// through bytes and restored onto a regenerated world, must reproduce the exact `state_checksum`
+/// — AND continue bit-identically. (Geometry is regenerated from the seed; only the overlay +
+/// creatures + tick are carried.)
+#[test]
+fn snapshot_round_trips_bit_identical() {
+    use crate::persist::Snapshot;
+    // Run a world to a non-trivial state (creatures bred, vegetation grazed, nutrient moved).
+    let mut t = world();
+    let mut s = Sim::new(42, &t);
+    for tick in 0..250 {
+        s.step(&mut t, tick);
+    }
+    let csum_before = state_checksum(&s, &t);
+
+    // Capture → serialise → deserialise → restore onto a freshly regenerated terrain.
+    let snap = Snapshot::new(t.seed, 250, s.to_state(), t.clone_state());
+    let mut bytes = Vec::new();
+    snap.write(&mut bytes).expect("snapshot serialises");
+    let restored = Snapshot::read(&bytes[..]).expect("snapshot deserialises");
+    let mut t2 = VoxelTerrain::new(restored.terrain_seed);
+    t2.set_state(restored.terrain).expect("overlay fits the regenerated terrain");
+    let mut s2 = Sim::from_state(restored.sim);
+    assert_eq!(state_checksum(&s2, &t2), csum_before, "restored state must equal the saved state");
+
+    // And the resumed run must stay bit-identical to the original continuing past the save point.
+    for tick in 250..300 {
+        s.step(&mut t, tick);
+        s2.step(&mut t2, tick);
+    }
+    assert_eq!(
+        state_checksum(&s, &t),
+        state_checksum(&s2, &t2),
+        "a loaded world must continue bit-identically to the one it was saved from"
+    );
+}
+
 /// The lock metric: over a headless run the herbivore population neither dies out nor pins
 /// the cap — a living, self-limiting ecosystem on the new world. (Tuning target for C0.)
 #[test]

@@ -121,6 +121,13 @@ pub const MUTATION_STD: f32 = 0.12;
 /// BODY PLAN changes by rarer, gentler steps than behaviour — no mutational flood of giant
 /// bodies (the body is the costly part).
 pub const GRN_MUTATION_STD: f32 = 0.10;
+/// Locomotion floor: the share of `CREATURE_SPEED` a body with NO effector cells can manage —
+/// passive drift, not powered motility. A founder single cell would creep at `CREATURE_SPEED·DRIFT_FLOOR`,
+/// real speed EARNED by developing effector cells (cf. `EFFECTOR_GAIN`).
+/// NB: held at `1.0` (== the old free baseline, bit-identical) PENDING the ecosystem rebalance —
+/// lowering it slows the WHOLE population (predation/foraging tuned around the old scale), which
+/// collapses the camouflage + seasonality demonstrations until those are re-tuned to the new regime.
+pub const DRIFT_FLOOR: f32 = 1.0;
 /// C1 body-stat coupling: each effector cell adds this fraction to top speed.
 pub const EFFECTOR_GAIN: f32 = 0.12;
 /// Each storage cell adds this much to the energy cap.

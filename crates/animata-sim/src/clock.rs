@@ -47,6 +47,14 @@ impl WorldClock {
         self.tick
     }
 
+    /// Restore the tick counter when loading a saved world. Clears the sub-step accumulator so the
+    /// interactive cadence restarts cleanly from the restored tick (the tick itself is the canonical
+    /// time the lazy-regrow timestamps are relative to).
+    pub fn set_tick(&mut self, tick: u64) {
+        self.tick = tick;
+        self.accum = 0.0;
+    }
+
     /// Elapsed sim-time in seconds. Derived from the integer `tick`, so it carries no drift.
     pub fn sim_time(&self) -> f64 {
         self.tick as f64 * TICK_LEN as f64

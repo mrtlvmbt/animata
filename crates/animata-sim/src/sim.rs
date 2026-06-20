@@ -42,8 +42,22 @@ const SALT_BIRTH: u64 = 0xB127;
 const SALT_CAMO: u64 = 0xCA30;
 const SALT_TOXIN: u64 = 0x70_8127;
 
+/// The serialisable live sim state — the half of a save snapshot that is the creatures (the other
+/// half is the terrain overlay). Restored via [`Sim::from_state`]; captured via [`Sim::to_state`].
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct SimState {
+    pub world_seed: u64,
+    pub next_id: u64,
+    pub births: u64,
+    pub deaths: u64,
+    pub kills: u64,
+    pub cfg: SimConfig,
+    pub creatures: Vec<Creature>,
+}
+
 /// One creature. Its `genome` (developmental GRN + brain weights) is grown once into `pheno`
 /// (the cell body) at creation; biomass and the stat modifiers below read from `pheno`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Creature {
     pub id: u64,
     pub founder: u64,
@@ -69,9 +83,11 @@ impl Creature {
     }
 
     /// Top speed: effector cells add locomotor thrust (emergent — a body that develops more
-    /// contractile cells moves faster, at the metabolic cost of carrying them).
+    /// contractile cells moves faster, at the metabolic cost of carrying them). A body with NO
+    /// effectors only drifts (`DRIFT_FLOOR`), so powered motility is an earned, selected trait — not
+    /// a free baseline every single cell gets.
     fn speed(&self) -> f32 {
-        CREATURE_SPEED * (1.0 + EFFECTOR_GAIN * self.pheno.effector as f32)
+        CREATURE_SPEED * (DRIFT_FLOOR + EFFECTOR_GAIN * self.pheno.effector as f32)
     }
 
     /// Energy capacity: storage cells enlarge the buffer (survive lean spells, bigger broods).
@@ -306,6 +322,39 @@ impl Sim {
             grid: SpatialGrid::default(),
             registry: PressureRegistry::build(&cfg.features, &cfg.params),
             cfg,
+        }
+    }
+
+    /// Capture the full live sim state for a save snapshot. Everything `state_checksum` folds plus
+    /// the counters and config needed to resume; the `grid` (rebuilt each tick) and `registry`
+    /// (rebuilt from `cfg`) are derived, so they are not stored.
+    pub fn to_state(&self) -> SimState {
+        SimState {
+            world_seed: self.world_seed,
+            next_id: self.next_id,
+            births: self.births,
+            deaths: self.deaths,
+            kills: self.kills,
+            cfg: self.cfg,
+            creatures: self.creatures.clone(),
+        }
+    }
+
+    /// Rebuild a `Sim` from a restored snapshot state. The pressure registry is rebuilt from the
+    /// restored `cfg` and the spatial grid starts empty (repopulated on the next `step`), so the
+    /// resumed run is bit-identical to the saved one (verified by a `state_checksum` round-trip test).
+    pub fn from_state(state: SimState) -> Self {
+        let registry = PressureRegistry::build(&state.cfg.features, &state.cfg.params);
+        Sim {
+            creatures: state.creatures,
+            world_seed: state.world_seed,
+            next_id: state.next_id,
+            births: state.births,
+            deaths: state.deaths,
+            kills: state.kills,
+            grid: SpatialGrid::default(),
+            registry,
+            cfg: state.cfg,
         }
     }
 

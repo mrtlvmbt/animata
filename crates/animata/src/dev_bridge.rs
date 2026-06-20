@@ -56,6 +56,10 @@ pub enum Cmd {
     /// Read metric values: the latest of every metric, plus the time-series of `id` if given
     /// (`last` caps how many recent samples to return).
     Metrics { id: Option<String>, last: Option<usize> },
+    /// Save the full world state to a file (`path` omitted → the default save path).
+    Save { path: Option<String> },
+    /// Load a world state from a file, replacing the current world (`path` omitted → default).
+    Load { path: Option<String> },
 }
 
 /// A queued request: the command plus the channel to answer it on.
@@ -162,6 +166,8 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             id: s("id"),
             last: u("last").map(|v| v as usize),
         }),
+        "animata/save" => Ok(Cmd::Save { path: s("path") }),
+        "animata/load" => Ok(Cmd::Load { path: s("path") }),
         other => Err(format!("unknown method: {other}")),
     }
 }
