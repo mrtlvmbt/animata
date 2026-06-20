@@ -58,6 +58,14 @@ pub enum Cmd {
     /// Read metric values: the latest of every metric, plus the time-series of `id` if given
     /// (`last` caps how many recent samples to return).
     Metrics { id: Option<String>, last: Option<usize> },
+    /// Drive the HUD state for scripted UI screenshots: open a rail flyout (`panel` =
+    /// none/world/view/pop/perf), select a debug view (`debug` = none/topo/temp/moist/
+    /// waterdist/slope/biomass), and/or toggle the whole HUD (`show_info`). Any field optional.
+    SetPanel {
+        panel: Option<String>,
+        debug: Option<String>,
+        show_info: Option<bool>,
+    },
     /// Save the full world state to a file (`path` omitted → the default save path).
     Save { path: Option<String> },
     /// Load a world state from a file, replacing the current world (`path` omitted → default).
@@ -215,6 +223,11 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
         "animata/metrics" => Ok(Cmd::Metrics {
             id: s("id"),
             last: u("last").map(|v| v as usize),
+        }),
+        "animata/set_panel" => Ok(Cmd::SetPanel {
+            panel: s("panel"),
+            debug: s("debug"),
+            show_info: b("show_info"),
         }),
         "animata/save" => Ok(Cmd::Save { path: s("path") }),
         "animata/load" => Ok(Cmd::Load { path: s("path") }),

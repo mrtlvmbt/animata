@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Static reproduction of the `Animata GUI` mockup HUD (deck runtime stripped) for pixel
+     comparison against the real egui HUD. backdrop-filter is intentionally DISABLED: egui cannot
+     blur the backdrop, so the achievable target is the same translucent fill WITHOUT blur. */
+  html,body{margin:0;padding:0;height:100%;background:#0a0c0b;overflow:hidden;}
+  *{box-sizing:border-box;-webkit-font-smoothing:antialiased;}
+  #root{position:fixed;inset:0;background-size:cover;background-position:center;font-family:'IBM Plex Sans',system-ui,sans-serif;color:#e9ece6;}
+  .hidden{display:none !important;}
+</style>
+</head>
+<body>
+<div id="root">
+
+  <!-- field recolor overlays (whole screen) -->
+  <div id="mute" style="position:absolute;inset:0;pointer-events:none;background:#05070a;opacity:0;"></div>
+  <div id="field" style="position:absolute;inset:0;pointer-events:none;mix-blend-mode:color;opacity:0;"></div>
+
+  <!-- ===== VITALS (top-left) ===== -->
+  <div id="vitals" style="position:absolute;top:18px;left:18px;display:flex;align-items:center;gap:16px;padding:10px 16px;background:rgba(12,15,14,.72);border:1px solid rgba(255,255,255,.10);border-radius:13px;box-shadow:0 10px 34px rgba(0,0,0,.40);">
+    <div style="display:flex;flex-direction:column;gap:4px;">
+      <span style="font:600 9px/1 'IBM Plex Mono';letter-spacing:.16em;color:rgba(233,236,230,.45);">DAY</span>
+      <div style="display:flex;align-items:baseline;gap:8px;">
+        <span id="dayLabel" style="font:500 15px/1 'IBM Plex Mono';">1</span>
+        <span id="timeLabel" style="font:400 12px/1 'IBM Plex Mono';color:rgba(233,236,230,.62);">00:50</span>
+      </div>
+    </div>
+    <span style="position:relative;width:20px;height:20px;border-radius:50%;border:1px solid rgba(255,255,255,.18);">
+      <span id="sun" style="position:absolute;bottom:50%;left:50%;width:1.5px;height:8px;background:#f2a64b;border-radius:2px;transform-origin:bottom center;margin-left:-.75px;transform:rotate(18deg);"></span>
+    </span>
+    <span style="width:1px;height:26px;background:rgba(255,255,255,.12);"></span>
+    <div style="display:flex;flex-direction:column;gap:4px;">
+      <span style="font:600 9px/1 'IBM Plex Mono';letter-spacing:.16em;color:rgba(233,236,230,.45);">POPULATION</span>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span id="popLabel" style="font:500 15px/1 'IBM Plex Mono';">1910</span>
+        <svg width="120" height="26" viewBox="0 0 120 26" style="display:block;overflow:visible;">
+          <polyline points="0,18 20,14 40,16 60,9 80,12 100,7 120,10" fill="none" stroke="#8fd16f" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"></polyline>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== MINIMAP (top-right) — interior intentionally diverges (app keeps iso diamond) ===== -->
+  <div id="minimap" style="position:absolute;top:18px;right:18px;padding:8px;background:rgba(12,15,14,.72);border:1px solid rgba(255,255,255,.10);border-radius:13px;box-shadow:0 10px 34px rgba(0,0,0,.40);">
+    <div style="position:relative;width:172px;height:118px;border-radius:8px;overflow:hidden;background:#16324a;">
+      <div style="position:absolute;left:34%;top:30%;width:36%;height:34%;border:1.5px solid rgba(242,166,75,.9);border-radius:3px;box-shadow:0 0 0 9999px rgba(5,7,10,.28);"></div>
+    </div>
+    <div id="mmField" class="hidden" style="display:flex;align-items:center;gap:8px;margin-top:8px;padding:0 2px;">
+      <span id="mmFieldName" style="font:500 10px/1 'IBM Plex Mono';letter-spacing:.04em;color:rgba(233,236,230,.65);">Temperature</span>
+      <div id="mmFieldGrad" style="flex:1;height:7px;border-radius:4px;"></div>
+    </div>
+  </div>
+
+  <!-- ===== TRANSPORT (bottom-left) ===== -->
+  <div id="transport" style="position:absolute;bottom:22px;left:18px;display:flex;align-items:center;gap:14px;padding:9px 14px;background:rgba(12,15,14,.74);border:1px solid rgba(255,255,255,.10);border-radius:14px;box-shadow:0 12px 38px rgba(0,0,0,.45);">
+    <button style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(242,166,75,.5);border-radius:11px;background:rgba(242,166,75,.16);color:#f4b86a;cursor:pointer;">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7L8 5z"></path></svg>
+    </button>
+    <span style="width:1px;height:24px;background:rgba(255,255,255,.12);"></span>
+    <div style="width:150px;height:3px;border-radius:3px;background:rgba(255,255,255,.16);position:relative;">
+      <span style="position:absolute;left:35.6%;top:50%;transform:translate(-50%,-50%);width:13px;height:13px;border-radius:50%;background:#f2a64b;border:2px solid rgba(10,12,11,.9);box-shadow:0 0 0 1px rgba(242,166,75,.5);"></span>
+    </div>
+    <span style="min-width:46px;text-align:right;font:500 14px/1 'IBM Plex Mono';color:#f4b86a;">1.0×</span>
+    <span id="paused" class="hidden" style="padding:4px 9px;border-radius:7px;background:rgba(242,166,75,.18);border:1px solid rgba(242,166,75,.4);font:600 9.5px/1 'IBM Plex Mono';letter-spacing:.12em;color:#f4b86a;">PAUSED</span>
+  </div>
+
+  <!-- ===== RAIL (bottom-right) ===== -->
+  <div id="rail" style="position:absolute;bottom:22px;right:18px;display:flex;flex-direction:column;gap:6px;padding:7px;background:rgba(12,15,14,.72);border:1px solid rgba(255,255,255,.10);border-radius:14px;box-shadow:0 10px 34px rgba(0,0,0,.40);">
+    <button data-tab="world" style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:none;border-radius:10px;background:transparent;color:rgba(233,236,230,.7);">
+      <span class="tabactive hidden"><span style="position:absolute;inset:0;border-radius:10px;background:rgba(242,166,75,.16);box-shadow:inset 0 0 0 1px rgba(242,166,75,.5);"></span><span style="position:absolute;left:-7px;top:50%;transform:translateY(-50%);width:3px;height:18px;border-radius:3px;background:#f2a64b;"></span></span>
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7v5l3.2 1.8"></path></svg>
+    </button>
+    <button data-tab="view" style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:none;border-radius:10px;background:transparent;color:rgba(233,236,230,.7);">
+      <span class="tabactive hidden"><span style="position:absolute;inset:0;border-radius:10px;background:rgba(242,166,75,.16);box-shadow:inset 0 0 0 1px rgba(242,166,75,.5);"></span><span style="position:absolute;left:-7px;top:50%;transform:translateY(-50%);width:3px;height:18px;border-radius:3px;background:#f2a64b;"></span></span>
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 4l8 4-8 4-8-4 8-4z"></path><path d="M4 12l8 4 8-4"></path></svg>
+    </button>
+    <button data-tab="pop" style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:none;border-radius:10px;background:transparent;color:rgba(233,236,230,.7);">
+      <span class="tabactive hidden"><span style="position:absolute;inset:0;border-radius:10px;background:rgba(242,166,75,.16);box-shadow:inset 0 0 0 1px rgba(242,166,75,.5);"></span><span style="position:absolute;left:-7px;top:50%;transform:translateY(-50%);width:3px;height:18px;border-radius:3px;background:#f2a64b;"></span></span>
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="8" cy="9" r="2.4"></circle><circle cx="15.5" cy="7" r="2"></circle><circle cx="13" cy="15" r="2.8"></circle></svg>
+    </button>
+    <button data-tab="perf" style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:none;border-radius:10px;background:transparent;color:rgba(233,236,230,.7);">
+      <span class="tabactive hidden"><span style="position:absolute;inset:0;border-radius:10px;background:rgba(242,166,75,.16);box-shadow:inset 0 0 0 1px rgba(242,166,75,.5);"></span><span style="position:absolute;left:-7px;top:50%;transform:translateY(-50%);width:3px;height:18px;border-radius:3px;background:#f2a64b;"></span></span>
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="13" width="3.5" height="7" rx="1"></rect><rect x="10.2" y="8" width="3.5" height="12" rx="1"></rect><rect x="16.5" y="5" width="3.5" height="15" rx="1"></rect></svg>
+    </button>
+    <span style="height:1px;margin:2px 6px;background:rgba(255,255,255,.10);"></span>
+    <button style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;border:none;border-radius:10px;background:transparent;color:rgba(233,236,230,.55);">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"></path><circle cx="12" cy="12" r="2.6"></circle></svg>
+    </button>
+  </div>
+
+  <!-- ===== FLYOUT: WORLD ===== -->
+  <div id="fly-world" class="flyout hidden" style="position:absolute;bottom:22px;right:84px;width:238px;padding:16px 18px;background:rgba(12,15,14,.74);border:1px solid rgba(255,255,255,.10);border-radius:14px;box-shadow:0 14px 40px rgba(0,0,0,.45);">
+    <div style="font:600 10px/1 'IBM Plex Mono';letter-spacing:.18em;color:rgba(233,236,230,.45);margin-bottom:14px;">WORLD &amp; TIME</div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">seed</span><span style="font:500 12px/1 'IBM Plex Mono';">0x1</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">size</span><span style="font:500 12px/1 'IBM Plex Mono';">1100×760 m</span></div>
+    <span style="display:block;height:1px;margin:13px 0;background:rgba(255,255,255,.10);"></span>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">tick</span><span style="font:500 12px/1 'IBM Plex Mono';">260</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">sim time</span><span style="font:500 12px/1 'IBM Plex Mono';">26.0 s</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">day fraction</span><span style="font:500 12px/1 'IBM Plex Mono';">0.04</span></div>
+    <span style="display:block;height:1px;margin:13px 0;background:rgba(255,255,255,.10);"></span>
+    <div style="display:flex;gap:8px;">
+      <button style="flex:1;padding:8px 0;border:1px solid rgba(255,255,255,.14);border-radius:9px;background:rgba(255,255,255,.03);color:#e9ece6;font:500 11px/1 'IBM Plex Mono';letter-spacing:.04em;">Save · F5</button>
+      <button style="flex:1;padding:8px 0;border:1px solid rgba(255,255,255,.14);border-radius:9px;background:rgba(255,255,255,.03);color:#e9ece6;font:500 11px/1 'IBM Plex Mono';letter-spacing:.04em;">Load · F9</button>
+    </div>
+  </div>
+
+  <!-- ===== FLYOUT: VIEW ===== -->
+  <div id="fly-view" class="flyout hidden" style="position:absolute;bottom:22px;right:84px;width:238px;padding:16px 18px;background:rgba(12,15,14,.74);border:1px solid rgba(255,255,255,.10);border-radius:14px;box-shadow:0 14px 40px rgba(0,0,0,.45);">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;"><span style="font:600 10px/1 'IBM Plex Mono';letter-spacing:.18em;color:rgba(233,236,230,.45);">DEBUG VIEW</span><span style="font:500 9px/1 'IBM Plex Mono';color:rgba(233,236,230,.4);">G cycles</span></div>
+    <div id="viewOpts" style="display:flex;flex-direction:column;gap:1px;"></div>
+    <span style="display:block;height:1px;margin:12px 0;background:rgba(255,255,255,.10);"></span>
+    <div style="display:flex;flex-direction:column;gap:2px;">
+      <div style="display:flex;align-items:center;gap:10px;width:100%;padding:7px 9px;border-radius:8px;font:400 12.5px/1 'IBM Plex Sans';">
+        <span style="width:14px;height:14px;border-radius:4px;border:1.5px solid rgba(255,255,255,.3);display:flex;align-items:center;justify-content:center;flex:none;background:#f2a64b;"><svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="#0a0c0b" stroke-width="2.2"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"></path></svg></span>
+        <span>Step-edge outline</span><span style="margin-left:auto;font:500 9px/1 'IBM Plex Mono';color:rgba(233,236,230,.4);">O</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;width:100%;padding:7px 9px;border-radius:8px;font:400 12.5px/1 'IBM Plex Sans';">
+        <span style="width:14px;height:14px;border-radius:4px;border:1.5px solid rgba(255,255,255,.3);display:flex;align-items:center;justify-content:center;flex:none;background:transparent;"></span>
+        <span>Water / land mask</span><span style="margin-left:auto;font:500 9px/1 'IBM Plex Mono';color:rgba(233,236,230,.4);">J</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;width:100%;padding:7px 9px;border-radius:8px;font:400 12.5px/1 'IBM Plex Sans';">
+        <span id="cbWater" style="width:14px;height:14px;border-radius:4px;border:1.5px solid rgba(255,255,255,.3);display:flex;align-items:center;justify-content:center;flex:none;background:#f2a64b;"><svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="#0a0c0b" stroke-width="2.2"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"></path></svg></span>
+        <span>Water surface</span><span style="margin-left:auto;font:500 9px/1 'IBM Plex Mono';color:rgba(233,236,230,.4);">H</span>
+      </div>
+    </div>
+    <div id="viewLegend" class="hidden">
+      <span style="display:block;height:1px;margin:12px 0 11px;background:rgba(255,255,255,.10);"></span>
+      <div id="viewLegendText" style="font:400 11px/1.3 'IBM Plex Sans';color:rgba(233,236,230,.6);margin-bottom:8px;">cold (blue) → hot (red)</div>
+      <div id="viewLegendGrad" style="height:9px;border-radius:5px;"></div>
+    </div>
+  </div>
+
+  <!-- ===== FLYOUT: POP ===== -->
+  <div id="fly-pop" class="flyout hidden" style="position:absolute;bottom:22px;right:84px;width:248px;padding:16px 18px;background:rgba(12,15,14,.74);border:1px solid rgba(255,255,255,.10);border-radius:14px;box-shadow:0 14px 40px rgba(0,0,0,.45);">
+    <div style="font:600 10px/1 'IBM Plex Mono';letter-spacing:.18em;color:rgba(233,236,230,.45);margin-bottom:13px;">POPULATION &amp; EVOLUTION</div>
+    <div style="display:flex;gap:10px;margin-bottom:14px;">
+      <div style="flex:1;"><div style="font:500 18px/1 'IBM Plex Mono';">1910</div><div style="font:400 9px/1 'IBM Plex Mono';letter-spacing:.1em;color:rgba(233,236,230,.45);margin-top:5px;">POP</div></div>
+      <div style="flex:1;"><div style="font:500 18px/1 'IBM Plex Mono';">61</div><div style="font:400 9px/1 'IBM Plex Mono';letter-spacing:.1em;color:rgba(233,236,230,.45);margin-top:5px;">ENERGY</div></div>
+      <div style="flex:1;"><div style="font:500 18px/1 'IBM Plex Mono';">1.00</div><div style="font:400 9px/1 'IBM Plex Mono';letter-spacing:.1em;color:rgba(233,236,230,.45);margin-top:5px;">BIOMASS</div></div>
+    </div>
+    <svg width="212" height="40" viewBox="0 0 212 40" style="display:block;margin-bottom:14px;overflow:visible;">
+      <polyline points="0,28 26,24 53,26 80,16 106,20 132,12 159,18 185,10 212,14" fill="none" stroke="#8fd16f" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"></polyline>
+    </svg>
+    <div style="font:600 9px/1 'IBM Plex Mono';letter-spacing:.14em;color:rgba(233,236,230,.4);margin-bottom:9px;">COMPLEXITY</div>
+    <div style="display:flex;flex-direction:column;gap:9px;margin-bottom:14px;">
+      <div><div style="display:flex;justify-content:space-between;font:400 11px/1 'IBM Plex Sans';margin-bottom:5px;"><span style="color:rgba(233,236,230,.62);">multicellular</span><span style="font-family:'IBM Plex Mono';">23%</span></div><div style="height:4px;border-radius:3px;background:rgba(255,255,255,.1);"><div style="width:23%;height:100%;border-radius:3px;background:#8fd16f;"></div></div></div>
+      <div><div style="display:flex;justify-content:space-between;font:400 11px/1 'IBM Plex Sans';margin-bottom:5px;"><span style="color:rgba(233,236,230,.62);">carnivory</span><span style="font-family:'IBM Plex Mono';">11%</span></div><div style="height:4px;border-radius:3px;background:rgba(255,255,255,.1);"><div style="width:11%;height:100%;border-radius:3px;background:#d97a5a;"></div></div></div>
+      <div><div style="display:flex;justify-content:space-between;font:400 11px/1 'IBM Plex Sans';margin-bottom:5px;"><span style="color:rgba(233,236,230,.62);">autotrophy</span><span style="font-family:'IBM Plex Mono';">38%</span></div><div style="height:4px;border-radius:3px;background:rgba(255,255,255,.1);"><div style="width:38%;height:100%;border-radius:3px;background:#5fb0c9;"></div></div></div>
+    </div>
+    <div style="font:600 9px/1 'IBM Plex Mono';letter-spacing:.14em;color:rgba(233,236,230,.4);margin-bottom:9px;">DIVERSITY</div>
+    <div style="display:flex;flex-wrap:wrap;gap:7px 16px;margin-bottom:14px;font:400 11.5px/1 'IBM Plex Sans';color:rgba(233,236,230,.62);">
+      <span>species <span style="color:#e9ece6;font-family:'IBM Plex Mono';">47</span></span>
+      <span>niches <span style="color:#e9ece6;font-family:'IBM Plex Mono';">9</span></span>
+      <span>allopatry <span style="color:#e9ece6;font-family:'IBM Plex Mono';">0.62</span></span>
+      <span>crypsis <span style="color:#e9ece6;font-family:'IBM Plex Mono';">0.41</span></span>
+    </div>
+    <div style="font:600 9px/1 'IBM Plex Mono';letter-spacing:.14em;color:rgba(233,236,230,.4);margin-bottom:9px;">STRATA MIX</div>
+    <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;">
+      <span style="width:38%;background:#7d6a4f;"></span><span style="width:29%;background:#8fb05a;"></span><span style="width:21%;background:#5fae7a;"></span><span style="width:12%;background:#5f93c9;"></span>
+    </div>
+    <div style="display:flex;justify-content:space-between;margin-top:7px;font:400 9.5px/1 'IBM Plex Mono';color:rgba(233,236,230,.5);"><span>under 38</span><span>surf 29</span><span>air 21</span><span>water 12</span></div>
+  </div>
+
+  <!-- ===== FLYOUT: PERF ===== -->
+  <div id="fly-perf" class="flyout hidden" style="position:absolute;bottom:22px;right:84px;width:222px;padding:16px 18px;background:rgba(12,15,14,.74);border:1px solid rgba(255,255,255,.10);border-radius:14px;box-shadow:0 14px 40px rgba(0,0,0,.45);">
+    <div style="font:600 10px/1 'IBM Plex Mono';letter-spacing:.18em;color:rgba(233,236,230,.45);margin-bottom:14px;">PERFORMANCE</div>
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:12px;"><span style="font:500 26px/1 'IBM Plex Mono';">60</span><span style="font:400 11px/1 'IBM Plex Mono';color:rgba(233,236,230,.5);">fps · 16.7 ms</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">draws</span><span style="font:500 12px/1 'IBM Plex Mono';">312</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">chunks · detail</span><span style="font:500 12px/1 'IBM Plex Mono';">184</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">chunks · coarse</span><span style="font:500 12px/1 'IBM Plex Mono';">128</span></div>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;"><span style="font:400 12px/1 'IBM Plex Sans';color:rgba(233,236,230,.55);">on-screen</span><span style="font:500 12px/1 'IBM Plex Mono';">1146</span></div>
+  </div>
+
+  <!-- toast (top-centre) -->
+  <div id="toast" class="hidden" style="position:absolute;top:18px;left:50%;transform:translateX(-50%);padding:10px 18px;background:rgba(12,15,14,.82);border:1px solid rgba(143,209,111,.3);border-radius:11px;box-shadow:0 10px 30px rgba(0,0,0,.4);">
+    <span id="toastMsg" style="font:500 12px/1 'IBM Plex Mono';color:#a6e08c;">Saved</span>
+  </div>
+
+  <!-- hide hint -->
+  <div id="hint" class="hidden" style="position:absolute;bottom:18px;left:18px;display:flex;align-items:center;gap:8px;padding:7px 12px;background:rgba(12,15,14,.6);border:1px solid rgba(255,255,255,.08);border-radius:9px;">
+    <span style="font:500 10px/1 'IBM Plex Mono';color:rgba(233,236,230,.55);">press</span>
+    <span style="padding:2px 6px;border-radius:5px;background:rgba(255,255,255,.1);font:600 10px/1 'IBM Plex Mono';color:#e9ece6;">I</span>
+    <span style="font:500 10px/1 'IBM Plex Mono';color:rgba(233,236,230,.55);">for UI</span>
+  </div>
+
+</div>
+
+<script>
+  // Field gradients (mockup GRAD) + legend text (mockup LEGEND).
+  const GRAD = {
+    none:'transparent',
+    topo:'linear-gradient(110deg,#3a2f1e,#9c8458 45%,#e9e4d8)',
+    temp:'linear-gradient(110deg,#2f6fe0,#7cc4d8 45%,#e0452f)',
+    moist:'linear-gradient(110deg,#c2a25f,#7fae7a 50%,#2fa39e)',
+    waterdist:'linear-gradient(110deg,#eef3f4,#9fb0b3 50%,#2a3436)',
+    slope:'linear-gradient(110deg,#1c2433,#7d6f2a 55%,#f2d24a)',
+    biomass:'linear-gradient(110deg,#5a3a1e,#7a8a3a 50%,#3fae54)',
+  };
+  const NAMES = {none:'None',topo:'Topography',temp:'Temperature',moist:'Moisture',waterdist:'Water distance',slope:'Slope',biomass:'Biomass'};
+  const LEGEND = {topo:'low (brown) → high (snow)',temp:'cold (blue) → hot (red)',moist:'dry (tan) → wet (teal)',waterdist:'near water (bright) → far (dark)',slope:'flat (dark) → steep (yellow)',biomass:'barren (brown) → lush (green)'};
+  const ORDER = ['none','topo','temp','moist','waterdist','slope','biomass'];
+
+  const q = new URLSearchParams(location.search);
+  const panel = q.get('panel') || 'none';       // none|world|view|pop|perf
+  const field = q.get('field') || 'none';        // none|topo|temp|...
+  const hide  = q.get('hide') === '1';
+  const paused = q.get('paused') === '1';
+  const bg    = q.get('bg');                      // background image path
+
+  if (paused) document.getElementById('paused').classList.remove('hidden');
+  const toastMsg = q.get('toast');
+  if (toastMsg) {
+    document.getElementById('toast').classList.remove('hidden');
+    document.getElementById('toastMsg').textContent = toastMsg;
+  }
+  if (q.get('water') === '0') {  // comparison runs hide the animated water surface
+    const cb = document.getElementById('cbWater');
+    cb.style.background = 'transparent'; cb.innerHTML = '';
+  }
+
+  if (bg) document.getElementById('root').style.backgroundImage = `url("${bg}")`;
+
+  // Field recolor (whole screen) is a MOCKUP-ONLY feature (app recolors the minimap only, not the
+  // 3D world) — leaving the full-screen wash OFF so the per-panel HUD diff isn't confounded. The
+  // minimap field-row + view legend (which the app DOES render) stay on.
+  if (field !== 'none') {
+    const mf = document.getElementById('mmField');
+    mf.classList.remove('hidden');
+    document.getElementById('mmFieldName').textContent = NAMES[field];
+    document.getElementById('mmFieldGrad').style.background = GRAD[field];
+  }
+
+  // View flyout radio options.
+  const vo = document.getElementById('viewOpts');
+  if (vo) {
+    for (const id of ORDER) {
+      const active = id === (field !== 'none' ? field : 'none');
+      const row = document.createElement('div');
+      row.style.cssText = 'position:relative;display:flex;align-items:center;gap:10px;width:100%;padding:7px 9px;border-radius:8px;font:400 12.5px/1 \'IBM Plex Sans\';color:#e9ece6;';
+      row.innerHTML = `${active?'<span style="position:absolute;inset:0;border-radius:8px;background:rgba(242,166,75,.14);"></span>':''}`
+        + `<span style="position:relative;width:12px;height:12px;border-radius:50%;border:1.5px solid rgba(255,255,255,.3);display:flex;align-items:center;justify-content:center;flex:none;">${active?'<span style="width:6px;height:6px;border-radius:50%;background:#f2a64b;"></span>':''}</span>`
+        + `<span style="position:relative;">${NAMES[id]}</span>`;
+      vo.appendChild(row);
+    }
+    if (field !== 'none') {
+      document.getElementById('viewLegend').classList.remove('hidden');
+      document.getElementById('viewLegendText').textContent = LEGEND[field] || '';
+      document.getElementById('viewLegendGrad').style.background = GRAD[field];
+    }
+  }
+
+  // Open the chosen flyout + light its rail tab.
+  if (panel !== 'none') {
+    const el = document.getElementById('fly-' + panel);
+    if (el) el.classList.remove('hidden');
+    const tab = document.querySelector(`#rail button[data-tab="${panel}"] .tabactive`);
+    if (tab) { tab.classList.remove('hidden'); tab.parentElement.style.color = '#f4b86a'; }
+  }
+
+  if (hide) {
+    for (const id of ['vitals','minimap','transport','rail']) document.getElementById(id).classList.add('hidden');
+    for (const e of document.querySelectorAll('.flyout')) e.classList.add('hidden');
+    document.getElementById('hint').classList.remove('hidden');
+  }
+
+  // Signal render-readiness (fonts loaded) for the headless screenshotter.
+  document.fonts.ready.then(() => { document.documentElement.setAttribute('data-ready', '1'); });
+</script>
+</body>
+</html>

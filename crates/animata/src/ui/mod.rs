@@ -24,6 +24,10 @@ pub type MinimapKey = (u64, DebugView, u64);
 #[derive(Default)]
 pub struct HudCache {
     pub minimap: Option<(MinimapKey, egui::TextureHandle)>,
+    /// Tiny 1-D colour textures for rounded horizontal bars (gradient legends, strata mix), keyed by
+    /// a hash of their colour content. A rounded `RectShape` textured with these masks the corners
+    /// cleanly — no end-cap hacks. Held across frames so the `TextureHandle` outlives the paint.
+    pub bars: std::collections::HashMap<u64, egui::TextureHandle>,
 }
 
 /// Which flyout (if any) is open from the control rail. One at a time.
@@ -71,7 +75,6 @@ pub struct LifeStats {
     pub niches: u64,
     pub allop: f32,
     pub crypsis: f32,
-    pub nutri: f32,
     pub strata: [f32; 4],
 }
 
@@ -111,34 +114,18 @@ pub struct SimMetrics {
 pub(crate) const MIN_TIME_SCALE: f32 = 0.1;
 pub(crate) const MAX_TIME_SCALE: f32 = 64.0;
 
-/// One-line ramp description for the active field map (mirrors `build_field_minimap`).
-pub(crate) fn legend_text(view: DebugView) -> &'static str {
+/// One-line ramp description for the active field map (mirrors `build_field_minimap`). The arrow is
+/// the Phosphor `ARROW_RIGHT` glyph, not U+2192 — the vendored IBM Plex subset lacks U+2192 and would
+/// render it as a tofu box; Phosphor is in both font families so it falls back cleanly.
+pub(crate) fn legend_text(view: DebugView) -> String {
+    let a = egui_phosphor::regular::ARROW_RIGHT;
     match view {
-        DebugView::Temp => "cold (blue) → hot (red)",
-        DebugView::Moist => "dry (tan) → wet (teal)",
-        DebugView::WaterDist => "near water (bright) → far (dark)",
-        DebugView::Slope => "flat (dark) → steep (yellow)",
-        DebugView::Biomass => "barren (brown) → lush (green) · right-drag = graze",
-        _ => "",
-    }
-}
-
-/// Horizontal gradient strip painted from the SAME ramp math as `build_field_minimap`
-/// (water special-cases omitted — this is just the colour legend).
-pub(crate) fn legend_bar(ui: &mut egui::Ui, view: DebugView) {
-    let (w, h) = (180.0, 12.0);
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
-    let painter = ui.painter();
-    let n = 48usize;
-    for i in 0..n {
-        let v = i as f32 / (n - 1) as f32;
-        let x0 = rect.left() + w * i as f32 / n as f32;
-        let x1 = rect.left() + w * (i + 1) as f32 / n as f32;
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
-            0.0,
-            ramp_color(view, v),
-        );
+        DebugView::Temp => format!("cold (blue) {a} hot (red)"),
+        DebugView::Moist => format!("dry (tan) {a} wet (teal)"),
+        DebugView::WaterDist => format!("near water (bright) {a} far (dark)"),
+        DebugView::Slope => format!("flat (dark) {a} steep (yellow)"),
+        DebugView::Biomass => format!("barren (brown) {a} lush (green) · right-drag = graze"),
+        _ => String::new(),
     }
 }
 
