@@ -222,6 +222,39 @@ fn population_radiates_into_many_species_and_niches() {
     assert!(nc > 6, "niche space barely occupied ({nc} niches)");
 }
 
+/// PR4: feature toggles actually bite, and a fixed config replays deterministically.
+#[test]
+fn feature_toggles_bite_and_replay() {
+    use crate::sim_config::SimConfig;
+
+    // Predation off ⇒ nothing is ever hunted, deterministically, and the population survives.
+    let mut cfg = SimConfig::default();
+    cfg.features.predation = false;
+    let mut t = world();
+    let mut s = Sim::with_config(7, &t, cfg);
+    for tick in 0..2000 {
+        s.step(&mut t, tick);
+    }
+    assert_eq!(s.kills, 0, "predation off but {} kills happened", s.kills);
+    assert!(s.population() > 0, "population died out with predation off");
+
+    // A toggle changes the trajectory: climate acts on every creature's food each tick, so turning
+    // it off diverges from the golden run by tick 300 — yet each config is itself deterministic.
+    let run = |climate: bool| {
+        let mut cfg = SimConfig::default();
+        cfg.features.climate = climate;
+        let mut t = world();
+        let mut s = Sim::with_config(42, &t, cfg);
+        for tick in 0..300 {
+            s.step(&mut t, tick);
+        }
+        state_checksum(&s, &t)
+    };
+    assert_eq!(run(true), GOLDEN_CHECKSUM_SEED42_300, "default-climate run must equal the golden");
+    assert_ne!(run(false), GOLDEN_CHECKSUM_SEED42_300, "climate off must change the trajectory");
+    assert_eq!(run(false), run(false), "a fixed config must replay deterministically");
+}
+
 /// Tuning aid (ignored): print the population trajectory for one seed so the energy
 /// constants can be balanced into a food-limited corridor below the cap.
 #[test]
