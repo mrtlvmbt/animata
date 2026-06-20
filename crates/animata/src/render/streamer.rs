@@ -250,7 +250,6 @@ pub fn center_chunk(cam: &IsoCam) -> (i32, i32) {
 pub struct GenJob {
     pub rx: std::sync::mpsc::Receiver<VoxelTerrain>,
     pub progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
-    pub seed: u64,
 }
 
 /// Kick off background generation for `seed`. Generation is pure CPU (touches no GPU), so it
@@ -266,6 +265,6 @@ pub fn spawn_gen(seed: u64) -> GenJob {
         });
         let _ = tx.send(t); // receiver may be gone if the app exited mid-gen — ignore
     });
-    GenJob { rx, progress, seed }
+    GenJob { rx, progress }
 }
 

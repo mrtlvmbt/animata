@@ -15,6 +15,7 @@
 mod dev_bridge;
 
 mod render;
+mod ui;
 
 // The simulation + world model live in the graphics-free `animata-sim` crate. The renderer only
 // needs these modules by name; the rest (genome/grid/rng/tectonics/erosion/hydrology) are internal
@@ -119,27 +120,46 @@ fn load_snapshot(path: &str) -> Result<Snapshot, String> {
     Snapshot::read(std::io::BufReader::new(f))
 }
 
-/// Apply a loaded snapshot: regenerate terrain geometry from the saved seed, restore the overlay +
-/// creatures + config + clock tick, returning the restored tick. The caller resets the mesh streamer
-/// (which needs the GL context). On a size mismatch the world is left untouched (nothing is moved
-/// before the check passes).
-fn apply_snapshot(
-    snap: Snapshot,
-    seed: &mut u64,
-    sim_cfg: &mut SimConfig,
-    sim: &mut Option<Sim>,
-    terrain: &mut Option<VoxelTerrain>,
-    clock: &mut WorldClock,
-) -> Result<u64, String> {
-    let mut t = VoxelTerrain::new(snap.terrain_seed);
-    t.set_state(snap.terrain)?; // size-checked; nothing below mutates state if this fails
-    let tick = snap.tick;
-    *seed = snap.terrain_seed;
-    *sim_cfg = snap.sim.cfg;
-    *sim = Some(Sim::from_state(snap.sim));
-    clock.set_tick(tick);
-    *terrain = Some(t);
-    Ok(tick)
+/// A snapshot load running on a background thread, so `F9` never blocks the render loop — the slow
+/// part is regenerating terrain geometry from the saved seed, exactly like a reseed. The worker
+/// reads + parses the file, regenerates terrain, applies the overlay, and ships the ready pieces
+/// back; the main thread polls `rx` each frame and reads `progress` (permille) for the same bar the
+/// generator uses. The current world stays live and interactive until the load is ready.
+struct LoadJob {
+    rx: std::sync::mpsc::Receiver<Result<LoadedWorld, String>>,
+    progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+/// The fully-prepared world a [`LoadJob`] ships back. Applied on the main thread (the only
+/// GL-touching step — the streamer reset — stays there); `set_state` already ran on the worker, so a
+/// size mismatch surfaces as the channel's `Err` before anything here is swapped in.
+struct LoadedWorld {
+    terrain: VoxelTerrain,
+    sim: sim::SimState,
+    tick: u64,
+    seed: u64,
+}
+
+/// Kick off a background load of `path` (mirrors [`spawn_gen`](render::streamer::spawn_gen)). File
+/// read + parse + terrain regen + overlay restore all run off the main thread.
+fn spawn_load(path: String) -> LoadJob {
+    use std::sync::atomic::Ordering;
+    let progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = progress.clone();
+    std::thread::spawn(move || {
+        let res = (|| -> Result<LoadedWorld, String> {
+            let snap = load_snapshot(&path)?;
+            let seed = snap.terrain_seed;
+            let mut terrain = VoxelTerrain::generate(seed, &|f| {
+                p.store((f.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+            });
+            terrain.set_state(snap.terrain)?; // size-checked; Err aborts before the main swap
+            Ok(LoadedWorld { terrain, sim: snap.sim, tick: snap.tick, seed })
+        })();
+        let _ = tx.send(res); // receiver may be gone if the app exited mid-load — ignore
+    });
+    LoadJob { rx, progress }
 }
 
 /// Max zoom-out (visible world height): frame the whole map with margin — the coarse tier
@@ -167,7 +187,7 @@ fn ground_under_cursor(cam: &IsoCam) -> Vec2 {
 /// Debug overlay selected by `G` (cycles in this order). `Topo` reshades the 3D scene on the
 /// GPU; the climate / water-distance views overlay a per-column colourmap MINIMAP — the live
 /// in-app consumer of the S1 environment getters.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DebugView {
     None,
     Topo,
@@ -190,69 +210,14 @@ impl DebugView {
             DebugView::Biomass => DebugView::None,
         }
     }
-    /// The views drawn as a 2D field minimap (vs the 3D scene reshade / no overlay).
+    /// The views drawn as a 2D field minimap (vs the 3D scene reshade / no overlay). Used by the
+    /// egui minimap panel to recolour the preview and show the field legend.
     fn is_field_map(self) -> bool {
         matches!(
             self,
             DebugView::Temp | DebugView::Moist | DebugView::WaterDist | DebugView::Slope | DebugView::Biomass
         )
     }
-    /// Views whose field changes over time (biomass regrows / is grazed) → the minimap must be
-    /// rebuilt every frame, not cached by seed.
-    fn is_dynamic(self) -> bool {
-        matches!(self, DebugView::Biomass)
-    }
-}
-
-/// Build a small colourmap texture of a per-column environment field for the debug minimap.
-/// Samples the whole map down to a fixed pixel size, so the cost is bounded. Static fields are
-/// cached (paid on a view/seed change); the dynamic biomass field is rebuilt each frame at the
-/// current `tick`. Ramps read at a glance: temp blue→red, moisture tan→teal, water-distance
-/// bright(near)→dark(far), slope dark→yellow, biomass barren brown→lush green.
-fn build_field_minimap(t: &VoxelTerrain, view: DebugView, tick: u64) -> Texture2D {
-    const MW: usize = 220;
-    let mh = (MW * ROWS / COLS).max(1);
-    let mut img = Image::gen_image_color(MW as u16, mh as u16, BLANK);
-    for py in 0..mh {
-        for px in 0..MW {
-            let x = (px * COLS / MW).min(COLS - 1);
-            let y = (py * ROWS / mh).min(ROWS - 1);
-            let c = match view {
-                DebugView::Temp => {
-                    let v = t.temperature_at(x, y);
-                    Color::new(v, 0.15, 1.0 - v, 1.0) // cold blue → hot red
-                }
-                DebugView::Moist => {
-                    let v = t.moisture_at(x, y);
-                    Color::new(0.65 * (1.0 - v) + 0.1, 0.35 + 0.45 * v, 0.25 + 0.5 * v, 1.0) // dry tan → wet teal
-                }
-                DebugView::WaterDist => {
-                    let f = t.water_dist_at(x, y) as f32 / 255.0;
-                    if f == 0.0 {
-                        Color::new(0.2, 0.5, 1.0, 1.0) // water itself
-                    } else {
-                        let b = 1.0 - 0.85 * f; // near bright → far dark
-                        Color::new(b, b, b, 1.0)
-                    }
-                }
-                DebugView::Slope => {
-                    let v = t.slope_at(x, y); // flat dark → steep yellow-white
-                    Color::new(v, v, 0.25 * v, 1.0)
-                }
-                DebugView::Biomass => {
-                    if t.is_water(x, y) {
-                        Color::new(0.18, 0.32, 0.5, 1.0) // water: no vegetation
-                    } else {
-                        let v = t.biomass_at(x, y, tick); // barren brown → lush green
-                        Color::new(0.45 * (1.0 - v) + 0.1, 0.25 + 0.6 * v, 0.12, 1.0)
-                    }
-                }
-                _ => BLANK,
-            };
-            img.set_pixel(px as u32, py as u32, c);
-        }
-    }
-    Texture2D::from_image(&img)
 }
 
 #[macroquad::main(window_conf)]
@@ -263,6 +228,21 @@ async fn main() {
     // never blocks the render loop. `terrain` is `None` until the initial job finishes.
     let mut terrain: Option<VoxelTerrain> = None;
     let mut gen: Option<GenJob> = Some(spawn_gen(seed));
+    // A background snapshot load (`F9`), polled like `gen`; the current world stays live until ready.
+    let mut load: Option<LoadJob> = None;
+    // Full-screen modal loader overlay: mirrors the active gen/load job (kind + its permille
+    // progress). `done_at` is set when the job finishes, holding the "100% / last step done" frame
+    // for 340 ms before the overlay is dismissed and the finish toast fires.
+    struct Loading {
+        kind: ui::loader::LoadKind,
+        progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        done_at: Option<f64>,
+    }
+    let mut loading: Option<Loading> = gen.as_ref().map(|j| Loading {
+        kind: ui::loader::LoadKind::Gen,
+        progress: j.progress.clone(),
+        done_at: None,
+    });
 
     // The default sim config, loaded from assets/config/sim.ron (editable without a rebuild); falls
     // back to the built-in default if the file is missing or malformed. Live dev-bridge changes
@@ -309,7 +289,32 @@ async fn main() {
     // Frame timing (EMA-smoothed) + an on-screen readout toggle (`I`).
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
-    let mut show_info = true;
+    // GUI toggle state (egui widgets + keyboard hotkeys flip the same fields); snapshotted into
+    // Copy locals each frame so the render pass below reads plain `debug_view`/`mask`/… as before.
+    let mut ui_state = ui::UiState {
+        show_info: true,
+        debug_view: DebugView::None,
+        water_on: true,
+        mask: false,
+        outline: true,
+        open_panel: None,
+    };
+    // Population sparkline buffer: last 48 samples, pushed on a tick cadence (freezes when paused).
+    let mut pop_hist: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(48);
+    let mut pop_last_tick: u64 = u64::MAX;
+    // Perf counters are produced DURING render (after the UI pass); the next frame's panels read
+    // them with a one-frame lag — invisible on an fps/draw readout, and it keeps `wants_pointer`
+    // fresh for input gating (the UI pass runs before world mouse input).
+    let mut drawn = 0usize;
+    let mut on_screen = 0usize;
+    // Fonts/style are installed on the first egui pass (egui keeps them for the context lifetime).
+    let mut fonts_set = false;
+    // Persistent HUD GPU resources (the minimap egui texture), held across frames.
+    let mut hud_cache = ui::HudCache::default();
+    // Transient top-centre system notice (save/load feedback): (message, start time in `get_time()`
+    // seconds). The HUD derives the slide-in + fade from the elapsed time; cleared after its life.
+    let mut toast: Option<(String, f64)> = None;
+    const TOAST_LIFE_MS: f32 = 2600.0;
     // Sim time base (S2). The main loop schedules fixed sub-steps from the real frame `dt`
     // (`clock.substeps`) and drives one `sim.step` per sub-step; `P` pauses. `advance` stays a
     // pure counter (HUD/day-frac). The creature sim (C0) is created once the world is ready.
@@ -322,18 +327,9 @@ async fn main() {
     // → WaterDist → off. Topo reshades the 3D scene; the climate/water-dist modes overlay a
     // colourmap MINIMAP of the per-column field (the live consumer of the S1 env getters, so
     // they verify visually — poles cold / equator hot — and aren't dead code in any build).
-    let mut debug_view = DebugView::None;
-    // Cached minimap texture for the field views, rebuilt only when the view or seed changes
-    // (sampling the field every frame would be wasteful). `None` for the Off/Topo views.
-    let mut field_map: Option<(DebugView, u64, Texture2D)> = None;
-    // `H` hides the translucent water surface, baring the seabed/terrain underneath.
-    let mut water_on = true;
-    // `J` toggles the WATER/LAND mask: land flat grey, generation-flagged water flat blue —
-    // dry cells that should be flooded show as grey holes inside the blue (a gen bug probe).
-    let mut mask = false;
-    // `O` toggles the dark step-edge outline (the contour strips baked along every terrace
-    // rim). On by default; off bares the plain shaded faces.
-    let mut outline = true;
+    // `H` hides the translucent water surface; `J` toggles the WATER/LAND mask (land grey,
+    // flagged water blue — dry holes inside blue flag a gen bug); `O` toggles the dark step-edge
+    // outline. All three live in `ui_state` now (checkbox + hotkey share the field).
     // Left-drag pans the map: the ground point grabbed on press stays under the cursor.
     let mut grab: Option<Vec2> = None;
 
@@ -342,7 +338,7 @@ async fn main() {
     #[cfg(feature = "dev")]
     let bridge = dev_bridge::spawn(8127);
     #[cfg(feature = "dev")]
-    let mut pending_shots: Vec<(String, std::sync::mpsc::Sender<serde_json::Value>)> = Vec::new();
+    let mut pending_shots: Vec<(String, bool, std::sync::mpsc::Sender<serde_json::Value>)> = Vec::new();
 
     loop {
         let dt = get_frame_time();
@@ -356,6 +352,50 @@ async fn main() {
                 gen = None;
                 let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                 streamer.clear(ctx);
+                // Hold the loader on "done" for 340 ms; it fires `World ready` and dismisses below.
+                if let Some(ld) = &mut loading {
+                    ld.done_at = Some(get_time());
+                }
+            }
+        }
+        // Pick up a finished background load the same way (restore overlay + creatures + tick).
+        if let Some(job) = &load {
+            if let Ok(res) = job.rx.try_recv() {
+                match res {
+                    Ok(w) => {
+                        seed = w.seed;
+                        sim_cfg = w.sim.cfg;
+                        sim = Some(Sim::from_state(w.sim));
+                        clock.set_tick(w.tick);
+                        terrain = Some(w.terrain);
+                        let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+                        streamer.clear(ctx);
+                        eprintln!("[load] restored {SAVE_PATH} at tick {}", w.tick);
+                        // Hold the loader on "done"; `Loaded` toast fires on dismissal below.
+                        if let Some(ld) = &mut loading {
+                            ld.done_at = Some(get_time());
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[load] failed: {e}");
+                        toast = Some((format!("Load failed: {e}"), get_time()));
+                        loading = None; // abort the overlay; no success hold on failure
+                    }
+                }
+                load = None;
+            }
+        }
+        // Dismiss the loader 340 ms after the job finished (the "done" hold), then fire the toast.
+        if let Some(ld) = &loading {
+            if let Some(t0) = ld.done_at {
+                if (get_time() - t0) * 1000.0 >= 340.0 {
+                    let msg = match ld.kind {
+                        ui::loader::LoadKind::Gen => "World ready",
+                        ui::loader::LoadKind::Load => "Loaded",
+                    };
+                    toast = Some((msg.into(), get_time()));
+                    loading = None;
+                }
             }
         }
         // Smooth the frame-time readout so it doesn't jitter.
@@ -379,60 +419,210 @@ async fn main() {
             }
         }
 
-        // ---- Input (no GUI) ----
+        // ---- GUI pass (egui) — runs before world input so `wants_pointer` gates the mouse.
+        // Perf counters (`drawn`/`on_screen`) come from LAST frame's render (produced after this
+        // pass); `det`/`crs` read the current streamer state.
+        let det = streamer.detail.len();
+        let crs = streamer.coarse.len();
+        let life = match (sim.as_ref(), terrain.as_ref()) {
+            (Some(s), Some(t)) => {
+                let (multi, _) = s.complexity_mix();
+                let sm = s.stratum_mix(t);
+                Some(ui::LifeStats {
+                    population: s.population() as u64,
+                    avg_energy: s.avg_energy(),
+                    avg_biomass: s.avg_biomass(),
+                    multi,
+                    carn: s.frac_carnivore(),
+                    auto: s.frac_autotroph(),
+                    species: s.species_count() as u64,
+                    niches: s.niche_coverage(t) as u64,
+                    allop: s.thermal_correlation(t),
+                    crypsis: s.crypsis_correlation(t),
+                    nutri: s.avg_nutrient(t, clock.tick()),
+                    strata: sm,
+                })
+            }
+            _ => None,
+        };
+        // Expire the transient save notice; otherwise hand the HUD the elapsed ms (it owns the fade).
+        let toast_view = match &toast {
+            Some((msg, start)) => {
+                let dt = ((get_time() - *start) as f32) * 1000.0;
+                if dt >= TOAST_LIFE_MS {
+                    toast = None;
+                    None
+                } else {
+                    Some((msg.clone(), dt))
+                }
+            }
+            None => None,
+        };
+        // Sparkline sample on a tick cadence (~every 10 ticks); deduped by tick so it freezes on
+        // pause and is independent of fps/time_scale.
+        if let Some(l) = &life {
+            let tnow = clock.tick();
+            if pop_last_tick == u64::MAX || tnow >= pop_last_tick.wrapping_add(10) {
+                if pop_hist.len() == 48 {
+                    pop_hist.pop_front();
+                }
+                pop_hist.push_back(l.population as f32);
+                pop_last_tick = tnow;
+            }
+        }
+        // Visible-world quad on the map for the minimap viewport frame: unproject the 4 screen
+        // corners onto the ground plane (exact at any yaw — the azimuth-45° view is a rotated quad,
+        // not an axis-aligned box), expressed as map-space fractions.
+        let minimap_view = {
+            let inv = cam.camera().matrix().inverse();
+            let (mw, mh) = (COLS as f32 * VOX, ROWS as f32 * VOX);
+            [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                .iter()
+                .map(|&(nx, ny)| {
+                    let near = inv.project_point3(vec3(nx, ny, -1.0));
+                    let far = inv.project_point3(vec3(nx, ny, 1.0));
+                    let d = far - near;
+                    let t = if d.y.abs() > 1e-6 { -near.y / d.y } else { 0.0 };
+                    let hit = near + d * t;
+                    [hit.x / mw, hit.z / mh]
+                })
+                .collect::<Vec<_>>()
+        };
+        let hud_metrics = ui::SimMetrics {
+            fps,
+            frame_ms,
+            drawn,
+            detail: det,
+            coarse: crs,
+            on_screen,
+            seed,
+            cols: COLS,
+            rows: ROWS,
+            tick: clock.tick(),
+            sim_time: clock.sim_time() as f32,
+            day_frac: clock.day_frac(),
+            time_scale: clock.time_scale,
+            paused: clock.paused,
+            life,
+            pop_hist: pop_hist.iter().copied().collect(),
+            minimap_view,
+            toast: toast_view,
+        };
+        // Loader overlay view: real permille progress (1.0 once done), step derived from the
+        // fraction. `loader_active` makes the world input modal while it's up.
+        let loader_view = loading.as_ref().map(|ld| {
+            let p = if ld.done_at.is_some() {
+                1.0
+            } else {
+                (ld.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0).clamp(0.0, 1.0)
+            };
+            let n = match ld.kind {
+                ui::loader::LoadKind::Gen => 5,
+                ui::loader::LoadKind::Load => 4,
+            };
+            let idx = ((p * n as f32).floor() as usize).min(n - 1);
+            (ld.kind, p, idx)
+        });
+        let loader_active = loading.is_some();
+        let mut actions = ui::UiActions::default();
+        egui_macroquad::ui(|ctx| {
+            // Register IBM Plex + Phosphor and the global style ONCE (egui keeps them for the
+            // context's lifetime). Fonts are vendored in assets/fonts/ (OFL), baked via include_bytes.
+            if !fonts_set {
+                ui::theme::install_fonts(
+                    ctx,
+                    include_bytes!("../../../assets/fonts/IBMPlexSans-Regular.ttf"),
+                    include_bytes!("../../../assets/fonts/IBMPlexMono-Regular.ttf"),
+                );
+                ui::theme::install_style(ctx);
+                fonts_set = true;
+            }
+            // high_dpi=true ⇒ macroquad reports physical px; match egui's scale so panels aren't
+            // tiny on Retina (F2).
+            ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
+            // While the modal loader is up it fully owns the screen — skip the HUD entirely (the
+            // scrim isn't perfectly opaque in egui_macroquad, so drawing the HUD under it would
+            // bleed through). Input is gated separately on `loader_active`.
+            if let Some((kind, p, idx)) = loader_view {
+                ui::loader::draw(ctx, kind, p, idx, seed);
+            } else {
+                actions = ui::draw_hud(ctx, &mut ui_state, &hud_metrics, &mut hud_cache, terrain.as_ref());
+            }
+        });
+        let wants_ptr = actions.wants_pointer;
+
+        // ---- Input ---- World hotkeys + mouse, gated while the modal loader is up (it's drawn
+        // foreground and eats the pointer; we also block keys here so nothing reaches the world).
+        // egui widgets flip the same `ui_state`.
+        if !loader_active {
         if is_key_pressed(KeyCode::I) {
-            show_info = !show_info;
+            ui_state.show_info = !ui_state.show_info;
         }
         if is_key_pressed(KeyCode::G) {
-            debug_view = debug_view.next();
+            ui_state.debug_view = ui_state.debug_view.next();
         }
         if is_key_pressed(KeyCode::H) {
-            water_on = !water_on;
+            ui_state.water_on = !ui_state.water_on;
         }
-        if is_key_pressed(KeyCode::P) {
+        if is_key_pressed(KeyCode::P) || actions.toggle_pause {
             clock.paused = !clock.paused;
         }
-        // Time speed: `[` slows, `]` speeds (multiplicative, clamped). Same `time_scale` the
-        // dev-bridge `set_timescale` drives — handy without curl.
+        // Time speed: `[` slows, `]` speeds (multiplicative, clamped); the panel slider/buttons feed
+        // `actions.set_time_scale`. Same `time_scale` the dev-bridge `set_timescale` drives.
         if is_key_pressed(KeyCode::LeftBracket) {
             clock.time_scale = (clock.time_scale / TIME_SCALE_STEP).max(MIN_TIME_SCALE);
         }
         if is_key_pressed(KeyCode::RightBracket) {
             clock.time_scale = (clock.time_scale * TIME_SCALE_STEP).min(MAX_TIME_SCALE);
         }
-        // Quick-save (`F5`) / quick-load (`F9`) the whole world to/from `SAVE_PATH`. Load is
-        // synchronous (regenerates terrain geometry from the saved seed, then restores the overlay +
-        // creatures + tick) — a brief hitch on the ×16 map, like a dev-bridge reseed.
-        if is_key_pressed(KeyCode::F5) {
+        if let Some(ts) = actions.set_time_scale {
+            clock.time_scale = ts.clamp(MIN_TIME_SCALE, MAX_TIME_SCALE);
+        }
+        // Quick-save (`F5`) / quick-load (`F9`) the whole world to/from `SAVE_PATH`. Both the load's
+        // terrain regen and save's serialise stay off the hot path: save is fast; load runs on a
+        // background thread (`spawn_load`) and swaps in when ready, like a reseed.
+        if is_key_pressed(KeyCode::F5) || actions.save {
             match (sim.as_ref(), terrain.as_ref()) {
                 (Some(s), Some(t)) => match save_world(SAVE_PATH, seed, clock.tick(), s, t) {
-                    Ok(()) => eprintln!("[save] wrote {SAVE_PATH} at tick {}", clock.tick()),
-                    Err(e) => eprintln!("[save] failed: {e}"),
+                    Ok(()) => {
+                        eprintln!("[save] wrote {SAVE_PATH} at tick {}", clock.tick());
+                        toast = Some(("Saved".into(), get_time()));
+                    }
+                    Err(e) => {
+                        eprintln!("[save] failed: {e}");
+                        toast = Some((format!("Save failed: {e}"), get_time()));
+                    }
                 },
                 _ => eprintln!("[save] world not ready"),
             }
         }
-        if is_key_pressed(KeyCode::F9) {
-            match load_snapshot(SAVE_PATH) {
-                Ok(snap) => match apply_snapshot(snap, &mut seed, &mut sim_cfg, &mut sim, &mut terrain, &mut clock) {
-                    Ok(tick) => {
-                        gen = None; // cancel any in-flight regen — the load wins
-                        let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
-                        streamer.clear(ctx);
-                        eprintln!("[load] restored {SAVE_PATH} at tick {tick}");
-                    }
-                    Err(e) => eprintln!("[load] failed: {e}"),
-                },
-                Err(e) => eprintln!("[load] failed: {e}"),
-            }
+        // Start a background load if one isn't already running. Cancel any in-flight regen — the
+        // load wins. The current world stays interactive; the poll above swaps it in when ready.
+        if (is_key_pressed(KeyCode::F9) || actions.load) && load.is_none() {
+            gen = None;
+            let job = spawn_load(SAVE_PATH.to_string());
+            loading = Some(Loading {
+                kind: ui::loader::LoadKind::Load,
+                progress: job.progress.clone(),
+                done_at: None,
+            });
+            load = Some(job);
         }
         if is_key_pressed(KeyCode::J) {
-            mask = !mask;
+            ui_state.mask = !ui_state.mask;
         }
         if is_key_pressed(KeyCode::O) {
-            outline = !outline;
+            ui_state.outline = !ui_state.outline;
         }
-        let wheel = mouse_wheel().1;
+        } // end loader-gated keyboard hotkeys
+        // Snapshot toggle state into Copy locals (`debug_view`/`mask`/`outline`/`water_on`) so the
+        // render pass below reads them as before. `show_info` is handled inside the GUI pass.
+        let ui::UiState { show_info: _, debug_view, water_on, mask, outline, open_panel: _ } = ui_state;
+
+        // World mouse interactions are gated on `!wants_ptr` so a click on a panel doesn't reach
+        // the world (F8). Keyboard pan/rotate stay live (egui claims no keys without a text focus).
+        if !loader_active {
+        let wheel = if wants_ptr { 0.0 } else { mouse_wheel().1 };
         if wheel != 0.0 {
             // Zoom toward the cursor: keep the ground point under the mouse fixed by
             // shifting the target by how much that point would otherwise move.
@@ -442,8 +632,9 @@ async fn main() {
             cam.target.x += before.x - after.x;
             cam.target.z += before.y - after.y;
         }
-        // Left-drag pan: lock the grabbed ground point under the moving cursor.
-        if is_mouse_button_pressed(MouseButton::Left) {
+        // Left-drag pan: lock the grabbed ground point under the moving cursor. Don't START a pan
+        // when the press lands on a panel (F8); an in-flight pan finishes normally.
+        if !wants_ptr && is_mouse_button_pressed(MouseButton::Left) {
             grab = Some(ground_under_cursor(&cam));
         }
         if !is_mouse_button_down(MouseButton::Left) {
@@ -457,7 +648,7 @@ async fn main() {
         // the default-build consumer of `graze`, and a manual way to verify regrowth (graze a
         // spot in the Biomass view, watch it grow back). Patch radius so it shows on the
         // down-sampled minimap.
-        if is_mouse_button_down(MouseButton::Right) {
+        if !wants_ptr && is_mouse_button_down(MouseButton::Right) {
             if let Some(t) = &mut terrain {
                 let g = ground_under_cursor(&cam);
                 let (gx, gy) = ((g.x / VOX).floor() as i32, (g.y / VOX).floor() as i32);
@@ -502,8 +693,15 @@ async fn main() {
         // A regen already in flight ignores further presses.
         if is_key_pressed(KeyCode::R) && gen.is_none() {
             seed = seed.wrapping_add(1);
-            gen = Some(spawn_gen(seed));
+            let job = spawn_gen(seed);
+            loading = Some(Loading {
+                kind: ui::loader::LoadKind::Gen,
+                progress: job.progress.clone(),
+                done_at: None,
+            });
+            gen = Some(job);
         }
+        } // end loader-gated mouse / camera input
 
         // ---- Dev bridge: service queued commands on the main thread ----
         #[cfg(feature = "dev")]
@@ -620,18 +818,20 @@ async fn main() {
                     let _ = reply.send(serde_json::json!({"seed": seed}));
                 }
                 dev_bridge::Cmd::Render { water: w, topo: tp } => {
+                    // Write to `ui_state` (the source of truth); the render snapshot picks it up next
+                    // frame — same field the HUD checkbox / `H`/`G` hotkeys flip.
                     if let Some(w) = w {
-                        water_on = w;
+                        ui_state.water_on = w;
                     }
                     if let Some(tp) = tp {
                         // `topo` stays a bool over the wire: true selects the Topo view, false
                         // clears to Off (the climate minimaps are driven by `G` interactively).
-                        debug_view = if tp { DebugView::Topo } else { DebugView::None };
+                        ui_state.debug_view = if tp { DebugView::Topo } else { DebugView::None };
                     }
-                    let _ = reply.send(serde_json::json!({"water": water_on, "topo": debug_view == DebugView::Topo}));
+                    let _ = reply.send(serde_json::json!({"water": ui_state.water_on, "topo": ui_state.debug_view == DebugView::Topo}));
                 }
-                dev_bridge::Cmd::Screenshot(path) => {
-                    pending_shots.push((path, reply)); // serviced post-draw below
+                dev_bridge::Cmd::Screenshot { path, window } => {
+                    pending_shots.push((path, window, reply)); // serviced post-draw below
                 }
                 dev_bridge::Cmd::GetConfig => {
                     let _ = reply.send(config_json(sim.as_ref()));
@@ -682,16 +882,28 @@ async fn main() {
                 }
                 dev_bridge::Cmd::Load { path } => {
                     let p = path.unwrap_or_else(|| SAVE_PATH.to_string());
-                    // Synchronous (like Reseed): scripted inspection expects the loaded world to be
-                    // present on the reply.
-                    let resp = match load_snapshot(&p)
-                        .and_then(|snap| apply_snapshot(snap, &mut seed, &mut sim_cfg, &mut sim, &mut terrain, &mut clock))
-                    {
-                        Ok(tick) => {
-                            gen = None; // cancel any in-flight regen — the load wins
-                            let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
-                            streamer.clear(ctx);
-                            serde_json::json!({ "ok": true, "loaded": p, "tick": tick, "seed": seed })
+                    // Synchronous (unlike the interactive F9 background load): scripted inspection
+                    // expects the loaded world present on the reply, so regenerate + restore inline.
+                    let resp = match load_snapshot(&p) {
+                        Ok(snap) => {
+                            let mut t = VoxelTerrain::new(snap.terrain_seed);
+                            match t.set_state(snap.terrain) {
+                                Ok(()) => {
+                                    let tick = snap.tick;
+                                    seed = snap.terrain_seed;
+                                    sim_cfg = snap.sim.cfg;
+                                    sim = Some(Sim::from_state(snap.sim));
+                                    clock.set_tick(tick);
+                                    terrain = Some(t);
+                                    gen = None; // cancel any in-flight regen/load — the load wins
+                                    load = None;
+                                    let InternalGlContext { quad_context: ctx, .. } =
+                                        unsafe { get_internal_gl() };
+                                    streamer.clear(ctx);
+                                    serde_json::json!({ "ok": true, "loaded": p, "tick": tick, "seed": seed })
+                                }
+                                Err(e) => serde_json::json!({ "ok": false, "error": e }),
+                            }
                         }
                         Err(e) => serde_json::json!({ "ok": false, "error": e }),
                     };
@@ -712,7 +924,7 @@ async fn main() {
         // — persistent buffers, one draw call per visible chunk, no per-frame upload.
         let vp = cam.camera().matrix();
         let center = center_chunk(&cam);
-        let mut drawn = 0usize;
+        drawn = 0; // reset the (loop-persistent) perf counter the GUI pass read this frame
         {
             let mut gl = unsafe { get_internal_gl() };
             gl.flush(); // flush any pending macroquad 2D before our own pass
@@ -806,7 +1018,7 @@ async fn main() {
         // back — not a fixed fat pixel). Past a zoom-out threshold an individual falls below a pixel,
         // so we switch to BACTERIAL MATS: per-column density tinted by the colony's mean coloration
         // (dense colony → solid mat, sparse → faint film). Off-screen points are culled by projection.
-        let mut on_screen = 0usize;
+        on_screen = 0; // reset the (loop-persistent) perf counter the GUI pass read this frame
         if let (Some(sim), Some(terrain)) = (sim.as_ref(), terrain.as_ref()) {
             let (sw, sh) = (screen_width(), screen_height());
             let px_per_m = sh / cam.zoom; // ortho: visible world-height = zoom
@@ -881,106 +1093,31 @@ async fn main() {
             }
         }
 
-        // Minimal debug readout (toggle `I`): fps + frame time. Drawn with a 1px
-        // shadow so it stays legible over any terrain colour.
-        // Build the readout unconditionally (reads `drawn` in every build config),
-        // draw it only when toggled on.
-        let (det, crs) = (streamer.detail.len(), streamer.coarse.len());
-        let mode = if mask {
-            "   [WATER/LAND mask, J]"
-        } else {
-            match debug_view {
-                DebugView::Topo => "   [TOPO: height/depth, G]",
-                DebugView::Temp => "   [TEMP map, G]",
-                DebugView::Moist => "   [MOIST map, G]",
-                DebugView::WaterDist => "   [WATER-DIST map, G]",
-                DebugView::Slope => "   [SLOPE map, G]",
-                DebugView::Biomass => "   [BIOMASS map, G — right-drag to graze]",
-                DebugView::None if !water_on => "   [water off, H]",
-                DebugView::None => "",
-            }
-        };
-        let outl = if outline { "" } else { "   [outline off, O]" };
-        let line = format!(
-            "{fps:.0} fps   {frame_ms:.2} ms   seed {seed}   {COLS}x{ROWS} m   draws {drawn}   detail {det} coarse {crs}{mode}{outl}"
-        );
-        // Sim-clock + population readout. The creature count is the always-built consumer of
-        // the sim getters; absent until the world is ready.
-        let pause = if clock.paused { "  [PAUSED, P]" } else { "" };
-        let life = match (sim.as_ref(), terrain.as_ref()) {
-            (Some(s), Some(t)) => {
-                let (multi, _) = s.complexity_mix();
-                let m = s.stratum_mix(t);
-                format!(
-                    "   pop {} E {:.0}   bm {:.2}   multi {:.0}% carn {:.0}% auto {:.0}%   species {} niches {}   allop {:.2} crypsis {:.2}   nutri {:.2}   strata u{:.0}/s{:.0}/a{:.0}/w{:.0}   on-scr {on_screen}",
-                    s.population(), s.avg_energy(), s.avg_biomass(), multi * 100.0,
-                    s.frac_carnivore() * 100.0, s.frac_autotroph() * 100.0, s.species_count(), s.niche_coverage(t),
-                    s.thermal_correlation(t), s.crypsis_correlation(t), s.avg_nutrient(t, clock.tick()),
-                    m[0] * 100.0, m[1] * 100.0, m[2] * 100.0, m[3] * 100.0
-                )
-            }
-            _ => String::new(),
-        };
-        let clock_line = format!(
-            "tick {}   sim {:.1}s   day {:.2}   x{:.1}{life}{pause}",
-            clock.tick(), clock.sim_time(), clock.day_frac(), clock.time_scale
-        );
-        if show_info {
-            draw_text(&line, 9.0, 23.0, 24.0, Color::new(0.0, 0.0, 0.0, 0.6));
-            draw_text(&line, 8.0, 22.0, 24.0, Color::new(0.95, 0.97, 1.0, 1.0));
-            draw_text(&clock_line, 9.0, 45.0, 22.0, Color::new(0.0, 0.0, 0.0, 0.6));
-            draw_text(&clock_line, 8.0, 44.0, 22.0, Color::new(0.85, 0.92, 1.0, 1.0));
-        }
+        // (The HUD/stats text is now the egui panels rendered at the start of the frame and
+        // composited by `egui_macroquad::draw()` at the end; see the GUI pass above.)
 
-        // Field colourmap minimap (the env-getter consumer): rebuild the texture on a view/seed
-        // change (static fields) or every frame (the dynamic biomass field), then blit it
-        // top-right with a label. Off for the None/Topo views (Topo reshades the 3D scene).
-        if debug_view.is_field_map() {
-            if let Some(t) = &terrain {
-                let stale = debug_view.is_dynamic()
-                    || field_map
-                        .as_ref()
-                        .map(|(v, s, _)| *v != debug_view || *s != seed)
-                        .unwrap_or(true);
-                if stale {
-                    field_map = Some((debug_view, seed, build_field_minimap(t, debug_view, clock.tick())));
-                }
-            }
-            if let Some((_, _, tex)) = &field_map {
-                let (mw, mh) = (tex.width() * 1.4, tex.height() * 1.4);
-                let (mx, my) = (screen_width() - mw - 12.0, 40.0);
-                draw_rectangle(mx - 3.0, my - 3.0, mw + 6.0, mh + 6.0, Color::new(0.0, 0.0, 0.0, 0.6));
-                draw_texture_ex(tex, mx, my, WHITE,
-                    DrawTextureParams { dest_size: Some(vec2(mw, mh)), ..Default::default() });
-            }
-        } else if field_map.is_some() {
-            field_map = None; // drop the cached texture when leaving the field views
-        }
+        // (The env-field minimap is now the egui minimap panel — top-right — built in the GUI pass
+        // at the start of the frame; see `ui::minimap`.)
 
-        // Background generation progress bar (only while a world is being built). Centred
-        // near the bottom; same shadow-text convention as the HUD above.
-        if let Some(job) = &gen {
-            let p = job.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
-            let w = screen_width();
-            let (bw, bh, margin) = (w * 0.5, 14.0, 24.0);
-            let x = (w - bw) * 0.5;
-            let y = screen_height() - margin - bh;
-            draw_rectangle(x - 2.0, y - 2.0, bw + 4.0, bh + 4.0, Color::new(0.0, 0.0, 0.0, 0.5));
-            draw_rectangle(x, y, bw, bh, Color::new(0.12, 0.14, 0.18, 0.9));
-            draw_rectangle(x, y, bw * p, bh, Color::new(0.45, 0.75, 1.0, 1.0));
-            let label = format!("generating world   seed {}   {:.0}%", job.seed, p * 100.0);
-            draw_text(&label, x + 1.0, y - 6.0, 22.0, Color::new(0.0, 0.0, 0.0, 0.6));
-            draw_text(&label, x, y - 7.0, 22.0, Color::new(0.95, 0.97, 1.0, 1.0));
-        }
+        // (The generation/load progress is now the full-screen egui loader overlay — `ui::loader`,
+        // drawn in the GUI pass above — which replaces the old macroquad bottom bar.)
 
-        // Dev bridge: service deferred screenshots now the frame is fully drawn.
-        // Read the offscreen target (fresh, pre-present) rather than the window
-        // back-buffer, so capture doesn't need the window foregrounded.
+        // Composite the egui panels (built in the GUI pass at the frame's start) over the scene.
+        // Its own render pass — drawn last so it sits on top, after creatures and the minimap.
+        egui_macroquad::draw();
+
+        // Dev bridge: service deferred screenshots now the frame is FULLY drawn (incl. the egui HUD
+        // just composited above). `window` → the whole window back-buffer with the HUD
+        // (`get_screen_data`); otherwise the offscreen 3D target only (no HUD, no foreground needed).
         #[cfg(feature = "dev")]
-        for (path, reply) in pending_shots.drain(..) {
-            let img = capture_target(&scene_rt);
+        for (path, window, reply) in pending_shots.drain(..) {
+            let img = if window {
+                get_screen_data()
+            } else {
+                capture_target(&scene_rt)
+            };
             img.export_png(&path);
-            let _ = reply.send(serde_json::json!({"saved": path}));
+            let _ = reply.send(serde_json::json!({"saved": path, "window": window}));
         }
 
         next_frame().await;

@@ -23,3 +23,6 @@
 
 # Agent metrics (local run log, machine-specific)
 /tools/agent-metrics/runs.tsv
+
+# Quick-save artifact (F5/F9)
+animata-save.bin

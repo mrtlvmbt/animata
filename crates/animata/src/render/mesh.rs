@@ -49,8 +49,9 @@ fn biome_def(biome: BiomeKind) -> &'static BiomeDef {
     &BIOME_DEFS[biome.id() as usize]
 }
 
-/// Surface (top-face) base colour per biome.
-fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
+/// Surface (top-face) base colour per biome. Public so the minimap preview reuses the exact
+/// colour mapping the chunk meshes use.
+pub fn top_rgb(biome: BiomeKind) -> (f32, f32, f32) {
     biome_def(biome).surface
 }
 
