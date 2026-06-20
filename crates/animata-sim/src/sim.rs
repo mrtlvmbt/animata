@@ -18,7 +18,7 @@ use glam::{vec2, Vec2};
 use rayon::prelude::*;
 
 use crate::config::*;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::genome::{Genome, Phenotype, TrophicNiche};
 use crate::grid::SpatialGrid;
@@ -152,6 +152,61 @@ impl Creature {
         }
         ((out[0] + 1.0) * 0.5, out[1])
     }
+}
+
+/// A reproduction queued by the serial apply phase, awaiting parallel body development. Holds the
+/// already-mutated child genome plus the parent state needed to finish the birth. `rng` is the SAME
+/// per-parent stream `mutate` advanced — resumed (inside the parallel closure) for the child's
+/// pos/heading, so the draw sequence is byte-identical to the old inline path. `genome`/`rng` are
+/// MOVED (not cloned).
+struct PendingBirth {
+    genome: Genome,
+    rng: Rng,
+    parent_pos: Vec2,
+    parent_energy: f32,
+    founder: u64,
+}
+
+/// A fully-developed child produced by the parallel develop phase, ready for the serial id-assigning
+/// append. `None` (vs this) marks a stillbirth (the parent couldn't afford the body) — drawn exactly
+/// when the old code drew, so no RNG is consumed for a stillborn child.
+struct BornChild {
+    genome: Genome,
+    pheno: Phenotype,
+    pos: Vec2,
+    heading: f32,
+    energy: f32,
+    founder: u64,
+}
+
+/// Minimum queued births to run development in parallel — below it the rayon fork/join overhead isn't
+/// worth it, so develop serially. Determinism is unaffected either way (`develop` is pure; the serial
+/// and parallel paths produce identical results in identical order).
+const PAR_DEVELOP_THRESHOLD: usize = 16;
+
+/// Grow a queued birth's body and finish it into a [`BornChild`], or `None` if the parent can't afford
+/// the developed body (stillborn). Pure + self-contained so it runs safely on a rayon worker: the only
+/// RNG is the parent's OWN moved `rng`, drawn here (after develop, conditional on viability) exactly as
+/// the old inline path did. `dev` mirrors `Features::development` (off ⇒ the trivial one-cell body, no
+/// growth, RNG stream unchanged).
+fn develop_birth(p: PendingBirth, dev: bool, maxx: f32, maxy: f32) -> Option<BornChild> {
+    let pheno = if dev {
+        p.genome.develop()
+    } else {
+        Phenotype { n_cells: 1, structural: 1, ..Default::default() }
+    };
+    let build = CELL_BIOMASS_COST * pheno.n_cells.saturating_sub(1) as f32;
+    let child_energy = p.parent_energy - build;
+    if child_energy <= 0.0 {
+        return None; // stillborn — the parent already paid half its energy; no pos/heading drawn
+    }
+    let mut rng = p.rng;
+    let pos = vec2(
+        (p.parent_pos.x + rng.signed() * 2.0).clamp(0.0, maxx),
+        (p.parent_pos.y + rng.signed() * 2.0).clamp(0.0, maxy),
+    );
+    let heading = rng.unit() * std::f32::consts::TAU;
+    Some(BornChild { genome: p.genome, pheno, pos, heading, energy: child_energy, founder: p.founder })
 }
 
 /// The whole creature population + the deterministic id counter and cumulative stats.
@@ -568,11 +623,11 @@ impl Sim {
         // doesn't shift as births accrue). On the over-provisioned map this aggregate
         // competition term — not food — sets the equilibrium near `SOFT_CAP`.
         let t_apply = Instant::now();
-        // `develop()` runs inside the apply loop (per birth), which holds `&mut self.creatures` —
-        // so the profiler can't be touched there. Accumulate its nanos locally, record after.
-        let mut develop_ns: u64 = 0;
+        // Reproductions queued here (genome mutated, energy paid) but NOT yet developed — `develop()`
+        // is the costly body-growth and is run in a parallel batch AFTER this serial loop. The loop
+        // holds `&mut self.creatures`, so the heavy work must leave it.
+        let mut pending: Vec<PendingBirth> = Vec::new();
         let birth_gate = (1.0 - n as f32 / SOFT_CAP).clamp(0.0, 1.0);
-        let mut births: Vec<Creature> = Vec::new();
         for (idx, c) in self.creatures.iter_mut().enumerate() {
             if !c.alive {
                 continue; // eaten in the predation pass
@@ -671,49 +726,55 @@ impl Sim {
             if c.energy >= REPRO_ENERGY && lucky {
                 let mut rng = Rng::new(seed_fold(self.world_seed, &[SALT_MUTATE, c.id, tick]));
                 // Morphogen READ weights evolve on their OWN stream (PR-D2) so the coupling's activation
-                // leaves `rng` — and thus the child's pos/heading below — byte-identical to the inert sim.
+                // leaves `rng` — and thus the child's pos/heading later — byte-identical to the inert sim.
                 let mut morph_rng = Rng::new(seed_fold(self.world_seed, &[SALT_MORPH, c.id, tick]));
-                // Mutate the genome (brain + GRN + morphogen) and DEVELOP the child's body up front, so
-                // its build cost (energy per cell beyond the first) is known.
+                // Mutate the genome (brain + GRN + morphogen); the parent pays half its energy now. The
+                // body is grown later, in the parallel develop phase (it doesn't touch the RNG), so the
+                // post-mutate `rng` is queued to finish the birth there — same draw stream, same bits.
                 let genome = c.genome.mutate(&mut rng, &mut morph_rng, MUTATION_STD, GRN_MUTATION_STD);
-                // Development off ⇒ the body never grows past one cell (C0); the genome still mutates
-                // (brain evolves), so the RNG stream is unchanged — only the phenotype differs.
-                let pheno = if feat.development {
-                    let t_dev = Instant::now();
-                    let p = genome.develop();
-                    develop_ns += t_dev.elapsed().as_nanos() as u64;
-                    p
-                } else {
-                    Phenotype { n_cells: 1, structural: 1, ..Default::default() }
-                };
                 c.energy *= 0.5;
-                let build = CELL_BIOMASS_COST * pheno.n_cells.saturating_sub(1) as f32;
-                let child_energy = c.energy - build;
-                // A child the parent can't afford to build is stillborn (the parent still paid
-                // half its energy — a real reproductive cost that penalises over-large bodies).
-                if child_energy > 0.0 {
-                    let child = Creature {
-                        id: self.next_id,
-                        founder: c.founder,
-                        pos: vec2(
-                            (c.pos.x + rng.signed() * 2.0).clamp(0.0, maxx),
-                            (c.pos.y + rng.signed() * 2.0).clamp(0.0, maxy),
-                        ),
-                        heading: rng.unit() * std::f32::consts::TAU,
-                        energy: child_energy,
-                        age: 0,
-                        alive: true,
-                        genome,
-                        pheno,
-                    };
-                    self.next_id += 1;
-                    self.births += 1;
-                    births.push(child);
-                }
+                pending.push(PendingBirth {
+                    genome,
+                    rng,
+                    parent_pos: c.pos,
+                    parent_energy: c.energy,
+                    founder: c.founder,
+                });
             }
         }
         self.profiler.record(Span::Apply, t_apply.elapsed());
-        self.profiler.record(Span::Develop, Duration::from_nanos(develop_ns));
+        // (c2) develop the queued children — the parallel phase. DETERMINISM: `develop()` is a pure
+        // function of the genome (no RNG, no shared/mutable state, no cross-body reduction), and each
+        // parent owns an INDEPENDENT `rng`, so doing this across threads is bit-identical to the old
+        // inline path. `into_par_iter().collect()` (Vec is an indexed parallel iterator) preserves
+        // index order, and the pos/heading draws stay co-located with — and conditional on — the
+        // develop result (a stillbirth draws nothing, exactly as before). The serial id/births
+        // assignment is deferred to the ordered pass below. Do NOT move id assignment in here.
+        let t_develop = Instant::now();
+        let dev = feat.development;
+        let born: Vec<Option<BornChild>> = if dev && pending.len() >= PAR_DEVELOP_THRESHOLD {
+            pending.into_par_iter().map(|p| develop_birth(p, dev, maxx, maxy)).collect()
+        } else {
+            pending.into_iter().map(|p| develop_birth(p, dev, maxx, maxy)).collect()
+        };
+        self.profiler.record(Span::Develop, t_develop.elapsed());
+        // (c3) append the survivors in index order, assigning the deterministic id sequence.
+        let mut births: Vec<Creature> = Vec::with_capacity(born.len());
+        for b in born.into_iter().flatten() {
+            births.push(Creature {
+                id: self.next_id,
+                founder: b.founder,
+                pos: b.pos,
+                heading: b.heading,
+                energy: b.energy,
+                age: 0,
+                alive: true,
+                genome: b.genome,
+                pheno: b.pheno,
+            });
+            self.next_id += 1;
+            self.births += 1;
+        }
         // (d) compact: drop the dead, append births, cull to the cap.
         let t_compact = Instant::now();
         self.creatures.retain(|c| c.alive);
@@ -1100,6 +1161,15 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 } else {
     17191699025293563262 // release profile (FMA contraction shifts the trajectory)
 };
+
+/// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
+/// so it catches FP-reassociation in the develop / reproduction path that the unicellular-dominated
+/// seed-42/300 golden cannot (that path's float math only matters once `n_cells > 1`). Pinned when the
+/// develop phase was parallelised. **Release only** — the canonical profile; an 8000-tick debug run is
+/// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
+#[cfg(not(debug_assertions))]
+#[allow(dead_code)]
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 0xae7d_8282_6852_9b63;
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]
