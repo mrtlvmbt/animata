@@ -1,5 +1,6 @@
 //! The HUD itself — nine floating `egui::Area`s composing the "naturalist's dashboard": vitals
-//! (top-left), transport (bottom-left), control rail + one flyout (bottom-right), toast / hide-hint.
+//! (top-left), transport (bottom-left), control rail + one flyout (bottom-right), toast (top-centre)
+//! / hide-hint.
 //! By default only vitals + transport + rail show; detail panels open from the rail, one at a time.
 //! Minimap (top-right) is added in a later layer.
 
@@ -102,27 +103,55 @@ fn secondary_button(ui: &mut egui::Ui, text: &str) -> bool {
 
 // ---------- toast / hide-hint ----------
 
+/// System confirmation toast, anchored top-centre (a neutral zone clear of vitals / minimap / rail).
+/// `dt` is the elapsed milliseconds since the toast fired; over its ~2600 ms life it slides in from
+/// above (0–180 ms), holds (180–1900 ms), then fades (1900–2600 ms). The opacity multiplies every
+/// layer — fill, stroke, text and shadow — so nothing leaves a hard edge while fading.
 fn toast(ctx: &egui::Context, m: &SimMetrics) {
-    let Some((msg, alpha)) = &m.toast else { return };
-    let a = (alpha.clamp(0.0, 1.0) * 255.0) as u8;
+    let Some((msg, dt)) = &m.toast else { return };
+    let dt = *dt;
+    let opacity = if dt < 180.0 {
+        dt / 180.0
+    } else if dt > 1900.0 {
+        ((2600.0 - dt) / 700.0).max(0.0)
+    } else {
+        1.0
+    };
+    let shift_y = if dt < 180.0 { -(180.0 - dt) / 180.0 * 10.0 } else { 0.0 };
+    // Scale a straight-alpha colour by the current opacity.
+    let a = |c: egui::Color32| {
+        egui::Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * opacity) as u8)
+    };
     egui::Area::new(egui::Id::new("toast"))
-        .anchor(Align2::RIGHT_BOTTOM, egui::vec2(-18.0, -76.0))
+        .anchor(Align2::CENTER_TOP, egui::vec2(0.0, 18.0 + shift_y))
         .interactable(false)
         .show(ctx, |ui| {
-            theme::panel_frame()
-                .stroke(Stroke::new(1.0, theme::TOAST_GREEN.gamma_multiply(0.30)))
+            egui::Frame::NONE
+                .fill(a(egui::Color32::from_rgba_unmultiplied(12, 15, 14, 209)))
+                .stroke(Stroke::new(
+                    1.0,
+                    a(egui::Color32::from_rgba_unmultiplied(143, 209, 111, 77)),
+                ))
+                .corner_radius(egui::CornerRadius::same(11))
+                .inner_margin(egui::Margin::symmetric(18, 10))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 10],
+                    blur: 30,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha((102.0 * opacity) as u8),
+                })
                 .show(ui, |ui| {
                     ui.add(
                         egui::Label::new(
                             RichText::new(msg)
-                                .font(theme::mono(11.0))
-                                .color(theme::TOAST_GREEN.gamma_multiply(alpha.clamp(0.0, 1.0))),
+                                .font(theme::mono(12.0))
+                                .color(a(theme::TOAST_GREEN)),
                         )
                         .wrap_mode(egui::TextWrapMode::Extend),
                     );
-                    let _ = a;
                 });
         });
+    ctx.request_repaint(); // keep the animation advancing between frames
 }
 
 fn hide_hint(ctx: &egui::Context) {

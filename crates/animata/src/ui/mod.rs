@@ -101,7 +101,8 @@ pub struct SimMetrics {
     /// Visible-world quad on the map for the minimap viewport frame: four corners as map-space
     /// fractions `[0,1]` (x,z), in screen order. Empty until the world is ready.
     pub minimap_view: Vec<[f32; 2]>,
-    /// Transient bottom-right notice (message, alpha 0..1) — e.g. "saved". `None` = nothing.
+    /// Transient top-centre system notice (message, elapsed milliseconds since it fired) — e.g.
+    /// "Saved". The HUD derives the entry slide + fade from the elapsed time. `None` = nothing.
     pub toast: Option<(String, f32)>,
 }
 

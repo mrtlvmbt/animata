@@ -298,11 +298,10 @@ async fn main() {
     let mut fonts_set = false;
     // Persistent HUD GPU resources (the minimap egui texture), held across frames.
     let mut hud_cache = ui::HudCache::default();
-    // Transient bottom-right notice (save/load feedback): (message, absolute expiry in `get_time()`
-    // seconds). Fades over its last `TOAST_FADE` seconds, then clears.
+    // Transient top-centre system notice (save/load feedback): (message, start time in `get_time()`
+    // seconds). The HUD derives the slide-in + fade from the elapsed time; cleared after its life.
     let mut toast: Option<(String, f64)> = None;
-    const TOAST_SECS: f64 = 2.5;
-    const TOAST_FADE: f32 = 0.6;
+    const TOAST_LIFE_MS: f32 = 2600.0;
     // Sim time base (S2). The main loop schedules fixed sub-steps from the real frame `dt`
     // (`clock.substeps`) and drives one `sim.step` per sub-step; `P` pauses. `advance` stays a
     // pure counter (HUD/day-frac). The creature sim (C0) is created once the world is ready.
@@ -355,11 +354,11 @@ async fn main() {
                         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                         streamer.clear(ctx);
                         eprintln!("[load] restored {SAVE_PATH} at tick {}", w.tick);
-                        toast = Some(("Loaded".into(), get_time() + TOAST_SECS));
+                        toast = Some(("Loaded".into(), get_time()));
                     }
                     Err(e) => {
                         eprintln!("[load] failed: {e}");
-                        toast = Some((format!("Load failed: {e}"), get_time() + TOAST_SECS));
+                        toast = Some((format!("Load failed: {e}"), get_time()));
                     }
                 }
                 load = None;
@@ -412,15 +411,15 @@ async fn main() {
             }
             _ => None,
         };
-        // Expire/fade the transient save notice.
+        // Expire the transient save notice; otherwise hand the HUD the elapsed ms (it owns the fade).
         let toast_view = match &toast {
-            Some((msg, exp)) => {
-                let left = (*exp - get_time()) as f32;
-                if left <= 0.0 {
+            Some((msg, start)) => {
+                let dt = ((get_time() - *start) as f32) * 1000.0;
+                if dt >= TOAST_LIFE_MS {
                     toast = None;
                     None
                 } else {
-                    Some((msg.clone(), (left / TOAST_FADE).min(1.0)))
+                    Some((msg.clone(), dt))
                 }
             }
             None => None,
@@ -527,11 +526,11 @@ async fn main() {
                 (Some(s), Some(t)) => match save_world(SAVE_PATH, seed, clock.tick(), s, t) {
                     Ok(()) => {
                         eprintln!("[save] wrote {SAVE_PATH} at tick {}", clock.tick());
-                        toast = Some(("Saved".into(), get_time() + TOAST_SECS));
+                        toast = Some(("Saved".into(), get_time()));
                     }
                     Err(e) => {
                         eprintln!("[save] failed: {e}");
-                        toast = Some((format!("Save failed: {e}"), get_time() + TOAST_SECS));
+                        toast = Some((format!("Save failed: {e}"), get_time()));
                     }
                 },
                 _ => eprintln!("[save] world not ready"),
