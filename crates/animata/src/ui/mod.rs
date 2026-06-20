@@ -24,6 +24,10 @@ pub type MinimapKey = (u64, DebugView, u64);
 #[derive(Default)]
 pub struct HudCache {
     pub minimap: Option<(MinimapKey, egui::TextureHandle)>,
+    /// Tiny 1-D colour textures for rounded horizontal bars (gradient legends, strata mix), keyed by
+    /// a hash of their colour content. A rounded `RectShape` textured with these masks the corners
+    /// cleanly — no end-cap hacks. Held across frames so the `TextureHandle` outlives the paint.
+    pub bars: std::collections::HashMap<u64, egui::TextureHandle>,
 }
 
 /// Which flyout (if any) is open from the control rail. One at a time.
@@ -122,44 +126,6 @@ pub(crate) fn legend_text(view: DebugView) -> String {
         DebugView::Slope => format!("flat (dark) {a} steep (yellow)"),
         DebugView::Biomass => format!("barren (brown) {a} lush (green) · right-drag = graze"),
         _ => String::new(),
-    }
-}
-
-/// Horizontal gradient strip painted from the SAME ramp math as `build_field_minimap`
-/// (water special-cases omitted — this is just the colour legend). `h` is the bar height (mockup:
-/// 9px in a flyout, 7px under the minimap); width fills the available space.
-pub(crate) fn legend_bar(ui: &mut egui::Ui, view: DebugView, h: f32) {
-    use egui::CornerRadius;
-    let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
-    let painter = ui.painter();
-    // Rounded (pill) ends: solid end-caps with the outer corners rounded, square gradient slices in
-    // between (a per-slice corner_radius can't round the bar's outer corners). The cap must be ≥2·r
-    // wide or egui clamps the corner radius to capwidth/2 and the rounding comes out half-size.
-    let r = (h * 0.5).round();
-    let ru = r as u8;
-    let capw = 2.0 * r;
-    let y0 = rect.top();
-    let y1 = rect.bottom();
-    let cap = |p: &egui::Painter, x: f32, color, cr| {
-        p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, y0), egui::pos2(x + capw, y1)), cr, color)
-    };
-    cap(painter, rect.left(), ramp_color(view, 0.0),
-        CornerRadius { nw: ru, sw: ru, ne: 0, se: 0 });
-    cap(painter, rect.right() - capw, ramp_color(view, 1.0),
-        CornerRadius { ne: ru, se: ru, nw: 0, sw: 0 });
-    let (mx0, mx1) = (rect.left() + capw, rect.right() - capw);
-    let mw = (mx1 - mx0).max(0.0);
-    let n = 48usize;
-    for i in 0..n {
-        let v = (capw + mw * (i as f32 + 0.5) / n as f32) / w; // sample at slice centre
-        let x0 = mx0 + mw * i as f32 / n as f32;
-        let x1 = mx0 + mw * (i + 1) as f32 / n as f32;
-        painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
-            0.0,
-            ramp_color(view, v.clamp(0.0, 1.0)),
-        );
     }
 }
 

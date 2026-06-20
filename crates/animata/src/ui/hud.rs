@@ -12,7 +12,7 @@ use animata_sim::terrain::VoxelTerrain;
 
 use super::theme;
 use super::theme::FrameKind;
-use super::{legend_bar, legend_text, minimap, MAX_TIME_SCALE, MIN_TIME_SCALE};
+use super::{legend_text, minimap, ramp_color, MAX_TIME_SCALE, MIN_TIME_SCALE};
 use super::{HudCache, Panel, SimMetrics, UiActions, UiState};
 use crate::DebugView;
 
@@ -49,7 +49,7 @@ pub fn draw_hud(
     transport(ctx, m, &mut act);
     minimap_panel(ctx, st, m, cache, terrain);
     rail(ctx, st);
-    flyout(ctx, st, m, &mut act);
+    flyout(ctx, st, m, cache, &mut act);
 
     // F4: gate world mouse on "pointer over ANY interactive Area" — covers empty panel backgrounds
     // too (a click on the glass shouldn't reach the world), while non-interactable toast/hint pass.
@@ -134,6 +134,43 @@ fn secondary_button(ui: &mut egui::Ui, text: &str, w: f32) -> bool {
     p.rect_stroke(rect, 9.0, Stroke::new(1.0, theme::straight(255, 255, 255, 36)), StrokeKind::Inside);
     p.text(rect.center(), Align2::CENTER_CENTER, text, theme::mono(11.0), theme::TEXT);
     resp.clicked()
+}
+
+/// Draw a horizontal bar with rounded ends via a 1-D colour texture on a rounded `RectShape` — the
+/// rounded geometry itself masks the corners (a true mask, not end-cap hacks). `colors` is the
+/// left→right colour profile; `smooth` picks LINEAR (gradients) vs NEAREST (hard segments). The tiny
+/// texture is cached in `HudCache::bars` (keyed by content) so the handle outlives the paint.
+fn rounded_bar(ui: &mut egui::Ui, cache: &mut HudCache, rect: egui::Rect, colors: &[Color32], smooth: bool) {
+    use std::hash::{Hash, Hasher};
+    let mut hsh = std::collections::hash_map::DefaultHasher::new();
+    smooth.hash(&mut hsh);
+    for c in colors {
+        c.to_array().hash(&mut hsh);
+    }
+    let key = hsh.finish();
+    if cache.bars.len() > 64 {
+        cache.bars.clear(); // bound growth — the strata key varies with live data
+    }
+    let tex = cache.bars.entry(key).or_insert_with(|| {
+        let img = egui::ColorImage { size: [colors.len().max(1), 1], pixels: colors.to_vec() };
+        let opt = if smooth { egui::TextureOptions::LINEAR } else { egui::TextureOptions::NEAREST };
+        ui.ctx().load_texture("hbar", img, opt)
+    });
+    let r = (rect.height() * 0.5).round() as u8;
+    let uv = egui::Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+    ui.painter().add(
+        egui::epaint::RectShape::filled(rect, egui::CornerRadius::same(r), Color32::WHITE)
+            .with_texture(tex.id(), uv),
+    );
+}
+
+/// Field-map colour-ramp legend with rounded ends. `h` = bar height (flyout 9, minimap 7).
+fn legend_bar(ui: &mut egui::Ui, cache: &mut HudCache, view: DebugView, h: f32) {
+    let w = ui.available_width();
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
+    let n = 64usize;
+    let colors: Vec<Color32> = (0..n).map(|i| ramp_color(view, i as f32 / (n - 1) as f32)).collect();
+    rounded_bar(ui, cache, rect, &colors, true);
 }
 
 // ---- 24-px viewBox → rect mapping (mockup icons) ----
@@ -515,7 +552,7 @@ fn minimap_panel(
                                 theme::straight(233, 236, 230, 166), // .65
                                 tr,
                             );
-                            legend_bar(ui, st.debug_view, 7.0);
+                            legend_bar(ui, cache, st.debug_view, 7.0);
                         });
                     }
                 });
@@ -677,7 +714,7 @@ fn flyout_width(panel: Panel) -> f32 {
     }
 }
 
-fn flyout(ctx: &egui::Context, st: &mut UiState, m: &SimMetrics, act: &mut UiActions) {
+fn flyout(ctx: &egui::Context, st: &mut UiState, m: &SimMetrics, cache: &mut HudCache, act: &mut UiActions) {
     let Some(panel) = st.open_panel else { return };
     egui::Area::new(egui::Id::new("flyout"))
         .anchor(Align2::RIGHT_BOTTOM, egui::vec2(-84.0, -22.0))
@@ -687,8 +724,8 @@ fn flyout(ctx: &egui::Context, st: &mut UiState, m: &SimMetrics, act: &mut UiAct
                 ui.spacing_mut().item_spacing.y = 7.0;
                 match panel {
                     Panel::World => world_panel(ui, m, act),
-                    Panel::View => view_panel(ui, st, m),
-                    Panel::Pop => pop_panel(ui, m),
+                    Panel::View => view_panel(ui, cache, st, m),
+                    Panel::Pop => pop_panel(ui, cache, m),
                     Panel::Perf => perf_panel(ui, m),
                 }
             });
@@ -723,7 +760,7 @@ fn world_panel(ui: &mut egui::Ui, m: &SimMetrics, act: &mut UiActions) {
     });
 }
 
-fn view_panel(ui: &mut egui::Ui, st: &mut UiState, _m: &SimMetrics) {
+fn view_panel(ui: &mut egui::Ui, cache: &mut HudCache, st: &mut UiState, _m: &SimMetrics) {
     ui.horizontal(|ui| {
         caps_tracked(ui, "Debug view", 10.0, 0.18, theme::TEXT_FAINT);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -760,7 +797,7 @@ fn view_panel(ui: &mut egui::Ui, st: &mut UiState, _m: &SimMetrics) {
         hairline(ui);
         ui.label(RichText::new(legend_text(st.debug_view)).font(theme::sans(11.0)).color(theme::straight(233, 236, 230, 153)));
         ui.add_space(3.0);
-        legend_bar(ui, st.debug_view, 9.0);
+        legend_bar(ui, cache, st.debug_view, 9.0);
     }
 }
 
@@ -831,7 +868,7 @@ fn checkbox_row(ui: &mut egui::Ui, checked: bool, label: &str, key: &str) -> egu
     resp
 }
 
-fn pop_panel(ui: &mut egui::Ui, m: &SimMetrics) {
+fn pop_panel(ui: &mut egui::Ui, cache: &mut HudCache, m: &SimMetrics) {
     flyout_header(ui, "Population & Evolution");
     let Some(l) = m.life.as_ref() else {
         ui.label(RichText::new("world generating…").font(theme::sans(11.5)).color(theme::TEXT_DIM));
@@ -860,7 +897,7 @@ fn pop_panel(ui: &mut egui::Ui, m: &SimMetrics) {
     ui.add_space(5.0);
     caps_tracked(ui, "Strata mix", 9.0, 0.14, KEYCAP_TXT);
     ui.add_space(4.0);
-    strata_bar(ui, l.strata);
+    strata_bar(ui, cache, l.strata);
 }
 
 /// Big metric: value on top (mono 18), caps label beneath (mono 9, .1em) — mockup order.
@@ -901,7 +938,7 @@ fn diversity_row(ui: &mut egui::Ui, l: &super::LifeStats) {
     });
 }
 
-fn strata_bar(ui: &mut egui::Ui, strata: [f32; 4]) {
+fn strata_bar(ui: &mut egui::Ui, cache: &mut HudCache, strata: [f32; 4]) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 10.0), Sense::hover());
     let cols = [
@@ -910,25 +947,22 @@ fn strata_bar(ui: &mut egui::Ui, strata: [f32; 4]) {
         theme::STRATA_AIR,
         theme::STRATA_WATER,
     ];
-    let p = ui.painter();
-    // Rounded outer corners (mockup: border-radius 5 + overflow:hidden). Round the FIRST and LAST
-    // non-empty segment (not fixed indices 0/3 — a zero-width end stratum would leave a square edge).
-    let r: u8 = 5;
-    let nz: Vec<usize> = (0..strata.len()).filter(|&i| strata[i].clamp(0.0, 1.0) > 0.0).collect();
-    let (first, last) = (nz.first().copied(), nz.last().copied());
-    let mut x = rect.left();
-    for (i, &f) in strata.iter().enumerate() {
-        let seg_w = rect.width() * f.clamp(0.0, 1.0);
-        let seg = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(seg_w, rect.height()));
-        let cr = egui::CornerRadius {
-            nw: if Some(i) == first { r } else { 0 },
-            sw: if Some(i) == first { r } else { 0 },
-            ne: if Some(i) == last { r } else { 0 },
-            se: if Some(i) == last { r } else { 0 },
-        };
-        p.rect_filled(seg, cr, cols[i]);
-        x += seg_w;
+    // Rounded ends via the texture-mask helper: build the segment colour profile at 256 columns
+    // (NEAREST → crisp segment edges) and let the rounded RectShape clip the corners.
+    const N: usize = 256;
+    let mut acc = [0.0f32; 5];
+    for i in 0..4 {
+        acc[i + 1] = acc[i] + strata[i].clamp(0.0, 1.0);
     }
+    let total = acc[4].max(1e-3);
+    let profile: Vec<Color32> = (0..N)
+        .map(|j| {
+            let f = (j as f32 + 0.5) / N as f32 * total;
+            let seg = (0..4).find(|&i| f < acc[i + 1]).unwrap_or(3);
+            cols[seg]
+        })
+        .collect();
+    rounded_bar(ui, cache, rect, &profile, false);
     ui.add_space(7.0);
     ui.horizontal(|ui| {
         let labels = [
