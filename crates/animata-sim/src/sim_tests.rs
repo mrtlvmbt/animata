@@ -152,6 +152,42 @@ fn organs_emerge_under_selection() {
     assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
 }
 
+/// Sensor cells now DO something (they were the one trait with no mechanical effect): a body's
+/// sensing reach scales with its sensor ORGAN power. This pins the mechanism — floor at no-sensor
+/// (no nerf), strictly monotone in sensor organ-power, a coherent organ beating scattered cells,
+/// and capped so the grid query stays local. (Emergence of the cells themselves is the same
+/// developmental machinery covered by `organs_emerge_under_selection`.)
+#[test]
+fn sensor_organ_extends_sensing_reach() {
+    // A creature carrying a chosen phenotype (only `sense_mult` reads it here; sensor = type idx 2).
+    let make = |sensor: u32, organ: u8| {
+        let mut rng = Rng::new(1);
+        let mut o = [0u8; 7];
+        o[2] = organ;
+        Creature {
+            id: 0,
+            founder: 0,
+            pos: vec2(0.0, 0.0),
+            heading: 0.0,
+            energy: 0.0,
+            age: 0,
+            alive: true,
+            genome: Genome::founder(&mut rng),
+            pheno: Phenotype { n_cells: sensor.max(1), sensor, organ: o, ..Default::default() },
+        }
+    };
+    // No sensor tissue ⇒ baseline reach, bit-identical to before this trait was wired.
+    assert_eq!(make(0, 0).sense_mult(), SENSE_FLOOR);
+    // More sensor organ-power ⇒ strictly farther reach, and a coherent organ beats scattered cells.
+    assert!(make(4, 0).sense_mult() > make(0, 0).sense_mult(), "sensor cells must extend reach");
+    assert!(
+        make(4, 4).sense_mult() > make(4, 1).sense_mult(),
+        "a coherent sensor organ must out-reach the same cells scattered"
+    );
+    // Capped so even an extreme body keeps the per-tick spatial-grid query local.
+    assert_eq!(make(32, 32).sense_mult(), SENSE_CAP);
+}
+
 /// C2 acceptance: a predatory second trophic level EMERGES — some creatures evolve predator
 /// cells, hunt and kill prey — and predators stay RARER than prey (a trophic pyramid, the
 /// ~10% rule), with the population staying alive. Single seed ⇒ deterministic.

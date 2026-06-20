@@ -222,7 +222,21 @@ pub const SEASON_AMPLITUDE: f32 = 0.35;
 /// A creature is predatory once predator cells make up this fraction of its body.
 pub const CARNIVORE_THRESHOLD: f32 = 0.2;
 /// World-unit radius at which a creature senses the nearest prey / threat (brain input).
+/// This is the BASE reach; the actual per-creature reach scales with its sensor ORGAN power
+/// (see `SENSE_FLOOR`/`SENSE_GAIN`).
 pub const SENSE_RANGE: f32 = 30.0;
+/// Sensing reach scales with the sensor ORGAN (count + coherence): a body with coherent sensory
+/// tissue detects prey/threats and feels food gradients farther. The reach multiplier is
+/// `(SENSE_FLOOR + SENSE_GAIN·organ_power(sensor))`, capped by `SENSE_CAP`. Floor `1.0` ⇒ a
+/// sensorless body keeps today's reach (no nerf): sensor cells are a pure but *costed* bonus —
+/// they consume cell slots + biomass that could have been effector/storage/etc., so investing in
+/// sensing trades against other organs (that tension is what selects the trait, the one trait that
+/// had no mechanical effect before this).
+pub const SENSE_FLOOR: f32 = 1.0;
+pub const SENSE_GAIN: f32 = 0.08;
+/// Cap on the sensing-reach multiplier so the per-tick spatial-grid query stays local (bounds the
+/// rings scanned — perf only; bit-determinism is unaffected by the cap).
+pub const SENSE_CAP: f32 = 2.0;
 /// World-unit radius within which a predator actually strikes its targeted prey.
 pub const ATTACK_RANGE: f32 = 3.5;
 /// Spatial-grid cell size for prey/threat queries (≈ the sense range so each query touches a

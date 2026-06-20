@@ -106,6 +106,14 @@ impl Creature {
         MAX_ENERGY + STORAGE_PER_CELL * self.pheno.organ_power(1)
     }
 
+    /// Sensing reach as a multiple of the base range, driven by the sensor ORGAN power (count +
+    /// coherence). `1.0` with no sensor cells (no nerf); rises with sensory tissue and is capped so
+    /// the spatial-grid query stays local. Scales BOTH prey/threat detection and the food-gradient
+    /// sampling — so it benefits herbivores (food gradient) as well as predators/prey (detection).
+    fn sense_mult(&self) -> f32 {
+        (SENSE_FLOOR + SENSE_GAIN * self.pheno.organ_power(2)).min(SENSE_CAP)
+    }
+
     /// Grazing throughput: a bigger body crops a little faster (sublinear, so size isn't free).
     fn intake(&self) -> f32 {
         EAT_RATE * (self.pheno.n_cells as f32).sqrt()
@@ -204,10 +212,12 @@ fn pearson(a: &[f32], b: &[f32]) -> f32 {
 
 /// Closeness `[0,1]` (1 = adjacent, 0 = at/over the sense range) and the left/right bearing of
 /// a target relative to a creature's heading — the two cues the brain needs to steer to/from it.
-fn rel(from: Vec2, heading: f32, target: Vec2) -> (f32, f32) {
+/// `range` is the SENSING creature's own reach (`SENSE_RANGE · sense_mult`) so prox is normalised
+/// against how far *this* body can perceive: a sharper-sensed body reads a far target as nearer.
+fn rel(from: Vec2, heading: f32, target: Vec2, range: f32) -> (f32, f32) {
     let d = target - from;
     let dist = d.length();
-    let prox = (1.0 - dist / SENSE_RANGE).clamp(0.0, 1.0);
+    let prox = (1.0 - dist / range).clamp(0.0, 1.0);
     let bearing = (d.y.atan2(d.x) - heading).sin();
     (prox, bearing)
 }
@@ -466,16 +476,19 @@ impl Sim {
                     let p = camo_base + (1.0 - camo_base) * contrast;
                     Rng::new(seed_fold(this.world_seed, &[SALT_CAMO, i as u64, j as u64, tick])).unit() <= p
                 };
+                // Per-creature sensing reach (sensor ORGAN power): a sharper-sensed body detects
+                // prey/threats farther AND feels the food gradient farther (inside `sense`).
+                let c = &this.creatures[i];
+                let reach = SENSE_RANGE * c.sense_mult();
                 let (prey, threat) = this.grid.nearest2_within(
                     &pos,
                     pos[i],
-                    SENSE_RANGE,
+                    reach,
                     |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),
                     |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm && strata[j] == self_layer,
                 );
-                let c = &this.creatures[i];
-                let prey_rel = prey.map(|j| rel(pos[i], c.heading, pos[j]));
-                let threat_rel = threat.map(|j| rel(pos[i], c.heading, pos[j]));
+                let prey_rel = prey.map(|j| rel(pos[i], c.heading, pos[j], reach));
+                let threat_rel = threat.map(|j| rel(pos[i], c.heading, pos[j], reach));
                 let inputs = this.sense(c, terrain_ref, tick, prey_rel, threat_rel);
                 let (throttle, turn) = c.think(&inputs);
                 // Attack if the targeted prey is within striking distance at snapshot positions.
@@ -660,8 +673,12 @@ impl Sim {
         prey: Option<(f32, f32)>,
         threat: Option<(f32, f32)>,
     ) -> [f32; N_INPUTS] {
+        // Sample the food gradient at the creature's own reach: a sharper-sensed body feels biomass
+        // farther ahead and steers toward food sooner (this is what makes the sensor organ pay off
+        // for herbivores, which have no prey/threat to detect).
+        let radius = SENSE_RADIUS * c.sense_mult();
         let sample = |angle: f32| {
-            let p = vec2(c.pos.x + angle.cos() * SENSE_RADIUS, c.pos.y + angle.sin() * SENSE_RADIUS);
+            let p = vec2(c.pos.x + angle.cos() * radius, c.pos.y + angle.sin() * radius);
             let (cx, cy) = column_index(p);
             terrain.biomass_at(cx, cy, tick)
         };
