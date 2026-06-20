@@ -75,6 +75,49 @@ pub type Queue = Arc<Mutex<VecDeque<Req>>>;
 /// Start the bridge: bind the server and spawn its thread. Returns the shared queue
 /// the main loop drains with [`take`]. A bind failure is logged and a dead queue is
 /// returned, so the app still runs without the bridge.
+/// File (in cwd) the chosen dev-bridge port is written to once bound, so a script / agent can find
+/// this instance's port without scraping stdout: `curl 127.0.0.1:$(cat .animata-dev-port) ...`.
+pub const PORT_FILE: &str = ".animata-dev-port";
+
+/// Pick the dev-bridge port so several branch checkouts running in parallel don't fight over one
+/// port. `ANIMATA_DEV_PORT` wins if set (explicit control); else a STABLE port derived from the
+/// current git branch name; else the historical default `8127` (not a git checkout).
+pub fn port() -> u16 {
+    if let Ok(p) = std::env::var("ANIMATA_DEV_PORT") {
+        if let Ok(p) = p.trim().parse::<u16>() {
+            return p;
+        }
+    }
+    match git_branch() {
+        // FNV-1a of the branch → a port in the IANA dynamic range (49152..=65535), unlikely to clash
+        // with real services and stable for a given branch (same branch ⇒ same port every run).
+        Some(b) => {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in b.bytes() {
+                h ^= byte as u64;
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            const LO: u32 = 49152;
+            const SPAN: u32 = 65535 - LO + 1;
+            (LO + (h % SPAN as u64) as u32) as u16
+        }
+        None => 8127,
+    }
+}
+
+/// The current git branch (`git rev-parse --abbrev-ref HEAD`), or `None` outside a checkout.
+fn git_branch() -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let b = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!b.is_empty()).then_some(b)
+}
+
 pub fn spawn(port: u16) -> Queue {
     let queue: Queue = Arc::new(Mutex::new(VecDeque::new()));
     let server = match tiny_http::Server::http(("127.0.0.1", port)) {
@@ -85,6 +128,8 @@ pub fn spawn(port: u16) -> Queue {
         }
     };
     eprintln!("[dev_bridge] listening on http://127.0.0.1:{port}");
+    // Publish the live port for scripts/agents (best-effort; cwd-local, one per worktree).
+    let _ = std::fs::write(PORT_FILE, port.to_string());
     let q = queue.clone();
     std::thread::spawn(move || {
         for mut request in server.incoming_requests() {
