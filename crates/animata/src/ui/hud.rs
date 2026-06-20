@@ -730,7 +730,7 @@ fn view_panel(ui: &mut egui::Ui, st: &mut UiState, _m: &SimMetrics) {
             ui.label(RichText::new("G cycles").font(theme::mono(9.0)).color(KEYCAP_TXT));
         });
     });
-    ui.add_space(5.0);
+    ui.add_space(8.0); // header margin-bottom 12 (≈ caps gap + this)
     ui.spacing_mut().item_spacing.y = 1.0;
     for (v, name) in [
         (DebugView::None, "None"),
@@ -767,7 +767,8 @@ fn view_panel(ui: &mut egui::Ui, st: &mut UiState, _m: &SimMetrics) {
 /// Full-row clickable option with a ring marker (mockup radio). `active` fills the row amber-faint.
 fn radio_row(ui: &mut egui::Ui, active: bool, label: &str) -> egui::Response {
     let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 28.0), Sense::click());
+    // 26.5 = mockup row box (12.5 line + 7+7 padding); column gap stays 1px → 27.5 pitch.
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 26.5), Sense::click());
     let p = ui.painter();
     if active {
         p.rect_filled(rect, 8.0, ACTIVE_ROW);
@@ -864,7 +865,7 @@ fn pop_panel(ui: &mut egui::Ui, m: &SimMetrics) {
 
 /// Big metric: value on top (mono 18), caps label beneath (mono 9, .1em) — mockup order.
 fn big_stat(ui: &mut egui::Ui, w: f32, value: String, label: &str) {
-    ui.allocate_ui(egui::vec2(w, 34.0), |ui| {
+    ui.allocate_ui(egui::vec2(w, 32.0), |ui| {
         ui.spacing_mut().item_spacing.y = 5.0;
         ui.label(RichText::new(value).font(theme::mono(18.0)).color(theme::TEXT));
         caps_tracked(ui, label, 9.0, 0.1, theme::TEXT_FAINT);

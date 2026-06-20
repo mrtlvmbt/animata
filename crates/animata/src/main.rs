@@ -898,7 +898,10 @@ async fn main() {
                     let p = path.unwrap_or_else(|| SAVE_PATH.to_string());
                     let resp = match (sim.as_ref(), terrain.as_ref()) {
                         (Some(s), Some(t)) => match save_world(&p, seed, clock.tick(), s, t) {
-                            Ok(()) => serde_json::json!({ "ok": true, "saved": p, "tick": clock.tick() }),
+                            Ok(()) => {
+                                toast = Some(("Saved".into(), get_time())); // mirror the HUD toast
+                                serde_json::json!({ "ok": true, "saved": p, "tick": clock.tick() })
+                            }
                             Err(e) => serde_json::json!({ "ok": false, "error": e }),
                         },
                         _ => serde_json::json!({ "ok": false, "error": "world not ready" }),

@@ -43,6 +43,7 @@ STATES = {
     "pop":   ("pop",   "none", False),
     "perf":  ("perf",  "none", False),
     "hide":  ("none",  "none", True),
+    "toast": ("none",  "none", False),   # special: triggers a Saved toast (see main loop)
 }
 
 # Regions of interest in LOGICAL px (x, y, w, h). `note` flags expected-divergent / text-noisy.
@@ -53,35 +54,37 @@ REGIONS = {
     "rail":      (1020, 466, 74, 282, ""),
     "flyout":    (760, 250, 312, 490, "text: live metrics differ"),
     "hint":      (8, 706, 150, 46, ""),
+    "toast":     (470, 10, 160, 46, "top-centre Saved toast"),
 }
 
 
 FINDINGS = """\
-**Хорошо совпало (MAE≈8–12, остаток — живой текст + гало теней):**
+Методика выверена: фон под панелями совпадает идеально (sRGB-профиль Chrome + вода выключена +
+пауза) — в `hide` пустые регионы vitals/rail дают **MAE 0.0**. Значит весь остаточный MAE — это сам
+HUD: тени + текст + реальные диффы.
+
+**Совпало хорошо:**
 - transport — play-кнопка (вектор-триангл на тинте), трек+кольцевой бегунок, `1.0×`, `PAUSED` ✓
 - rail — иконки clock/layers/circles/bars выровнены по позиции и форме ✓
-- hide-hint — `press [I] for UI` почти пиксель-в-пиксель (MAE 2.6) ✓
-- vitals — компоновка (day/time, дайл, divider, population/спарклайн) ✓
+- hide-hint — `press [I] for UI` ✓ ; toast `Saved` (top-center) ✓
+- vitals/world/perf — компоновка и kv-строки ✓
+- view/pop — после тюна высота строк radio (26.5) и big-stat (32) ближе к макету
 
-**Мелкие расхождения (можно дотюнить):**
-- view-флайаут: строки radio/checkbox дают вертикальный дрейф (~1–2px/строка накопительно) —
-  высота строки чуть отличается от макета (28px vs ~26.5).
-- pop-флайаут: суммарная высота панели больше макета → bottom-anchored контент уезжает вверх
-  (внутренние add_space/спейсинги копятся сильнее макета).
-- vitals: трекинг caps `DAY`/`POPULATION` смещён на ~1–2px; ширина панели зависит от числа
-  (растёт с разрядностью population/спарклайном).
-- rail: иконка eye — эллипс-аппроксимация vs bezier-линза макета (чуть другая форма).
+**Остаточные мелочи (низкий ROI, субпиксельно):**
+- view-флайаут: лёгкий вертикальный дрейф строк (метрики строкового бокса egui-IBM-Plex vs Chrome
+  чуть разные) — визуально незаметно.
+- vitals: трекинг caps `DAY`/`POPULATION` ±1px; ширина панели зависит от разрядности population.
+- rail: eye — эллипс-аппроксимация vs bezier-линза макета.
 
 **Неустранимо / по дизайну (не баги):**
-- Гало теней вокруг каждой панели — egui box-shadow мягче/шире CSS (доминирующий не-текстовый
-  диф). Параметры shadow выставлены по числам макета, но рендер-модель иная.
-- Минимапа: интерьер исключён — намеренно изо-ромб (решение пользователя), макет плоский.
-- Полноэкранный field-recolor wash — только в макете; приложение перекрашивает лишь минимапу
-  (вне HUD-скоупа, не реализовано).
+- Гало теней вокруг панелей — egui box-shadow мягче/шире CSS (доминирующий не-текстовый диф;
+  параметры выставлены по числам макета, но рендер-модель иная).
+- Минимапа: интерьер исключён — намеренно изо-ромб (решение пользователя).
+- Полноэкранный field-recolor wash — только в макете (приложение красит лишь минимапу).
 - Backdrop-blur — egui не умеет; в шаблоне отключён.
 
-**Шум сравнения (не дефекты HUD):** живые значения (population/tick/fps/проценты/диаметр) и
-позиция бегунка зависят от состояния симуляции."""
+**Шум сравнения (не дефекты HUD):** живые значения (population/tick/fps/проценты) — поэтому в
+строках с текстом ориентируйся на %off, а не на MAE."""
 
 
 def rpc(method, **params):
@@ -107,13 +110,19 @@ def inpaint_hint(png):
     im.save(png)
 
 
-def render_template(panel, field, bg_png, out_png):
+def render_template(panel, field, bg_png, out_png, toast=None):
     url = (f"file://{TEMPLATE}?panel={panel}&field={field}"
            f"&hide={'1' if panel=='hide' else '0'}&paused=1&bg={bg_png}")
+    if toast:
+        url += f"&toast={toast}"
+    url += "&water=0"  # comparison runs disable the animated water surface
     subprocess.run([
         CHROME, "--headless=new", "--disable-gpu", "--hide-scrollbars",
         "--allow-file-access-from-files", f"--force-device-scale-factor={SCALE}",
         f"--window-size={W},{H}", "--default-background-color=00000000",
+        # Render in plain sRGB so the world background PNG round-trips without a P3/colour-mgmt
+        # brightness shift (otherwise every panel region carries a uniform ~10 MAE floor).
+        "--force-color-profile=srgb", "--disable-color-correct-rendering",
         "--virtual-time-budget=4000", f"--screenshot={out_png}", url,
     ], check=True, capture_output=True)
 
@@ -147,7 +156,8 @@ def main():
     ap.add_argument("--states", nargs="*", default=list(STATES))
     args = ap.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
-    rpc("animata/set_timescale", scale=1, paused=True)  # freeze the world (label stays 1.0×)
+    rpc("animata/set_timescale", scale=1, paused=True)  # freeze the sim (label stays 1.0×)
+    rpc("animata/render", water=False)  # hide the real-time-animated water surface → static world
 
     rows = []  # (state, region, mae, pct, note, strip_path)
     for st in args.states:
@@ -161,20 +171,31 @@ def main():
         if not hide:
             inpaint_hint(bg_png)
         # 1b. the actual HUD frame
-        rpc("animata/set_panel", panel=("none" if hide else panel),
-            debug=field, show_info=(not hide))
-        time.sleep(0.4)
-        shot(app_png, True)
-        # 2. render the template over the same world
         tpl_png = OUT / f"tpl_{st}.png"
-        render_template("hide" if hide else panel, field, bg_png, tpl_png)
+        if st == "toast":
+            rpc("animata/save")  # fires the "Saved" toast
+            rpc("animata/set_panel", panel="none", debug="none", show_info=True)
+            time.sleep(0.5)      # capture during the toast's full-opacity hold
+            shot(app_png, True)
+            render_template("none", "none", bg_png, tpl_png, toast="Saved")
+        else:
+            rpc("animata/set_panel", panel=("none" if hide else panel),
+                debug=field, show_info=(not hide))
+            time.sleep(0.4)
+            shot(app_png, True)
+            render_template("hide" if hide else panel, field, bg_png, tpl_png)
         app = Image.open(app_png)
         tpl = Image.open(tpl_png)
         # 3. per-region diff
         for name, region in REGIONS.items():
             if name == "minimap":
                 continue  # interior intentionally diverges (iso diamond)
-            if name == "flyout" and (hide or panel == "none"):
+            if st == "toast":
+                if name != "toast":
+                    continue
+            elif name == "toast":
+                continue
+            if name == "flyout" and (hide or st in ("base", "toast")):
                 continue
             if name == "hint" and not hide:
                 continue
