@@ -435,7 +435,10 @@ async fn main() {
     // and lets far faces overdraw near ones.
     let mut scene_rt = new_scene_target(screen_width() as u32, screen_height() as u32);
 
-    // Frame timing (EMA-smoothed) + an on-screen readout toggle (`I`).
+    // Frame timing: a sliding-window mean over the last `FPS_WINDOW` frames (steadier than an EMA —
+    // one slow frame can't visibly yank the readout). `fps`/`frame_ms` are recomputed from the ring.
+    const FPS_WINDOW: usize = 60;
+    let mut dt_ring: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(FPS_WINDOW);
     let mut fps = 0.0f32;
     let mut frame_ms = 0.0f32;
     // GUI toggle state (egui widgets + keyboard hotkeys flip the same fields); snapshotted into
@@ -548,10 +551,18 @@ async fn main() {
                 }
             }
         }
-        // Smooth the frame-time readout so it doesn't jitter.
-        frame_ms = 0.9 * frame_ms + 0.1 * dt * 1000.0;
+        // Smooth the readouts with a sliding-window mean so they don't jitter: push this frame's dt,
+        // drop the oldest past the window, then derive both from the window average.
         if dt > 0.0 {
-            fps = 0.9 * fps + 0.1 / dt;
+            if dt_ring.len() == FPS_WINDOW {
+                dt_ring.pop_front();
+            }
+            dt_ring.push_back(dt);
+        }
+        if !dt_ring.is_empty() {
+            let mean_dt = dt_ring.iter().sum::<f32>() / dt_ring.len() as f32;
+            frame_ms = mean_dt * 1000.0;
+            fps = 1.0 / mean_dt;
         }
         // Drive the sim: schedule whole sub-steps from real `dt` (capped, so a lag spike can't
         // spiral), then run EXACTLY one fixed `sim.step` per sub-step, each at its own tick.
