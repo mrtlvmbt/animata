@@ -82,6 +82,14 @@ impl Creature {
         self.genome.coloration
     }
 
+    /// The developed body as `(x, y, cell_type)` lattice cells — for RENDER ONLY (drawing the
+    /// organism's shape at close zoom). Re-derived from the (private) genome via the shared
+    /// morphogenesis core; nothing spatial is stored on the creature. `cell_type`: 0 = structural,
+    /// 1..=7 = effector / storage / sensor / predator / flight / burrow / photo.
+    pub fn body_layout_for_render(&self) -> Vec<(i16, i16, u8)> {
+        self.genome.body_layout()
+    }
+
     /// Top speed: effector cells add locomotor thrust (emergent — a body that develops more
     /// contractile cells moves faster, at the metabolic cost of carrying them). A body with NO
     /// effectors only drifts (`DRIFT_FLOOR`), so powered motility is an earned, selected trait — not
