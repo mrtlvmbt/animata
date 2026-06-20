@@ -73,29 +73,34 @@ Pillars (do not violate — they protect perf + determinism):
 When a behavioural change shifts the trajectory, BOTH profile goldens move. To read the new values:
 
 ```sh
-# rtk SWALLOWS cargo-test stdout (shows only its summary). Use `rtk proxy` to see the assert_eq values.
-rtk proxy cargo test -p animata-sim --release state_checksum_replays_to_golden 2>&1 | grep -iE "left:|right:"
-rtk proxy cargo test -p animata-sim          state_checksum_replays_to_golden 2>&1 | grep -iE "left:|right:"
+# ALWAYS run tests via ./scripts/test-bar.sh (mandatory, see CLAUDE.md) — it bypasses rtk (which
+# otherwise swallows cargo-test stdout) AND passes the assert left:/right: lines through.
+./scripts/test-bar.sh -p animata-sim --release state_checksum_replays_to_golden | grep -iE "left:|right:"
+./scripts/test-bar.sh -p animata-sim          state_checksum_replays_to_golden | grep -iE "left:|right:"
 ```
 
 `left:` is the actual (new) value, `right:` is the stale golden. Paste both into
 `GOLDEN_CHECKSUM_SEED42_300` in `sim.rs` (debug branch + release branch), with a comment saying WHY it
-moved. Then a full `cargo test -p animata-sim --release` must be green.
+moved. Then a full `./scripts/test-bar.sh -p animata-sim --release` must be green.
 
 **Before re-pinning, ask: did I MEAN to move the trajectory?** If the change was supposed to be inert
 (machinery only), a moved golden means it leaked — fix the leak (§5), don't re-pin. The legitimate
 inert re-pin is *only* when you ADDED a field to the checksum fold (the hash inputs grew, the
 trajectory didn't).
 
-## 4. Capturing test output past rtk (you WILL need this)
+## 4. Running tests — always via `./scripts/test-bar.sh`
 
-`rtk` (the token-saving proxy) replaces `cargo test` stdout/stderr with a one-line summary, so
-`--nocapture`, `eprintln!`, and `assert` messages vanish. To actually see them:
-- `rtk proxy cargo test ... -- --nocapture` — runs raw, unfiltered.
-- or read the tee log: `~/Library/Application Support/rtk/tee/<ts>_cargo_test.log` (latest = the run).
-- `cargo test` takes ONE positional filter; multiple need `cargo test -- f1 f2` or separate runs.
+**Mandatory (CLAUDE.md): run tests through `./scripts/test-bar.sh`, never bare `cargo test`.** The
+script wraps `cargo test`, streams progress (so the human sees how far a long run is), passes
+failure detail through (panic body, assert `left:`/`right:`), and runs raw cargo internally so the
+rtk proxy (which otherwise collapses cargo-test output to a one-line summary) is bypassed.
+- `./scripts/test-bar.sh` — full suite (`--release --workspace`); `./scripts/test-bar.sh <args>` — any
+  `cargo test` args pass through (one positional filter; multiple need `-- f1 f2` or separate runs).
+- Non-TTY (captured/backgrounded) → periodic checkpoint lines instead of a `\r` bar; cadence `BAR_EVERY=N`.
 - The 8000-tick acceptance tests run ~14 s each in release, minutes in debug — the full release suite
-  is ~6 min. It auto-backgrounds; wait for the completion notification rather than polling.
+  is ~6 min. Background it and wait for the completion notification rather than polling.
+- Fallback only if the script is unavailable: `rtk proxy cargo test ... -- --nocapture`, or the tee log
+  `~/Library/Application Support/rtk/tee/<ts>_cargo_test.log`.
 
 ## 5. The fragility lesson (single-seed corridors) — the #1 way to break things
 
@@ -169,6 +174,7 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
 
 ## 10. Running & inspecting
 
+- Tests: **always `./scripts/test-bar.sh`** (§4), never bare `cargo test`.
 - Headless: `cargo run -p animata-sim --bin headless --release`.
 - Viewer + dev-bridge: `cargo run -p animata --features dev` (the dev-bridge port is PER-BRANCH —
   read it from `.animata-dev-port`, never assume 8127; see [[dev-bridge-port]]). Verify visual/render
@@ -181,7 +187,8 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
 1. Read this skill + the relevant memory. Understand the determinism footprint of your change.
 2. If it's a big mechanism: plan → plan-consensus → spike (gate) → implement.
 3. Implement smallest-first; prefer inert-then-activate for risky determinism-critical work.
-4. `cargo build -p animata-sim --release`; run the targeted tests, then the FULL release suite.
+4. `cargo build -p animata-sim --release`; run the targeted tests, then the FULL release suite —
+   always via `./scripts/test-bar.sh` (§4), never bare `cargo test`.
 5. If the golden moved: confirm it was MEANT to, re-pin both profiles (§3) with a why-comment.
 6. If a corridor broke: apply §5 (inert / RNG-preserve / multi-seed) — never silently weaken a test.
 7. New field? Run the §7 checklist.
