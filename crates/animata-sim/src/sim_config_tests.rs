@@ -4,7 +4,9 @@ use super::*;
 #[test]
 fn features_set_and_pairs_round_trip() {
     let mut f = Features::default();
-    assert!(f.pairs().iter().all(|(_, on)| *on), "defaults should be all-on");
+    // Defaults: the world's standing features are on; seasonality is an opt-in mode, default off.
+    assert!(f.climate && f.predation && f.toxicity, "standing features should default on");
+    assert!(!f.seasonality, "seasonality should default off (opt-in mode)");
     assert!(f.set("predation", false));
     assert!(!f.set("bogus", true), "unknown feature must be rejected");
     let on = f.pairs().iter().find(|(k, _)| *k == "predation").unwrap().1;
@@ -34,7 +36,8 @@ fn from_ron_partial_falls_back_to_defaults() {
 #[test]
 fn from_ron_empty_is_default() {
     let cfg = SimConfig::from_ron("()").unwrap();
-    assert!(cfg.features.pairs().iter().all(|(_, on)| *on));
+    // Matches the built-in default: standing features on, seasonality off.
+    assert!(cfg.features.climate && cfg.features.toxicity && !cfg.features.seasonality);
     assert_eq!(cfg.params.thermal_penalty, Params::default().thermal_penalty);
 }
 

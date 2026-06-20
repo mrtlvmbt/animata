@@ -242,6 +242,36 @@ fn toxin_resistance_evolves_on_toxic_ground() {
     assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
 }
 
+/// Seasonality acceptance: the opt-in seasonal food swing makes the whole population BREATHE — its
+/// size fluctuates markedly more over the run than in the aseasonal baseline (a recurring
+/// summer-boom / winter-bust). A time-domain environmental pressure, vs the spatial ones.
+#[test]
+fn seasonality_makes_the_population_breathe() {
+    use crate::sim_config::SimConfig;
+    let coeff_var = |seasonal: bool| -> (f64, f64) {
+        let mut cfg = SimConfig::default();
+        cfg.features.seasonality = seasonal;
+        cfg.params.season_len = 80.0; // short year ⇒ several cycles fit the run
+        cfg.params.season_amplitude = 0.5; // a clear swing
+        let mut t = world();
+        let mut s = Sim::with_config(1, &t, cfg);
+        let mut pops = Vec::new();
+        for tick in 0..6000 {
+            s.step(&mut t, tick);
+            if tick >= 1000 && tick % 25 == 0 {
+                pops.push(s.population() as f64); // skip the founder transient
+            }
+        }
+        let mean = pops.iter().sum::<f64>() / pops.len() as f64;
+        let var = pops.iter().map(|p| (p - mean).powi(2)).sum::<f64>() / pops.len() as f64;
+        (var.sqrt() / mean, mean)
+    };
+    let (cv_on, mean_on) = coeff_var(true);
+    let (cv_off, mean_off) = coeff_var(false);
+    eprintln!("population CV: seasonal {cv_on:.4} (mean {mean_on:.0}) vs aseasonal {cv_off:.4} (mean {mean_off:.0})");
+    assert!(cv_on > cv_off * 1.3, "seasonality should make the population fluctuate more (cv {cv_on:.4} vs {cv_off:.4})");
+}
+
 /// PR4: feature toggles actually bite, and a fixed config replays deterministically.
 #[test]
 fn feature_toggles_bite_and_replay() {

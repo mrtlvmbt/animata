@@ -24,6 +24,7 @@ use crate::sim_config::{Features, Params};
 mod autotrophy;
 mod climate;
 mod metabolism;
+mod seasonality;
 mod toxicity;
 
 /// Per-creature inputs a pressure may read: an environment sample at the creature's column plus its
@@ -39,6 +40,9 @@ pub struct Sample<'a> {
     pub light: f32,
     /// Ground toxicity `[0,1]` at the creature's column (env field).
     pub toxicity: f32,
+    /// Seasonal phase this tick in `[-1,1]` (`sin` of the year angle): +1 high summer, −1 deep
+    /// winter. A per-tick global (same for all creatures), a pure function of the tick.
+    pub season_phase: f32,
     /// Autotroph self-shading multiplier (a per-tick population aggregate; see `TickCtx` in `step`).
     pub autotroph_shading: f32,
 }
@@ -108,6 +112,9 @@ impl PressureRegistry {
         }));
         if f.toxicity {
             active.push(Box::new(toxicity::Toxicity { lethality: p.toxin_lethality }));
+        }
+        if f.seasonality {
+            active.push(Box::new(seasonality::Seasonality { amplitude: p.season_amplitude }));
         }
         PressureRegistry { active }
     }
