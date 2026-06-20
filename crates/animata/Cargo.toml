@@ -10,6 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 macroquad = "0.4"
+egui = "0.31"
+egui-macroquad = "0.17.3"
 animata-sim = { path = "../animata-sim" }
 tiny_http = { version = "0.12", optional = true }
 serde_json = { version = "1", optional = true }
