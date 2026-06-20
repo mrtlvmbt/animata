@@ -308,6 +308,19 @@ impl Sim {
         }
     }
 
+    /// The current runtime config (features + params).
+    pub fn config(&self) -> SimConfig {
+        self.cfg
+    }
+
+    /// Replace the runtime config live (e.g. from the dev bridge): updates the feature gates and
+    /// rebuilds the pressure registry, so a changed membership / parameter takes effect from the
+    /// next tick. `(seed, cfg)` still replays — the new cfg is simply the input from here on.
+    pub fn set_config(&mut self, cfg: SimConfig) {
+        self.cfg = cfg;
+        self.registry = PressureRegistry::build(&cfg.features, &cfg.params);
+    }
+
     /// One fixed sim tick. Multi-phase so the outcome is independent of iteration order:
     /// (a) snapshot the world + a spatial index, every creature senses (plant field + nearest
     /// prey/threat) and decides; (b) predation pass — resolve hunts by snapshot index, flagging

@@ -43,6 +43,34 @@ impl Default for Features {
     }
 }
 
+impl Features {
+    /// `(name, on)` for every feature — the introspection surface (get_config / the dev bridge).
+    pub fn pairs(&self) -> [(&'static str, bool); 6] {
+        [
+            ("climate", self.climate),
+            ("autotrophy", self.autotrophy),
+            ("strata", self.strata),
+            ("predation", self.predation),
+            ("camouflage", self.camouflage),
+            ("development", self.development),
+        ]
+    }
+
+    /// Set a feature by name; returns `false` for an unknown name (caller can report it).
+    pub fn set(&mut self, name: &str, on: bool) -> bool {
+        match name {
+            "climate" => self.climate = on,
+            "autotrophy" => self.autotrophy = on,
+            "strata" => self.strata = on,
+            "predation" => self.predation = on,
+            "camouflage" => self.camouflage = on,
+            "development" => self.development = on,
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// Tunable numeric parameters (mirror of the `config.rs` constants used in the hot path). Defaults
 /// equal those constants, so `Params::default()` is bit-identical to the pre-config behaviour.
 #[derive(Clone, Copy, Debug)]
@@ -70,9 +98,39 @@ impl Default for Params {
     }
 }
 
+impl Params {
+    /// `(name, value)` for every parameter — the introspection surface.
+    pub fn pairs(&self) -> [(&'static str, f32); 5] {
+        [
+            ("thermal_penalty", self.thermal_penalty),
+            ("photo_rate", self.photo_rate),
+            ("air_metab_mult", self.air_metab_mult),
+            ("underground_metab_mult", self.underground_metab_mult),
+            ("camo_base_detect", self.camo_base_detect),
+        ]
+    }
+
+    /// Set a parameter by name; returns `false` for an unknown name.
+    pub fn set(&mut self, name: &str, v: f32) -> bool {
+        match name {
+            "thermal_penalty" => self.thermal_penalty = v,
+            "photo_rate" => self.photo_rate = v,
+            "air_metab_mult" => self.air_metab_mult = v,
+            "underground_metab_mult" => self.underground_metab_mult = v,
+            "camo_base_detect" => self.camo_base_detect = v,
+            _ => return false,
+        }
+        true
+    }
+}
+
 /// The full runtime config: feature flags + parameters. Default = all-on, constants — the golden.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SimConfig {
     pub features: Features,
     pub params: Params,
 }
+
+#[cfg(test)]
+#[path = "sim_config_tests.rs"]
+mod tests;
