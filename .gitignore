@@ -18,6 +18,9 @@
 # Dev-bridge screenshots
 /*.png
 
+# Dev-bridge live port (per-worktree, written at startup)
+/.animata-dev-port
+
 # CodeGraph local index
 /.codegraph/
 

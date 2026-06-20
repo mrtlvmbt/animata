@@ -336,7 +336,7 @@ async fn main() {
     // Dev bridge: localhost JSON-RPC for driving/inspecting the viewer (see
     // DEV_BRIDGE.md). Off unless built with `--features dev`.
     #[cfg(feature = "dev")]
-    let bridge = dev_bridge::spawn(8127);
+    let bridge = dev_bridge::spawn(dev_bridge::port());
     #[cfg(feature = "dev")]
     let mut pending_shots: Vec<(String, bool, std::sync::mpsc::Sender<serde_json::Value>)> = Vec::new();
 
