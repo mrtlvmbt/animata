@@ -5,7 +5,7 @@ use crate::sim::Stratum;
 use crate::sim_config::Params;
 
 fn sample_with<'a>(layer: Stratum, temperature: f32, light: f32, genome: &'a Genome, pheno: &'a Phenotype) -> Sample<'a> {
-    Sample { pheno, genome, layer, temperature, light, toxicity: 0.0, autotroph_shading: 1.0 }
+    Sample { pheno, genome, layer, temperature, light, toxicity: 0.0, season_phase: 0.0, autotroph_shading: 1.0 }
 }
 
 fn climate() -> climate::Climate {
@@ -67,6 +67,27 @@ fn default_registry_lists_pressures() {
     assert!(ids.contains(&"autotrophy"));
     assert!(ids.contains(&"metabolism"));
     assert!(ids.contains(&"toxicity"));
+    // Seasonality is default-OFF (an opt-in mode), so it must NOT be in the default registry.
+    assert!(!ids.contains(&"seasonality"));
+}
+
+/// Seasonality swings `food_mult` around 1 with the phase: richer in summer (+1), leaner in winter
+/// (−1), neutral at the equinox (0). Touches only the food channel.
+#[test]
+fn seasonality_swings_food_with_the_phase() {
+    let mut rng = Rng::new(5);
+    let genome = Genome::founder(&mut rng);
+    let pheno = genome.develop();
+    let season = seasonality::Seasonality { amplitude: 0.3 };
+    let at = |phase: f32| {
+        let mut s = sample_with(Stratum::Surface, 0.0, 1.0, &genome, &pheno);
+        s.season_phase = phase;
+        season.eval(&s)
+    };
+    assert_eq!(at(0.0).food_mult, 1.0, "equinox ⇒ neutral");
+    assert!(at(1.0).food_mult > 1.0, "summer ⇒ richer");
+    assert!(at(-1.0).food_mult < 1.0, "winter ⇒ leaner");
+    assert!(at(1.0).energy_add == 0.0 && at(1.0).metab_mult == 1.0, "seasonality only touches food");
 }
 
 /// Toxicity writes `mortality_add` only when ground toxicity exceeds the creature's resistance.

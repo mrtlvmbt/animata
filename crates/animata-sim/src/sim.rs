@@ -335,6 +335,10 @@ impl Sim {
         // `self`. All-on/default reproduces the pre-config behaviour bit-for-bit.
         let feat = self.cfg.features;
         let camo_base = self.cfg.params.camo_base_detect;
+        // Seasonal phase this tick in [-1, 1] (a pure function of the tick). Computed always; only
+        // the (default-off) seasonality pressure reads it, so it's inert unless enabled.
+        let season_phase =
+            (std::f32::consts::TAU * tick as f32 * TICK_LEN / self.cfg.params.season_len.max(1e-3)).sin();
         // (a) snapshot + decide — reads only, terrain unmutated. Snapshot arrays feed the grid
         // predicates without borrowing `self.creatures` inside the closures.
         let pos: Vec<Vec2> = self.creatures.iter().map(|c| c.pos).collect();
@@ -486,6 +490,7 @@ impl Sim {
                 temperature: terrain.temperature_at(cx, cy),
                 light: light_for(layer, cy, tick),
                 toxicity: terrain.toxicity_at(cx, cy),
+                season_phase,
                 autotroph_shading,
             };
             let eff = self.registry.eval_all(&sample);

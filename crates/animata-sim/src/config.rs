@@ -192,6 +192,14 @@ pub const THERMAL_PENALTY: f32 = 0.9;
 /// in before the lineage is wiped), not instant death.
 pub const TOXIN_LETHALITY: f32 = 0.02;
 
+// ---- C3: seasonality (a TIME-varying environmental pressure; default OFF) ----
+/// Length of one in-world year in **sim-seconds** — the period of the seasonal food cycle. Short
+/// enough (vs `LIFESPAN`) that a lineage feels the swing within a few generations.
+pub const SEASON_LEN: f32 = 300.0;
+/// Seasonal swing of food availability: `food ×= 1 + AMPLITUDE·sin(year_phase)` — summer is richer,
+/// winter leaner. Default OFF (`Features.seasonality`), so the baseline world is aseasonal.
+pub const SEASON_AMPLITUDE: f32 = 0.35;
+
 // ---- C2: predation / trophic web ----
 /// A creature is predatory once predator cells make up this fraction of its body.
 pub const CARNIVORE_THRESHOLD: f32 = 0.2;

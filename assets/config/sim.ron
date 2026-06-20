@@ -13,6 +13,7 @@
         camouflage: true,   // crypsis gates predator detection
         development: true,  // GRN grows multicellular bodies (off ⇒ single-cell children)
         toxicity: true,     // toxic ground belts kill the unresistant (selects for toxin_resistance)
+        seasonality: false, // food swings over the year (opt-in mode; off keeps the world aseasonal)
     ),
     params: (
         thermal_penalty: 0.9,           // climate: steepness of the food-vs-temperature falloff
@@ -21,5 +22,7 @@
         underground_metab_mult: 0.7,    // metabolism: burrowing is cheap
         camo_base_detect: 0.12,         // camouflage: detection floor for a perfectly cryptic prey
         toxin_lethality: 0.02,          // toxicity: per-tick death hazard per unit of unresisted toxicity
+        season_amplitude: 0.35,         // seasonality: food swing amplitude over the year
+        season_len: 300.0,              // seasonality: year length in sim-seconds
     ),
 )
