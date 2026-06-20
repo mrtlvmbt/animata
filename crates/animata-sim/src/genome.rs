@@ -180,62 +180,128 @@ impl Genome {
         out
     }
 
-    /// Grow the body from one seed cell by running the GRN for `DEV_STEPS`, dividing cells
-    /// whose divide gene fires (daughter gets a polarity flip so sisters can differentiate),
-    /// capped at `MAX_CELLS`. Deterministic — depends only on the genome. Then tally cell
-    /// types from the final states. **Empty GRN ⇒ exactly one structural cell (C0).**
-    pub fn develop(&self) -> Phenotype {
+    /// The shared morphogenesis core (the SINGLE source of truth for body structure): grow the body
+    /// from one seed cell by running the GRN for `DEV_STEPS`, dividing cells whose divide gene fires
+    /// (daughter gets a polarity flip so sisters can differentiate), capped at `MAX_CELLS`. Returns
+    /// each cell's final GRN state PLUS its integer lattice position. The GRN growth is byte-identical
+    /// to the pre-morphogenesis loop — positions are assigned ALONGSIDE and feed nothing back, so the
+    /// cell set (and therefore `develop()`'s tallies) is unchanged. Deterministic; depends only on the
+    /// genome. **Empty GRN ⇒ exactly one structural cell at the origin (C0).**
+    fn grow(&self) -> (Vec<[f32; G]>, Vec<(i16, i16)>) {
         let mut seed = [0.0f32; G];
         seed[0] = 1.0; // a maternal factor to bootstrap a non-empty GRN (ignored by W=0)
         let mut states: Vec<[f32; G]> = vec![seed];
+        let mut pos: Vec<(i16, i16)> = vec![(0, 0)];
         for _ in 0..DEV_STEPS {
             let cur = states.len(); // fixed during this step (newborns go to a side buffer)
             let mut newborn: Vec<[f32; G]> = Vec::new();
-            for s in states.iter_mut() {
-                let ns = self.regulate(s);
-                *s = ns;
+            let mut newborn_pos: Vec<(i16, i16)> = Vec::new();
+            for i in 0..cur {
+                let ns = self.regulate(&states[i]);
+                states[i] = ns;
                 if ns[GENE_DIVIDE] > DIVIDE_THETA && cur + newborn.len() < MAX_CELLS {
                     let mut child = ns;
                     child[GENE_POLARITY] = -child[GENE_POLARITY];
+                    // Place the daughter on a free lattice neighbour, preferred direction from the
+                    // parent's polarity (render metadata only — never fed back into the GRN).
+                    let p = place_cell(pos[i], ns[GENE_POLARITY], &pos, &newborn_pos);
                     newborn.push(child);
+                    newborn_pos.push(p);
                 }
             }
             if newborn.is_empty() {
                 break; // settled — no more growth
             }
             states.extend(newborn);
+            pos.extend(newborn_pos);
             if states.len() >= MAX_CELLS {
                 break;
             }
         }
+        (states, pos)
+    }
+
+    /// Develop the body and tally cell-type COUNTS (the per-tick stat inputs). Reduces the shared
+    /// [`grow`](Self::grow) core to the same `Phenotype` counts as before morphogenesis.
+    pub fn develop(&self) -> Phenotype {
+        let (states, _pos) = self.grow();
         let mut p = Phenotype { n_cells: states.len() as u32, ..Default::default() };
         for s in &states {
-            // The cell takes the identity of its most-expressed function gene (if any beats the
-            // baseline; else it's structural). One arg-max over all the function genes.
-            let funcs = [
-                (GENE_EFFECTOR, &mut p.effector),
-                (GENE_STORAGE, &mut p.storage),
-                (GENE_SENSOR, &mut p.sensor),
-                (GENE_PREDATOR, &mut p.predator),
-                (GENE_FLIGHT, &mut p.flight),
-                (GENE_BURROW, &mut p.burrow),
-                (GENE_PHOTO, &mut p.photo),
-            ];
-            let best = funcs.iter().map(|&(g, _)| s[g]).fold(f32::MIN, f32::max);
-            if best < SPECIALISE_THETA {
-                p.structural += 1;
-            } else {
-                // First gene reaching the max wins the tie (deterministic).
-                for (g, count) in funcs {
-                    if s[g] == best {
-                        *count += 1;
-                        break;
-                    }
-                }
+            match cell_type(s) {
+                1 => p.effector += 1,
+                2 => p.storage += 1,
+                3 => p.sensor += 1,
+                4 => p.predator += 1,
+                5 => p.flight += 1,
+                6 => p.burrow += 1,
+                7 => p.photo += 1,
+                _ => p.structural += 1, // 0 = structural (no function gene beats the baseline)
             }
         }
         p
     }
+
+    /// The developed body as `(x, y, cell_type)` on the lattice — for RENDER ONLY (drawing the
+    /// organism's shape at close zoom). Same shared [`grow`](Self::grow) core `develop()` uses, so the
+    /// drawn body always matches the stats. `cell_type`: 0 = structural, 1..=7 = effector / storage /
+    /// sensor / predator / flight / burrow / photo. Re-derived on demand; nothing is stored per-creature.
+    pub fn body_layout(&self) -> Vec<(i16, i16, u8)> {
+        let (states, pos) = self.grow();
+        states.iter().zip(pos).map(|(s, p)| (p.0, p.1, cell_type(s))).collect()
+    }
+}
+
+/// A cell's type from its final GRN state: argmax over the 7 function genes if any beats the
+/// specialise baseline (first gene reaching the max wins the tie — deterministic), else structural.
+/// 0 = structural, 1..=7 = effector / storage / sensor / predator / flight / burrow / photo. The
+/// single classifier both `develop()` (counts) and `body_layout()` (render) share.
+fn cell_type(s: &[f32; G]) -> u8 {
+    const FUNCS: [usize; 7] =
+        [GENE_EFFECTOR, GENE_STORAGE, GENE_SENSOR, GENE_PREDATOR, GENE_FLIGHT, GENE_BURROW, GENE_PHOTO];
+    let best = FUNCS.iter().map(|&g| s[g]).fold(f32::MIN, f32::max);
+    if best < SPECIALISE_THETA {
+        return 0;
+    }
+    for (idx, &g) in FUNCS.iter().enumerate() {
+        if s[g] == best {
+            return (idx + 1) as u8;
+        }
+    }
+    0
+}
+
+/// Place a dividing cell's daughter on a free 4-neighbour lattice site, preferring the direction set
+/// by the parent's polarity (a fixed-threshold bin into N/E/S/W — render metadata, so the float read
+/// here never feeds the GRN). If all four neighbours are taken, spiral outward in a fixed scan order
+/// until a free site is found. Deterministic for ≤ `MAX_CELLS` cells. `taken`/`pending` are the
+/// already-placed coords (this step's parents + this step's newborns).
+fn place_cell(parent: (i16, i16), polarity: f32, taken: &[(i16, i16)], pending: &[(i16, i16)]) -> (i16, i16) {
+    const DIRS: [(i16, i16); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // N, E, S, W
+    let free = |c: (i16, i16)| !taken.contains(&c) && !pending.contains(&c);
+    // Preferred starting direction from polarity (one fixed-threshold bin into 0..=3).
+    let start = (((polarity.clamp(-1.0, 1.0) + 1.0) * 0.5 * 3.999) as usize).min(3);
+    for k in 0..4 {
+        let d = DIRS[(start + k) % 4];
+        let c = (parent.0 + d.0, parent.1 + d.1);
+        if free(c) {
+            return c;
+        }
+    }
+    // All four neighbours taken: expand square rings around the parent, fixed scan order.
+    for r in 2i16.. {
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx.abs().max(dy.abs()) != r {
+                    continue; // ring perimeter only
+                }
+                let c = (parent.0 + dx, parent.1 + dy);
+                if free(c) {
+                    return c;
+                }
+            }
+        }
+    }
+    parent // unreachable for ≤ MAX_CELLS, but a total function
 }
 
 impl Genome {

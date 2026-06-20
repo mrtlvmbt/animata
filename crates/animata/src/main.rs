@@ -77,6 +77,24 @@ const LOD_MAT_PX_PER_M: f32 = 4.0;
 const MAT_FULL_COUNT: f32 = 6.0;
 /// Opacity ceiling of a mat tile, so terrain stays faintly readable under a dense colony.
 const MAT_MAX_ALPHA: f32 = 0.85;
+/// Min on-screen size (px) of one body cell before we draw the MORPHOLOGY (cluster of typed cells)
+/// instead of a single dot — i.e. only when zoomed in close (few creatures on screen, cost bounded).
+const BODY_CELL_MIN_PX: f32 = 2.5;
+
+/// Colour for a body cell by type (`genome::body_layout` ids): structural = the creature's evolved
+/// greyscale coloration (camouflage still reads), function cells get a distinct hue so organs show.
+fn cell_color(cell_type: u8, coloration: f32) -> Color {
+    match cell_type {
+        1 => Color::new(0.85, 0.25, 0.20, 1.0), // effector — muscle red
+        2 => Color::new(0.90, 0.80, 0.20, 1.0), // storage — yellow
+        3 => Color::new(0.20, 0.80, 0.90, 1.0), // sensor — cyan
+        4 => Color::new(0.85, 0.20, 0.70, 1.0), // predator — magenta
+        5 => Color::new(0.60, 0.70, 1.00, 1.0), // flight — sky blue
+        6 => Color::new(0.55, 0.40, 0.25, 1.0), // burrow — brown
+        7 => Color::new(0.30, 0.80, 0.30, 1.0), // photo — green
+        _ => Color::new(coloration, coloration, coloration, 1.0), // structural — evolved coloration
+    }
+}
 /// Default save file (cwd) for the `F5`/`F9` quick-save keys and the path-less dev-bridge save/load.
 const SAVE_PATH: &str = "animata-save.bin";
 
@@ -805,8 +823,13 @@ async fn main() {
                 Some(((nx * 0.5 + 0.5) * sw, (1.0 - (ny * 0.5 + 0.5)) * sh))
             };
             if px_per_m >= LOD_MAT_PX_PER_M {
-                // INDIVIDUALS — world-scaled dots. Fill = evolved coloration (greyscale) so
-                // camouflage stays visible; a thin dark ring keeps a light dot legible.
+                // INDIVIDUALS. Zoomed in far enough that a single cell spans ≥ a couple pixels, draw
+                // the MORPHOLOGY — the developed body as a cluster of lattice cells, tinted by type
+                // (structural = the evolved greyscale coloration, so camouflage still reads; function
+                // cells get a type colour, so organs are visible). Otherwise the body is sub-cell, so
+                // draw the cheaper world-scaled dot (also bounds cost: morphology only at high zoom,
+                // where few creatures are on screen).
+                let cell_px = CREATURE_RADIUS_M * px_per_m * 2.0;
                 for c in &sim.creatures {
                     let (cx, cy) = sim::column_index(c.pos);
                     let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
@@ -814,11 +837,20 @@ async fn main() {
                         continue;
                     };
                     let g = c.coloration();
-                    // Body radius in metres (√biomass) → pixels; a floor keeps a lone microbe clickable.
-                    let r =
-                        (CREATURE_RADIUS_M * (c.biomass() as f32).sqrt() * px_per_m).max(CREATURE_MIN_PX);
-                    draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
-                    draw_circle(px, py, r, Color::new(g, g, g, 1.0));
+                    if cell_px >= BODY_CELL_MIN_PX {
+                        for (dx, dy, ty) in c.body_layout_for_render() {
+                            let bx = px + dx as f32 * cell_px;
+                            let by = py + dy as f32 * cell_px;
+                            let (h, s) = (cell_px * 0.5, cell_px);
+                            draw_rectangle(bx - h - 0.5, by - h - 0.5, s + 1.0, s + 1.0, Color::new(0.0, 0.0, 0.0, 0.5));
+                            draw_rectangle(bx - h, by - h, s, s, cell_color(ty, g));
+                        }
+                    } else {
+                        // Body radius in metres (√biomass) → pixels; floor keeps a lone microbe clickable.
+                        let r = (CREATURE_RADIUS_M * (c.biomass() as f32).sqrt() * px_per_m).max(CREATURE_MIN_PX);
+                        draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
+                        draw_circle(px, py, r, Color::new(g, g, g, 1.0));
+                    }
                     on_screen += 1;
                 }
             } else {
