@@ -46,6 +46,16 @@ pub enum Cmd {
     Render { water: Option<bool>, topo: Option<bool> },
     /// Capture the current frame to a PNG (serviced post-draw on the main loop).
     Screenshot(String),
+    /// Read the live `SimConfig` (every feature flag + parameter).
+    GetConfig,
+    /// Toggle a simulation feature by name (climate / autotrophy / strata / predation /
+    /// camouflage / development).
+    SetFeature { name: String, enabled: bool },
+    /// Set a simulation parameter by name (thermal_penalty / photo_rate / … / camo_base_detect).
+    SetParam { name: String, value: f32 },
+    /// Read metric values: the latest of every metric, plus the time-series of `id` if given
+    /// (`last` caps how many recent samples to return).
+    Metrics { id: Option<String>, last: Option<usize> },
 }
 
 /// A queued request: the command plus the channel to answer it on.
@@ -139,6 +149,19 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
         }),
         "animata/render" => Ok(Cmd::Render { water: b("water"), topo: b("topo") }),
         "animata/screenshot" => Ok(Cmd::Screenshot(s("path").unwrap_or_else(|| "shot.png".into()))),
+        "animata/get_config" => Ok(Cmd::GetConfig),
+        "animata/set_feature" => Ok(Cmd::SetFeature {
+            name: s("name").ok_or("set_feature: missing name")?,
+            enabled: b("enabled").unwrap_or(true),
+        }),
+        "animata/set_param" => Ok(Cmd::SetParam {
+            name: s("name").ok_or("set_param: missing name")?,
+            value: f("value").ok_or("set_param: missing value")? as f32,
+        }),
+        "animata/metrics" => Ok(Cmd::Metrics {
+            id: s("id"),
+            last: u("last").map(|v| v as usize),
+        }),
         other => Err(format!("unknown method: {other}")),
     }
 }

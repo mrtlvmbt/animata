@@ -20,6 +20,8 @@ mod render;
 // needs these modules by name; the rest (genome/grid/rng/tectonics/erosion/hydrology) are internal
 // to the sim. `Vec2` comes from the same glam major macroquad re-exports, so types line up.
 use animata_sim::{clock, config, sim, terrain};
+#[cfg(feature = "dev")]
+use animata_sim::metrics::{MetricRegistry, MetricValue, SimView};
 
 use clock::WorldClock;
 use config::*;
@@ -197,6 +199,9 @@ async fn main() {
     // pure counter (HUD/day-frac). The creature sim (C0) is created once the world is ready.
     let mut clock = WorldClock::new();
     let mut sim: Option<Sim> = None;
+    // Live metric time-series for the dev bridge (`animata/metrics`); sampled after each sub-step.
+    #[cfg(feature = "dev")]
+    let mut metrics = MetricRegistry::default();
     // `G` cycles the debug view: off → Topo (GPU height/depth, water hidden) → Temp → Moist
     // → WaterDist → off. Topo reshades the 3D scene; the climate/water-dist modes overlay a
     // colourmap MINIMAP of the per-column field (the live consumer of the S1 env getters, so
@@ -250,7 +255,11 @@ async fn main() {
         for _ in 0..substeps {
             clock.advance(1);
             if let (Some(sim), Some(terrain)) = (sim.as_mut(), terrain.as_mut()) {
-                sim.step(terrain, clock.tick());
+                let tick = clock.tick();
+                sim.step(terrain, tick);
+                // Sample the metric registry (dev only) so `animata/metrics` can serve live values.
+                #[cfg(feature = "dev")]
+                metrics.maybe_sample(&SimView { sim, terrain, tick });
             }
         }
 
@@ -403,6 +412,7 @@ async fn main() {
                                 "kills": s.kills,
                             })
                         }),
+                        "config": config_json(sim.as_ref()),
                     }));
                 }
                 dev_bridge::Cmd::SetClock { scale, paused } => {
@@ -472,6 +482,42 @@ async fn main() {
                 }
                 dev_bridge::Cmd::Screenshot(path) => {
                     pending_shots.push((path, reply)); // serviced post-draw below
+                }
+                dev_bridge::Cmd::GetConfig => {
+                    let _ = reply.send(config_json(sim.as_ref()));
+                }
+                dev_bridge::Cmd::SetFeature { name, enabled } => {
+                    let resp = match sim.as_mut() {
+                        Some(s) => {
+                            let mut c = s.config();
+                            if c.features.set(&name, enabled) {
+                                s.set_config(c);
+                                serde_json::json!({ "ok": true, "feature": name, "enabled": enabled })
+                            } else {
+                                serde_json::json!({ "ok": false, "error": format!("unknown feature: {name}") })
+                            }
+                        }
+                        None => serde_json::json!({ "ok": false, "error": "no sim yet" }),
+                    };
+                    let _ = reply.send(resp);
+                }
+                dev_bridge::Cmd::SetParam { name, value } => {
+                    let resp = match sim.as_mut() {
+                        Some(s) => {
+                            let mut c = s.config();
+                            if c.params.set(&name, value) {
+                                s.set_config(c);
+                                serde_json::json!({ "ok": true, "param": name, "value": value })
+                            } else {
+                                serde_json::json!({ "ok": false, "error": format!("unknown param: {name}") })
+                            }
+                        }
+                        None => serde_json::json!({ "ok": false, "error": "no sim yet" }),
+                    };
+                    let _ = reply.send(resp);
+                }
+                dev_bridge::Cmd::Metrics { id, last } => {
+                    let _ = reply.send(metrics_json(&metrics, id.as_deref(), last));
                 }
             }
         }
@@ -728,6 +774,47 @@ fn capture_target(rt: &RenderTarget) -> Image {
         }
     }
     img
+}
+
+/// The live `SimConfig` (features + params) as JSON, or `null` before the sim exists. Used by the
+/// dev bridge's `get_config` and embedded in `status`.
+#[cfg(feature = "dev")]
+fn config_json(sim: Option<&Sim>) -> serde_json::Value {
+    match sim {
+        Some(s) => {
+            let cfg = s.config();
+            let features: serde_json::Map<String, serde_json::Value> =
+                cfg.features.pairs().iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect();
+            let params: serde_json::Map<String, serde_json::Value> =
+                cfg.params.pairs().iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect();
+            serde_json::json!({ "features": features, "params": params })
+        }
+        None => serde_json::Value::Null,
+    }
+}
+
+/// A metric value as JSON. `u64` checksums are stringified (they exceed JSON's exact-integer range).
+#[cfg(feature = "dev")]
+fn mv_json(v: MetricValue) -> serde_json::Value {
+    match v {
+        MetricValue::Scalar(x) => serde_json::json!(x),
+        MetricValue::Checksum(h) => serde_json::json!(h.to_string()),
+    }
+}
+
+/// `{ latest: {id: value…}, series: [[tick, value]…] | null }` — the latest of every metric, plus
+/// the time-series of `id` (capped to the last `last` samples) if requested.
+#[cfg(feature = "dev")]
+fn metrics_json(reg: &MetricRegistry, id: Option<&str>, last: Option<usize>) -> serde_json::Value {
+    let latest: serde_json::Map<String, serde_json::Value> = reg
+        .ids()
+        .filter_map(|name| reg.latest(name).map(|v| (name.to_string(), mv_json(v))))
+        .collect();
+    let series = id.and_then(|name| reg.series(name)).map(|s| {
+        let start = last.map(|k| s.len().saturating_sub(k)).unwrap_or(0);
+        s[start..].iter().map(|(t, v)| serde_json::json!([t, mv_json(*v)])).collect::<Vec<_>>()
+    });
+    serde_json::json!({ "latest": latest, "series": series })
 }
 
 #[cfg(test)]
