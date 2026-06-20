@@ -135,6 +135,14 @@ pub const DRIFT_FLOOR: f32 = 0.5;
 pub const EFFECTOR_GAIN: f32 = 0.35;
 /// Each storage cell adds this much to the energy cap.
 pub const STORAGE_PER_CELL: f32 = 25.0;
+/// Morphogenesis PR-C: a COHERENT organ beats the same cells scattered. A type's effective power is
+/// `count + ORGAN_BONUS · (largest_connected_cluster − 1)`, so clustering specialised cells into one
+/// organ (a real muscle / eye / gut) pays off — the smooth selective gradient toward organs. Gentle
+/// so it's a climb, not a cliff. At 1 cell the cluster is ≤1 ⇒ bonus 0 ⇒ founder stats unchanged.
+pub const ORGAN_BONUS: f32 = 0.5;
+/// A connected same-type cluster of at least this many cells counts as an "organ" (for the
+/// `frac_with_organ` metric / the organs-emerge acceptance).
+pub const ORGAN_MIN: u8 = 3;
 /// Energy to build one cell beyond the first when budding a child — so a larger body costs
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
