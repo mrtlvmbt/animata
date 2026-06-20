@@ -129,6 +129,29 @@ fn multicellularity_emerges_under_selection() {
     assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
 }
 
+/// Morphogenesis PR-C acceptance: ORGANS emerge. Founders (single cells) have none, but as bodies
+/// evolve a real fraction develop a coherent organ — a connected same-type cluster ≥ `ORGAN_MIN` —
+/// because a coherent organ out-performs the same cells scattered (`organ_power` drives speed/energy).
+/// Population stays healthy. Single seed ⇒ deterministic.
+#[test]
+fn organs_emerge_under_selection() {
+    let mut t = world();
+    let mut s = Sim::new(1, &t);
+    assert_eq!(s.frac_with_organ(), 0.0, "founders (single cells) must have no organs");
+    for tick in 0..8000 {
+        s.step(&mut t, tick);
+    }
+    let frac = s.frac_with_organ();
+    eprintln!(
+        "after 8000 ticks: {:.1}% carry a coherent organ, avg_biomass {:.2}, pop {}",
+        frac * 100.0,
+        s.avg_biomass(),
+        s.population()
+    );
+    assert!(frac > 0.05, "no organs emerged ({:.1}%)", frac * 100.0);
+    assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
+}
+
 /// C2 acceptance: a predatory second trophic level EMERGES — some creatures evolve predator
 /// cells, hunt and kill prey — and predators stay RARER than prey (a trophic pyramid, the
 /// ~10% rule), with the population staying alive. Single seed ⇒ deterministic.

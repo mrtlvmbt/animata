@@ -95,12 +95,15 @@ impl Creature {
     /// effectors only drifts (`DRIFT_FLOOR`), so powered motility is an earned, selected trait — not
     /// a free baseline every single cell gets.
     fn speed(&self) -> f32 {
-        CREATURE_SPEED * (DRIFT_FLOOR + EFFECTOR_GAIN * self.pheno.effector as f32)
+        // Effector ORGAN power (count + coherence bonus): a real muscle moves better than the same
+        // contractile cells scattered (PR-C). At ≤1 cell the bonus is 0 ⇒ identical to the count.
+        CREATURE_SPEED * (DRIFT_FLOOR + EFFECTOR_GAIN * self.pheno.organ_power(0))
     }
 
-    /// Energy capacity: storage cells enlarge the buffer (survive lean spells, bigger broods).
+    /// Energy capacity: storage cells enlarge the buffer (survive lean spells, bigger broods). A
+    /// coherent storage ORGAN holds more than the same cells scattered (PR-C organ_power).
     fn max_energy(&self) -> f32 {
-        MAX_ENERGY + STORAGE_PER_CELL * self.pheno.storage as f32
+        MAX_ENERGY + STORAGE_PER_CELL * self.pheno.organ_power(1)
     }
 
     /// Grazing throughput: a bigger body crops a little faster (sublinear, so size isn't free).
@@ -867,6 +870,22 @@ impl Sim {
         let carn = self.creatures.iter().filter(|c| c.pheno.carnivory() > CARNIVORE_THRESHOLD).count();
         carn as f32 / n as f32
     }
+
+    /// Fraction of the population that has developed a coherent ORGAN — a connected same-type cluster
+    /// of at least `ORGAN_MIN` cells (PR-C). Founders (single cells) have none; this rises as bodies
+    /// evolve real tissues.
+    pub fn frac_with_organ(&self) -> f32 {
+        let n = self.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let with = self
+            .creatures
+            .iter()
+            .filter(|c| c.pheno.organ.iter().any(|&l| l >= ORGAN_MIN))
+            .count();
+        with as f32 / n as f32
+    }
 }
 
 /// Full-state determinism checksum (PR1 lock, F1/F7): an integer fold of the COMPLETE
@@ -897,6 +916,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
         for v in [p.n_cells, p.effector, p.storage, p.sensor, p.predator, p.flight, p.burrow, p.photo, p.structural] {
             fnv_fold_u32(&mut h, v);
         }
+        for &o in &p.organ {
+            fnv_fold_u32(&mut h, o as u32); // organ coherence per type (PR-C; part of the body state)
+        }
     }
     fnv_fold_u64(&mut h, terrain.mut_state_checksum());
     h
@@ -910,9 +932,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    10572991899119710295 // debug profile
+    6857269672853979342 // debug profile
 } else {
-    15250152079906823249 // release profile (FMA contraction shifts the trajectory)
+    16421358658108191288 // release profile (FMA contraction shifts the trajectory)
 };
 
 #[cfg(test)]

@@ -14,6 +14,7 @@
 //! cell — biomass 1, no stat boosts — i.e. the C0 organism, driven by the (still-present,
 //! evolvable) brain weights. Mutation grows the GRN away from there.
 
+use crate::config::ORGAN_BONUS;
 use crate::rng::Rng;
 
 /// Morphogen genes per cell (the GRN state width).
@@ -53,8 +54,9 @@ const SPECIALISE_THETA: f32 = 0.3;
 /// `sim::N_INPUTS*N_HIDDEN + N_HIDDEN*N_OUTPUTS` (a test guards this).
 pub const BRAIN_WEIGHTS: usize = 11 * 6 + 6 * 2;
 
-/// The grown body: just the counts C1 needs (cell positions/adhesion come later). Cell count
-/// is the integer biomass; the type tallies drive the emergent stats.
+/// The grown body: the cell-type counts (cell count = integer biomass) PLUS, per function type, the
+/// size of its largest CONNECTED cluster (`organ`) — coherent tissue, from the differential-adhesion
+/// layout. The type tallies + organ coherence drive the emergent stats (see [`organ_power`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Phenotype {
     pub n_cells: u32,
@@ -66,9 +68,22 @@ pub struct Phenotype {
     pub burrow: u32,
     pub photo: u32,
     pub structural: u32,
+    /// Largest connected same-type cluster per function type, index 0..=6 = effector / storage /
+    /// sensor / predator / flight / burrow / photo. `0` or `1` ⇒ no coherent organ (no bonus).
+    pub organ: [u8; 7],
 }
 
 impl Phenotype {
+    /// The effective power of a function type: its cell count plus a coherence bonus for clustering
+    /// those cells into one organ — `count + ORGAN_BONUS·max(0, largest_cluster − 1)`. Monotone in
+    /// both count and coherence; at ≤1 cell the bonus is 0 (founder/small-body stats unchanged).
+    /// `type_idx` 0..=6 = effector / storage / sensor / predator / flight / burrow / photo.
+    pub fn organ_power(&self, type_idx: usize) -> f32 {
+        let count = [
+            self.effector, self.storage, self.sensor, self.predator, self.flight, self.burrow, self.photo,
+        ][type_idx];
+        count as f32 + ORGAN_BONUS * self.organ[type_idx].saturating_sub(1) as f32
+    }
     /// A coarse complexity tier from the developed body (the single→multi→complex axis).
     /// 0 = unicellular, 1 = multicellular (≤1 specialised type), 2 = complex (≥2 types).
     pub fn complexity(&self) -> u8 {
@@ -235,7 +250,7 @@ impl Genome {
     /// Develop the body and tally cell-type COUNTS (the per-tick stat inputs). Reduces the shared
     /// [`grow`](Self::grow) core to the same `Phenotype` counts as before morphogenesis.
     pub fn develop(&self) -> Phenotype {
-        let (states, _pos) = self.grow();
+        let (states, pos) = self.grow();
         let mut p = Phenotype { n_cells: states.len() as u32, ..Default::default() };
         for s in &states {
             match cell_type(s) {
@@ -249,6 +264,7 @@ impl Genome {
                 _ => p.structural += 1, // 0 = structural (no function gene beats the baseline)
             }
         }
+        p.organ = largest_organs(&states, &pos); // coherent-tissue size per function type (PR-C)
         p
     }
 
@@ -323,6 +339,37 @@ fn adhesion_tier(s: &[f32; G]) -> i32 {
 /// Two lattice sites are bonded iff 4-adjacent (Manhattan distance 1).
 fn is_adjacent(a: (i16, i16), b: (i16, i16)) -> bool {
     (a.0 - b.0).abs() + (a.1 - b.1).abs() == 1
+}
+
+/// Largest CONNECTED same-type cluster size per function type (4-adjacency on the lattice), index
+/// 0..=6 = effector..photo. This is the "organ" coherence the differential-adhesion sort builds up —
+/// the input to [`Phenotype::organ_power`]. Structural cells (type 0) are ignored. O(n²), n ≤ 32.
+fn largest_organs(states: &[[f32; G]], pos: &[(i16, i16)]) -> [u8; 7] {
+    let n = states.len();
+    let types: Vec<u8> = states.iter().map(cell_type).collect();
+    let mut organ = [0u8; 7];
+    let mut visited = vec![false; n];
+    for start in 0..n {
+        let t = types[start];
+        if t == 0 || visited[start] {
+            continue; // structural, or already part of a counted component
+        }
+        let mut stack = vec![start];
+        visited[start] = true;
+        let mut size = 0u32;
+        while let Some(a) = stack.pop() {
+            size += 1;
+            for b in 0..n {
+                if !visited[b] && types[b] == t && is_adjacent(pos[a], pos[b]) {
+                    visited[b] = true;
+                    stack.push(b);
+                }
+            }
+        }
+        let idx = (t - 1) as usize;
+        organ[idx] = organ[idx].max(size.min(255) as u8);
+    }
+    organ
 }
 
 /// Differential-adhesion cell sorting (Steinberg): permute the cell CONTENTS across the fixed lattice
