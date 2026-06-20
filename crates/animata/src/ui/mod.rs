@@ -133,24 +133,26 @@ pub(crate) fn legend_bar(ui: &mut egui::Ui, view: DebugView, h: f32) {
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     let painter = ui.painter();
-    // Rounded (pill) ends: solid end-caps r-wide with the outer corners rounded, square gradient
-    // slices in between (a per-slice corner_radius can't round the bar's outer corners).
+    // Rounded (pill) ends: solid end-caps with the outer corners rounded, square gradient slices in
+    // between (a per-slice corner_radius can't round the bar's outer corners). The cap must be ≥2·r
+    // wide or egui clamps the corner radius to capwidth/2 and the rounding comes out half-size.
     let r = (h * 0.5).round();
     let ru = r as u8;
+    let capw = 2.0 * r;
     let y0 = rect.top();
     let y1 = rect.bottom();
     let cap = |p: &egui::Painter, x: f32, color, cr| {
-        p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, y0), egui::pos2(x + r, y1)), cr, color)
+        p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, y0), egui::pos2(x + capw, y1)), cr, color)
     };
     cap(painter, rect.left(), ramp_color(view, 0.0),
         CornerRadius { nw: ru, sw: ru, ne: 0, se: 0 });
-    cap(painter, rect.right() - r, ramp_color(view, 1.0),
+    cap(painter, rect.right() - capw, ramp_color(view, 1.0),
         CornerRadius { ne: ru, se: ru, nw: 0, sw: 0 });
-    let (mx0, mx1) = (rect.left() + r, rect.right() - r);
+    let (mx0, mx1) = (rect.left() + capw, rect.right() - capw);
     let mw = (mx1 - mx0).max(0.0);
     let n = 48usize;
     for i in 0..n {
-        let v = (r + mw * (i as f32 + 0.5) / n as f32) / w; // sample at slice centre
+        let v = (capw + mw * (i as f32 + 0.5) / n as f32) / w; // sample at slice centre
         let x0 = mx0 + mw * i as f32 / n as f32;
         let x1 = mx0 + mw * (i + 1) as f32 / n as f32;
         painter.rect_filled(
