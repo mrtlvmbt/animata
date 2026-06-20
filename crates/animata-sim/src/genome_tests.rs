@@ -1,6 +1,212 @@
 use super::*;
 use crate::rng::Rng;
 
+// ============================================================================
+// PR-D0 SPIKE (throwaway, cfg(test) only — NEVER ships): does a position-anchored
+// morphogen SOURCE + lattice DIFFUSION build a monotone axis gradient on ≤32 cells
+// over DEV_STEPS, and does thresholding that gradient yield a COHESIVE organ (so
+// there is a real organ_power fitness channel)? Gate A + Gate B of the plan.
+// Reuses the real dev primitives (regulate / place_cell / is_adjacent).
+// ============================================================================
+
+/// Prototype dev loop WITH a one-channel morphogen. Per step: reaction (`regulate`) → diffusion
+/// (synchronous snapshot, serial fixed index order) → DECAY (degradation) → source re-injection at
+/// the origin cell (a position-anchored boundary pinned to 1.0) → division (as in `grow`). The DECAY
+/// is what the spike discovered is essential: source + diffusion ALONE homogenise to the source value
+/// (flat field, no gradient); a degradation term gives the screened-Poisson steady state c(r) ∝
+/// exp(−r/λ), λ = √(D/k) — a real monotone gradient. `extra_settle` runs additional diffuse+decay
+/// steps after growth stops, so the gradient can relax on the finished body (a tuning knob D0 reports
+/// to D1: how many DEV_STEPS / settle steps the gradient needs). Returns lattice + concentration.
+#[cfg(test)]
+fn grow_spike(g: &Genome, diff_rate: f32, decay: f32, extra_settle: usize) -> (Vec<(i16, i16)>, Vec<f32>) {
+    let mut seed = [0.0f32; G];
+    seed[0] = 1.0;
+    let mut states: Vec<[f32; G]> = vec![seed];
+    let mut pos: Vec<(i16, i16)> = vec![(0, 0)];
+    let mut morph: Vec<f32> = vec![1.0]; // origin starts as the source
+    let mut grew = true;
+    for step in 0..(DEV_STEPS + extra_settle) {
+        let cur = states.len();
+        for s in states.iter_mut().take(cur) {
+            *s = g.regulate(s);
+        }
+        // DIFFUSION: each cell relaxes toward the mean of its 4-neighbours (snapshot → order-free).
+        let snap = morph.clone();
+        let n = states.len();
+        for a in 0..n {
+            let (mut sum, mut cnt) = (0.0f32, 0u32);
+            for b in 0..n {
+                if is_adjacent(pos[a], pos[b]) {
+                    sum += snap[b];
+                    cnt += 1;
+                }
+            }
+            if cnt > 0 {
+                morph[a] += diff_rate * (sum / cnt as f32 - morph[a]);
+            }
+        }
+        // DECAY: uniform degradation — the term that makes a gradient instead of a flat field.
+        for m in morph.iter_mut() {
+            *m *= 1.0 - decay;
+        }
+        // SOURCE: re-pin the origin cell to 1.0 (position-anchored boundary, survives growth + decay).
+        for i in 0..n {
+            if pos[i] == (0, 0) {
+                morph[i] = 1.0;
+            }
+        }
+        // DIVISION (mirrors `grow`) — only while still in the growth phase.
+        if step < DEV_STEPS && states.len() < MAX_CELLS {
+            let (mut nb, mut nb_pos, mut nb_m) = (Vec::new(), Vec::new(), Vec::new());
+            for i in 0..cur {
+                let ns = states[i];
+                if ns[GENE_DIVIDE] > DIVIDE_THETA && cur + nb.len() < MAX_CELLS {
+                    let mut child = ns;
+                    child[GENE_POLARITY] = -child[GENE_POLARITY];
+                    let p = place_cell(pos[i], ns[GENE_POLARITY], &pos, &nb_pos);
+                    nb.push(child);
+                    nb_pos.push(p);
+                    nb_m.push(morph[i]);
+                }
+            }
+            grew = !nb.is_empty();
+            states.extend(nb);
+            pos.extend(nb_pos);
+            morph.extend(nb_m);
+        } else if !grew && extra_settle == 0 {
+            break;
+        }
+    }
+    (pos, morph)
+}
+
+/// Largest 4-connected component of the cells flagged `true` (flood fill on the lattice).
+#[cfg(test)]
+fn largest_true_cluster(pos: &[(i16, i16)], mask: &[bool]) -> u32 {
+    let n = pos.len();
+    let mut visited = vec![false; n];
+    let mut best = 0u32;
+    for start in 0..n {
+        if !mask[start] || visited[start] {
+            continue;
+        }
+        let mut stack = vec![start];
+        visited[start] = true;
+        let mut size = 0u32;
+        while let Some(a) = stack.pop() {
+            size += 1;
+            for b in 0..n {
+                if !visited[b] && mask[b] && is_adjacent(pos[a], pos[b]) {
+                    visited[b] = true;
+                    stack.push(b);
+                }
+            }
+        }
+        best = best.max(size);
+    }
+    best
+}
+
+/// A genome forced to grow a full body (so the gradient has a real lattice to form on): empty GRN
+/// except a strong divide bias ⇒ tanh(b) > DIVIDE_THETA every step ⇒ grows to MAX_CELLS.
+#[cfg(test)]
+fn growing_genome() -> Genome {
+    let mut g = Genome::founder(&mut Rng::new(1));
+    g.grn_b[GENE_DIVIDE] = 1.0;
+    g
+}
+
+/// GATE A — a position-anchored source + diffusion builds a MONOTONE axis gradient: morphogen
+/// concentration falls with lattice distance from the origin source. Measured by a Kendall-style
+/// concordance — the fraction of cell pairs where the nearer-to-origin cell holds MORE morphogen.
+/// If this is not strongly > 0.5, pure diffusion is homogenising and PR-D is dead here.
+#[test]
+fn spike_gate_a_source_diffusion_builds_monotone_gradient() {
+    let (pos, morph) = grow_spike(&growing_genome(), 0.5, 0.3, 8);
+    let n = pos.len();
+    assert!(n >= 16, "spike body too small to judge a gradient: {n} cells");
+    let dist = |p: (i16, i16)| (p.0.abs() + p.1.abs()) as i32;
+
+    // Concordance over all pairs at DIFFERENT distances: nearer ⇒ more morphogen.
+    let (mut concordant, mut total) = (0u32, 0u32);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (di, dj) = (dist(pos[i]), dist(pos[j]));
+            if di == dj {
+                continue;
+            }
+            total += 1;
+            let nearer_has_more = if di < dj { morph[i] > morph[j] } else { morph[j] > morph[i] };
+            if nearer_has_more {
+                concordant += 1;
+            }
+        }
+    }
+    let frac = concordant as f32 / total as f32;
+    // Profile by distance band, for the log.
+    let maxd = pos.iter().map(|&p| dist(p)).max().unwrap_or(0);
+    let mut by_band: Vec<(i32, f32, u32)> = Vec::new();
+    for d in 0..=maxd {
+        let vals: Vec<f32> = (0..n).filter(|&i| dist(pos[i]) == d).map(|i| morph[i]).collect();
+        if !vals.is_empty() {
+            by_band.push((d, vals.iter().sum::<f32>() / vals.len() as f32, vals.len() as u32));
+        }
+    }
+    eprintln!("GATE A: {n} cells, concordance(near⇒more) {:.3}", frac);
+    for (d, mean, k) in &by_band {
+        eprintln!("  dist {d}: mean morph {:.3}  ({k} cells)", mean);
+    }
+    assert!(frac > 0.7, "no monotone gradient — diffusion homogenised (concordance {frac:.3})");
+}
+
+/// GATE B — segregating cell TYPE by the gradient yields a COHESIVE organ: thresholding the morphogen
+/// (high near the source) labels a spatially contiguous region, so its largest connected cluster
+/// beats a RANDOM labelling of the same count. This is the selective pull — `organ_power` rewards the
+/// largest connected same-type cluster, so a gradient-segregated body develops bigger organs than
+/// chance, giving evolution a fitness channel to climb toward axial body plans.
+#[test]
+fn spike_gate_b_gradient_segregation_beats_random_cohesion() {
+    let (pos, morph) = grow_spike(&growing_genome(), 0.5, 0.3, 8);
+    let n = pos.len();
+    // Threshold at the median morphogen so ~half the cells are "high" (the would-be organ).
+    let mut sorted = morph.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[n / 2];
+    let grad_mask: Vec<bool> = morph.iter().map(|&m| m >= median).collect();
+    let high = grad_mask.iter().filter(|&&b| b).count();
+    let grad_cluster = largest_true_cluster(&pos, &grad_mask);
+
+    // Control: the SAME number of "high" labels scattered at random (averaged over seeds).
+    let mut rng = Rng::new(777);
+    let trials = 64;
+    let mut rand_total = 0u32;
+    let mut rand_best = 0u32;
+    for _ in 0..trials {
+        // Fisher–Yates pick `high` indices.
+        let mut idx: Vec<usize> = (0..n).collect();
+        for k in 0..high {
+            let r = k + (rng.unit() * (n - k) as f32) as usize % (n - k).max(1);
+            idx.swap(k, r.min(n - 1));
+        }
+        let mut mask = vec![false; n];
+        for &i in idx.iter().take(high) {
+            mask[i] = true;
+        }
+        let c = largest_true_cluster(&pos, &mask);
+        rand_total += c;
+        rand_best = rand_best.max(c);
+    }
+    let rand_mean = rand_total as f32 / trials as f32;
+    eprintln!(
+        "GATE B: {n} cells, {high} high. gradient organ {grad_cluster} vs random mean {:.1} (max {rand_best})",
+        rand_mean
+    );
+    assert!(
+        grad_cluster as f32 > rand_mean * 1.3,
+        "gradient segregation gave no cohesion edge: organ {grad_cluster} vs random mean {rand_mean:.1}"
+    );
+}
+
 /// The continuity keystone: an empty-GRN founder develops to EXACTLY one structural cell —
 /// biomass 1, no specialisation — i.e. the C0 organism, by construction.
 #[test]
