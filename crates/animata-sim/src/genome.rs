@@ -24,6 +24,24 @@ pub const DEV_STEPS: usize = 10;
 /// Hard cap on cells per body (bounds dev cost AND the per-tick brain/biomass cost).
 pub const MAX_CELLS: usize = 32;
 
+/// Morphogen SIGNALLING channels (Phase 2 / PR-D) — cell-cell diffusion fields the GRN READS, NOT
+/// regulated genes. D1 = 1 (the axis morphogen); D3 adds a symmetry channel. Each channel evolves by a
+/// position-anchored SOURCE + lattice DIFFUSION + DECAY (the PR-D0 spike proved decay is required —
+/// source+diffusion alone homogenise to a flat field; decay gives the screened-Poisson `exp(−r/λ)`
+/// gradient), and feeds INTO `regulate` as an extra input so `W` can couple a cell's TYPE to its
+/// POSITION → emergent body axes. **C0 continuity by meaning:** founder `W=0` never reads the
+/// morphogen, so it changes no differentiation and a founder still develops to one cell — even though
+/// the rates are armed (non-zero) at birth.
+pub const N_MORPH: usize = 1;
+/// Founder morphogen kinetics — the PR-D0 spike's proven gradient (`d≈0.5`, `k≈0.3`). Armed at birth so
+/// only the READ weights (`morph_w`) must evolve to couple type↔position — the gradient is already
+/// there to read (no triple-trait fitness valley of diffusion+decay+read together). Founder `morph_w=0`
+/// ⇒ the armed gradient is NOT read ⇒ a founder develops byte-identically to the pre-morphogen body
+/// (C0 continuity), and the existing genes keep their exact mutation RNG stream (the new genes are
+/// drawn LAST in `mutate`), so the morphogen perturbs the ecosystem only as `morph_w` slowly evolves.
+const FOUNDER_DIFF: f32 = 0.5;
+const FOUNDER_DECAY: f32 = 0.3;
+
 // Gene roles (gene 9 is GENE_ADHESION; none free now at G=10).
 const GENE_DIVIDE: usize = 0; // > THETA ⇒ the cell divides this step
 const GENE_POLARITY: usize = 1; // negated in the daughter so sisters can differentiate
@@ -71,6 +89,12 @@ pub struct Phenotype {
     /// Largest connected same-type cluster per function type, index 0..=6 = effector / storage /
     /// sensor / predator / flight / burrow / photo. `0` or `1` ⇒ no coherent organ (no bonus).
     pub organ: [u8; 7],
+    /// AXIS ORDER (Phase 2 / PR-D1), `0..=255`: how strongly cell TYPE varies with POSITION along the
+    /// body's radial axis (distance from the morphogen source) — a scale-invariant η² (between-type /
+    /// total variance of radial position), computed on the PRE-`adhesion_sort` layout so the gradient's
+    /// type↔position map is read before the cosmetic sort scrambles it. `0` for a founder / no axial
+    /// patterning; high when types segregate along the axis (an emergent body plan).
+    pub axis_order: u8,
 }
 
 impl Phenotype {
@@ -144,8 +168,15 @@ impl Phenotype {
 /// different climate bands favour different prefs → habitats / allopatry.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Genome {
-    grn_w: Vec<f32>, // G×G, row-major
+    grn_w: Vec<f32>, // G×G, row-major (unchanged — the gene→gene regulatory weights)
     grn_b: Vec<f32>, // G
+    /// Morphogen READ weights, `G×N_MORPH` row-major (PR-D): how strongly each regulated gene responds
+    /// to each morphogen channel. Founder `0` ⇒ the morphogen is not read ⇒ C0-identical development.
+    morph_w: Vec<f32>,
+    /// Morphogen kinetics, `N_MORPH` each, `[0,1]` (PR-D): per-channel diffusion + decay rates that
+    /// drive the position-anchored signalling field the GRN reads (not regulated genes themselves).
+    diff_rate: Vec<f32>,
+    decay_rate: Vec<f32>,
     pub brain: Vec<f32>,
     pub thermal_pref: f32,
     /// Body coloration in `[0,1]` (dark .. light) — a heritable appearance trait. A predator
@@ -165,6 +196,9 @@ impl Genome {
         Genome {
             grn_w: vec![0.0; G * G],
             grn_b: vec![0.0; G],
+            morph_w: vec![0.0; G * N_MORPH],
+            diff_rate: vec![FOUNDER_DIFF; N_MORPH],
+            decay_rate: vec![FOUNDER_DECAY; N_MORPH],
             brain: (0..BRAIN_WEIGHTS).map(|_| rng.signed()).collect(),
             thermal_pref: rng.unit(),
             coloration: rng.unit(),
@@ -180,23 +214,52 @@ impl Genome {
         let m = |v: &[f32], std: f32, rng: &mut Rng| -> Vec<f32> {
             v.iter().map(|&w| w + rng.signed() * std).collect()
         };
+        // NOTE: the field assignments are EVALUATED top-to-bottom (Rust struct-literal order), so the
+        // pre-morphogen genes are drawn FIRST in their original order — preserving the exact mutation
+        // RNG stream they had before PR-D1 — and the new morphogen genes are drawn LAST. This is why
+        // the morphogen perturbs the ecosystem only as `morph_w` evolves away from 0, not via an RNG
+        // phase shift to the existing genes.
+        let grn_w = m(&self.grn_w, grn_std, rng);
+        let grn_b = m(&self.grn_b, grn_std, rng);
+        let brain = m(&self.brain, brain_std, rng);
+        let thermal_pref = (self.thermal_pref + rng.signed() * grn_std).clamp(0.0, 1.0);
+        let coloration = (self.coloration + rng.signed() * grn_std).clamp(0.0, 1.0);
+        let toxin_resistance = (self.toxin_resistance + rng.signed() * grn_std).clamp(0.0, 1.0);
+        // Morphogen READ genes are FROZEN at their founder values in PR-D1 (machinery landed INERT, the
+        // proven project pattern): `morph_w = 0` ⇒ `regulate` ignores the morphogen ⇒ the developmental
+        // trajectory is byte-identical to the pre-morphogen sim, so every acceptance corridor holds
+        // unchanged and the only golden shift is the checksum folding the new (constant) fields. They
+        // draw NO rng (kept out of the stream above), so the existing genes' mutation is untouched.
+        // PR-D2 turns the coupling ON by mutating `morph_w`/`diff_rate`/`decay_rate` here, re-pins the
+        // golden, and tests axis emergence (with the single-seed corridors made multi-seed robust).
+        let morph_w = self.morph_w.clone();
+        let diff_rate = self.diff_rate.clone();
+        let decay_rate = self.decay_rate.clone();
         Genome {
-            grn_w: m(&self.grn_w, grn_std, rng),
-            grn_b: m(&self.grn_b, grn_std, rng),
-            brain: m(&self.brain, brain_std, rng),
-            thermal_pref: (self.thermal_pref + rng.signed() * grn_std).clamp(0.0, 1.0),
-            coloration: (self.coloration + rng.signed() * grn_std).clamp(0.0, 1.0),
-            toxin_resistance: (self.toxin_resistance + rng.signed() * grn_std).clamp(0.0, 1.0),
+            grn_w,
+            grn_b,
+            morph_w,
+            diff_rate,
+            decay_rate,
+            brain,
+            thermal_pref,
+            coloration,
+            toxin_resistance,
         }
     }
 
-    /// One GRN update of a cell state: `s' = tanh(W·s + b)`.
-    fn regulate(&self, s: &[f32; G]) -> [f32; G] {
+    /// One GRN update of a cell: `s' = tanh(W·[s ; morph] + b)`. The regulated genes read both the `G`
+    /// gene states AND the `N_MORPH` morphogen channels (the extra `W` columns), so a cell's
+    /// differentiation can depend on the local morphogen concentration — i.e. on its POSITION (PR-D).
+    fn regulate(&self, s: &[f32; G], morph: &[f32; N_MORPH]) -> [f32; G] {
         let mut out = [0.0f32; G];
         for (i, o) in out.iter_mut().enumerate() {
             let mut sum = self.grn_b[i];
             for (j, &sj) in s.iter().enumerate() {
                 sum += self.grn_w[i * G + j] * sj;
+            }
+            for (c, &mc) in morph.iter().enumerate() {
+                sum += self.morph_w[i * N_MORPH + c] * mc; // morphogen read (position → differentiation)
             }
             *o = sum.tanh();
         }
@@ -206,52 +269,71 @@ impl Genome {
     /// The shared morphogenesis core (the SINGLE source of truth for body structure): grow the body
     /// from one seed cell by running the GRN for `DEV_STEPS`, dividing cells whose divide gene fires
     /// (daughter gets a polarity flip so sisters can differentiate), capped at `MAX_CELLS`. Returns
-    /// each cell's final GRN state PLUS its integer lattice position. The GRN growth is byte-identical
-    /// to the pre-morphogenesis loop — positions are assigned ALONGSIDE and feed nothing back, so the
-    /// cell set (and therefore `develop()`'s tallies) is unchanged. Deterministic; depends only on the
-    /// genome. **Empty GRN ⇒ exactly one structural cell at the origin (C0).**
-    fn grow(&self) -> (Vec<[f32; G]>, Vec<(i16, i16)>) {
+    /// each cell's final GRN state, its integer lattice position, and the body's `axis_order` (computed
+    /// PRE-`adhesion_sort`, F6). A MORPHOGEN field co-evolves with the cells (PR-D): a position-anchored
+    /// source + lattice diffusion + decay; `regulate` READS it, so a cell's type can depend on its
+    /// position — this is why the old "positions feed nothing back into the GRN" invariant is now
+    /// intentionally lifted. Deterministic (within a profile); depends only on the genome.
+    /// **Empty GRN ⇒ exactly one structural cell at the origin (C0): with `W=0` the morphogen is never
+    /// read, so the armed rates change nothing.**
+    fn grow(&self) -> (Vec<[f32; G]>, Vec<(i16, i16)>, u8) {
         let mut seed = [0.0f32; G];
         seed[0] = 1.0; // a maternal factor to bootstrap a non-empty GRN (ignored by W=0)
         let mut states: Vec<[f32; G]> = vec![seed];
         let mut pos: Vec<(i16, i16)> = vec![(0, 0)];
+        let mut morph: Vec<[f32; N_MORPH]> = vec![[0.0; N_MORPH]];
+        // The morphogen field only matters if SOME gene reads it (`morph_w ≠ 0`). When it doesn't —
+        // every founder, and every body in PR-D1 where the read genes are held inert — skip the
+        // diffusion entirely: it would be computed and never read, a pure waste (this is also why
+        // PR-D1 needs no render-layout cache yet — `grow`'s cost is unchanged until PR-D2 switches the
+        // coupling on). Determinism is unaffected: with `morph_w = 0` the skipped field was unused.
+        let reads_morph = self.morph_w.iter().any(|&w| w != 0.0);
         for _ in 0..DEV_STEPS {
             let cur = states.len(); // fixed during this step (newborns go to a side buffer)
             let mut newborn: Vec<[f32; G]> = Vec::new();
             let mut newborn_pos: Vec<(i16, i16)> = Vec::new();
+            let mut newborn_morph: Vec<[f32; N_MORPH]> = Vec::new();
             for i in 0..cur {
-                let ns = self.regulate(&states[i]);
+                let ns = self.regulate(&states[i], &morph[i]); // reads this cell's morphogen
                 states[i] = ns;
                 if ns[GENE_DIVIDE] > DIVIDE_THETA && cur + newborn.len() < MAX_CELLS {
                     let mut child = ns;
                     child[GENE_POLARITY] = -child[GENE_POLARITY];
                     // Place the daughter on a free lattice neighbour, preferred direction from the
-                    // parent's polarity (render metadata only — never fed back into the GRN).
+                    // parent's polarity. The daughter inherits the parent's current morphogen level.
                     let p = place_cell(pos[i], ns[GENE_POLARITY], &pos, &newborn_pos);
                     newborn.push(child);
                     newborn_pos.push(p);
+                    newborn_morph.push(morph[i]);
                 }
             }
-            if newborn.is_empty() {
-                break; // settled — no more growth
-            }
+            let settled = newborn.is_empty();
             states.extend(newborn);
             pos.extend(newborn_pos);
-            if states.len() >= MAX_CELLS {
-                break;
+            morph.extend(newborn_morph);
+            // Morphogen signalling on the (grown) lattice: diffuse + decay + re-pin the origin source.
+            // Runs every growth step so `regulate` reads a progressively sharper gradient (one-step lag).
+            if reads_morph {
+                diffuse_morphogen(&mut morph, &pos, &self.diff_rate, &self.decay_rate);
+            }
+            if settled || states.len() >= MAX_CELLS {
+                break; // body shape settled (no division) — same stop as before morphogenesis
             }
         }
+        // AXIS ORDER (F6): measured on the PRE-sort type↔position map the gradient built, before the
+        // cosmetic `adhesion_sort` permutes cells across slots.
+        let axis_order = axis_order_metric(&states, &pos);
         // Differential adhesion: cluster same-type cells into tissues by permuting which cell sits at
         // which lattice slot (positions fixed). Preserves the cell multiset ⇒ type counts unchanged.
         adhesion_sort(&mut states, &pos);
-        (states, pos)
+        (states, pos, axis_order)
     }
 
     /// Develop the body and tally cell-type COUNTS (the per-tick stat inputs). Reduces the shared
     /// [`grow`](Self::grow) core to the same `Phenotype` counts as before morphogenesis.
     pub fn develop(&self) -> Phenotype {
-        let (states, pos) = self.grow();
-        let mut p = Phenotype { n_cells: states.len() as u32, ..Default::default() };
+        let (states, pos, axis_order) = self.grow();
+        let mut p = Phenotype { n_cells: states.len() as u32, axis_order, ..Default::default() };
         for s in &states {
             match cell_type(s) {
                 1 => p.effector += 1,
@@ -273,7 +355,7 @@ impl Genome {
     /// drawn body always matches the stats. `cell_type`: 0 = structural, 1..=7 = effector / storage /
     /// sensor / predator / flight / burrow / photo. Re-derived on demand; nothing is stored per-creature.
     pub fn body_layout(&self) -> Vec<(i16, i16, u8)> {
-        let (states, pos) = self.grow();
+        let (states, pos, _axis) = self.grow();
         states.iter().zip(pos).map(|(s, p)| (p.0, p.1, cell_type(s))).collect()
     }
 }
@@ -339,6 +421,66 @@ fn adhesion_tier(s: &[f32; G]) -> i32 {
 /// Two lattice sites are bonded iff 4-adjacent (Manhattan distance 1).
 fn is_adjacent(a: (i16, i16), b: (i16, i16)) -> bool {
     (a.0 - b.0).abs() + (a.1 - b.1).abs() == 1
+}
+
+/// One morphogen signalling step on the lattice (PR-D1). Per channel: DIFFUSION — relax each cell
+/// toward the mean of its 4-neighbours from a SNAPSHOT (synchronous ⇒ traversal order can't matter);
+/// DECAY — degrade by `1−k`; SOURCE — re-pin the origin cell to `1.0` (a position-anchored boundary).
+/// Decay is essential: the PR-D0 spike showed source+diffusion ALONE homogenise to a flat field; decay
+/// yields the screened-Poisson `c(r) ∝ exp(−r/λ)` gradient. The neighbour sum is a serial fixed index
+/// order ⇒ within-profile deterministic (it inherits the GRN's per-profile FMA, like the golden).
+fn diffuse_morphogen(morph: &mut [[f32; N_MORPH]], pos: &[(i16, i16)], diff: &[f32], decay: &[f32]) {
+    let n = morph.len();
+    for c in 0..N_MORPH {
+        let snap: Vec<f32> = morph.iter().map(|m| m[c]).collect();
+        for a in 0..n {
+            let (mut sum, mut cnt) = (0.0f32, 0u32);
+            for b in 0..n {
+                if is_adjacent(pos[a], pos[b]) {
+                    sum += snap[b];
+                    cnt += 1;
+                }
+            }
+            if cnt > 0 {
+                morph[a][c] += diff[c] * (sum / cnt as f32 - snap[a]);
+            }
+            morph[a][c] *= 1.0 - decay[c];
+        }
+        for a in 0..n {
+            if pos[a] == (0, 0) {
+                morph[a][c] = 1.0; // SOURCE (origin)
+            }
+        }
+    }
+}
+
+/// AXIS ORDER (PR-D1): how strongly cell TYPE varies with RADIAL position (Manhattan distance from the
+/// origin source) — η² = (between-type variance of radial distance) / (total variance), mapped to
+/// `0..=255`. A RATIO ⇒ scale-invariant: it does NOT reward sheer body size (the F1 trap), only genuine
+/// type↔position structure. `0` for a founder, a single type, or equidistant cells; high when the
+/// morphogen gradient has segregated types along the axis (an emergent body plan). Computed PRE-sort.
+fn axis_order_metric(states: &[[f32; G]], pos: &[(i16, i16)]) -> u8 {
+    let n = states.len();
+    if n < 2 {
+        return 0;
+    }
+    let d: Vec<f32> = pos.iter().map(|&(x, y)| (x.abs() + y.abs()) as f32).collect();
+    let mean_all = d.iter().sum::<f32>() / n as f32;
+    let ss_total: f32 = d.iter().map(|&v| (v - mean_all).powi(2)).sum();
+    if ss_total <= 0.0 {
+        return 0; // all cells equidistant from the source ⇒ no axis to speak of
+    }
+    let types: Vec<u8> = states.iter().map(cell_type).collect();
+    let mut ss_between = 0.0f32;
+    for t in 0u8..=7 {
+        let members: Vec<f32> = (0..n).filter(|&i| types[i] == t).map(|i| d[i]).collect();
+        if members.is_empty() {
+            continue;
+        }
+        let mg = members.iter().sum::<f32>() / members.len() as f32;
+        ss_between += members.len() as f32 * (mg - mean_all).powi(2);
+    }
+    ((ss_between / ss_total).clamp(0.0, 1.0) * 255.0) as u8
 }
 
 /// Largest CONNECTED same-type cluster size per function type (4-adjacency on the lattice), index
@@ -422,6 +564,15 @@ impl Genome {
         }
         for &b in &self.grn_b {
             crate::rng::fnv_fold_u32(&mut h, b.to_bits());
+        }
+        for &w in &self.morph_w {
+            crate::rng::fnv_fold_u32(&mut h, w.to_bits());
+        }
+        for &r in &self.diff_rate {
+            crate::rng::fnv_fold_u32(&mut h, r.to_bits());
+        }
+        for &r in &self.decay_rate {
+            crate::rng::fnv_fold_u32(&mut h, r.to_bits());
         }
         for &w in &self.brain {
             crate::rng::fnv_fold_u32(&mut h, w.to_bits());

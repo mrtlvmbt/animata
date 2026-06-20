@@ -13,8 +13,11 @@ use crate::sim::SimState;
 use crate::terrain::TerrainState;
 use std::io::{Read, Write};
 
-/// File magic: ASCII "ANM1". Bumped if the snapshot layout changes incompatibly.
-const MAGIC: u32 = 0x414E_4D31;
+/// File magic: ASCII "ANM2". Bumped whenever the snapshot layout changes incompatibly — `bincode` is
+/// positional (not self-describing), so a new field anywhere in the graph shifts every following byte
+/// and an old file would silently mis-decode. Bumped at PR-D1: `Phenotype` gained `axis_order`, and
+/// `Genome` gained `morph_w`/`diff_rate`/`decay_rate`, so pre-D1 saves must be cleanly REJECTED here.
+const MAGIC: u32 = 0x414E_4D32;
 
 /// A complete world snapshot: the seed (to regenerate terrain geometry), the clock tick to resume
 /// at, the sim state (creatures + counters + config) and the terrain overlay.

@@ -28,7 +28,7 @@ fn grow_spike(g: &Genome, diff_rate: f32, decay: f32, extra_settle: usize) -> (V
     for step in 0..(DEV_STEPS + extra_settle) {
         let cur = states.len();
         for s in states.iter_mut().take(cur) {
-            *s = g.regulate(s);
+            *s = g.regulate(s, &[0.0; N_MORPH]); // spike carries its own morphogen field separately
         }
         // DIFFUSION: each cell relaxes toward the mean of its 4-neighbours (snapshot → order-free).
         let snap = morph.clone();
@@ -220,6 +220,45 @@ fn founder_develops_to_one_structural_cell() {
     // reduces to the raw count and the founder's stats are unchanged by morphogenesis.
     assert_eq!(p.organ, [0; 7], "a single-cell founder must carry no organ");
     assert_eq!(p.organ_power(0), 0.0, "founder effector power must be the bare count (no organ bonus)");
+    // PR-D1: a single cell has no spatial axis to speak of.
+    assert_eq!(p.axis_order, 0, "a single-cell founder must have no axial order");
+}
+
+/// PR-D1 machinery: the morphogen READ path is correct and READY — a genome whose `morph_w` couples a
+/// function gene to the (armed, position-anchored) morphogen gradient develops a body whose TYPE varies
+/// with radial position, so `axis_order` rises well above the founder's 0. (In PR-D1 the evolutionary
+/// coupling is held INERT — `mutate` freezes `morph_w` at 0 — so this constructs the coupling by hand
+/// to prove the mechanism is sound for PR-D2 to switch on. Founder rates are armed, so only `morph_w`
+/// is set here.)
+#[test]
+fn morphogen_read_makes_type_track_position() {
+    // Grow a full body, and make the EFFECTOR gene respond strongly to morphogen channel 0: cells in
+    // the high-morphogen core (near the origin source) specialise; the low-morphogen rim stays
+    // structural ⇒ type segregates along the radial axis.
+    let mut g = Genome::founder(&mut Rng::new(1));
+    g.grn_b[GENE_DIVIDE] = 1.0; // force growth to MAX_CELLS so there is a body to pattern
+    g.morph_w[GENE_EFFECTOR * N_MORPH] = 6.0; // effector gene reads the axis morphogen
+    let p = g.develop();
+    eprintln!("axis_order {} (n_cells {}, effector {})", p.axis_order, p.n_cells, p.effector);
+    assert!(p.n_cells >= 16, "need a real body to judge an axis: {} cells", p.n_cells);
+    assert!(p.effector > 0 && p.effector < p.n_cells, "morphogen should specialise SOME (not all) cells");
+    assert!(p.axis_order > 20, "type did not track radial position via the morphogen ({})", p.axis_order);
+
+    // And it is determined purely by the genome (re-developing is identical) — the dev path stays pure.
+    assert_eq!(p, g.develop(), "morphogen development must be deterministic");
+}
+
+/// PR-D1 inertness anchor: with the founder's `morph_w = 0`, the morphogen is NOT read, so a grown
+/// body's cell types — hence its `axis_order` — are whatever the pre-morphogen development produced.
+/// A growing genome with NO morphogen coupling specialises NOTHING from the gradient, so its
+/// single-type body has no axial order. (Guards that the inert path really is inert.)
+#[test]
+fn morphogen_inert_when_unread() {
+    let mut g = Genome::founder(&mut Rng::new(1));
+    g.grn_b[GENE_DIVIDE] = 1.0; // grows, but morph_w stays 0 ⇒ gradient unread
+    let p = g.develop();
+    assert_eq!(p.effector, 0, "no morphogen coupling ⇒ the gradient specialises no cells");
+    assert_eq!(p.axis_order, 0, "an unread gradient must leave the body axis-less");
 }
 
 /// `organ_power` is monotone in BOTH cell count and organ coherence: adding a cell of the type, or
