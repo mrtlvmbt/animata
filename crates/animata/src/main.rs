@@ -184,6 +184,155 @@ fn ground_under_cursor(cam: &IsoCam) -> Vec2 {
     vec2(hit.x, hit.z)
 }
 
+/// Project a world point to screen (logical px), or `None` if behind the camera / off-screen.
+/// Single source for both the creature render pass and the inspector crosshair projection.
+fn project_world(vp: Mat4, sw: f32, sh: f32, w: Vec3) -> Option<[f32; 2]> {
+    let clip = vp * vec4(w.x, w.y, w.z, 1.0);
+    if clip.w <= 0.0 {
+        return None;
+    }
+    let (nx, ny) = (clip.x / clip.w, clip.y / clip.w);
+    if !(-1.0..=1.0).contains(&nx) || !(-1.0..=1.0).contains(&ny) {
+        return None;
+    }
+    Some([(nx * 0.5 + 0.5) * sw, (1.0 - (ny * 0.5 + 0.5)) * sh])
+}
+
+/// Top-of-column world point for a creature (its dot's render anchor), for projection.
+fn creature_world(c: &sim::Creature, terrain: &VoxelTerrain) -> Vec3 {
+    let (cx, cy) = sim::column_index(c.pos);
+    let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
+    vec3(c.pos.x, wy, c.pos.y)
+}
+
+/// Screen-space creature pick: nearest creature to the cursor within its own on-screen radius
+/// (same radius the render pass draws), or `None` on a miss. Used to set the inspector selection.
+fn pick_creature(cam: &IsoCam, sim: Option<&Sim>, terrain: Option<&VoxelTerrain>) -> Option<u64> {
+    let (sim, terrain) = (sim?, terrain?);
+    let (sw, sh) = (screen_width(), screen_height());
+    let px_per_m = sh / cam.zoom;
+    let vp = cam.camera().matrix();
+    let (mx, my) = mouse_position();
+    let mut best: Option<(f32, u64)> = None;
+    for c in &sim.creatures {
+        let Some(p) = project_world(vp, sw, sh, creature_world(c, terrain)) else {
+            continue;
+        };
+        let r = (CREATURE_RADIUS_M * (c.biomass() as f32).sqrt() * px_per_m).max(6.0);
+        let d = ((p[0] - mx).powi(2) + (p[1] - my).powi(2)).sqrt();
+        if d <= r && best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, c.id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// SplitMix64 — deterministic per-creature hashing for the inspector's mock fields (name, id,
+/// generation, offspring), so each creature reads stably and alive (not a static placeholder).
+fn hash64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Stable morphotype tag from a lineage founder, e.g. "AX-7" (mock — the sim has no morphotype id).
+fn morphotype_id(founder: u64) -> String {
+    let h = hash64(founder);
+    let a = (b'A' + (h % 26) as u8) as char;
+    let b = (b'A' + ((h >> 8) % 26) as u8) as char;
+    let num = (h >> 16) % 90 + 1;
+    format!("{a}{b}-{num}")
+}
+
+/// Stable pseudo-Latin species name from a lineage founder (mock — no species names in the sim).
+fn species_name(founder: u64) -> String {
+    const ON: [&str; 8] = ["Pel", "Cry", "Ther", "Lim", "Nyx", "Vor", "Aqu", "Strat"];
+    const TW: [&str; 8] = ["arctos", "odon", "ophis", "ictis", "ander", "opter", "ursa", "ceps"];
+    let h = hash64(founder ^ 0xABCD);
+    format!("{}{}", ON[(h % 8) as usize], TW[((h >> 8) % 8) as usize])
+}
+
+/// Build the inspector snapshot for a creature. Real fields read from the phenotype/genome; fields
+/// the sim doesn't model (name/generation/health/hydration/activity/offspring) are derived
+/// deterministically so they stay stable per-creature and look alive (consensus: derive, not static).
+fn creature_view(c: &sim::Creature, terrain: &VoxelTerrain) -> ui::CreatureView {
+    use animata_sim::genome::MAX_CELLS;
+    let p = &c.pheno;
+    let n = p.n_cells.max(1) as f32;
+    let frac = |x: u32| (x as f32 / n).clamp(0.0, 1.0);
+
+    let kind = if p.photo_frac() > PHOTO_THETA {
+        ui::TrophicKind::Autotroph
+    } else if p.carnivory() > CARNIVORE_THRESHOLD {
+        ui::TrophicKind::Carnivore
+    } else {
+        ui::TrophicKind::Herbivore
+    };
+    let diet = match kind {
+        ui::TrophicKind::Autotroph => "Phototroph",
+        ui::TrophicKind::Carnivore => "Carnivore",
+        ui::TrophicKind::Herbivore => "Grazer",
+    }
+    .to_string();
+
+    let (cx, cy) = sim::column_index(c.pos);
+    let is_water = terrain.is_water(cx, cy);
+    let strata = sim::stratum_of(p, is_water).name().to_string();
+    let (fl, bu, ef) = (frac(p.flight), frac(p.burrow), frac(p.effector));
+    let locomotion = if is_water && fl < STRATUM_THETA && bu < STRATUM_THETA {
+        "Amphibious"
+    } else if fl >= bu && fl >= ef && fl > 0.05 {
+        "Drifter"
+    } else if bu >= ef && bu > 0.05 {
+        "Fossorial"
+    } else if ef > 0.05 {
+        "Cursorial"
+    } else {
+        "Sessile"
+    }
+    .to_string();
+
+    let energy = c.energy_frac();
+    let health = (0.45 + 0.55 * energy).clamp(0.0, 1.0); // placeholder: no health stat in the sim
+    let hydration = terrain.moisture_at(cx, cy).clamp(0.0, 1.0); // semi-real: local moisture
+    let age_days = c.age as f32 * TICK_LEN / DAY_LEN;
+    let mass = c.biomass() as f32 * 0.1;
+    let activity = match (kind, energy) {
+        (_, e) if e < 0.25 => "Resting",
+        (ui::TrophicKind::Carnivore, _) => "Hunting",
+        (ui::TrophicKind::Autotroph, _) => "Basking",
+        _ => "Foraging",
+    }
+    .to_string();
+    let traits = [
+        ("metabolism", (p.n_cells as f32 / MAX_CELLS as f32).clamp(0.0, 1.0)),
+        ("speed", frac(p.effector)),
+        ("sense", frac(p.sensor)),
+        ("aggression", frac(p.predator)),
+        ("fertility", frac(p.storage)),
+        ("crypsis", c.coloration().clamp(0.0, 1.0)),
+    ];
+
+    ui::CreatureView {
+        id: morphotype_id(c.founder),
+        name: species_name(c.founder),
+        kind,
+        generation: ((hash64(c.founder) >> 16) % 400) as u32,
+        age: format!("{age_days:.1} d"),
+        diet,
+        mass: format!("{mass:.1} kg"),
+        locomotion,
+        strata,
+        energy,
+        health,
+        hydration,
+        traits,
+        activity,
+        offspring: (hash64(c.id) % 13) as u32,
+    }
+}
+
 /// Debug overlay selected by `G` (cycles in this order). `Topo` reshades the 3D scene on the
 /// GPU; the climate / water-distance views overlay a per-column colourmap MINIMAP — the live
 /// in-app consumer of the S1 environment getters.
@@ -298,6 +447,7 @@ async fn main() {
         mask: false,
         outline: true,
         open_panel: None,
+        selected: None,
     };
     // Population sparkline buffer: last 48 samples, pushed on a tick cadence (freezes when paused).
     let mut pop_hist: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(48);
@@ -487,6 +637,33 @@ async fn main() {
                 })
                 .collect::<Vec<_>>()
         };
+        // Inspector snapshot + crosshair/conspecific screen projections (camera of the previous
+        // frame → ≤1-frame lag on the crosshair, imperceptible). Computed ONCE per frame here and
+        // reused by both the panel and the markers. If the selected creature died, clear selection.
+        let (inspect, inspect_screen, conspecific_screen) = {
+            let mut view = None;
+            let mut scr = None;
+            let mut cons = Vec::new();
+            if let (Some(id), Some(s), Some(t)) = (ui_state.selected, sim.as_ref(), terrain.as_ref()) {
+                if let Some(c) = s.creatures.iter().find(|c| c.id == id) {
+                    let vp = cam.camera().matrix();
+                    let (sw, sh) = (screen_width(), screen_height());
+                    view = Some(creature_view(c, t));
+                    scr = project_world(vp, sw, sh, creature_world(c, t));
+                    for idx in s.conspecifics(id) {
+                        if cons.len() >= 256 {
+                            break;
+                        }
+                        if let Some(p) = project_world(vp, sw, sh, creature_world(&s.creatures[idx], t)) {
+                            cons.push(p);
+                        }
+                    }
+                } else {
+                    ui_state.selected = None; // creature died → drop selection
+                }
+            }
+            (view, scr, cons)
+        };
         let hud_metrics = ui::SimMetrics {
             fps,
             frame_ms,
@@ -506,6 +683,9 @@ async fn main() {
             pop_hist: pop_hist.iter().copied().collect(),
             minimap_view,
             toast: toast_view,
+            inspect,
+            inspect_screen,
+            conspecific_screen,
         };
         // Loader overlay view: real permille progress (1.0 once done), step derived from the
         // fraction. `loader_active` makes the world input modal while it's up.
@@ -545,7 +725,14 @@ async fn main() {
             if let Some((kind, p, idx)) = loader_view {
                 ui::loader::draw(ctx, kind, p, idx, seed);
             } else {
-                actions = ui::draw_hud(ctx, &mut ui_state, &hud_metrics, &mut hud_cache, terrain.as_ref());
+                actions = ui::draw_hud(
+                    ctx,
+                    &mut ui_state,
+                    &hud_metrics,
+                    &mut hud_cache,
+                    terrain.as_ref(),
+                    get_time() as f32,
+                );
             }
         });
         let wants_ptr = actions.wants_pointer;
@@ -613,10 +800,14 @@ async fn main() {
         if is_key_pressed(KeyCode::O) {
             ui_state.outline = !ui_state.outline;
         }
+        if is_key_pressed(KeyCode::Escape) {
+            ui_state.selected = None; // close the creature inspector
+        }
         } // end loader-gated keyboard hotkeys
         // Snapshot toggle state into Copy locals (`debug_view`/`mask`/`outline`/`water_on`) so the
         // render pass below reads them as before. `show_info` is handled inside the GUI pass.
-        let ui::UiState { show_info: _, debug_view, water_on, mask, outline, open_panel: _ } = ui_state;
+        let ui::UiState { show_info: _, debug_view, water_on, mask, outline, open_panel: _, selected: _ } =
+            ui_state;
 
         // World mouse interactions are gated on `!wants_ptr` so a click on a panel doesn't reach
         // the world (F8). Keyboard pan/rotate stay live (egui claims no keys without a text focus).
@@ -631,10 +822,22 @@ async fn main() {
             cam.target.x += before.x - after.x;
             cam.target.z += before.y - after.y;
         }
-        // Left-drag pan: lock the grabbed ground point under the moving cursor. Don't START a pan
-        // when the press lands on a panel (F8); an in-flight pan finishes normally.
+        // Left-press: first try to PICK a creature (screen-space) → toggle the inspector selection
+        // and DON'T start a pan; a miss falls through to the normal pan-grab. Don't START a pan when
+        // the press lands on a panel (F8); an in-flight pan finishes normally. Picking is gated on
+        // show_info (no selecting while the HUD is hidden).
         if !wants_ptr && is_mouse_button_pressed(MouseButton::Left) {
-            grab = Some(ground_under_cursor(&cam));
+            let picked = if ui_state.show_info {
+                pick_creature(&cam, sim.as_ref(), terrain.as_ref())
+            } else {
+                None
+            };
+            if let Some(pid) = picked {
+                ui_state.selected = if ui_state.selected == Some(pid) { None } else { Some(pid) };
+                grab = None;
+            } else {
+                grab = Some(ground_under_cursor(&cam));
+            }
         }
         if !is_mouse_button_down(MouseButton::Left) {
             grab = None;
@@ -855,6 +1058,28 @@ async fn main() {
                     }
                     let _ = reply.send(serde_json::json!({"ok": true}));
                 }
+                dev_bridge::Cmd::Select { id, nearest } => {
+                    if nearest {
+                        if let (Some(s), Some(t)) = (sim.as_ref(), terrain.as_ref()) {
+                            let (sw, sh) = (screen_width(), screen_height());
+                            let vp = cam.camera().matrix();
+                            let (ccx, ccy) = (sw * 0.5, sh * 0.5);
+                            let mut best: Option<(f32, u64)> = None;
+                            for c in &s.creatures {
+                                if let Some(p) = project_world(vp, sw, sh, creature_world(c, t)) {
+                                    let d = ((p[0] - ccx).powi(2) + (p[1] - ccy).powi(2)).sqrt();
+                                    if best.is_none_or(|(bd, _)| d < bd) {
+                                        best = Some((d, c.id));
+                                    }
+                                }
+                            }
+                            ui_state.selected = best.map(|(_, id)| id);
+                        }
+                    } else {
+                        ui_state.selected = id;
+                    }
+                    let _ = reply.send(serde_json::json!({"ok": true, "selected": ui_state.selected}));
+                }
                 dev_bridge::Cmd::Screenshot { path, window } => {
                     pending_shots.push((path, window, reply)); // serviced post-draw below
                 }
@@ -1052,15 +1277,7 @@ async fn main() {
             let px_per_m = sh / cam.zoom; // ortho: visible world-height = zoom
             // Project a world point on a column top to screen px; None if behind/off-screen.
             let project = |wx: f32, wz: f32, wy: f32| -> Option<(f32, f32)> {
-                let clip = vp * vec4(wx, wy, wz, 1.0);
-                if clip.w <= 0.0 {
-                    return None;
-                }
-                let (nx, ny) = (clip.x / clip.w, clip.y / clip.w);
-                if !(-1.0..=1.0).contains(&nx) || !(-1.0..=1.0).contains(&ny) {
-                    return None;
-                }
-                Some(((nx * 0.5 + 0.5) * sw, (1.0 - (ny * 0.5 + 0.5)) * sh))
+                project_world(vp, sw, sh, vec3(wx, wy, wz)).map(|p| (p[0], p[1]))
             };
             if px_per_m >= LOD_MAT_PX_PER_M {
                 // INDIVIDUALS. Zoomed in far enough that a single cell spans ≥ a couple pixels, draw

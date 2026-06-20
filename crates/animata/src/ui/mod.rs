@@ -9,11 +9,13 @@
 use crate::DebugView;
 
 pub mod hud;
+pub mod inspector;
 pub mod loader;
 pub mod minimap;
 pub mod theme;
 
 pub use hud::draw_hud;
+pub use inspector::{CreatureView, TrophicKind};
 
 /// Cache key for the minimap texture: (seed, view, biomass-tick-bucket) — rebuilt only on change.
 pub type MinimapKey = (u64, DebugView, u64);
@@ -49,6 +51,10 @@ pub struct UiState {
     pub outline: bool,
     /// Open flyout from the control rail (rail is the only entry point to detail panels).
     pub open_panel: Option<Panel>,
+    /// Inspected creature by stable `id` (`None` = no inspector). Set by world-click picking
+    /// (main.rs), cleared by `Esc` / the panel's `×` / re-clicking the same creature. Outside the
+    /// "one panel at a time" rule — coexists with any rail flyout.
+    pub selected: Option<u64>,
 }
 
 /// Things a panel widget asked for that don't reduce to a plain `&mut bool` toggle.
@@ -108,6 +114,15 @@ pub struct SimMetrics {
     /// Transient top-centre system notice (message, elapsed milliseconds since it fired) — e.g.
     /// "Saved". The HUD derives the entry slide + fade from the elapsed time. `None` = nothing.
     pub toast: Option<(String, f32)>,
+    /// Inspector snapshot of the selected creature, built in `main.rs` (keeps this module free of
+    /// sim-getter knowledge, like [`LifeStats`]). `None` when nothing is selected / it just died.
+    pub inspect: Option<CreatureView>,
+    /// Screen-space position (logical px) of the selected creature for the crosshair. `None` if
+    /// off-screen / nothing selected. Projected in `main.rs` before the egui pass.
+    pub inspect_screen: Option<[f32; 2]>,
+    /// Screen-space positions of same-species creatures (conspecific ring markers), already culled
+    /// to on-screen + capped. Empty when nothing selected.
+    pub conspecific_screen: Vec<[f32; 2]>,
 }
 
 // Mirror of main.rs time-scale tuning (kept local to avoid a cross-module const dependency).

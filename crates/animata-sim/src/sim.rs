@@ -106,6 +106,12 @@ impl Creature {
         MAX_ENERGY + STORAGE_PER_CELL * self.pheno.organ_power(1)
     }
 
+    /// Energy as a fraction `[0,1]` of this body's own capacity — for the inspector vitals bar
+    /// (`max_energy` is private, so this is the public read).
+    pub fn energy_frac(&self) -> f32 {
+        (self.energy / self.max_energy().max(1e-6)).clamp(0.0, 1.0)
+    }
+
     /// Sensing reach as a multiple of the base range, driven by the sensor ORGAN power (count +
     /// coherence). `1.0` with no sensor cells (no nerf); rises with sensory tissue and is capped so
     /// the spatial-grid query stays local. Scales BOTH prey/threat detection and the food-gradient
@@ -243,12 +249,22 @@ pub enum Stratum {
 }
 
 impl Stratum {
-    fn idx(self) -> usize {
+    pub fn idx(self) -> usize {
         match self {
             Stratum::Underground => 0,
             Stratum::Surface => 1,
             Stratum::Air => 2,
             Stratum::Water => 3,
+        }
+    }
+
+    /// Human label for the inspector "strata" row.
+    pub fn name(self) -> &'static str {
+        match self {
+            Stratum::Underground => "Under",
+            Stratum::Surface => "Surface",
+            Stratum::Air => "Air",
+            Stratum::Water => "Water",
         }
     }
 
@@ -267,7 +283,7 @@ impl Stratum {
 
 /// The stratum a creature occupies, from its body and whether its column is water. Priority
 /// Air > Underground > Water > Surface (a body able to fly uses the air even over water).
-fn stratum_of(pheno: &Phenotype, is_water_col: bool) -> Stratum {
+pub fn stratum_of(pheno: &Phenotype, is_water_col: bool) -> Stratum {
     if pheno.flight_frac() > STRATUM_THETA {
         Stratum::Air
     } else if pheno.burrow_frac() > STRATUM_THETA {
@@ -848,6 +864,24 @@ impl Sim {
             }
         }
         leaders.len()
+    }
+
+    /// Indices of the creatures that share the species (body-plan cluster) of the creature with
+    /// `id`, EXCLUDING that creature itself — same `SPECIES_THRESHOLD` feature radius the species
+    /// metric uses. Backs the inspector's conspecific markers. O(N): one pass once the target's
+    /// feature is known; returns `[]` if `id` isn't present.
+    pub fn conspecifics(&self, id: u64) -> Vec<usize> {
+        let Some(target) = self.creatures.iter().find(|c| c.id == id) else {
+            return Vec::new();
+        };
+        let tf = feature(target);
+        let thr = SPECIES_THRESHOLD * SPECIES_THRESHOLD;
+        self.creatures
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.id != id && feature_dist2(&tf, &feature(c)) <= thr)
+            .map(|(i, _)| i)
+            .collect()
     }
 
     /// Crypsis metric: Pearson correlation between each creature's coloration and the ground tone

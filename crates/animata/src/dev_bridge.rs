@@ -66,6 +66,10 @@ pub enum Cmd {
         debug: Option<String>,
         show_info: Option<bool>,
     },
+    /// Drive the creature inspector for scripted screenshots: select by creature `id`, or pick the
+    /// on-screen creature nearest the viewport centre (`nearest: true`); `id=None`+`nearest=false`
+    /// clears the selection.
+    Select { id: Option<u64>, nearest: bool },
     /// Save the full world state to a file (`path` omitted → the default save path).
     Save { path: Option<String> },
     /// Load a world state from a file, replacing the current world (`path` omitted → default).
@@ -228,6 +232,10 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             panel: s("panel"),
             debug: s("debug"),
             show_info: b("show_info"),
+        }),
+        "animata/select" => Ok(Cmd::Select {
+            id: u("id"),
+            nearest: b("nearest").unwrap_or(false),
         }),
         "animata/save" => Ok(Cmd::Save { path: s("path") }),
         "animata/load" => Ok(Cmd::Load { path: s("path") }),
