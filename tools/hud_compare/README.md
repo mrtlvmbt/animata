@@ -27,6 +27,15 @@ python3 tools/hud_compare/hud_compare.py --states view pop
 Outputs land in `/tmp/hud_cmp/`: `report.md` (metrics table + curated findings), `strip_<state>_<region>.png`,
 `heat_<state>.png`, `app_*/tpl_*/bg_*`.
 
+## tofu_check.py — missing-glyph guard
+Static scan (no app needed) that flags characters in HUD string literals that no loaded font can
+render — they show as tofu boxes (□), e.g. `→` (U+2192) is absent from the vendored IBM Plex subset.
+Checks against the IBM Plex Sans/Mono cmaps + the Phosphor PUA range; exits non-zero on a hit.
+```sh
+python3 tools/hud_compare/tofu_check.py
+```
+Fix a hit with a Phosphor glyph (`ph::ARROW_RIGHT`) or an ASCII form.
+
 ## Requirements
 Google Chrome (`/Applications/Google Chrome.app`), `python3` with `pillow` + `numpy`, the app
 running with `--features dev` (dev-bridge on 127.0.0.1:8127, incl. the `animata/set_panel` method).
