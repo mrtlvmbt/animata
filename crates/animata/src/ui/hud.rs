@@ -897,8 +897,15 @@ fn pop_panel(ui: &mut egui::Ui, cache: &mut HudCache, m: &SimMetrics) {
     ui.add_space(2.0);
     ui.spacing_mut().item_spacing.y = 9.0;
     labelled_bar(ui, "multicellular", l.multi, theme::GOOD_GREEN);
-    labelled_bar(ui, "carnivory", l.carn, theme::DATA_CARN);
-    labelled_bar(ui, "autotrophy", l.auto, theme::DATA_AUTO);
+    ui.add_space(5.0);
+    // Trophic (food) niches — one bar per `TrophicNiche`, iterated from the sim snapshot so a new
+    // niche shows up here automatically (the colour falls back to neutral until wired in `niche_color`).
+    caps_tracked(ui, "Trophic niches", 9.0, 0.14, KEYCAP_TXT);
+    ui.add_space(2.0);
+    ui.spacing_mut().item_spacing.y = 9.0;
+    for &(niche, frac) in &l.trophic {
+        labelled_bar(ui, niche.label(), frac, niche_color(niche));
+    }
     ui.add_space(5.0);
     caps_tracked(ui, "Diversity", 9.0, 0.14, KEYCAP_TXT);
     ui.add_space(4.0);
@@ -907,6 +914,18 @@ fn pop_panel(ui: &mut egui::Ui, cache: &mut HudCache, m: &SimMetrics) {
     caps_tracked(ui, "Strata mix", 9.0, 0.14, KEYCAP_TXT);
     ui.add_space(4.0);
     strata_bar(ui, cache, l.strata);
+}
+
+/// Bar colour for a trophic niche. `#[non_exhaustive]` enum ⇒ the wildcard arm is required and not
+/// dead code: a niche added in `animata-sim` renders with the neutral fallback until coloured here.
+fn niche_color(n: animata_sim::genome::TrophicNiche) -> egui::Color32 {
+    use animata_sim::genome::TrophicNiche;
+    match n {
+        TrophicNiche::Autotroph => theme::DATA_AUTO,
+        TrophicNiche::Carnivore => theme::DATA_CARN,
+        TrophicNiche::Herbivore => theme::GOOD_GREEN,
+        _ => theme::TRAIT_FILL,
+    }
 }
 
 /// Big metric: value on top (mono 18), caps label beneath (mono 9, .1em) — mockup order.

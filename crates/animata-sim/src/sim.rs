@@ -18,7 +18,7 @@ use glam::{vec2, Vec2};
 use rayon::prelude::*;
 
 use crate::config::*;
-use crate::genome::{Genome, Phenotype};
+use crate::genome::{Genome, Phenotype, TrophicNiche};
 use crate::grid::SpatialGrid;
 use crate::pressure::{PressureRegistry, Sample};
 use crate::rng::{seed_fold, splitmix64, Rng};
@@ -920,6 +920,25 @@ impl Sim {
         }
         let carn = self.creatures.iter().filter(|c| c.pheno.carnivory() > CARNIVORE_THRESHOLD).count();
         carn as f32 / n as f32
+    }
+
+    /// Fraction of the live population in each [`TrophicNiche`], in `TrophicNiche::ALL` order
+    /// (mutually exclusive ⇒ sums to 1.0; empty population ⇒ all zero). The population panel iterates
+    /// this, so a new niche variant produces a new bar with no UI change. O(N · niches).
+    pub fn trophic_fractions(&self) -> Vec<(TrophicNiche, f32)> {
+        let n = self.creatures.len();
+        let inv = if n == 0 { 0.0 } else { 1.0 / n as f32 };
+        TrophicNiche::ALL
+            .iter()
+            .map(|&niche| {
+                let count = self
+                    .creatures
+                    .iter()
+                    .filter(|c| TrophicNiche::classify(&c.pheno) == niche)
+                    .count();
+                (niche, count as f32 * inv)
+            })
+            .collect()
     }
 
     /// Fraction of the population that has developed a coherent ORGAN — a connected same-type cluster

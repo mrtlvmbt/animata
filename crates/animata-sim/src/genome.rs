@@ -161,6 +161,51 @@ impl Phenotype {
     }
 }
 
+/// The mutually-exclusive **food (trophic) niches** a body can occupy — the energy-income strategies
+/// the sim actually models (photosynthesis / predation / grazing; see `Sim::step`). This is the ONE
+/// place a creature is classified by diet: the population panel iterates [`TrophicNiche::ALL`] and the
+/// inspector classifies through [`TrophicNiche::classify`], so adding a variant here makes a new bar
+/// appear automatically. `#[non_exhaustive]` forces the UI's colour map to carry a neutral fallback,
+/// so a new niche renders (with a placeholder colour) before anyone wires a colour for it.
+#[non_exhaustive]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrophicNiche {
+    Autotroph,
+    Carnivore,
+    Herbivore,
+}
+
+impl TrophicNiche {
+    /// Every niche, in display order. Iterate this to render one bar per niche.
+    pub const ALL: &'static [TrophicNiche] = &[
+        TrophicNiche::Autotroph,
+        TrophicNiche::Carnivore,
+        TrophicNiche::Herbivore,
+    ];
+
+    /// Classify a body by its cell mix. Precedence (matches the energy model): a photosynthetic body
+    /// feeds itself, so it's an autotroph even with predator cells; otherwise a sufficiently predatory
+    /// body is a carnivore; everything else grazes. Mutually exclusive ⇒ population fractions sum to 1.
+    pub fn classify(pheno: &Phenotype) -> TrophicNiche {
+        if pheno.photo_frac() > crate::config::PHOTO_THETA {
+            TrophicNiche::Autotroph
+        } else if pheno.carnivory() > crate::config::CARNIVORE_THRESHOLD {
+            TrophicNiche::Carnivore
+        } else {
+            TrophicNiche::Herbivore
+        }
+    }
+
+    /// Lower-case bar label (matches the existing `multicellular` complexity label style).
+    pub fn label(self) -> &'static str {
+        match self {
+            TrophicNiche::Autotroph => "autotrophy",
+            TrophicNiche::Carnivore => "carnivory",
+            TrophicNiche::Herbivore => "herbivory",
+        }
+    }
+}
+
 /// The heritable genome: the developmental GRN (weight matrix + bias), the controller weights,
 /// and the climate-niche trait. A "founder" has a zero GRN (→ single cell == C0), random brain
 /// weights, and a random thermal preference. `thermal_pref` in `[0,1]` is the temperature this
