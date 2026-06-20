@@ -23,6 +23,37 @@ pub fn seed_fold(base: u64, fields: &[u64]) -> u64 {
     s
 }
 
+// ---- FNV-1a 64-bit fold (the determinism-checksum primitive, PR1 lock) ----
+// Integer-only mixing: floats are folded by their bit pattern (`f32::to_bits`), NEVER by
+// floating-point addition — sum-of-floats is not associative, so a parallel/reordered reduce
+// would give a different checksum and the lock would lie (F2). FNV is order-sensitive, which is
+// what we want: the checksum is over a fixed, deterministic field order.
+
+// (Consumed by the determinism-checksum tests now; by the metrics-registry checksum metric in PR5.)
+/// FNV-1a 64-bit offset basis — the checksum's start value.
+#[allow(dead_code)]
+pub const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+#[allow(dead_code)]
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Fold one `u64` (8 bytes, little-endian) into an FNV-1a accumulator.
+#[allow(dead_code)]
+pub fn fnv_fold_u64(h: &mut u64, v: u64) {
+    for b in v.to_le_bytes() {
+        *h ^= b as u64;
+        *h = h.wrapping_mul(FNV_PRIME);
+    }
+}
+
+/// Fold one `u32` (e.g. an `f32::to_bits()` pattern) into an FNV-1a accumulator.
+#[allow(dead_code)]
+pub fn fnv_fold_u32(h: &mut u64, v: u32) {
+    for b in v.to_le_bytes() {
+        *h ^= b as u64;
+        *h = h.wrapping_mul(FNV_PRIME);
+    }
+}
+
 /// A tiny deterministic PRNG: a splitmix64 stream from a `u64` seed. Drawing advances the
 /// state, so a fixed draw order from a fixed seed always yields the same sequence.
 pub struct Rng(u64);
@@ -52,36 +83,5 @@ impl Rng {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn splitmix_is_pure_and_avalanches() {
-        // Pure: same input → same output; adjacent inputs → very different outputs.
-        assert_eq!(splitmix64(42), splitmix64(42));
-        let (a, b) = (splitmix64(1), splitmix64(2));
-        assert_ne!(a, b);
-        assert!((a ^ b).count_ones() > 10, "adjacent seeds barely differ — weak mix");
-    }
-
-    #[test]
-    fn seed_fold_is_non_commutative() {
-        // The whole point: swapping two fields must change the seed (else id^tick collisions).
-        assert_ne!(seed_fold(7, &[3, 5]), seed_fold(7, &[5, 3]));
-        assert_eq!(seed_fold(7, &[3, 5]), seed_fold(7, &[3, 5])); // but deterministic
-    }
-
-    #[test]
-    fn rng_stream_is_deterministic() {
-        let mut a = Rng::new(123);
-        let mut b = Rng::new(123);
-        for _ in 0..100 {
-            assert_eq!(a.next_u64(), b.next_u64());
-        }
-        let mut r = Rng::new(9);
-        for _ in 0..1000 {
-            let u = r.unit();
-            assert!((0.0..1.0).contains(&u));
-        }
-    }
-}
+#[path = "rng_tests.rs"]
+mod tests;
