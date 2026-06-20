@@ -674,6 +674,11 @@ async fn main() {
             }
             (view, scr, cons)
         };
+        // Per-phase sim timing (mean ms) for the perf panel — empty until the world is ready.
+        let sim_phases: Vec<(&'static str, f32)> = sim
+            .as_ref()
+            .map(|s| s.profile_report().into_iter().map(|(span, mean, _max)| (span.label(), mean)).collect())
+            .unwrap_or_default();
         let hud_metrics = ui::SimMetrics {
             fps,
             frame_ms,
@@ -681,6 +686,7 @@ async fn main() {
             detail: det,
             coarse: crs,
             on_screen,
+            sim_phases,
             seed,
             cols: COLS,
             rows: ROWS,
@@ -956,6 +962,15 @@ async fn main() {
                             let (multi, complex) = s.complexity_mix();
                             let allopatry = terrain.as_ref().map(|t| s.thermal_correlation(t));
                             let strata = terrain.as_ref().map(|t| s.stratum_mix(t));
+                            // Per-phase wall-clock breakdown of `Sim::step` (mean/max ms over the
+                            // profiler window) — a performance-assert surface for automation.
+                            let profile: serde_json::Map<String, serde_json::Value> = s
+                                .profile_report()
+                                .into_iter()
+                                .map(|(span, mean, max)| {
+                                    (span.label().to_string(), serde_json::json!({ "mean_ms": mean, "max_ms": max }))
+                                })
+                                .collect();
                             serde_json::json!({
                                 "population": s.population(),
                                 "avg_energy": s.avg_energy(),
@@ -973,6 +988,7 @@ async fn main() {
                                 "births": s.births,
                                 "deaths": s.deaths,
                                 "kills": s.kills,
+                                "profile": profile,
                             })
                         }),
                         "config": config_json(sim.as_ref()),

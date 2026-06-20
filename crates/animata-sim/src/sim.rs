@@ -18,8 +18,11 @@ use glam::{vec2, Vec2};
 use rayon::prelude::*;
 
 use crate::config::*;
+use std::time::{Duration, Instant};
+
 use crate::genome::{Genome, Phenotype, TrophicNiche};
 use crate::grid::SpatialGrid;
+use crate::profile::Span;
 use crate::pressure::{PressureRegistry, Sample};
 use crate::rng::{seed_fold, splitmix64, Rng};
 use crate::sim_config::SimConfig;
@@ -167,6 +170,10 @@ pub struct Sim {
     /// Runtime feature toggles + parameters. Part of the sim's INPUT (with the seed); the golden is
     /// at `SimConfig::default()`. Behaviour config, not state.
     cfg: SimConfig,
+    /// Per-phase wall-clock profiler. A pure MEASUREMENT (reads `Instant`, influences no sim value) —
+    /// like `grid`/`registry` it is NOT part of `state_checksum`, so the golden is identical whether
+    /// profiling is on or off.
+    profiler: crate::profile::Profiler,
 }
 
 /// Dimensions of the species feature vector: 7 cell-type fractions (the developmental body plan)
@@ -360,6 +367,7 @@ impl Sim {
             grid: SpatialGrid::default(),
             registry: PressureRegistry::build(&cfg.features, &cfg.params),
             cfg,
+            profiler: crate::profile::Profiler::default(),
         }
     }
 
@@ -393,7 +401,20 @@ impl Sim {
             grid: SpatialGrid::default(),
             registry,
             cfg: state.cfg,
+            profiler: crate::profile::Profiler::default(),
         }
+    }
+
+    /// Per-phase timing report (`(span, mean_ms, max_ms)` over the profiler's window) — for the
+    /// headless `--profile` table, the HUD perf panel and the dev-bridge. Pure measurement.
+    pub fn profile_report(&self) -> Vec<(crate::profile::Span, f32, f32)> {
+        self.profiler.report()
+    }
+
+    /// Enable/disable the phase profiler (default on). Off ⇒ the timing windows freeze; never affects
+    /// determinism either way.
+    pub fn set_profiling(&mut self, on: bool) {
+        self.profiler.set_enabled(on);
     }
 
     /// The current runtime config (features + params).
@@ -428,6 +449,7 @@ impl Sim {
             (std::f32::consts::TAU * tick as f32 * TICK_LEN / self.cfg.params.season_len.max(1e-3)).sin();
         // (a) snapshot + decide — reads only, terrain unmutated. Snapshot arrays feed the grid
         // predicates without borrowing `self.creatures` inside the closures.
+        let t_snapshot = Instant::now();
         let pos: Vec<Vec2> = self.creatures.iter().map(|c| c.pos).collect();
         let bm: Vec<u32> = self.creatures.iter().map(|c| c.biomass()).collect();
         let carn: Vec<f32> = self.creatures.iter().map(|c| c.pheno.carnivory()).collect();
@@ -463,7 +485,10 @@ impl Sim {
         // a finite flux, so more autotrophs ⇒ less photosynthesis per head ⇒ the niche self-limits.
         let n_auto = self.creatures.iter().filter(|c| c.pheno.photo_frac() > PHOTO_THETA).count();
         let autotroph_shading = 1.0 / (1.0 + n_auto as f32 / PHOTO_SOFTCAP);
+        self.profiler.record(Span::Snapshot, t_snapshot.elapsed());
+        let t_grid = Instant::now();
         self.grid.rebuild(&pos, maxx, maxy, GRID_CELL);
+        self.profiler.record(Span::GridRebuild, t_grid.elapsed());
         // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
         // This phase is READ-ONLY (snapshots + the rebuilt grid + the terrain getters), so it runs
         // in parallel across cores. `par_iter().map().collect()` writes each `decisions[i]` from an
@@ -471,6 +496,7 @@ impl Sim {
         // `(i, j, tick)` — so the result is BIT-IDENTICAL to the serial loop (the golden holds).
         // Shared reborrows so the parallel closure captures `&Sim`/`&VoxelTerrain` (both `Sync`),
         // never the `&mut` from `step`.
+        let t_decide = Instant::now();
         let this: &Sim = self;
         let terrain_ref: &VoxelTerrain = terrain;
         let decisions: Vec<(f32, f32, Option<usize>)> = (0..n)
@@ -513,8 +539,10 @@ impl Sim {
                 (throttle, turn, hunt)
             })
             .collect();
+        self.profiler.record(Span::Decide, t_decide.elapsed());
         // (b) predation: resolve hunts by snapshot index. Flag prey dead (never remove mid-pass
         // — indices must stay stable, F7); credit the predator with the trophic-scaled energy.
+        let t_predation = Instant::now();
         for i in 0..n {
             let Some(j) = decisions[i].2 else { continue };
             if !self.creatures[i].alive || !self.creatures[j].alive {
@@ -534,10 +562,15 @@ impl Sim {
             let (dx, dy) = column_index(pos[j]);
             terrain.deposit_nutrient(dx, dy, bm[j] as f32 * NUTRIENT_PER_CELL, tick);
         }
+        self.profiler.record(Span::Predation, t_predation.elapsed());
         // (c) apply per surviving creature in index order.
         // Logistic birth gate from the population at the START of the tick (deterministic;
         // doesn't shift as births accrue). On the over-provisioned map this aggregate
         // competition term — not food — sets the equilibrium near `SOFT_CAP`.
+        let t_apply = Instant::now();
+        // `develop()` runs inside the apply loop (per birth), which holds `&mut self.creatures` —
+        // so the profiler can't be touched there. Accumulate its nanos locally, record after.
+        let mut develop_ns: u64 = 0;
         let birth_gate = (1.0 - n as f32 / SOFT_CAP).clamp(0.0, 1.0);
         let mut births: Vec<Creature> = Vec::new();
         for (idx, c) in self.creatures.iter_mut().enumerate() {
@@ -646,7 +679,10 @@ impl Sim {
                 // Development off ⇒ the body never grows past one cell (C0); the genome still mutates
                 // (brain evolves), so the RNG stream is unchanged — only the phenotype differs.
                 let pheno = if feat.development {
-                    genome.develop()
+                    let t_dev = Instant::now();
+                    let p = genome.develop();
+                    develop_ns += t_dev.elapsed().as_nanos() as u64;
+                    p
                 } else {
                     Phenotype { n_cells: 1, structural: 1, ..Default::default() }
                 };
@@ -676,10 +712,15 @@ impl Sim {
                 }
             }
         }
+        self.profiler.record(Span::Apply, t_apply.elapsed());
+        self.profiler.record(Span::Develop, Duration::from_nanos(develop_ns));
         // (d) compact: drop the dead, append births, cull to the cap.
+        let t_compact = Instant::now();
         self.creatures.retain(|c| c.alive);
         self.creatures.append(&mut births);
         self.cull_to_cap(tick);
+        self.profiler.record(Span::Compact, t_compact.elapsed());
+        self.profiler.commit_tick();
     }
 
     /// Build the brain inputs: the plant-biomass field ahead / left / right (a gradient to

@@ -95,6 +95,10 @@ pub struct SimMetrics {
     pub detail: usize,
     pub coarse: usize,
     pub on_screen: usize,
+    /// Per-phase `Sim::step` timing (label, mean ms), in `profile::Span::ALL` order. Sourced from
+    /// `Sim::profile_report` each frame; the perf panel iterates it so a new span shows up
+    /// automatically. Empty until the world is ready.
+    pub sim_phases: Vec<(&'static str, f32)>,
     // World & time
     pub seed: u64,
     pub cols: usize,
