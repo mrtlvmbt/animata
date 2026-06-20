@@ -1,4 +1,6 @@
     use super::*;
+    use crate::render::mesh::{build_chunk_mesh, build_region_mesh};
+    use crate::render::streamer::COARSE_LOD;
 
     /// Every built chunk mesh must stay strictly under macroquad's per-`draw_mesh` batch
     /// limits (`>= 10000` verts / `>= 5000` indices ⇒ silent clamping). Builds chunk by
