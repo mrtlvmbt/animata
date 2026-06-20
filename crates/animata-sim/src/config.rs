@@ -68,9 +68,12 @@ pub const DAY_LEN: f32 = 600.0;
 
 // ---- Vegetation (S3; consumed in terrain.rs) ----
 /// Biomass regrow rate (per sim-second) for the linear-with-saturation law
-/// `b' = cap − (cap − b)·e^(−RATE·elapsed)`. `0.01` ⇒ a ~100 s time-constant (a grazed
-/// patch is most of the way back within a sim-day). Tunable.
-pub const BIOMASS_REGROW_RATE: f32 = 0.01;
+/// `b' = cap − (cap − b)·e^(−RATE·elapsed)`. `0.03` ⇒ a ~33 s time-constant. Raised ×3 from 0.01 to
+/// lift the RENEWABLE food flux (the real biomass limiter at clustered densities, where grazing
+/// outpaces regrow — not the population counter, see the caps note below). Measured at 8000 ticks
+/// (seed 1): population 11.7k→15.1k, avg_biomass 2.83→3.07, multicellular 75.8%→85.3%, and carnivores
+/// 1.4%→2.6% (denser prey makes predation pay). Tunable.
+pub const BIOMASS_REGROW_RATE: f32 = 0.03;
 
 // ---- Life simulation: C0 unicellular ecosystem (consumed in sim.rs) ----
 /// Founder creatures spawned at world start (on land columns).
