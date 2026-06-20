@@ -129,18 +129,34 @@ pub(crate) fn legend_text(view: DebugView) -> String {
 /// (water special-cases omitted — this is just the colour legend). `h` is the bar height (mockup:
 /// 9px in a flyout, 7px under the minimap); width fills the available space.
 pub(crate) fn legend_bar(ui: &mut egui::Ui, view: DebugView, h: f32) {
+    use egui::CornerRadius;
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     let painter = ui.painter();
+    // Rounded (pill) ends: solid end-caps r-wide with the outer corners rounded, square gradient
+    // slices in between (a per-slice corner_radius can't round the bar's outer corners).
+    let r = (h * 0.5).round();
+    let ru = r as u8;
+    let y0 = rect.top();
+    let y1 = rect.bottom();
+    let cap = |p: &egui::Painter, x: f32, color, cr| {
+        p.rect_filled(egui::Rect::from_min_max(egui::pos2(x, y0), egui::pos2(x + r, y1)), cr, color)
+    };
+    cap(painter, rect.left(), ramp_color(view, 0.0),
+        CornerRadius { nw: ru, sw: ru, ne: 0, se: 0 });
+    cap(painter, rect.right() - r, ramp_color(view, 1.0),
+        CornerRadius { ne: ru, se: ru, nw: 0, sw: 0 });
+    let (mx0, mx1) = (rect.left() + r, rect.right() - r);
+    let mw = (mx1 - mx0).max(0.0);
     let n = 48usize;
     for i in 0..n {
-        let v = i as f32 / (n - 1) as f32;
-        let x0 = rect.left() + w * i as f32 / n as f32;
-        let x1 = rect.left() + w * (i + 1) as f32 / n as f32;
+        let v = (r + mw * (i as f32 + 0.5) / n as f32) / w; // sample at slice centre
+        let x0 = mx0 + mw * i as f32 / n as f32;
+        let x1 = mx0 + mw * (i + 1) as f32 / n as f32;
         painter.rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
+            egui::Rect::from_min_max(egui::pos2(x0, y0), egui::pos2(x1, y1)),
             0.0,
-            ramp_color(view, v),
+            ramp_color(view, v.clamp(0.0, 1.0)),
         );
     }
 }

@@ -911,11 +911,22 @@ fn strata_bar(ui: &mut egui::Ui, strata: [f32; 4]) {
         theme::STRATA_WATER,
     ];
     let p = ui.painter();
+    // Rounded outer corners (mockup: border-radius 5 + overflow:hidden). Round the FIRST and LAST
+    // non-empty segment (not fixed indices 0/3 — a zero-width end stratum would leave a square edge).
+    let r: u8 = 5;
+    let nz: Vec<usize> = (0..strata.len()).filter(|&i| strata[i].clamp(0.0, 1.0) > 0.0).collect();
+    let (first, last) = (nz.first().copied(), nz.last().copied());
     let mut x = rect.left();
     for (i, &f) in strata.iter().enumerate() {
         let seg_w = rect.width() * f.clamp(0.0, 1.0);
         let seg = egui::Rect::from_min_size(egui::pos2(x, rect.top()), egui::vec2(seg_w, rect.height()));
-        p.rect_filled(seg, 0.0, cols[i]);
+        let cr = egui::CornerRadius {
+            nw: if Some(i) == first { r } else { 0 },
+            sw: if Some(i) == first { r } else { 0 },
+            ne: if Some(i) == last { r } else { 0 },
+            se: if Some(i) == last { r } else { 0 },
+        };
+        p.rect_filled(seg, cr, cols[i]);
         x += seg_w;
     }
     ui.add_space(7.0);
