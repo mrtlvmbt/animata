@@ -295,8 +295,9 @@ fn organ_power_is_monotone() {
 fn development_is_bounded_and_deterministic() {
     for seed in 0..200u64 {
         let mut rng = Rng::new(seed);
+        let mut mrng = Rng::new(seed ^ 0xD2);
         // A mutated genome (non-empty GRN) — may grow a body.
-        let g = Genome::founder(&mut rng).mutate(&mut rng, 0.3, 0.8);
+        let g = Genome::founder(&mut rng).mutate(&mut rng, &mut mrng, 0.3, 0.8);
         let p1 = g.develop();
         let p2 = g.develop();
         assert_eq!(p1, p2, "development not deterministic");
@@ -313,10 +314,11 @@ fn mutation_can_grow_complex_bodies() {
     let (mut multi, mut complex, mut maxn) = (0, 0, 0u32);
     for seed in 0..2000u64 {
         let mut rng = Rng::new(seed ^ 0xABCD);
+        let mut mrng = Rng::new(seed ^ 0xABCD ^ 0xD2);
         // Several mutation steps so the GRN drifts well away from empty.
         let mut g = Genome::founder(&mut rng);
         for _ in 0..5 {
-            g = g.mutate(&mut rng, 0.3, 0.9);
+            g = g.mutate(&mut rng, &mut mrng, 0.3, 0.9);
         }
         let p = g.develop();
         if p.n_cells > 1 {
@@ -341,9 +343,10 @@ fn body_layout_is_deterministic_and_preserves_counts() {
     let mut checked = 0;
     for seed in 0..1500u64 {
         let mut rng = Rng::new(seed ^ 0x5151);
+        let mut mrng = Rng::new(seed ^ 0x5151 ^ 0xD2);
         let mut g = Genome::founder(&mut rng);
         for _ in 0..5 {
-            g = g.mutate(&mut rng, 0.3, 0.9);
+            g = g.mutate(&mut rng, &mut mrng, 0.3, 0.9);
         }
         let p = g.develop();
         if p.n_cells <= 1 {

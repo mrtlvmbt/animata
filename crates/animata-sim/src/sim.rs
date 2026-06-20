@@ -41,6 +41,7 @@ const SALT_DEATH: u64 = 0xDEAD;
 const SALT_BIRTH: u64 = 0xB127;
 const SALT_CAMO: u64 = 0xCA30;
 const SALT_TOXIN: u64 = 0x70_8127;
+const SALT_MORPH: u64 = 0xD2_0F; // morphogen READ-weight mutation (PR-D2) — an INDEPENDENT stream
 
 /// The serialisable live sim state — the half of a save snapshot that is the creatures (the other
 /// half is the terrain overlay). Restored via [`Sim::from_state`]; captured via [`Sim::to_state`].
@@ -636,9 +637,12 @@ impl Sim {
                 || Rng::new(seed_fold(self.world_seed, &[SALT_BIRTH, c.id, tick])).unit() < birth_gate;
             if c.energy >= REPRO_ENERGY && lucky {
                 let mut rng = Rng::new(seed_fold(self.world_seed, &[SALT_MUTATE, c.id, tick]));
-                // Mutate the genome (brain + GRN) and DEVELOP the child's body up front, so its
-                // build cost (energy per cell beyond the first) is known.
-                let genome = c.genome.mutate(&mut rng, MUTATION_STD, GRN_MUTATION_STD);
+                // Morphogen READ weights evolve on their OWN stream (PR-D2) so the coupling's activation
+                // leaves `rng` — and thus the child's pos/heading below — byte-identical to the inert sim.
+                let mut morph_rng = Rng::new(seed_fold(self.world_seed, &[SALT_MORPH, c.id, tick]));
+                // Mutate the genome (brain + GRN + morphogen) and DEVELOP the child's body up front, so
+                // its build cost (energy per cell beyond the first) is known.
+                let genome = c.genome.mutate(&mut rng, &mut morph_rng, MUTATION_STD, GRN_MUTATION_STD);
                 // Development off ⇒ the body never grows past one cell (C0); the genome still mutates
                 // (brain evolves), so the RNG stream is unchanged — only the phenotype differs.
                 let pheno = if feat.development {
@@ -937,6 +941,54 @@ impl Sim {
             .count();
         with as f32 / n as f32
     }
+
+    /// Fraction of the population that has developed an emergent body AXIS — `axis_order >= AXIS_MIN`
+    /// (PR-D2). Founders (single cells) have `axis_order = 0`; this rises from zero only as the
+    /// morphogen READ weights (`morph_w`) evolve to couple cell type to radial position.
+    pub fn frac_with_axis(&self) -> f32 {
+        let n = self.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let with = self.creatures.iter().filter(|c| c.pheno.axis_order >= AXIS_MIN).count();
+        with as f32 / n as f32
+    }
+
+    /// Mean `axis_order` over the population (PR-D2 observability) — the average strength of the
+    /// type↔position coupling, `0..=255`. Rises from 0 as the morphogen coupling evolves.
+    pub fn avg_axis_order(&self) -> f32 {
+        let n = self.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        self.creatures.iter().map(|c| c.pheno.axis_order as f32).sum::<f32>() / n as f32
+    }
+
+    /// Pearson correlation between `axis_order` and body size (`n_cells`) over the population — the
+    /// DECORRELATION control for the axis-emerges acceptance (PR-D2). `axis_order` is a scale-invariant
+    /// η² RATIO by construction, so a body plan must be a genuine type↔position structure, NOT a
+    /// by-product of growing more cells: this correlation must stay well below 1 (a big blob without a
+    /// gradient scores ≈0). Read-only observer; f64 serial sum (off the determinism-critical path).
+    pub fn axis_size_correlation(&self) -> f32 {
+        let n = self.creatures.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let (xs, ys): (Vec<f64>, Vec<f64>) =
+            self.creatures.iter().map(|c| (c.pheno.axis_order as f64, c.pheno.n_cells as f64)).unzip();
+        let nf = n as f64;
+        let (mx, my) = (xs.iter().sum::<f64>() / nf, ys.iter().sum::<f64>() / nf);
+        let (mut cov, mut vx, mut vy) = (0.0, 0.0, 0.0);
+        for (x, y) in xs.iter().zip(&ys) {
+            cov += (x - mx) * (y - my);
+            vx += (x - mx).powi(2);
+            vy += (y - my).powi(2);
+        }
+        if vx <= 0.0 || vy <= 0.0 {
+            return 0.0; // no variance in one axis ⇒ correlation undefined ⇒ report 0
+        }
+        (cov / (vx.sqrt() * vy.sqrt())) as f32
+    }
 }
 
 /// Full-state determinism checksum (PR1 lock, F1/F7): an integer fold of the COMPLETE
@@ -984,9 +1036,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    8328727706105271575 // debug profile (re-pinned at PR-D1: checksum now folds the inert morphogen fields)
+    9343349087510113984 // debug profile (re-pinned at PR-D2: morphogen coupling LIVE — `morph_w` now evolves)
 } else {
-    480162056762806937 // release profile (FMA contraction shifts the trajectory)
+    9414828644806342974 // release profile (FMA contraction shifts the trajectory)
 };
 
 #[cfg(test)]

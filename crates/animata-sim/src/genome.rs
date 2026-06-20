@@ -37,8 +37,9 @@ pub const N_MORPH: usize = 1;
 /// only the READ weights (`morph_w`) must evolve to couple type↔position — the gradient is already
 /// there to read (no triple-trait fitness valley of diffusion+decay+read together). Founder `morph_w=0`
 /// ⇒ the armed gradient is NOT read ⇒ a founder develops byte-identically to the pre-morphogen body
-/// (C0 continuity), and the existing genes keep their exact mutation RNG stream (the new genes are
-/// drawn LAST in `mutate`), so the morphogen perturbs the ecosystem only as `morph_w` slowly evolves.
+/// (C0 continuity). The read weights evolve (PR-D2) on a SEPARATE RNG stream from the existing genes
+/// (see `mutate`), so the existing genes' mutation stream is untouched and the morphogen perturbs the
+/// ecosystem only as `morph_w` slowly drifts off 0 under selection.
 const FOUNDER_DIFF: f32 = 0.5;
 const FOUNDER_DECAY: f32 = 0.3;
 
@@ -207,32 +208,35 @@ impl Genome {
     }
 
     /// A mutated child genome: every gene (GRN weights, GRN bias, brain weights, thermal pref)
-    /// is nudged by `±std` noise from `rng`. GRN mutations grow/shrink/retype the body; brain
-    /// mutations tune behaviour; the thermal pref drifts to track the climate it lives in.
-    /// `grn_std` is kept smaller so body plans change by rarer, gentler steps than behaviour.
-    pub fn mutate(&self, rng: &mut Rng, brain_std: f32, grn_std: f32) -> Self {
+    /// is nudged by `±std` noise. GRN mutations grow/shrink/retype the body; brain mutations tune
+    /// behaviour; the thermal pref drifts to track the climate it lives in. `grn_std` is kept smaller
+    /// so body plans change by rarer, gentler steps than behaviour. The morphogen READ weights evolve
+    /// on a SEPARATE stream (`morph_rng`) — see below.
+    pub fn mutate(&self, rng: &mut Rng, morph_rng: &mut Rng, brain_std: f32, grn_std: f32) -> Self {
         let m = |v: &[f32], std: f32, rng: &mut Rng| -> Vec<f32> {
             v.iter().map(|&w| w + rng.signed() * std).collect()
         };
-        // NOTE: the field assignments are EVALUATED top-to-bottom (Rust struct-literal order), so the
-        // pre-morphogen genes are drawn FIRST in their original order — preserving the exact mutation
-        // RNG stream they had before PR-D1 — and the new morphogen genes are drawn LAST. This is why
-        // the morphogen perturbs the ecosystem only as `morph_w` evolves away from 0, not via an RNG
-        // phase shift to the existing genes.
+        // The pre-morphogen genes are drawn from `rng` in their original order — a byte-identical RNG
+        // stream to the pre-morphogen sim (so the child's spawn pos/heading, drawn from this same `rng`
+        // AFTER mutate returns in `sim::step`, are unperturbed too).
         let grn_w = m(&self.grn_w, grn_std, rng);
         let grn_b = m(&self.grn_b, grn_std, rng);
         let brain = m(&self.brain, brain_std, rng);
         let thermal_pref = (self.thermal_pref + rng.signed() * grn_std).clamp(0.0, 1.0);
         let coloration = (self.coloration + rng.signed() * grn_std).clamp(0.0, 1.0);
         let toxin_resistance = (self.toxin_resistance + rng.signed() * grn_std).clamp(0.0, 1.0);
-        // Morphogen READ genes are FROZEN at their founder values in PR-D1 (machinery landed INERT, the
-        // proven project pattern): `morph_w = 0` ⇒ `regulate` ignores the morphogen ⇒ the developmental
-        // trajectory is byte-identical to the pre-morphogen sim, so every acceptance corridor holds
-        // unchanged and the only golden shift is the checksum folding the new (constant) fields. They
-        // draw NO rng (kept out of the stream above), so the existing genes' mutation is untouched.
-        // PR-D2 turns the coupling ON by mutating `morph_w`/`diff_rate`/`decay_rate` here, re-pins the
-        // golden, and tests axis emergence (with the single-seed corridors made multi-seed robust).
-        let morph_w = self.morph_w.clone();
+        // PR-D2 — the morphogen coupling is now LIVE: the READ weights `morph_w` EVOLVE (founder 0 ⇒
+        // they drift up under selection, coupling a cell's TYPE to the local morphogen concentration,
+        // i.e. to its POSITION → emergent body axes). They are drawn from an INDEPENDENT stream
+        // (`morph_rng`, salted apart in `sim::step`) so activating the coupling consumes NO draws from
+        // `rng`: every existing gene AND the child's pos/heading stay byte-identical to the inert sim,
+        // and the trajectory shift is attributable purely to the morphogen mechanism — not an RNG
+        // reshuffle. The kinetics (`diff_rate`/`decay_rate`) stay ARMED-FROZEN at the founder gradient
+        // (`d≈0.5`, `k≈0.3`, the PR-D0-proven `exp(−r/λ)`): only the read weights must evolve to couple
+        // type↔position, so there is no triple-trait (diffuse+decay+read) fitness valley and the
+        // gradient is already there to read the instant `morph_w` lifts off 0 (C0-continuity preserved:
+        // a founder still has `morph_w=0` ⇒ the armed gradient is never read ⇒ develops to one cell).
+        let morph_w = m(&self.morph_w, grn_std, morph_rng);
         let diff_rate = self.diff_rate.clone();
         let decay_rate = self.decay_rate.clone();
         Genome {

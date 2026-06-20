@@ -143,6 +143,12 @@ pub const ORGAN_BONUS: f32 = 0.5;
 /// A connected same-type cluster of at least this many cells counts as an "organ" (for the
 /// `frac_with_organ` metric / the organs-emerge acceptance).
 pub const ORGAN_MIN: u8 = 3;
+/// Morphogenesis PR-D2: a body counts as carrying an emergent AXIS once its `axis_order` (the
+/// scale-invariant η² of cell-type vs radial position, `0..=255`) clears this. ~`0.1·255` ⇒ a real
+/// type↔position structure, not the ≈0 of an unpatterned blob (used by the `frac_with_axis` metric /
+/// the axis-emerges acceptance). Tuned against the post-activation trajectory (a modest bar: emergence
+/// from zero is the signal, magnitude grows later via French-flag bands in PR-D-segments).
+pub const AXIS_MIN: u8 = 26;
 /// Energy to build one cell beyond the first when budding a child — so a larger body costs
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;
