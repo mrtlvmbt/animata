@@ -6,15 +6,35 @@ render without a human watching the display.
 
 > **Status:** restored from the archived a-life build (tag `sim-v1`) and adapted to
 > the voxel viewer. Compiled only under `--features dev` (`src/dev_bridge.rs`). A
-> background thread runs a tiny HTTP server on `127.0.0.1:8127`; each request is
+> background thread runs a tiny HTTP server on `127.0.0.1:<port>`; each request is
 > parsed into a `Cmd`, queued, and answered by the **main loop** on its next frame
 > (so nothing touches the GL context off-thread).
+
+## Port (per-branch, not fixed)
+
+The bridge no longer binds a fixed `8127` — so several branch checkouts / agent
+sessions can run in parallel without colliding. The port is picked by `port()`:
+
+1. `ANIMATA_DEV_PORT` env var if set (explicit override), else
+2. a STABLE port derived from the current git branch (FNV-1a → `49152..=65535`,
+   same branch ⇒ same port), else
+3. `8127` (not a git checkout).
+
+On bind the chosen port is written to **`.animata-dev-port`** in the cwd
+(gitignored, one per worktree). **Always read the port from that file — never
+assume 8127:**
+
+```sh
+PORT=$(cat .animata-dev-port)
+curl -s 127.0.0.1:$PORT -d '{"jsonrpc":"2.0","id":1,"method":"animata/status","params":null}'
+```
 
 ## Run
 
 ```sh
-cargo run --features dev          # opens the window + binds 127.0.0.1:8127
-source tools/dev/bridge.sh        # curl recipes (bstatus, bview, breseed, bshot…)
+cargo run -p animata --features dev   # opens the window + binds 127.0.0.1:$(cat .animata-dev-port)
+ANIMATA_DEV_PORT=51234 cargo run -p animata --features dev   # force a port
+source tools/dev/bridge.sh            # curl recipes (bstatus, bview, breseed, bshot…)
 ```
 
 ## Methods (`animata/*`)
@@ -29,7 +49,7 @@ source tools/dev/bridge.sh        # curl recipes (bstatus, bview, breseed, bshot
 Raw call:
 
 ```sh
-curl -s 127.0.0.1:8127 \
+curl -s 127.0.0.1:$(cat .animata-dev-port) \
   -d '{"jsonrpc":"2.0","id":1,"method":"animata/status","params":null}'
 ```
 
