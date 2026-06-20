@@ -436,7 +436,7 @@
         // Range of water surface levels present (for normalising the colour ramp).
         let (mut lo, mut hi) = (u8::MAX, 0u8);
         for i in 0..n {
-            let wl = t.water[i];
+            let wl = t.geo.water[i];
             if wl > 0 {
                 lo = lo.min(wl);
                 hi = hi.max(wl);
@@ -467,7 +467,7 @@
             (u8c(0.85), u8c(0.15), u8c(0.10))
         };
         dump_ppm("/tmp/dbg_water_height.ppm", COLS, ROWS, |x, y| {
-            let wl = t.water[y * COLS + x];
+            let wl = t.geo.water[y * COLS + x];
             if wl == 0 {
                 (u8c(0.12), u8c(0.12), u8c(0.13)) // dry land
             } else {
@@ -479,7 +479,7 @@
         let mut stack: Vec<usize> = Vec::new();
         // Count connected water bodies (4-connected over water_level > 0).
         for start in 0..n {
-            if t.water[start] == 0 || seen[start] {
+            if t.geo.water[start] == 0 || seen[start] {
                 continue;
             }
             bodies += 1;
@@ -493,7 +493,7 @@
                         continue;
                     }
                     let j = (ny * COLS as i32 + nx) as usize;
-                    if t.water[j] > 0 && !seen[j] {
+                    if t.geo.water[j] > 0 && !seen[j] {
                         seen[j] = true;
                         stack.push(j);
                     }
@@ -520,7 +520,7 @@
         let mut stack: Vec<usize> = Vec::new();
         let mut landlocked_ocean_cells = 0u64;
         for start in 0..n {
-            if t.water[start] == 0 || seen[start] {
+            if t.geo.water[start] == 0 || seen[start] {
                 continue;
             }
             stack.push(start);
@@ -528,7 +528,7 @@
             // Count SEA_ABS cells in this body; flag if the body ever touches the map edge.
             let (mut ocean_cells, mut touches_border) = (0u64, false);
             while let Some(i) = stack.pop() {
-                if t.water[i] == SEA_ABS {
+                if t.geo.water[i] == SEA_ABS {
                     ocean_cells += 1;
                 }
                 let (x, y) = ((i % COLS) as i32, (i / COLS) as i32);
@@ -540,7 +540,7 @@
                         continue;
                     }
                     let j = (ny * COLS as i32 + nx) as usize;
-                    if t.water[j] > 0 && !seen[j] {
+                    if t.geo.water[j] > 0 && !seen[j] {
                         seen[j] = true;
                         stack.push(j);
                     }
@@ -575,7 +575,7 @@
         let (mut landlocked_ocean_bodies, mut landlocked_ocean_cells) = (0u64, 0u64);
         let mut example = (0usize, 0usize, 0i32, 0i32);
         for start in 0..n {
-            if t.water[start] == 0 || seen[start] {
+            if t.geo.water[start] == 0 || seen[start] {
                 continue;
             }
             comp.clear();
@@ -585,10 +585,10 @@
             let (mut has_ocean, mut has_other, mut touches_border) = (false, false, false);
             while let Some(i) = stack.pop() {
                 comp.push(i);
-                let wl = t.water[i] as i32;
+                let wl = t.geo.water[i] as i32;
                 lo = lo.min(wl);
                 hi = hi.max(wl);
-                if t.water[i] == SEA_ABS {
+                if t.geo.water[i] == SEA_ABS {
                     has_ocean = true;
                 } else {
                     has_other = true;
@@ -602,7 +602,7 @@
                         continue;
                     }
                     let j = (ny * COLS as i32 + nx) as usize;
-                    if t.water[j] > 0 && !seen[j] {
+                    if t.geo.water[j] > 0 && !seen[j] {
                         seen[j] = true;
                         stack.push(j);
                     }
