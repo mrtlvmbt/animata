@@ -12,6 +12,7 @@ pub mod erosion;
 pub mod genome;
 pub mod grid;
 pub mod hydrology;
+pub mod metrics;
 pub mod pressure;
 pub mod rng;
 pub mod sim;
