@@ -20,6 +20,24 @@ fn params_set_and_pairs_round_trip() {
     assert_eq!(v, 0.5);
 }
 
+/// A partial RON file overrides only what it names; everything else stays at the default.
+#[test]
+fn from_ron_partial_falls_back_to_defaults() {
+    let cfg = SimConfig::from_ron("(features: (predation: false), params: (photo_rate: 5.0))").unwrap();
+    assert!(!cfg.features.predation, "predation override not applied");
+    assert!(cfg.features.climate, "unspecified feature must stay default-on");
+    assert_eq!(cfg.params.photo_rate, 5.0);
+    assert_eq!(cfg.params.thermal_penalty, Params::default().thermal_penalty, "unspecified param must stay default");
+}
+
+/// An empty RON document yields the full default config.
+#[test]
+fn from_ron_empty_is_default() {
+    let cfg = SimConfig::from_ron("()").unwrap();
+    assert!(cfg.features.pairs().iter().all(|(_, on)| *on));
+    assert_eq!(cfg.params.thermal_penalty, Params::default().thermal_penalty);
+}
+
 /// Defaults equal the `config.rs` constants (the golden config).
 #[test]
 fn defaults_match_constants() {

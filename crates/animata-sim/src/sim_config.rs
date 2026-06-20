@@ -14,7 +14,8 @@ use crate::config::{
 };
 
 /// Which simulation features are active. All default to `true`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Features {
     /// Climate stress on food value (temperature vs evolved preference). Off ⇒ `food_mult = 1`.
     pub climate: bool,
@@ -73,7 +74,8 @@ impl Features {
 
 /// Tunable numeric parameters (mirror of the `config.rs` constants used in the hot path). Defaults
 /// equal those constants, so `Params::default()` is bit-identical to the pre-config behaviour.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Params {
     /// Climate: how steeply food value falls with temperature mismatch.
     pub thermal_penalty: f32,
@@ -125,10 +127,19 @@ impl Params {
 }
 
 /// The full runtime config: feature flags + parameters. Default = all-on, constants — the golden.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct SimConfig {
     pub features: Features,
     pub params: Params,
+}
+
+impl SimConfig {
+    /// Parse a `SimConfig` from RON (e.g. `assets/config/sim.ron`). Missing fields fall back to the
+    /// defaults (the consts), so a file may specify only what it wants to override.
+    pub fn from_ron(s: &str) -> Result<Self, ron::error::SpannedError> {
+        ron::from_str(s)
+    }
 }
 
 #[cfg(test)]

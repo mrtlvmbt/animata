@@ -20,6 +20,7 @@ mod render;
 // needs these modules by name; the rest (genome/grid/rng/tectonics/erosion/hydrology) are internal
 // to the sim. `Vec2` comes from the same glam major macroquad re-exports, so types line up.
 use animata_sim::{clock, config, sim, terrain};
+use animata_sim::sim_config::SimConfig;
 #[cfg(feature = "dev")]
 use animata_sim::metrics::{MetricRegistry, MetricValue, SimView};
 
@@ -44,10 +45,22 @@ fn window_conf() -> Conf {
     }
 }
 
+// ---- Camera / input tuning (no more magic numbers smeared across the loop) ----
+/// Tightest zoom-in (smallest visible world height); the camera never zooms closer than this.
+const MIN_ZOOM: f32 = 8.0;
+/// Mouse-wheel zoom step — fraction of the current zoom per wheel notch.
+const ZOOM_STEP: f32 = 0.1;
+/// Keyboard pan speed factor (× zoom × dt) — pans faster when zoomed out.
+const PAN_SPEED: f32 = 0.5;
+/// Right-drag graze patch radius in columns (the debug clear-cut tool).
+const GRAZE_PATCH_R: i32 = 24;
+/// Whole-map zoom-out margin: the coarse tier covers all of it, so no empty edges however far out.
+const MAX_ZOOM_MARGIN: f32 = 1.2;
+
 /// Max zoom-out (visible world height): frame the whole map with margin — the coarse tier
 /// covers all of it, so there are no empty edges however far out you go.
 fn max_zoom() -> f32 {
-    COLS.max(ROWS) as f32 * VOX * 1.2
+    COLS.max(ROWS) as f32 * VOX * MAX_ZOOM_MARGIN
 }
 
 /// The ground-plane point (returned as `(x, z)`) under the mouse cursor: unproject the
@@ -166,9 +179,27 @@ async fn main() {
     let mut terrain: Option<VoxelTerrain> = None;
     let mut gen: Option<GenJob> = Some(spawn_gen(seed));
 
+    // The default sim config, loaded from assets/config/sim.ron (editable without a rebuild); falls
+    // back to the built-in default if the file is missing or malformed. Live dev-bridge changes
+    // apply on top until the next reseed.
+    let sim_cfg = match macroquad::file::load_string("assets/config/sim.ron").await {
+        Ok(s) => SimConfig::from_ron(&s).unwrap_or_else(|e| {
+            eprintln!("[config] assets/config/sim.ron: {e}; using defaults");
+            SimConfig::default()
+        }),
+        Err(_) => SimConfig::default(),
+    };
+
     // Chunk meshes are STREAMED around the camera (see `Streamer`) rather than all built
     // up front — the world model is fully resident but the meshes are not, so a ×16 map
     // stays within memory. The streamer fills in each frame from `terrain`.
+    // Shaders live in assets/shaders/ (editable without a rebuild); fall back to the copy baked in
+    // with `include_str!` if the asset isn't reachable (e.g. running outside the repo).
+    let chunk_vert = load_shader("assets/shaders/chunk.vert", include_str!("../../../assets/shaders/chunk.vert")).await;
+    let chunk_frag = load_shader("assets/shaders/chunk.frag", include_str!("../../../assets/shaders/chunk.frag")).await;
+    let water_vert = load_shader("assets/shaders/water.vert", include_str!("../../../assets/shaders/water.vert")).await;
+    let water_frag = load_shader("assets/shaders/water.frag", include_str!("../../../assets/shaders/water.frag")).await;
+
     let pipeline;
     let water_pipe;
     let mut streamer = Streamer::new();
@@ -176,8 +207,8 @@ async fn main() {
         let InternalGlContext {
             quad_context: ctx, ..
         } = unsafe { get_internal_gl() };
-        pipeline = chunk_pipeline(ctx);
-        water_pipe = water_pipeline(ctx);
+        pipeline = chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
+        water_pipe = water_pipeline(ctx, &water_vert, &water_frag);
     }
 
     // The scene is rendered into this offscreen target every frame, then blitted to
@@ -235,7 +266,7 @@ async fn main() {
         if let Some(job) = &gen {
             if let Ok(t) = job.rx.try_recv() {
                 // Seed the creature population from the new world (deterministic from its seed).
-                sim = Some(Sim::new(seed, &t));
+                sim = Some(Sim::with_config(seed, &t, sim_cfg));
                 terrain = Some(t);
                 gen = None;
                 let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
@@ -287,7 +318,7 @@ async fn main() {
             // Zoom toward the cursor: keep the ground point under the mouse fixed by
             // shifting the target by how much that point would otherwise move.
             let before = ground_under_cursor(&cam);
-            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * 0.1)).clamp(8.0, max_zoom());
+            cam.zoom = (cam.zoom * (1.0 - wheel.signum() * ZOOM_STEP)).clamp(MIN_ZOOM, max_zoom());
             let after = ground_under_cursor(&cam);
             cam.target.x += before.x - after.x;
             cam.target.z += before.y - after.y;
@@ -311,7 +342,7 @@ async fn main() {
             if let Some(t) = &mut terrain {
                 let g = ground_under_cursor(&cam);
                 let (gx, gy) = ((g.x / VOX).floor() as i32, (g.y / VOX).floor() as i32);
-                let r = 24i32;
+                let r = GRAZE_PATCH_R;
                 let tick = clock.tick();
                 for yy in (gy - r).max(0)..(gy + r).min(ROWS as i32) {
                     for xx in (gx - r).max(0)..(gx + r).min(COLS as i32) {
@@ -335,7 +366,7 @@ async fn main() {
             pan.y += 1.0;
         }
         if pan != Vec2::ZERO {
-            let speed = cam.zoom * dt * 0.5; // pan faster when zoomed out
+            let speed = cam.zoom * dt * PAN_SPEED; // pan faster when zoomed out
             let (c, s) = (cam.yaw.cos(), cam.yaw.sin());
             cam.target.x += (pan.x * c - pan.y * s) * speed;
             cam.target.z += (pan.x * s + pan.y * c) * speed;
@@ -450,7 +481,7 @@ async fn main() {
                         cam.target.z = v;
                     }
                     if let Some(v) = zoom {
-                        cam.zoom = v.clamp(8.0, max_zoom());
+                        cam.zoom = v.clamp(MIN_ZOOM, max_zoom());
                     }
                     if let Some(v) = yaw {
                         cam.yaw = v;
@@ -463,7 +494,7 @@ async fn main() {
                     seed = s.unwrap_or(seed.wrapping_add(1));
                     gen = None; // cancel any in-flight background regen — this wins
                     let t = VoxelTerrain::new(seed);
-                    sim = Some(Sim::new(seed, &t)); // re-seed the population from the new world
+                    sim = Some(Sim::with_config(seed, &t, sim_cfg)); // re-seed the population from the new world
                     terrain = Some(t);
                     let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                     streamer.clear(ctx);
@@ -774,6 +805,12 @@ fn capture_target(rt: &RenderTarget) -> Image {
         }
     }
     img
+}
+
+/// Load a shader from `assets/` at runtime (editable without a rebuild), falling back to the copy
+/// baked in with `include_str!` if the file isn't reachable.
+async fn load_shader(path: &str, baked: &str) -> String {
+    macroquad::file::load_string(path).await.unwrap_or_else(|_| baked.to_string())
 }
 
 /// The live `SimConfig` (features + params) as JSON, or `null` before the sim exists. Used by the
