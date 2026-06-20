@@ -15,3 +15,7 @@ glam = "0.27"
 # Data parallelism for the read-only decision phase of a tick. `par_iter().map().collect()` keeps
 # index order, so the result is bit-identical to the serial path (determinism preserved).
 rayon = "1"
+# Load the default SimConfig from `assets/config/sim.ron` (tune features/params without a rebuild).
+# Pure data — no effect on determinism; the headless path and tests still use `SimConfig::default()`.
+serde = { version = "1", features = ["derive"] }
+ron = "0.8"
