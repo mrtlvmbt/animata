@@ -1029,4 +1029,15 @@ fn perf_panel(ui: &mut egui::Ui, m: &SimMetrics) {
     kv(ui, "chunks · detail", format!("{}", m.detail));
     kv(ui, "chunks · coarse", format!("{}", m.coarse));
     kv(ui, "on-screen", format!("{}", m.on_screen));
+    // Per-phase sim timing — auto-iterated, so a new profiler span appears here with no UI change.
+    if !m.sim_phases.is_empty() {
+        ui.add_space(2.0);
+        hairline(ui);
+        caps_tracked(ui, "sim · phase ms", 9.0, 0.14, KEYCAP_TXT);
+        ui.add_space(4.0);
+        ui.spacing_mut().item_spacing.y = 9.0;
+        for (label, ms) in &m.sim_phases {
+            kv(ui, label, format!("{ms:.2}"));
+        }
+    }
 }

@@ -15,6 +15,7 @@ pub mod hydrology;
 pub mod metrics;
 pub mod persist;
 pub mod pressure;
+pub mod profile;
 pub mod rng;
 pub mod sim;
 pub mod sim_config;
