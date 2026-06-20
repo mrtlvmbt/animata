@@ -439,7 +439,6 @@ async fn main() {
                     niches: s.niche_coverage(t) as u64,
                     allop: s.thermal_correlation(t),
                     crypsis: s.crypsis_correlation(t),
-                    nutri: s.avg_nutrient(t, clock.tick()),
                     strata: sm,
                 })
             }
@@ -829,6 +828,32 @@ async fn main() {
                         ui_state.debug_view = if tp { DebugView::Topo } else { DebugView::None };
                     }
                     let _ = reply.send(serde_json::json!({"water": ui_state.water_on, "topo": ui_state.debug_view == DebugView::Topo}));
+                }
+                dev_bridge::Cmd::SetPanel { panel, debug, show_info } => {
+                    if let Some(p) = panel {
+                        ui_state.open_panel = match p.as_str() {
+                            "world" => Some(ui::Panel::World),
+                            "view" => Some(ui::Panel::View),
+                            "pop" => Some(ui::Panel::Pop),
+                            "perf" => Some(ui::Panel::Perf),
+                            _ => None,
+                        };
+                    }
+                    if let Some(d) = debug {
+                        ui_state.debug_view = match d.as_str() {
+                            "topo" => DebugView::Topo,
+                            "temp" => DebugView::Temp,
+                            "moist" => DebugView::Moist,
+                            "waterdist" => DebugView::WaterDist,
+                            "slope" => DebugView::Slope,
+                            "biomass" => DebugView::Biomass,
+                            _ => DebugView::None,
+                        };
+                    }
+                    if let Some(si) = show_info {
+                        ui_state.show_info = si;
+                    }
+                    let _ = reply.send(serde_json::json!({"ok": true}));
                 }
                 dev_bridge::Cmd::Screenshot { path, window } => {
                     pending_shots.push((path, window, reply)); // serviced post-draw below

@@ -71,7 +71,6 @@ pub struct LifeStats {
     pub niches: u64,
     pub allop: f32,
     pub crypsis: f32,
-    pub nutri: f32,
     pub strata: [f32; 4],
 }
 
@@ -124,9 +123,10 @@ pub(crate) fn legend_text(view: DebugView) -> &'static str {
 }
 
 /// Horizontal gradient strip painted from the SAME ramp math as `build_field_minimap`
-/// (water special-cases omitted — this is just the colour legend).
-pub(crate) fn legend_bar(ui: &mut egui::Ui, view: DebugView) {
-    let (w, h) = (180.0, 12.0);
+/// (water special-cases omitted — this is just the colour legend). `h` is the bar height (mockup:
+/// 9px in a flyout, 7px under the minimap); width fills the available space.
+pub(crate) fn legend_bar(ui: &mut egui::Ui, view: DebugView, h: f32) {
+    let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::hover());
     let painter = ui.painter();
     let n = 48usize;

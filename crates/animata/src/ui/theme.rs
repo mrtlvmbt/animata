@@ -22,8 +22,9 @@ pub const PANEL_STROKE: Color32 = straight(255, 255, 255, 26); // 0.10 edge
 pub const HAIRLINE: Color32 = straight(255, 255, 255, 26); // dividers
 
 pub const TEXT: Color32 = Color32::from_rgb(233, 236, 230); // primary
-pub const TEXT_DIM: Color32 = straight(233, 236, 230, 158); // secondary
-pub const TEXT_FAINT: Color32 = straight(233, 236, 230, 115); // caps labels
+pub const TEXT_DIM: Color32 = straight(233, 236, 230, 158); // secondary (.62)
+pub const TEXT_LABEL: Color32 = straight(233, 236, 230, 140); // flyout kv labels / done-step (.55)
+pub const TEXT_FAINT: Color32 = straight(233, 236, 230, 115); // caps labels (.45)
 
 pub const ACCENT: Color32 = Color32::from_rgb(242, 166, 75); // amber — active states
 pub const ACCENT_TEXT: Color32 = Color32::from_rgb(244, 184, 106); // amber text on dark
@@ -52,25 +53,105 @@ pub fn sans(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Proportional)
 }
 
-// ---- frames ----
-pub fn panel_frame() -> Frame {
-    Frame {
-        inner_margin: Margin::symmetric(16, 12),
-        fill: PANEL_BG,
-        stroke: Stroke::new(1.0, PANEL_STROKE),
-        corner_radius: CornerRadius::same(13),
-        shadow: Shadow {
-            offset: [0, 10],
-            blur: 34,
-            spread: 0,
-            color: Color32::from_black_alpha(102),
-        },
-        ..Default::default()
+/// CSS `em` letter-spacing → pixels for a given font size (e.g. `.16em` at 9px = 1.44px).
+pub fn tracking_em(size: f32, em: f32) -> f32 {
+    size * em
+}
+
+/// Paint `text` with CSS-style letter-spacing (egui has no native tracking). Glyphs are laid out
+/// one-by-one using each glyph's advance + `tracking` px; `align` positions the whole run around
+/// `pos` (horizontal: Min/Center/Max; vertical handed to each glyph). Shared by the HUD caps and the
+/// loader. `total_tracked_width` returns the run width so callers can pre-allocate layout space.
+pub fn total_tracked_width(ui: &egui::Ui, text: &str, font: &egui::FontId, tracking: f32) -> f32 {
+    let n = text.chars().count();
+    let sum: f32 = text
+        .chars()
+        .map(|c| ui.ctx().fonts(|f| f.glyph_width(font, c)))
+        .sum();
+    sum + tracking * n.saturating_sub(1) as f32
+}
+
+pub fn paint_tracked(
+    ui: &egui::Ui,
+    pos: egui::Pos2,
+    align: egui::Align2,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    tracking: f32,
+) {
+    let widths: Vec<f32> = text
+        .chars()
+        .map(|c| ui.ctx().fonts(|f| f.glyph_width(&font, c)))
+        .collect();
+    let total: f32 = widths.iter().sum::<f32>() + tracking * widths.len().saturating_sub(1) as f32;
+    let start_x = match align.x() {
+        egui::Align::Min => pos.x,
+        egui::Align::Center => pos.x - total / 2.0,
+        egui::Align::Max => pos.x - total,
+    };
+    let glyph_align = egui::Align2([egui::Align::Min, align.y()]);
+    let painter = ui.painter();
+    let mut x = start_x;
+    for (c, w) in text.chars().zip(widths) {
+        painter.text(egui::pos2(x, pos.y), glyph_align, c, font.clone(), color);
+        x += w + tracking;
     }
 }
 
-pub fn flyout_frame() -> Frame {
-    panel_frame().fill(PANEL_BG_STRONG)
+// ---- frames ----
+/// Which floating panel a [`themed_frame`] dresses. One source of truth for the per-panel
+/// padding / radius / fill / shadow (mockup §2): glass panels differ only by these.
+#[derive(Clone, Copy)]
+pub enum FrameKind {
+    Vitals,    // top-left + (with margin override) minimap: r13, pad 10×16, glass .72
+    Rail,      // control rail: r14, pad 7
+    Transport, // bottom-left transport: r14, pad 9×14, stronger glass .74
+    Flyout,    // detail flyouts: r14, pad 16×18, stronger glass .74
+}
+
+pub fn themed_frame(kind: FrameKind) -> Frame {
+    // (inner_margin, radius, fill, shadow offset.y, shadow blur, shadow alpha)
+    let (margin, radius, fill, off, blur, sa) = match kind {
+        FrameKind::Vitals => (
+            Margin { left: 16, right: 16, top: 10, bottom: 10 },
+            13,
+            PANEL_BG,
+            10,
+            34,
+            102, // .40
+        ),
+        FrameKind::Rail => (Margin::same(7), 14, PANEL_BG, 10, 34, 102),
+        FrameKind::Transport => (
+            Margin { left: 14, right: 14, top: 9, bottom: 9 },
+            14,
+            PANEL_BG_STRONG,
+            12,
+            38,
+            115, // .45
+        ),
+        FrameKind::Flyout => (
+            Margin { left: 18, right: 18, top: 16, bottom: 16 },
+            14,
+            PANEL_BG_STRONG,
+            14,
+            40,
+            115,
+        ),
+    };
+    Frame {
+        inner_margin: margin,
+        fill,
+        stroke: Stroke::new(1.0, PANEL_STROKE),
+        corner_radius: CornerRadius::same(radius),
+        shadow: Shadow {
+            offset: [0, off],
+            blur,
+            spread: 0,
+            color: Color32::from_black_alpha(sa),
+        },
+        ..Default::default()
+    }
 }
 
 /// Register IBM Plex Sans (proportional) + Mono + the Phosphor icon glyphs. Call ONCE; egui keeps
