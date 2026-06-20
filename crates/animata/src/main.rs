@@ -20,6 +20,7 @@ mod render;
 // needs these modules by name; the rest (genome/grid/rng/tectonics/erosion/hydrology) are internal
 // to the sim. `Vec2` comes from the same glam major macroquad re-exports, so types line up.
 use animata_sim::{clock, config, sim, terrain};
+use animata_sim::persist::Snapshot;
 use animata_sim::sim_config::SimConfig;
 #[cfg(feature = "dev")]
 use animata_sim::metrics::{MetricRegistry, MetricValue, SimView};
@@ -54,8 +55,74 @@ const ZOOM_STEP: f32 = 0.1;
 const PAN_SPEED: f32 = 0.5;
 /// Right-drag graze patch radius in columns (the debug clear-cut tool).
 const GRAZE_PATCH_R: i32 = 24;
+/// Time-scale keys (`[` slower / `]` faster): multiplicative step and the clamp range. The real
+/// ceiling is `MAX_SUBSTEPS` (the per-frame sim-step cap) — past ~24–48× (30–60 fps) extra scale just
+/// drops backlog instead of simulating faster — so this cap sits above that, not as the limiter.
+const TIME_SCALE_STEP: f32 = 1.5;
+const MIN_TIME_SCALE: f32 = 0.1;
+const MAX_TIME_SCALE: f32 = 64.0;
 /// Whole-map zoom-out margin: the coarse tier covers all of it, so no empty edges however far out.
 const MAX_ZOOM_MARGIN: f32 = 1.2;
+// ---- Creature LOD (zoom-aware: individuals up close, bacterial mats when zoomed out) ----
+/// Body radius in METRES per √(biomass cells). A single cell (biomass 1) ≈ this radius — the
+/// documented creature scale is ~0.12 m (mouse-sized; see `config.rs` density contract), so a lone
+/// microbe is a sub-decimetre speck that shrinks with zoom instead of a fixed fat pixel.
+const CREATURE_RADIUS_M: f32 = 0.06;
+/// Legibility floor (px) for an individual dot when zoomed in, so a lone microbe stays clickable.
+const CREATURE_MIN_PX: f32 = 1.0;
+/// LOD switch: below this many pixels-per-metre (zoomed out) individuals fall sub-pixel, so we draw
+/// per-column bacterial-mat coverage instead of dots.
+const LOD_MAT_PX_PER_M: f32 = 4.0;
+/// Colony density (creatures in a column) at which a mat tile reaches its peak opacity.
+const MAT_FULL_COUNT: f32 = 6.0;
+/// Opacity ceiling of a mat tile, so terrain stays faintly readable under a dense colony.
+const MAT_MAX_ALPHA: f32 = 0.85;
+/// Default save file (cwd) for the `F5`/`F9` quick-save keys and the path-less dev-bridge save/load.
+const SAVE_PATH: &str = "animata-save.bin";
+
+/// Write a full-state snapshot of the running world to `path` (geometry is regenerated from the seed
+/// on load, so only the creatures + terrain overlay + tick are stored). Human-readable error on fail.
+fn save_world(
+    path: &str,
+    seed: u64,
+    tick: u64,
+    sim: &Sim,
+    terrain: &VoxelTerrain,
+) -> Result<(), String> {
+    let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    Snapshot::new(seed, tick, sim.to_state(), terrain.clone_state())
+        .write(std::io::BufWriter::new(f))
+}
+
+/// Read a snapshot from `path` (does not yet apply it — the caller regenerates terrain from the
+/// snapshot's seed and restores the state).
+fn load_snapshot(path: &str) -> Result<Snapshot, String> {
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    Snapshot::read(std::io::BufReader::new(f))
+}
+
+/// Apply a loaded snapshot: regenerate terrain geometry from the saved seed, restore the overlay +
+/// creatures + config + clock tick, returning the restored tick. The caller resets the mesh streamer
+/// (which needs the GL context). On a size mismatch the world is left untouched (nothing is moved
+/// before the check passes).
+fn apply_snapshot(
+    snap: Snapshot,
+    seed: &mut u64,
+    sim_cfg: &mut SimConfig,
+    sim: &mut Option<Sim>,
+    terrain: &mut Option<VoxelTerrain>,
+    clock: &mut WorldClock,
+) -> Result<u64, String> {
+    let mut t = VoxelTerrain::new(snap.terrain_seed);
+    t.set_state(snap.terrain)?; // size-checked; nothing below mutates state if this fails
+    let tick = snap.tick;
+    *seed = snap.terrain_seed;
+    *sim_cfg = snap.sim.cfg;
+    *sim = Some(Sim::from_state(snap.sim));
+    clock.set_tick(tick);
+    *terrain = Some(t);
+    Ok(tick)
+}
 
 /// Max zoom-out (visible world height): frame the whole map with margin — the coarse tier
 /// covers all of it, so there are no empty edges however far out you go.
@@ -182,7 +249,7 @@ async fn main() {
     // The default sim config, loaded from assets/config/sim.ron (editable without a rebuild); falls
     // back to the built-in default if the file is missing or malformed. Live dev-bridge changes
     // apply on top until the next reseed.
-    let sim_cfg = match macroquad::file::load_string("assets/config/sim.ron").await {
+    let mut sim_cfg = match macroquad::file::load_string("assets/config/sim.ron").await {
         Ok(s) => SimConfig::from_ron(&s).unwrap_or_else(|e| {
             eprintln!("[config] assets/config/sim.ron: {e}; using defaults");
             SimConfig::default()
@@ -306,6 +373,40 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::P) {
             clock.paused = !clock.paused;
+        }
+        // Time speed: `[` slows, `]` speeds (multiplicative, clamped). Same `time_scale` the
+        // dev-bridge `set_timescale` drives — handy without curl.
+        if is_key_pressed(KeyCode::LeftBracket) {
+            clock.time_scale = (clock.time_scale / TIME_SCALE_STEP).max(MIN_TIME_SCALE);
+        }
+        if is_key_pressed(KeyCode::RightBracket) {
+            clock.time_scale = (clock.time_scale * TIME_SCALE_STEP).min(MAX_TIME_SCALE);
+        }
+        // Quick-save (`F5`) / quick-load (`F9`) the whole world to/from `SAVE_PATH`. Load is
+        // synchronous (regenerates terrain geometry from the saved seed, then restores the overlay +
+        // creatures + tick) — a brief hitch on the ×16 map, like a dev-bridge reseed.
+        if is_key_pressed(KeyCode::F5) {
+            match (sim.as_ref(), terrain.as_ref()) {
+                (Some(s), Some(t)) => match save_world(SAVE_PATH, seed, clock.tick(), s, t) {
+                    Ok(()) => eprintln!("[save] wrote {SAVE_PATH} at tick {}", clock.tick()),
+                    Err(e) => eprintln!("[save] failed: {e}"),
+                },
+                _ => eprintln!("[save] world not ready"),
+            }
+        }
+        if is_key_pressed(KeyCode::F9) {
+            match load_snapshot(SAVE_PATH) {
+                Ok(snap) => match apply_snapshot(snap, &mut seed, &mut sim_cfg, &mut sim, &mut terrain, &mut clock) {
+                    Ok(tick) => {
+                        gen = None; // cancel any in-flight regen — the load wins
+                        let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+                        streamer.clear(ctx);
+                        eprintln!("[load] restored {SAVE_PATH} at tick {tick}");
+                    }
+                    Err(e) => eprintln!("[load] failed: {e}"),
+                },
+                Err(e) => eprintln!("[load] failed: {e}"),
+            }
         }
         if is_key_pressed(KeyCode::J) {
             mask = !mask;
@@ -550,6 +651,34 @@ async fn main() {
                 dev_bridge::Cmd::Metrics { id, last } => {
                     let _ = reply.send(metrics_json(&metrics, id.as_deref(), last));
                 }
+                dev_bridge::Cmd::Save { path } => {
+                    let p = path.unwrap_or_else(|| SAVE_PATH.to_string());
+                    let resp = match (sim.as_ref(), terrain.as_ref()) {
+                        (Some(s), Some(t)) => match save_world(&p, seed, clock.tick(), s, t) {
+                            Ok(()) => serde_json::json!({ "ok": true, "saved": p, "tick": clock.tick() }),
+                            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+                        },
+                        _ => serde_json::json!({ "ok": false, "error": "world not ready" }),
+                    };
+                    let _ = reply.send(resp);
+                }
+                dev_bridge::Cmd::Load { path } => {
+                    let p = path.unwrap_or_else(|| SAVE_PATH.to_string());
+                    // Synchronous (like Reseed): scripted inspection expects the loaded world to be
+                    // present on the reply.
+                    let resp = match load_snapshot(&p)
+                        .and_then(|snap| apply_snapshot(snap, &mut seed, &mut sim_cfg, &mut sim, &mut terrain, &mut clock))
+                    {
+                        Ok(tick) => {
+                            gen = None; // cancel any in-flight regen — the load wins
+                            let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
+                            streamer.clear(ctx);
+                            serde_json::json!({ "ok": true, "loaded": p, "tick": tick, "seed": seed })
+                        }
+                        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+                    };
+                    let _ = reply.send(resp);
+                }
             }
         }
 
@@ -654,33 +783,69 @@ async fn main() {
             },
         );
 
-        // Creatures: LOD dots over the blitted scene (C0). Project each creature's column-top
-        // world point through the same camera matrix; draw a small dot, tinted by lineage so
-        // clusters are visible. Off-screen ones are culled by the projection.
+        // Creatures: zoom-aware LOD over the blitted scene. Close in, draw INDIVIDUALS sized in
+        // world metres (a single-cell microbe is a sub-metre speck that shrinks as the camera pulls
+        // back — not a fixed fat pixel). Past a zoom-out threshold an individual falls below a pixel,
+        // so we switch to BACTERIAL MATS: per-column density tinted by the colony's mean coloration
+        // (dense colony → solid mat, sparse → faint film). Off-screen points are culled by projection.
         let mut on_screen = 0usize;
         if let (Some(sim), Some(terrain)) = (sim.as_ref(), terrain.as_ref()) {
             let (sw, sh) = (screen_width(), screen_height());
-            for c in &sim.creatures {
-                let (cx, cy) = sim::column_index(c.pos);
-                let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
-                let clip = vp * vec4(c.pos.x, wy, c.pos.y, 1.0);
+            let px_per_m = sh / cam.zoom; // ortho: visible world-height = zoom
+            // Project a world point on a column top to screen px; None if behind/off-screen.
+            let project = |wx: f32, wz: f32, wy: f32| -> Option<(f32, f32)> {
+                let clip = vp * vec4(wx, wy, wz, 1.0);
                 if clip.w <= 0.0 {
-                    continue;
+                    return None;
                 }
                 let (nx, ny) = (clip.x / clip.w, clip.y / clip.w);
                 if !(-1.0..=1.0).contains(&nx) || !(-1.0..=1.0).contains(&ny) {
-                    continue;
+                    return None;
                 }
-                let (px, py) = ((nx * 0.5 + 0.5) * sw, (1.0 - (ny * 0.5 + 0.5)) * sh);
-                // Fill = the creature's evolved coloration (greyscale, dark..light) so camouflage
-                // is visible: cryptic creatures blend into their biome, conspicuous ones stand out.
-                // A thin dark ring keeps even a light dot legible over any terrain.
-                let g = c.coloration();
-                // Dot size grows with body size (√biomass) so multicellular creatures read bigger.
-                let r = 2.0 + 1.2 * (c.biomass() as f32).sqrt();
-                draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
-                draw_circle(px, py, r, Color::new(g, g, g, 1.0));
-                on_screen += 1;
+                Some(((nx * 0.5 + 0.5) * sw, (1.0 - (ny * 0.5 + 0.5)) * sh))
+            };
+            if px_per_m >= LOD_MAT_PX_PER_M {
+                // INDIVIDUALS — world-scaled dots. Fill = evolved coloration (greyscale) so
+                // camouflage stays visible; a thin dark ring keeps a light dot legible.
+                for c in &sim.creatures {
+                    let (cx, cy) = sim::column_index(c.pos);
+                    let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
+                    let Some((px, py)) = project(c.pos.x, c.pos.y, wy) else {
+                        continue;
+                    };
+                    let g = c.coloration();
+                    // Body radius in metres (√biomass) → pixels; a floor keeps a lone microbe clickable.
+                    let r =
+                        (CREATURE_RADIUS_M * (c.biomass() as f32).sqrt() * px_per_m).max(CREATURE_MIN_PX);
+                    draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
+                    draw_circle(px, py, r, Color::new(g, g, g, 1.0));
+                    on_screen += 1;
+                }
+            } else {
+                // BACTERIAL MATS — aggregate creatures per column (count + summed coloration), then
+                // draw one coverage tile per occupied column: alpha ramps with colony density,
+                // greyscale = the colony's mean coloration. Adjacent dense columns tile into a mat.
+                let mut bucket: std::collections::HashMap<(usize, usize), (u32, f32)> =
+                    std::collections::HashMap::new();
+                for c in &sim.creatures {
+                    let (cx, cy) = sim::column_index(c.pos);
+                    let e = bucket.entry((cx, cy)).or_insert((0, 0.0));
+                    e.0 += 1;
+                    e.1 += c.coloration();
+                }
+                let tile = (VOX * px_per_m).max(1.0); // a column footprint in px
+                for ((cx, cy), (count, colsum)) in bucket {
+                    let wx = (cx as f32 + 0.5) * VOX;
+                    let wz = (cy as f32 + 0.5) * VOX;
+                    let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
+                    let Some((px, py)) = project(wx, wz, wy) else {
+                        continue;
+                    };
+                    let g = colsum / count as f32; // mean coloration of the colony
+                    let a = (count as f32 / MAT_FULL_COUNT).min(MAT_MAX_ALPHA);
+                    draw_rectangle(px - tile * 0.5, py - tile * 0.5, tile, tile, Color::new(g, g, g, a));
+                    on_screen += count as usize;
+                }
             }
         }
 
