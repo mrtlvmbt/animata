@@ -10,6 +10,39 @@ fn founder_develops_to_one_structural_cell() {
     let p = g.develop();
     assert_eq!(p, Phenotype { n_cells: 1, structural: 1, ..Default::default() });
     assert_eq!(p.complexity(), 0);
+    // C0 organ anchor (determinism-critical): a single cell has NO coherent organ, so organ_power
+    // reduces to the raw count and the founder's stats are unchanged by morphogenesis.
+    assert_eq!(p.organ, [0; 7], "a single-cell founder must carry no organ");
+    assert_eq!(p.organ_power(0), 0.0, "founder effector power must be the bare count (no organ bonus)");
+}
+
+/// `organ_power` is monotone in BOTH cell count and organ coherence: adding a cell of the type, or
+/// growing its largest cluster, never LOWERS the type's power. This is the no-fitness-valley
+/// guarantee — the climb from scattered cells to a coherent organ is a smooth selective gradient,
+/// never a cliff a lineage must leap.
+#[test]
+fn organ_power_is_monotone() {
+    let pheno = |count: u32, organ0: u8| Phenotype { effector: count, organ: [organ0, 0, 0, 0, 0, 0, 0], ..Default::default() };
+    // Monotone in count (organ fixed).
+    for o in 0u8..=12 {
+        for c in 0u32..24 {
+            assert!(
+                pheno(c + 1, o).organ_power(0) >= pheno(c, o).organ_power(0),
+                "power dropped when count rose (count {c}, organ {o})"
+            );
+        }
+    }
+    // Monotone in organ coherence (count fixed).
+    for c in 1u32..24 {
+        for o in 0u8..12 {
+            assert!(
+                pheno(c, o + 1).organ_power(0) >= pheno(c, o).organ_power(0),
+                "power dropped when the organ grew (count {c}, organ {o})"
+            );
+        }
+    }
+    // A coherent organ strictly beats the same cells scattered.
+    assert!(pheno(4, 4).organ_power(0) > pheno(4, 1).organ_power(0), "a coherent organ must beat scattered cells");
 }
 
 /// Development is bounded and deterministic for any genome (cost + replay).
