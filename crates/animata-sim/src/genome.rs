@@ -129,6 +129,10 @@ pub struct Genome {
     /// detects prey with a probability rising with the CONTRAST between this and the local
     /// ground tone, so matching the background (crypsis / camouflage) lowers predation (C3).
     pub coloration: f32,
+    /// Tolerance `[0,1]` to environmental toxicity (heavy metals / pollutants in the ground). A
+    /// creature standing on ground more toxic than its tolerance suffers an extra death hazard, so
+    /// toxic regions select for resistant lineages (a habitat filter on a new abiotic axis).
+    pub toxin_resistance: f32,
 }
 
 impl Genome {
@@ -141,6 +145,7 @@ impl Genome {
             brain: (0..BRAIN_WEIGHTS).map(|_| rng.signed()).collect(),
             thermal_pref: rng.unit(),
             coloration: rng.unit(),
+            toxin_resistance: rng.unit(),
         }
     }
 
@@ -158,6 +163,7 @@ impl Genome {
             brain: m(&self.brain, brain_std, rng),
             thermal_pref: (self.thermal_pref + rng.signed() * grn_std).clamp(0.0, 1.0),
             coloration: (self.coloration + rng.signed() * grn_std).clamp(0.0, 1.0),
+            toxin_resistance: (self.toxin_resistance + rng.signed() * grn_std).clamp(0.0, 1.0),
         }
     }
 
@@ -251,6 +257,7 @@ impl Genome {
         }
         crate::rng::fnv_fold_u32(&mut h, self.thermal_pref.to_bits());
         crate::rng::fnv_fold_u32(&mut h, self.coloration.to_bits());
+        crate::rng::fnv_fold_u32(&mut h, self.toxin_resistance.to_bits());
         h
     }
 }

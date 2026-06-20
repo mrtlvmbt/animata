@@ -42,6 +42,10 @@ const DETAIL_WEIGHT: f32 = 0.34;
 /// biome (desert↔plains↔forest). Scaled by `MAP_SCALE` so moisture regions are big.
 const MOIST_LATTICE: f32 = 21.0 * MAP_SCALE as f32;
 const MOIST_OCTAVES: u32 = 3;
+/// Ground toxicity field (heavy metals / pollutants), an independent abiotic axis the sim reads:
+/// big smooth regions (its own noise lattice) so a toxic belt is a coherent habitat filter. `[0,1]`.
+const TOXIC_LATTICE: f32 = 18.0 * MAP_SCALE as f32;
+const TOXIC_OCTAVES: u32 = 3;
 /// Temperature: warm at the equator (map middle), cold toward the poles (map top/bottom)
 /// and cold with altitude. With moisture this drives a Whittaker biome matrix. The
 /// latitude band is wiggled by noise so biome belts aren't ruler-straight.
@@ -347,6 +351,9 @@ pub struct TerrainGeo {
     /// `temp`: 0 cold .. 1 hot. `moist`: 0 dry .. 1 wet. Present for every column.
     temp: Vec<u8>,
     moist: Vec<u8>,
+    /// Ground toxicity per column, quantised `[0,1]→[0,255]` — an abiotic axis (heavy metals /
+    /// pollutants) selecting for `toxin_resistance`. Geometry-fixed after worldgen.
+    toxicity: Vec<u8>,
     /// Chebyshev-ish BFS distance (in columns, 4-connectivity) to the nearest water column,
     /// saturating at 255. `0` on water itself; the gradient near a shore is exact (far inland
     /// plateaus all read the 255 floor — fine for the sim's "far = far").
@@ -532,6 +539,7 @@ impl VoxelTerrain {
         let mut water = vec![0u8; n];
         let mut temp = vec![0u8; n];
         let mut moist = vec![0u8; n];
+        let mut toxicity = vec![0u8; n];
         let mut biomass = vec![0u8; n];
         let mut nutrient = vec![0u8; n];
         for y in 0..ROWS {
@@ -540,6 +548,10 @@ impl VoxelTerrain {
                 let (mut s, mut b, ct, cm) = classify(seed, x, y, elev[i]);
                 temp[i] = quant_unit(ct);
                 moist[i] = quant_unit(cm);
+                // Toxicity: a coherent noise field, squared so MOST ground is benign and toxic
+                // belts are the minority (a real habitat filter, not a uniform haze).
+                let tox = fbm(seed, x as f32 / TOXIC_LATTICE, y as f32 / TOXIC_LATTICE, 707, TOXIC_OCTAVES);
+                toxicity[i] = quant_unit(tox * tox);
                 let mut f = 0u8;
                 // Water priority on connectivity, not absolute height: ocean (sea-connected)
                 // wins, else a depression lake, else a river. `hydro` already cleared lake/river
@@ -653,7 +665,7 @@ impl VoxelTerrain {
             seed,
             chunks_x: COLS.div_ceil(CHUNK),
             chunks_y: ROWS.div_ceil(CHUNK),
-            geo: Arc::new(TerrainGeo { surf, biome, flags, water, temp, moist, water_dist }),
+            geo: Arc::new(TerrainGeo { surf, biome, flags, water, temp, moist, toxicity, water_dist }),
             state: TerrainState {
                 biomass,
                 last_update: vec![0u32; n],
@@ -736,6 +748,10 @@ impl VoxelTerrain {
     /// Moisture in `[0,1]` (0 dry .. 1 wet) at a column. De-quantised from the `u8` field.
     pub fn moisture_at(&self, x: usize, y: usize) -> f32 {
         self.geo.moist[y * COLS + x] as f32 / 255.0
+    }
+    /// Ground toxicity in `[0,1]` at a column (heavy metals / pollutants). De-quantised.
+    pub fn toxicity_at(&self, x: usize, y: usize) -> f32 {
+        self.geo.toxicity[y * COLS + x] as f32 / 255.0
     }
     /// Distance (in columns) to the nearest water, saturating at 255. `0` on water.
     pub fn water_dist_at(&self, x: usize, y: usize) -> u8 {

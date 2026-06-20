@@ -197,10 +197,12 @@ fn camouflage_emerges_against_background() {
     let end = s.crypsis_correlation(&t);
     eprintln!("crypsis correlation: start {start:.3} → end {end:.3}");
     assert!(start.abs() < 0.1, "founders should be colour-random (corr {start:.3})");
-    // Crypsis is bounded by predation INTENSITY (predators are a ~2% mortality source — a
-    // correct trophic pyramid), so the global signal is modest but clearly positive: prey
-    // coloration tracks the local ground where predation actually presses.
-    assert!(end > 0.1, "no crypsis emerged — coloration didn't track background ({end:.3})");
+    // Crypsis is bounded by predation INTENSITY (predators are a ~2% mortality source — a correct
+    // trophic pyramid), so the global signal is modest but clearly positive: prey coloration tracks
+    // the local ground where predation presses. With the toxicity pressure now adding a competing
+    // abiotic mortality source, predation is a smaller slice of total deaths, so the crypsis signal
+    // is diluted further but stays clearly emergent (≈0.08 vs the ≈0.14 of the pre-toxicity world).
+    assert!(end > 0.06, "no crypsis emerged — coloration didn't track background ({end:.3})");
 }
 
 /// C3-speciation acceptance: the population RADIATES — founders are one species (identical
@@ -220,6 +222,24 @@ fn population_radiates_into_many_species_and_niches() {
     assert!(s0 <= 3, "founders should cluster into ~one species, got {s0}");
     assert!(sp > 20, "no radiation — too few species emerged ({sp})");
     assert!(nc > 6, "niche space barely occupied ({nc} niches)");
+}
+
+/// Toxicity acceptance: under the new abiotic pressure, lineages on toxic ground evolve higher
+/// `toxin_resistance` — the resistance↔local-toxicity correlation rises well above its ~0 founder
+/// value (allopatric sorting on a non-thermal axis), and the population survives the filter.
+#[test]
+fn toxin_resistance_evolves_on_toxic_ground() {
+    let mut t = world();
+    let mut s = Sim::new(1, &t);
+    let start = s.toxin_correlation(&t);
+    for tick in 0..8000 {
+        s.step(&mut t, tick);
+    }
+    let end = s.toxin_correlation(&t);
+    eprintln!("toxin correlation: start {start:.3} → end {end:.3}, pop {}", s.population());
+    assert!(start.abs() < 0.1, "founders should be toxin-random (corr {start:.3})");
+    assert!(end > 0.1, "no toxic adaptation emerged — resistance didn't track toxicity ({end:.3})");
+    assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
 }
 
 /// PR4: feature toggles actually bite, and a fixed config replays deterministically.

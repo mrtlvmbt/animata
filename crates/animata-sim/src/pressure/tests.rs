@@ -5,7 +5,7 @@ use crate::sim::Stratum;
 use crate::sim_config::Params;
 
 fn sample_with<'a>(layer: Stratum, temperature: f32, light: f32, genome: &'a Genome, pheno: &'a Phenotype) -> Sample<'a> {
-    Sample { pheno, genome, layer, temperature, light, autotroph_shading: 1.0 }
+    Sample { pheno, genome, layer, temperature, light, toxicity: 0.0, autotroph_shading: 1.0 }
 }
 
 fn climate() -> climate::Climate {
@@ -66,4 +66,26 @@ fn default_registry_lists_pressures() {
     assert!(ids.contains(&"climate"));
     assert!(ids.contains(&"autotrophy"));
     assert!(ids.contains(&"metabolism"));
+    assert!(ids.contains(&"toxicity"));
+}
+
+/// Toxicity writes `mortality_add` only when ground toxicity exceeds the creature's resistance.
+#[test]
+fn toxicity_hazard_scales_with_unresisted_excess() {
+    let mut rng = Rng::new(3);
+    let genome = Genome::founder(&mut rng); // toxin_resistance ∈ [0,1]
+    let pheno = genome.develop();
+    let tox = toxicity::Toxicity { lethality: Params::default().toxin_lethality };
+
+    // Ground cleaner than the creature's resistance ⇒ no hazard, all channels identity.
+    let mut clean = sample_with(Stratum::Surface, 0.0, 1.0, &genome, &pheno);
+    clean.toxicity = (genome.toxin_resistance - 0.2).max(0.0);
+    assert_eq!(tox.eval(&clean).mortality_add, 0.0);
+
+    // Ground more toxic than resistance ⇒ a positive hazard, growing with the excess.
+    let mut dirty = sample_with(Stratum::Surface, 0.0, 1.0, &genome, &pheno);
+    dirty.toxicity = (genome.toxin_resistance + 0.5).min(1.0);
+    let e = tox.eval(&dirty);
+    assert!(e.mortality_add > 0.0, "toxic ground must add a death hazard");
+    assert!(e.food_mult == 1.0 && e.energy_add == 0.0, "toxicity only touches mortality");
 }
