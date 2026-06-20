@@ -23,7 +23,7 @@ pub const DEV_STEPS: usize = 10;
 /// Hard cap on cells per body (bounds dev cost AND the per-tick brain/biomass cost).
 pub const MAX_CELLS: usize = 32;
 
-// Gene roles (the rest, 9..G, are free regulatory genes the GRN can use as it likes).
+// Gene roles (gene 9 is GENE_ADHESION; none free now at G=10).
 const GENE_DIVIDE: usize = 0; // > THETA ⇒ the cell divides this step
 const GENE_POLARITY: usize = 1; // negated in the daughter so sisters can differentiate
 const GENE_EFFECTOR: usize = 2; // expressed ⇒ contractile/locomotor cell (also fins in water)
@@ -33,6 +33,14 @@ const GENE_PREDATOR: usize = 5; // expressed ⇒ predatory/meat-digesting cell (
 const GENE_FLIGHT: usize = 6; // expressed ⇒ wing/lift cell — access to the AIR stratum (C3)
 const GENE_BURROW: usize = 7; // expressed ⇒ digging cell — access to the UNDERGROUND stratum (C3)
 const GENE_PHOTO: usize = 8; // expressed ⇒ photosynthetic cell — makes energy from light (C3)
+const GENE_ADHESION: usize = 9; // how strongly the cell sticks to its own type (differential adhesion)
+/// Differential-adhesion sorting (PR-B). `GENE_ADHESION` is binned into `0..=ADH_Q` integer tiers at
+/// GRN exit (the one float read); the whole sort is then i32 ⇒ deterministic WITHIN a profile (it
+/// inherits the GRN's per-profile FMA reality, like the golden — no cross-profile claim). The sort
+/// permutes which cell sits at which lattice slot to cluster same-type cells (tissues); it preserves
+/// the cell MULTISET, so `develop()`'s type counts — and the golden — are unchanged.
+const ADH_Q: i32 = 4;
+const SORT_SWEEPS: usize = 6;
 /// Division fires when the divide gene exceeds this. Low enough that a few accumulated GRN
 /// mutations can reach it from the empty founder (so multicellularity is evolutionarily
 /// reachable, not stranded behind an unmutatable threshold).
@@ -218,6 +226,9 @@ impl Genome {
                 break;
             }
         }
+        // Differential adhesion: cluster same-type cells into tissues by permuting which cell sits at
+        // which lattice slot (positions fixed). Preserves the cell multiset ⇒ type counts unchanged.
+        adhesion_sort(&mut states, &pos);
         (states, pos)
     }
 
@@ -302,6 +313,53 @@ fn place_cell(parent: (i16, i16), polarity: f32, taken: &[(i16, i16)], pending: 
         }
     }
     parent // unreachable for ≤ MAX_CELLS, but a total function
+}
+
+/// `GENE_ADHESION` binned to an integer tier `0..=ADH_Q` (the single float read of the sort).
+fn adhesion_tier(s: &[f32; G]) -> i32 {
+    (((s[GENE_ADHESION].clamp(-1.0, 1.0) + 1.0) * 0.5 * ADH_Q as f32) as i32).clamp(0, ADH_Q)
+}
+
+/// Two lattice sites are bonded iff 4-adjacent (Manhattan distance 1).
+fn is_adjacent(a: (i16, i16), b: (i16, i16)) -> bool {
+    (a.0 - b.0).abs() + (a.1 - b.1).abs() == 1
+}
+
+/// Differential-adhesion cell sorting (Steinberg): permute the cell CONTENTS across the fixed lattice
+/// slots so same-type cells become 4-adjacent, maximising the integer "bond" energy
+/// `E = Σ over same-type adjacent pairs of (adh_a + adh_b)`. Greedy, fixed index order, strict
+/// improvement only (tie ⇒ no move) ⇒ deterministic within a profile. The cell multiset is preserved
+/// (only the slot assignment changes), so `develop()`'s type counts are unchanged. O(n²·sweeps) with
+/// n ≤ `MAX_CELLS=32` — negligible per birth.
+fn adhesion_sort(states: &mut [[f32; G]], pos: &[(i16, i16)]) {
+    let n = states.len();
+    if n < 3 {
+        return; // nothing to cluster
+    }
+    let neighbors: Vec<Vec<usize>> = (0..n)
+        .map(|a| (0..n).filter(|&b| b != a && is_adjacent(pos[a], pos[b])).collect())
+        .collect();
+    // Bonded energy of the cell currently in slot `a` with its same-type neighbours.
+    let local_e = |states: &[[f32; G]], a: usize| -> i32 {
+        let (ta, aa) = (cell_type(&states[a]), adhesion_tier(&states[a]));
+        neighbors[a]
+            .iter()
+            .filter(|&&b| cell_type(&states[b]) == ta)
+            .map(|&b| aa + adhesion_tier(&states[b]))
+            .sum()
+    };
+    for _ in 0..SORT_SWEEPS {
+        for a in 0..n {
+            for b in (a + 1)..n {
+                let before = local_e(states, a) + local_e(states, b);
+                states.swap(a, b);
+                let after = local_e(states, a) + local_e(states, b);
+                if after <= before {
+                    states.swap(a, b); // strict-improvement only; revert ties/regressions
+                }
+            }
+        }
+    }
 }
 
 impl Genome {

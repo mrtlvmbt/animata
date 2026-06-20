@@ -53,3 +53,51 @@ fn mutation_can_grow_complex_bodies() {
     assert!(multi > 50, "almost no multicellular bodies emerge: {multi}");
     assert!(complex > 5, "no complex (multi-type) bodies emerge: {complex}");
 }
+
+/// PR-B: the spatial body layout (positions + the differential-adhesion sort) is deterministic
+/// WITHIN a profile, every cell occupies a UNIQUE lattice slot, and the sort PRESERVES the cell
+/// multiset — its `(structural + per-type)` tally equals `develop()`'s counts (so the sort can never
+/// shift the golden). Checked across many drifted multicellular GRNs.
+#[test]
+fn body_layout_is_deterministic_and_preserves_counts() {
+    let mut checked = 0;
+    for seed in 0..1500u64 {
+        let mut rng = Rng::new(seed ^ 0x5151);
+        let mut g = Genome::founder(&mut rng);
+        for _ in 0..5 {
+            g = g.mutate(&mut rng, 0.3, 0.9);
+        }
+        let p = g.develop();
+        if p.n_cells <= 1 {
+            continue; // exercise real multicellular bodies
+        }
+        checked += 1;
+
+        // Deterministic within a profile: two layouts of the same genome are byte-identical.
+        let layout = g.body_layout();
+        assert_eq!(layout, g.body_layout(), "body_layout must be deterministic for a fixed genome");
+        assert_eq!(layout.len() as u32, p.n_cells, "layout cell count must equal n_cells");
+
+        // Every cell occupies a unique lattice slot.
+        let mut coords: Vec<(i16, i16)> = layout.iter().map(|&(x, y, _)| (x, y)).collect();
+        coords.sort_unstable();
+        coords.dedup();
+        assert_eq!(coords.len() as u32, p.n_cells, "two cells share a lattice slot");
+
+        // The sort preserves the multiset: per-type tally over the layout == develop() counts.
+        let mut tally = [0u32; 8]; // 0 structural, 1..=7 functions
+        for &(_, _, ty) in &layout {
+            tally[ty as usize] += 1;
+        }
+        assert_eq!(tally[0], p.structural, "structural count drifted");
+        assert_eq!(tally[1], p.effector, "effector count drifted");
+        assert_eq!(tally[2], p.storage, "storage count drifted");
+        assert_eq!(tally[3], p.sensor, "sensor count drifted");
+        assert_eq!(tally[4], p.predator, "predator count drifted");
+        assert_eq!(tally[5], p.flight, "flight count drifted");
+        assert_eq!(tally[6], p.burrow, "burrow count drifted");
+        assert_eq!(tally[7], p.photo, "photo count drifted");
+    }
+    eprintln!("body_layout: checked {checked} multicellular layouts — deterministic, unique slots, counts preserved");
+    assert!(checked > 50, "too few multicellular layouts exercised: {checked}");
+}
