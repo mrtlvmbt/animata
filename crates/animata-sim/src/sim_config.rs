@@ -10,7 +10,8 @@
 //! (strata / predation / camouflage / development) are gated inside `Sim::step`.
 
 use crate::config::{
-    AIR_METAB_MULT, CAMO_BASE_DETECT, PHOTO_RATE, THERMAL_PENALTY, UNDERGROUND_METAB_MULT,
+    AIR_METAB_MULT, CAMO_BASE_DETECT, PHOTO_RATE, THERMAL_PENALTY, TOXIN_LETHALITY,
+    UNDERGROUND_METAB_MULT,
 };
 
 /// Which simulation features are active. All default to `true`.
@@ -29,6 +30,8 @@ pub struct Features {
     pub camouflage: bool,
     /// Developmental bodies (the GRN grows multicellular forms). Off ⇒ children are single cells.
     pub development: bool,
+    /// Ground toxicity selection (toxic belts kill the unresistant). Off ⇒ no toxic mortality.
+    pub toxicity: bool,
 }
 
 impl Default for Features {
@@ -40,13 +43,14 @@ impl Default for Features {
             predation: true,
             camouflage: true,
             development: true,
+            toxicity: true,
         }
     }
 }
 
 impl Features {
     /// `(name, on)` for every feature — the introspection surface (get_config / the dev bridge).
-    pub fn pairs(&self) -> [(&'static str, bool); 6] {
+    pub fn pairs(&self) -> [(&'static str, bool); 7] {
         [
             ("climate", self.climate),
             ("autotrophy", self.autotrophy),
@@ -54,6 +58,7 @@ impl Features {
             ("predation", self.predation),
             ("camouflage", self.camouflage),
             ("development", self.development),
+            ("toxicity", self.toxicity),
         ]
     }
 
@@ -66,6 +71,7 @@ impl Features {
             "predation" => self.predation = on,
             "camouflage" => self.camouflage = on,
             "development" => self.development = on,
+            "toxicity" => self.toxicity = on,
             _ => return false,
         }
         true
@@ -86,6 +92,8 @@ pub struct Params {
     pub underground_metab_mult: f32,
     /// Camouflage: detection probability of a perfectly cryptic prey (the floor).
     pub camo_base_detect: f32,
+    /// Toxicity: per-tick death hazard per unit of unresisted ground toxicity.
+    pub toxin_lethality: f32,
 }
 
 impl Default for Params {
@@ -96,19 +104,21 @@ impl Default for Params {
             air_metab_mult: AIR_METAB_MULT,
             underground_metab_mult: UNDERGROUND_METAB_MULT,
             camo_base_detect: CAMO_BASE_DETECT,
+            toxin_lethality: TOXIN_LETHALITY,
         }
     }
 }
 
 impl Params {
     /// `(name, value)` for every parameter — the introspection surface.
-    pub fn pairs(&self) -> [(&'static str, f32); 5] {
+    pub fn pairs(&self) -> [(&'static str, f32); 6] {
         [
             ("thermal_penalty", self.thermal_penalty),
             ("photo_rate", self.photo_rate),
             ("air_metab_mult", self.air_metab_mult),
             ("underground_metab_mult", self.underground_metab_mult),
             ("camo_base_detect", self.camo_base_detect),
+            ("toxin_lethality", self.toxin_lethality),
         ]
     }
 
@@ -120,6 +130,7 @@ impl Params {
             "air_metab_mult" => self.air_metab_mult = v,
             "underground_metab_mult" => self.underground_metab_mult = v,
             "camo_base_detect" => self.camo_base_detect = v,
+            "toxin_lethality" => self.toxin_lethality = v,
             _ => return false,
         }
         true

@@ -48,6 +48,7 @@ pub(super) fn default_metrics() -> Vec<Box<dyn Metric>> {
         s("niches", |v| v.sim.niche_coverage(v.terrain) as f64),
         s("thermal_correlation", |v| v.sim.thermal_correlation(v.terrain) as f64),
         s("crypsis_correlation", |v| v.sim.crypsis_correlation(v.terrain) as f64),
+        s("toxin_correlation", |v| v.sim.toxin_correlation(v.terrain) as f64),
         s("avg_nutrient", |v| v.sim.avg_nutrient(v.terrain, v.tick) as f64),
         s("stratum_underground", |v| v.sim.stratum_mix(v.terrain)[0] as f64),
         s("stratum_surface", |v| v.sim.stratum_mix(v.terrain)[1] as f64),

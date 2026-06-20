@@ -185,6 +185,13 @@ pub const UNDERGROUND_METAB_MULT: f32 = 0.7;
 /// sorting. (Acts on food, the dominant energy channel, so it actually bites.)
 pub const THERMAL_PENALTY: f32 = 0.9;
 
+// ---- C3: ground toxicity (abiotic selection on toxin_resistance) ----
+/// Per-tick death hazard per unit of UNRESISTED toxicity: a creature on ground whose toxicity
+/// exceeds its `toxin_resistance` dies this tick with probability `(toxicity − resistance)·LETHALITY`.
+/// Tuned so a fully-unresisted toxic belt is a strong but survivable filter (resistance can evolve
+/// in before the lineage is wiped), not instant death.
+pub const TOXIN_LETHALITY: f32 = 0.02;
+
 // ---- C2: predation / trophic web ----
 /// A creature is predatory once predator cells make up this fraction of its body.
 pub const CARNIVORE_THRESHOLD: f32 = 0.2;

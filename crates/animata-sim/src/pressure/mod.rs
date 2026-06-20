@@ -24,6 +24,7 @@ use crate::sim_config::{Features, Params};
 mod autotrophy;
 mod climate;
 mod metabolism;
+mod toxicity;
 
 /// Per-creature inputs a pressure may read: an environment sample at the creature's column plus its
 /// body, genome and niche context. Cheap scalars are filled eagerly by the caller (only a couple,
@@ -36,6 +37,8 @@ pub struct Sample<'a> {
     pub temperature: f32,
     /// Light reaching the creature's stratum at this tick `[0,1]` (env field; 0 underground/night).
     pub light: f32,
+    /// Ground toxicity `[0,1]` at the creature's column (env field).
+    pub toxicity: f32,
     /// Autotroph self-shading multiplier (a per-tick population aggregate; see `TickCtx` in `step`).
     pub autotroph_shading: f32,
 }
@@ -50,11 +53,13 @@ pub struct Effect {
     pub energy_add: f32,
     /// Multiplies the metabolic cost (e.g. the stratum a creature lives in).
     pub metab_mult: f32,
+    /// Additive per-tick death hazard `[0,1]` (e.g. ground toxicity beyond a creature's tolerance).
+    pub mortality_add: f32,
 }
 
 impl Effect {
     pub fn identity() -> Self {
-        Effect { food_mult: 1.0, energy_add: 0.0, metab_mult: 1.0 }
+        Effect { food_mult: 1.0, energy_add: 0.0, metab_mult: 1.0, mortality_add: 0.0 }
     }
 
     /// Fold another effect in. Identity element under `compose`, and — because multiplying by `1.0`
@@ -65,6 +70,7 @@ impl Effect {
             food_mult: self.food_mult * o.food_mult,
             energy_add: self.energy_add + o.energy_add,
             metab_mult: self.metab_mult * o.metab_mult,
+            mortality_add: self.mortality_add + o.mortality_add,
         }
     }
 }
@@ -100,6 +106,9 @@ impl PressureRegistry {
             air: p.air_metab_mult,
             underground: p.underground_metab_mult,
         }));
+        if f.toxicity {
+            active.push(Box::new(toxicity::Toxicity { lethality: p.toxin_lethality }));
+        }
         PressureRegistry { active }
     }
 

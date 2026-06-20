@@ -40,6 +40,7 @@ const SALT_CULL: u64 = 0xC011;
 const SALT_DEATH: u64 = 0xDEAD;
 const SALT_BIRTH: u64 = 0xB127;
 const SALT_CAMO: u64 = 0xCA30;
+const SALT_TOXIN: u64 = 0x70_8127;
 
 /// One creature. Its `genome` (developmental GRN + brain weights) is grown once into `pheno`
 /// (the cell body) at creation; biomass and the stat modifiers below read from `pheno`.
@@ -484,6 +485,7 @@ impl Sim {
                 layer,
                 temperature: terrain.temperature_at(cx, cy),
                 light: light_for(layer, cy, tick),
+                toxicity: terrain.toxicity_at(cx, cy),
                 autotroph_shading,
             };
             let eff = self.registry.eval_all(&sample);
@@ -502,6 +504,18 @@ impl Sim {
             let kleiber = (c.biomass() as f32).powf(0.75);
             c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle) * TICK_LEN;
             c.age += 1;
+            // Toxic death (C3 abiotic): ground toxicity beyond the creature's resistance is a
+            // per-tick death hazard (the `mortality_add` channel). Deterministic per (id, tick).
+            // Like the other deaths, the matter returns to the nutrient pool at the death site.
+            if eff.mortality_add > 0.0
+                && Rng::new(seed_fold(self.world_seed, &[SALT_TOXIN, c.id, tick])).unit() < eff.mortality_add
+            {
+                c.alive = false;
+                self.deaths += 1;
+                let (dx, dy) = column_index(c.pos);
+                terrain.deposit_nutrient(dx, dy, c.biomass() as f32 * NUTRIENT_PER_CELL, tick);
+                continue;
+            }
             // Death by starvation. The creature's matter returns to the nutrient pool here
             // (decomposition) — closing the cycle and re-fertilising the death site.
             if c.energy <= 0.0 {
@@ -667,6 +681,24 @@ impl Sim {
         pearson(&prefs, &temps)
     }
 
+    /// Toxic-adaptation metric: Pearson correlation between each creature's evolved
+    /// `toxin_resistance` and the ground toxicity where it lives. ~0 = no adaptation; → 1 = resistant
+    /// lineages have sorted onto the toxic ground (the toxicity pressure has bitten).
+    pub fn toxin_correlation(&self, terrain: &VoxelTerrain) -> f32 {
+        let n = self.creatures.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let mut res = Vec::with_capacity(n);
+        let mut tox = Vec::with_capacity(n);
+        for c in &self.creatures {
+            let (cx, cy) = column_index(c.pos);
+            res.push(c.genome.toxin_resistance);
+            tox.push(terrain.toxicity_at(cx, cy));
+        }
+        pearson(&res, &tox)
+    }
+
     /// Fraction of the population in each stratum `[underground, surface, air, water]` — shows
     /// whether vertical niches (burrowers / fliers / swimmers) have been colonised.
     pub fn stratum_mix(&self, terrain: &VoxelTerrain) -> [f32; 4] {
@@ -816,9 +848,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    16631596019518872104 // debug profile
+    4028216738331231112 // debug profile
 } else {
-    4293681612149572219 // release profile (FMA contraction shifts the trajectory)
+    2002045662948495743 // release profile (FMA contraction shifts the trajectory)
 };
 
 #[cfg(test)]
