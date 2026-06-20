@@ -230,6 +230,19 @@ async fn main() {
     let mut gen: Option<GenJob> = Some(spawn_gen(seed));
     // A background snapshot load (`F9`), polled like `gen`; the current world stays live until ready.
     let mut load: Option<LoadJob> = None;
+    // Full-screen modal loader overlay: mirrors the active gen/load job (kind + its permille
+    // progress). `done_at` is set when the job finishes, holding the "100% / last step done" frame
+    // for 340 ms before the overlay is dismissed and the finish toast fires.
+    struct Loading {
+        kind: ui::loader::LoadKind,
+        progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+        done_at: Option<f64>,
+    }
+    let mut loading: Option<Loading> = gen.as_ref().map(|j| Loading {
+        kind: ui::loader::LoadKind::Gen,
+        progress: j.progress.clone(),
+        done_at: None,
+    });
 
     // The default sim config, loaded from assets/config/sim.ron (editable without a rebuild); falls
     // back to the built-in default if the file is missing or malformed. Live dev-bridge changes
@@ -339,6 +352,10 @@ async fn main() {
                 gen = None;
                 let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                 streamer.clear(ctx);
+                // Hold the loader on "done" for 340 ms; it fires `World ready` and dismisses below.
+                if let Some(ld) = &mut loading {
+                    ld.done_at = Some(get_time());
+                }
             }
         }
         // Pick up a finished background load the same way (restore overlay + creatures + tick).
@@ -354,14 +371,31 @@ async fn main() {
                         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                         streamer.clear(ctx);
                         eprintln!("[load] restored {SAVE_PATH} at tick {}", w.tick);
-                        toast = Some(("Loaded".into(), get_time()));
+                        // Hold the loader on "done"; `Loaded` toast fires on dismissal below.
+                        if let Some(ld) = &mut loading {
+                            ld.done_at = Some(get_time());
+                        }
                     }
                     Err(e) => {
                         eprintln!("[load] failed: {e}");
                         toast = Some((format!("Load failed: {e}"), get_time()));
+                        loading = None; // abort the overlay; no success hold on failure
                     }
                 }
                 load = None;
+            }
+        }
+        // Dismiss the loader 340 ms after the job finished (the "done" hold), then fire the toast.
+        if let Some(ld) = &loading {
+            if let Some(t0) = ld.done_at {
+                if (get_time() - t0) * 1000.0 >= 340.0 {
+                    let msg = match ld.kind {
+                        ui::loader::LoadKind::Gen => "World ready",
+                        ui::loader::LoadKind::Load => "Loaded",
+                    };
+                    toast = Some((msg.into(), get_time()));
+                    loading = None;
+                }
             }
         }
         // Smooth the frame-time readout so it doesn't jitter.
@@ -474,6 +508,22 @@ async fn main() {
             minimap_view,
             toast: toast_view,
         };
+        // Loader overlay view: real permille progress (1.0 once done), step derived from the
+        // fraction. `loader_active` makes the world input modal while it's up.
+        let loader_view = loading.as_ref().map(|ld| {
+            let p = if ld.done_at.is_some() {
+                1.0
+            } else {
+                (ld.progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0).clamp(0.0, 1.0)
+            };
+            let n = match ld.kind {
+                ui::loader::LoadKind::Gen => 5,
+                ui::loader::LoadKind::Load => 4,
+            };
+            let idx = ((p * n as f32).floor() as usize).min(n - 1);
+            (ld.kind, p, idx)
+        });
+        let loader_active = loading.is_some();
         let mut actions = ui::UiActions::default();
         egui_macroquad::ui(|ctx| {
             // Register IBM Plex + Phosphor and the global style ONCE (egui keeps them for the
@@ -490,11 +540,21 @@ async fn main() {
             // high_dpi=true ⇒ macroquad reports physical px; match egui's scale so panels aren't
             // tiny on Retina (F2).
             ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
-            actions = ui::draw_hud(ctx, &mut ui_state, &hud_metrics, &mut hud_cache, terrain.as_ref());
+            // While the modal loader is up it fully owns the screen — skip the HUD entirely (the
+            // scrim isn't perfectly opaque in egui_macroquad, so drawing the HUD under it would
+            // bleed through). Input is gated separately on `loader_active`.
+            if let Some((kind, p, idx)) = loader_view {
+                ui::loader::draw(ctx, kind, p, idx, seed);
+            } else {
+                actions = ui::draw_hud(ctx, &mut ui_state, &hud_metrics, &mut hud_cache, terrain.as_ref());
+            }
         });
         let wants_ptr = actions.wants_pointer;
 
-        // ---- Input ---- (keyboard hotkeys always live; egui widgets flip the same `ui_state`.)
+        // ---- Input ---- World hotkeys + mouse, gated while the modal loader is up (it's drawn
+        // foreground and eats the pointer; we also block keys here so nothing reaches the world).
+        // egui widgets flip the same `ui_state`.
+        if !loader_active {
         if is_key_pressed(KeyCode::I) {
             ui_state.show_info = !ui_state.show_info;
         }
@@ -540,7 +600,13 @@ async fn main() {
         // load wins. The current world stays interactive; the poll above swaps it in when ready.
         if (is_key_pressed(KeyCode::F9) || actions.load) && load.is_none() {
             gen = None;
-            load = Some(spawn_load(SAVE_PATH.to_string()));
+            let job = spawn_load(SAVE_PATH.to_string());
+            loading = Some(Loading {
+                kind: ui::loader::LoadKind::Load,
+                progress: job.progress.clone(),
+                done_at: None,
+            });
+            load = Some(job);
         }
         if is_key_pressed(KeyCode::J) {
             ui_state.mask = !ui_state.mask;
@@ -548,12 +614,14 @@ async fn main() {
         if is_key_pressed(KeyCode::O) {
             ui_state.outline = !ui_state.outline;
         }
+        } // end loader-gated keyboard hotkeys
         // Snapshot toggle state into Copy locals (`debug_view`/`mask`/`outline`/`water_on`) so the
         // render pass below reads them as before. `show_info` is handled inside the GUI pass.
         let ui::UiState { show_info: _, debug_view, water_on, mask, outline, open_panel: _ } = ui_state;
 
         // World mouse interactions are gated on `!wants_ptr` so a click on a panel doesn't reach
         // the world (F8). Keyboard pan/rotate stay live (egui claims no keys without a text focus).
+        if !loader_active {
         let wheel = if wants_ptr { 0.0 } else { mouse_wheel().1 };
         if wheel != 0.0 {
             // Zoom toward the cursor: keep the ground point under the mouse fixed by
@@ -625,8 +693,15 @@ async fn main() {
         // A regen already in flight ignores further presses.
         if is_key_pressed(KeyCode::R) && gen.is_none() {
             seed = seed.wrapping_add(1);
-            gen = Some(spawn_gen(seed));
+            let job = spawn_gen(seed);
+            loading = Some(Loading {
+                kind: ui::loader::LoadKind::Gen,
+                progress: job.progress.clone(),
+                done_at: None,
+            });
+            gen = Some(job);
         }
+        } // end loader-gated mouse / camera input
 
         // ---- Dev bridge: service queued commands on the main thread ----
         #[cfg(feature = "dev")]
@@ -1024,29 +1099,8 @@ async fn main() {
         // (The env-field minimap is now the egui minimap panel — top-right — built in the GUI pass
         // at the start of the frame; see `ui::minimap`.)
 
-        // Background progress bar — shown while a world is being generated (reseed) OR loaded.
-        // Centred near the bottom; same shadow-text convention as the old HUD.
-        let bar = gen
-            .as_ref()
-            .map(|j| (j.progress.clone(), format!("generating world   seed {}", j.seed)))
-            .or_else(|| {
-                load
-                    .as_ref()
-                    .map(|j| (j.progress.clone(), "loading world".to_string()))
-            });
-        if let Some((progress, label_base)) = bar {
-            let p = progress.load(std::sync::atomic::Ordering::Relaxed) as f32 / 1000.0;
-            let w = screen_width();
-            let (bw, bh, margin) = (w * 0.5, 14.0, 24.0);
-            let x = (w - bw) * 0.5;
-            let y = screen_height() - margin - bh;
-            draw_rectangle(x - 2.0, y - 2.0, bw + 4.0, bh + 4.0, Color::new(0.0, 0.0, 0.0, 0.5));
-            draw_rectangle(x, y, bw, bh, Color::new(0.12, 0.14, 0.18, 0.9));
-            draw_rectangle(x, y, bw * p, bh, Color::new(0.45, 0.75, 1.0, 1.0));
-            let label = format!("{label_base}   {:.0}%", p * 100.0);
-            draw_text(&label, x + 1.0, y - 6.0, 22.0, Color::new(0.0, 0.0, 0.0, 0.6));
-            draw_text(&label, x, y - 7.0, 22.0, Color::new(0.95, 0.97, 1.0, 1.0));
-        }
+        // (The generation/load progress is now the full-screen egui loader overlay — `ui::loader`,
+        // drawn in the GUI pass above — which replaces the old macroquad bottom bar.)
 
         // Composite the egui panels (built in the GUI pass at the frame's start) over the scene.
         // Its own render pass — drawn last so it sits on top, after creatures and the minimap.

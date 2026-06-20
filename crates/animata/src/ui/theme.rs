@@ -8,7 +8,7 @@ use egui::{Color32, CornerRadius, Frame, Margin, Shadow, Stroke};
 // Straight-alpha → premultiplied. egui stores Color32 PREMULTIPLIED; writing translucent tints as
 // `from_rgba_premultiplied(fullRGB, lowAlpha)` is invalid (RGB ≫ alpha) and renders near-opaque
 // (e.g. a "0.10 white" track came out solid white). `from_rgba_unmultiplied` isn't const, so:
-const fn straight(r: u8, g: u8, b: u8, al: u8) -> Color32 {
+pub(crate) const fn straight(r: u8, g: u8, b: u8, al: u8) -> Color32 {
     let a = al as u32;
     let pr = ((r as u32 * a + 127) / 255) as u8;
     let pg = ((g as u32 * a + 127) / 255) as u8;

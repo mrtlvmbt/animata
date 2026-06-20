@@ -9,6 +9,7 @@
 use crate::DebugView;
 
 pub mod hud;
+pub mod loader;
 pub mod minimap;
 pub mod theme;
 
