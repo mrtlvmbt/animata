@@ -12,7 +12,7 @@ use animata_sim::terrain::VoxelTerrain;
 
 use super::theme;
 use super::theme::FrameKind;
-use super::{legend_text, minimap, ramp_color, MAX_TIME_SCALE, MIN_TIME_SCALE};
+use super::{inspector, legend_text, minimap, ramp_color, MAX_TIME_SCALE, MIN_TIME_SCALE};
 use super::{HudCache, Panel, SimMetrics, UiActions, UiState};
 use crate::DebugView;
 
@@ -33,6 +33,7 @@ pub fn draw_hud(
     m: &SimMetrics,
     cache: &mut HudCache,
     terrain: Option<&VoxelTerrain>,
+    now: f32,
 ) -> UiActions {
     let mut act = UiActions::default();
 
@@ -50,6 +51,9 @@ pub fn draw_hud(
     minimap_panel(ctx, st, m, cache, terrain);
     rail(ctx, st);
     flyout(ctx, st, m, cache, &mut act);
+    // Inspector last (after the rail flyout) but before the modal loader: it coexists with any
+    // flyout and is driven by world-selection, not the rail.
+    inspector::draw_inspector(ctx, st, m, now);
 
     // F4: gate world mouse on "pointer over ANY interactive Area" — covers empty panel backgrounds
     // too (a click on the glass shouldn't reach the world), while non-interactable toast/hint pass.
@@ -60,7 +64,7 @@ pub fn draw_hud(
 // ---------- small shared widgets ----------
 
 /// Mono caps label with CSS letter-spacing, laid out left-aligned in the current vertical flow.
-fn caps_tracked(ui: &mut egui::Ui, text: &str, size: f32, em: f32, color: Color32) {
+pub(crate) fn caps_tracked(ui: &mut egui::Ui, text: &str, size: f32, em: f32, color: Color32) {
     let upper = text.to_uppercase();
     let font = theme::mono(size);
     let tr = theme::tracking_em(size, em);
@@ -88,7 +92,7 @@ fn fmt2(v: f32) -> String {
 }
 
 /// `label … value` row (label sans dim left, value mono right) — mockup flyout row.
-fn kv(ui: &mut egui::Ui, label: &str, value: String) {
+pub(crate) fn kv(ui: &mut egui::Ui, label: &str, value: String) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(label)
@@ -101,7 +105,7 @@ fn kv(ui: &mut egui::Ui, label: &str, value: String) {
     });
 }
 
-fn hairline(ui: &mut egui::Ui) {
+pub(crate) fn hairline(ui: &mut egui::Ui) {
     ui.add_space(5.0);
     let w = ui.available_width();
     let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 1.0), Sense::hover());
@@ -110,15 +114,20 @@ fn hairline(ui: &mut egui::Ui) {
     ui.add_space(5.0);
 }
 
-/// Thin progress bar: track + metric-coloured fill.
+/// Thin progress bar: track + metric-coloured fill. Default h4 r3 (flyout/pop bars).
 fn bar(ui: &mut egui::Ui, frac: f32, col: Color32) {
+    bar_sized(ui, frac, col, 4.0, 3.0);
+}
+
+/// Progress bar with explicit height/radius (inspector reuses h4 vitals, h3 genome).
+pub(crate) fn bar_sized(ui: &mut egui::Ui, frac: f32, col: Color32, h: f32, r: f32) {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, 4.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(w, h), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(rect, 3.0, theme::straight(255, 255, 255, 26)); // .10 track
+    p.rect_filled(rect, r, theme::straight(255, 255, 255, 26)); // .10 track
     let mut fill = rect;
     fill.set_width(rect.width() * frac.clamp(0.0, 1.0));
-    p.rect_filled(fill, 3.0, col);
+    p.rect_filled(fill, r, col);
 }
 
 /// Outline button (Save / Load): faint fill, white-ish frame, hover lift. Fixed `w`, no icon.

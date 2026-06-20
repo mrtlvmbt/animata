@@ -36,8 +36,12 @@ pub const HOVER_FILL: Color32 = straight(255, 255, 255, 18); // 0.07 hover
 pub const TOAST_GREEN: Color32 = Color32::from_rgb(166, 224, 140);
 
 // data accents (charts only — never a second UI accent)
-pub const DATA_CARN: Color32 = Color32::from_rgb(217, 122, 90); // #D97A5A terracotta
-pub const DATA_AUTO: Color32 = Color32::from_rgb(95, 176, 201); // #5FB0C9 blue
+pub const DATA_CARN: Color32 = Color32::from_rgb(217, 122, 90); // #D97A5A terracotta (carnivore)
+pub const DATA_AUTO: Color32 = Color32::from_rgb(95, 176, 201); // #5FB0C9 blue (autotroph / hydration)
+
+// inspector data fills (creature vitals + genome fingerprint) — data, not chrome
+pub const VITAL_NEUTRAL: Color32 = Color32::from_rgb(205, 211, 200); // #CDD3C8 health bar
+pub const TRAIT_FILL: Color32 = Color32::from_rgb(174, 180, 168); // #AEB4A8 genome bars (single neutral)
 
 // strata stack segments (under / surface / air / water) — spec §4.4
 pub const STRATA_UNDER: Color32 = Color32::from_rgb(125, 106, 79); // #7D6A4F
@@ -108,6 +112,7 @@ pub enum FrameKind {
     Rail,      // control rail: r14, pad 7
     Transport, // bottom-left transport: r14, pad 9×14, stronger glass .74
     Flyout,    // detail flyouts: r14, pad 16×18, stronger glass .74
+    Inspector, // creature inspector (left, under vitals): r14, pad 17×15, stronger glass
 }
 
 pub fn themed_frame(kind: FrameKind) -> Frame {
@@ -132,6 +137,14 @@ pub fn themed_frame(kind: FrameKind) -> Frame {
         ),
         FrameKind::Flyout => (
             Margin { left: 18, right: 18, top: 16, bottom: 16 },
+            14,
+            PANEL_BG_STRONG,
+            14,
+            40,
+            115,
+        ),
+        FrameKind::Inspector => (
+            Margin { left: 17, right: 17, top: 15, bottom: 15 },
             14,
             PANEL_BG_STRONG,
             14,
