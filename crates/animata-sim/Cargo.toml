@@ -12,3 +12,6 @@ path = "src/lib.rs"
 # Vector math only. Pinned to the same major version macroquad 0.4 re-exports, so `Vec2` is the
 # identical type across the crate boundary (no conversion in the renderer). Deliberately NO macroquad.
 glam = "0.27"
+# Data parallelism for the read-only decision phase of a tick. `par_iter().map().collect()` keeps
+# index order, so the result is bit-identical to the serial path (determinism preserved).
+rayon = "1"

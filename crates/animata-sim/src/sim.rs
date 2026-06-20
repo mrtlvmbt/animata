@@ -15,6 +15,7 @@
 //! mid-apply); over-cap cull is deterministic-random, not tail-truncation.
 
 use glam::{vec2, Vec2};
+use rayon::prelude::*;
 
 use crate::config::*;
 use crate::genome::{Genome, Phenotype};
@@ -359,42 +360,51 @@ impl Sim {
         let autotroph_shading = 1.0 / (1.0 + n_auto as f32 / PHOTO_SOFTCAP);
         self.grid.rebuild(&pos, maxx, maxy, GRID_CELL);
         // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
-        let mut decisions: Vec<(f32, f32, Option<usize>)> = Vec::with_capacity(n);
-        for i in 0..n {
-            // Predation off ⇒ no creature targets prey ⇒ the predation pass resolves nothing.
-            let predator = feat.predation && carn[i] > CARNIVORE_THRESHOLD;
-            let self_bm = bm[i];
-            let self_layer = strata[i];
-            // Nearest edible prey (only if predatory) AND nearest threatening predator, one pass.
-            // Both restricted to the SAME stratum — a creature in another layer is out of reach.
-            // Camouflage gates DETECTION: a predator only sees (and so only targets) a prey it
-            // spots, with probability rising in the contrast of the prey's coloration vs its
-            // ground. A cryptic prey is often invisible — strong, habitat-specific selection for
-            // matching the background (coevolution). Deterministic per (predator, prey, tick).
-            let detected = |j: usize| {
-                if !feat.camouflage {
-                    return true; // camouflage off ⇒ prey always detectable
-                }
-                let contrast = (color[j] - bg[j]).abs();
-                let p = camo_base + (1.0 - camo_base) * contrast;
-                Rng::new(seed_fold(self.world_seed, &[SALT_CAMO, i as u64, j as u64, tick])).unit() <= p
-            };
-            let (prey, threat) = self.grid.nearest2_within(
-                &pos,
-                pos[i],
-                SENSE_RANGE,
-                |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),
-                |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm && strata[j] == self_layer,
-            );
-            let c = &self.creatures[i];
-            let prey_rel = prey.map(|j| rel(pos[i], c.heading, pos[j]));
-            let threat_rel = threat.map(|j| rel(pos[i], c.heading, pos[j]));
-            let inputs = self.sense(c, terrain, tick, prey_rel, threat_rel);
-            let (throttle, turn) = c.think(&inputs);
-            // Attack if the targeted prey is within striking distance at snapshot positions.
-            let hunt = prey.filter(|&j| (pos[j] - pos[i]).length() <= ATTACK_RANGE);
-            decisions.push((throttle, turn, hunt));
-        }
+        // This phase is READ-ONLY (snapshots + the rebuilt grid + the terrain getters), so it runs
+        // in parallel across cores. `par_iter().map().collect()` writes each `decisions[i]` from an
+        // independent task and collects IN INDEX ORDER, and the only randomness is `seed_fold`ed per
+        // `(i, j, tick)` — so the result is BIT-IDENTICAL to the serial loop (the golden holds).
+        // Shared reborrows so the parallel closure captures `&Sim`/`&VoxelTerrain` (both `Sync`),
+        // never the `&mut` from `step`.
+        let this: &Sim = self;
+        let terrain_ref: &VoxelTerrain = terrain;
+        let decisions: Vec<(f32, f32, Option<usize>)> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                // Predation off ⇒ no creature targets prey ⇒ the predation pass resolves nothing.
+                let predator = feat.predation && carn[i] > CARNIVORE_THRESHOLD;
+                let self_bm = bm[i];
+                let self_layer = strata[i];
+                // Nearest edible prey (only if predatory) AND nearest threatening predator, one pass.
+                // Both restricted to the SAME stratum — a creature in another layer is out of reach.
+                // Camouflage gates DETECTION: a predator only sees (and so only targets) a prey it
+                // spots, with probability rising in the contrast of the prey's coloration vs its
+                // ground. Deterministic per (predator, prey, tick).
+                let detected = |j: usize| {
+                    if !feat.camouflage {
+                        return true; // camouflage off ⇒ prey always detectable
+                    }
+                    let contrast = (color[j] - bg[j]).abs();
+                    let p = camo_base + (1.0 - camo_base) * contrast;
+                    Rng::new(seed_fold(this.world_seed, &[SALT_CAMO, i as u64, j as u64, tick])).unit() <= p
+                };
+                let (prey, threat) = this.grid.nearest2_within(
+                    &pos,
+                    pos[i],
+                    SENSE_RANGE,
+                    |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),
+                    |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm && strata[j] == self_layer,
+                );
+                let c = &this.creatures[i];
+                let prey_rel = prey.map(|j| rel(pos[i], c.heading, pos[j]));
+                let threat_rel = threat.map(|j| rel(pos[i], c.heading, pos[j]));
+                let inputs = this.sense(c, terrain_ref, tick, prey_rel, threat_rel);
+                let (throttle, turn) = c.think(&inputs);
+                // Attack if the targeted prey is within striking distance at snapshot positions.
+                let hunt = prey.filter(|&j| (pos[j] - pos[i]).length() <= ATTACK_RANGE);
+                (throttle, turn, hunt)
+            })
+            .collect();
         // (b) predation: resolve hunts by snapshot index. Flag prey dead (never remove mid-pass
         // — indices must stay stable, F7); credit the predator with the trophic-scaled energy.
         for i in 0..n {
