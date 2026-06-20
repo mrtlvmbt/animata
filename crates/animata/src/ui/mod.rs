@@ -110,15 +110,18 @@ pub struct SimMetrics {
 pub(crate) const MIN_TIME_SCALE: f32 = 0.1;
 pub(crate) const MAX_TIME_SCALE: f32 = 64.0;
 
-/// One-line ramp description for the active field map (mirrors `build_field_minimap`).
-pub(crate) fn legend_text(view: DebugView) -> &'static str {
+/// One-line ramp description for the active field map (mirrors `build_field_minimap`). The arrow is
+/// the Phosphor `ARROW_RIGHT` glyph, not U+2192 — the vendored IBM Plex subset lacks U+2192 and would
+/// render it as a tofu box; Phosphor is in both font families so it falls back cleanly.
+pub(crate) fn legend_text(view: DebugView) -> String {
+    let a = egui_phosphor::regular::ARROW_RIGHT;
     match view {
-        DebugView::Temp => "cold (blue) → hot (red)",
-        DebugView::Moist => "dry (tan) → wet (teal)",
-        DebugView::WaterDist => "near water (bright) → far (dark)",
-        DebugView::Slope => "flat (dark) → steep (yellow)",
-        DebugView::Biomass => "barren (brown) → lush (green) · right-drag = graze",
-        _ => "",
+        DebugView::Temp => format!("cold (blue) {a} hot (red)"),
+        DebugView::Moist => format!("dry (tan) {a} wet (teal)"),
+        DebugView::WaterDist => format!("near water (bright) {a} far (dark)"),
+        DebugView::Slope => format!("flat (dark) {a} steep (yellow)"),
+        DebugView::Biomass => format!("barren (brown) {a} lush (green) · right-drag = graze"),
+        _ => String::new(),
     }
 }
 
