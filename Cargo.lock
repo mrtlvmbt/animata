@@ -54,6 +54,7 @@ dependencies = [
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "rayon",
  "serde_json",
  "tiny_http",
 ]
