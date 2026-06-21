@@ -500,6 +500,11 @@ fn minimap_panel(
                     let key = (m.seed, st.debug_view, bucket);
                     let stale = cache.minimap.as_ref().map(|(k, _)| *k != key).unwrap_or(true);
                     if stale {
+                        // NOTE (sim-on-thread): `t` is the render-side terrain — geometry/climate are
+                        // the real shared `geo`, but its vegetation overlay is EMPTY (the live biomass
+                        // lives on the sim thread). So the geo-backed field views (Topo/Temp/Moist/
+                        // Slope/WaterDist) are correct, but the BIOMASS minimap view reads zeros
+                        // (degraded) until the overlay is shipped in the snapshot — a known follow-up.
                         let img = minimap::build_image(t, st.debug_view, m.tick);
                         let tex = ctx.load_texture("minimap", img, egui::TextureOptions::NEAREST);
                         cache.minimap = Some((key, tex));

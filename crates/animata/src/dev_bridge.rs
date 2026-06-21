@@ -56,7 +56,9 @@ pub enum Cmd {
     /// Set a simulation parameter by name (thermal_penalty / photo_rate / … / camo_base_detect).
     SetParam { name: String, value: f32 },
     /// Read metric values: the latest of every metric, plus the time-series of `id` if given
-    /// (`last` caps how many recent samples to return).
+    /// (`last` caps how many recent samples to return). Fields parsed off the wire but currently
+    /// unread — live metric sampling isn't wired to the sim worker yet (Phase B follow-up).
+    #[allow(dead_code)]
     Metrics { id: Option<String>, last: Option<usize> },
     /// Drive the HUD state for scripted UI screenshots: open a rail flyout (`panel` =
     /// none/world/view/pop/perf), select a debug view (`debug` = none/topo/temp/moist/

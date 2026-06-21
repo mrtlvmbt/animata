@@ -19,9 +19,11 @@ mod mac_icon;
 
 mod render;
 mod render_snapshot;
+mod sim_driver;
 mod ui;
 
-use render_snapshot::{CreatureDot, RenderSnapshot};
+use render_snapshot::CreatureDot;
+use sim_driver::SimCommand;
 
 // The simulation + world model live in the graphics-free `animata-sim` crate. The renderer only
 // needs these modules by name; the rest (genome/grid/rng/tectonics/erosion/hydrology) are internal
@@ -29,8 +31,6 @@ use render_snapshot::{CreatureDot, RenderSnapshot};
 use animata_sim::{clock, config, sim, terrain};
 use animata_sim::persist::Snapshot;
 use animata_sim::sim_config::SimConfig;
-#[cfg(feature = "dev")]
-use animata_sim::metrics::{MetricRegistry, MetricValue, SimView};
 
 use clock::WorldClock;
 use config::*;
@@ -111,12 +111,11 @@ fn save_world(
     path: &str,
     seed: u64,
     tick: u64,
-    sim: &Sim,
-    terrain: &VoxelTerrain,
+    sim: sim::SimState,
+    terrain: animata_sim::terrain::TerrainState,
 ) -> Result<(), String> {
     let f = std::fs::File::create(path).map_err(|e| e.to_string())?;
-    Snapshot::new(seed, tick, sim.to_state(), terrain.clone_state())
-        .write(std::io::BufWriter::new(f))
+    Snapshot::new(seed, tick, sim, terrain).write(std::io::BufWriter::new(f))
 }
 
 /// Read a snapshot from `path` (does not yet apply it — the caller regenerates terrain from the
@@ -480,11 +479,13 @@ async fn main() {
     // Sim time base (S2). The main loop schedules fixed sub-steps from the real frame `dt`
     // (`clock.substeps`) and drives one `sim.step` per sub-step; `P` pauses. `advance` stays a
     // pure counter (HUD/day-frac). The creature sim (C0) is created once the world is ready.
+    // The sim + terrain now live on a worker thread (see `sim_driver`); this is just the render-side
+    // mirror. `clock` holds the DISPLAY/intent time (its `tick` is set from the snapshot each frame;
+    // `time_scale`/`paused` are the user's intent, echoed to the worker via `SetClock`). `terrain`
+    // below is a geo-only render-side copy (shared `Arc<TerrainGeo>`), repopulated on world swap.
     let mut clock = WorldClock::new();
-    let mut sim: Option<Sim> = None;
-    // Live metric time-series for the dev bridge (`animata/metrics`); sampled after each sub-step.
-    #[cfg(feature = "dev")]
-    let mut metrics = MetricRegistry::default();
+    let sim_handle = sim_driver::spawn();
+    let mut snapshot: Option<std::sync::Arc<render_snapshot::RenderSnapshot>>;
     // `G` cycles the debug view: off → Topo (GPU height/depth, water hidden) → Temp → Moist
     // → WaterDist → off. Topo reshades the 3D scene; the climate/water-dist modes overlay a
     // colourmap MINIMAP of the per-column field (the live consumer of the S1 env getters, so
@@ -514,9 +515,16 @@ async fn main() {
         // reset the streamer so meshes rebuild around the camera from the new terrain.
         if let Some(job) = &gen {
             if let Ok(t) = job.rx.try_recv() {
-                // Seed the creature population from the new world (deterministic from its seed).
-                sim = Some(Sim::with_config(seed, &t, sim_cfg));
-                terrain = Some(t);
+                // Seed the creature population from the new world (deterministic from its seed), keep a
+                // geo-only render-side terrain, and hand the authoritative world to the sim worker.
+                let sim_world = Sim::with_config(seed, &t, sim_cfg);
+                terrain = Some(VoxelTerrain::render_side(seed, t.chunks_x, t.chunks_y, t.geo()));
+                sim_handle.send(SimCommand::LoadWorld {
+                    sim: Box::new(sim_world),
+                    terrain: Box::new(t),
+                    tick: 0,
+                });
+                clock.set_tick(0);
                 gen = None;
                 let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                 streamer.clear(ctx);
@@ -533,9 +541,13 @@ async fn main() {
                     Ok(w) => {
                         seed = w.seed;
                         sim_cfg = w.sim.cfg;
-                        sim = Some(Sim::from_state(w.sim));
+                        terrain = Some(VoxelTerrain::render_side(seed, w.terrain.chunks_x, w.terrain.chunks_y, w.terrain.geo()));
                         clock.set_tick(w.tick);
-                        terrain = Some(w.terrain);
+                        sim_handle.send(SimCommand::LoadWorld {
+                            sim: Box::new(Sim::from_state(w.sim)),
+                            terrain: Box::new(w.terrain),
+                            tick: w.tick,
+                        });
                         let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                         streamer.clear(ctx);
                         eprintln!("[load] restored {SAVE_PATH} at tick {}", w.tick);
@@ -579,41 +591,22 @@ async fn main() {
             frame_ms = mean_dt * 1000.0;
             fps = 1.0 / mean_dt;
         }
-        // Drive the sim: schedule whole sub-steps from real `dt` (capped, so a lag spike can't
-        // spiral), then run EXACTLY one fixed `sim.step` per sub-step, each at its own tick.
-        // `advance` stays a pure counter (HUD/day-frac); the interactive cadence is best-effort
-        // (not for seed replay — that path is the fixed-step headless harness).
-        let substeps = clock.substeps(dt);
-        for _ in 0..substeps {
-            clock.advance(1);
-            if let (Some(sim), Some(terrain)) = (sim.as_mut(), terrain.as_mut()) {
-                let tick = clock.tick();
-                sim.step(terrain, tick);
-                // Sample the metric registry (dev only) so `animata/metrics` can serve live values.
-                #[cfg(feature = "dev")]
-                metrics.maybe_sample(&SimView { sim, terrain, tick });
-            }
+        // The sim advances on its worker thread; pull the latest snapshot it published and mirror its
+        // tick into the display clock (so `sim_time`/`day_frac` read right). The render pass, HUD and
+        // picking all read this snapshot — never the live sim.
+        snapshot = sim_handle.latest();
+        if let Some(s) = &snapshot {
+            clock.set_tick(s.tick);
         }
-
-        // Render snapshot — the world render pass AND picking read THIS, never `sim` directly (the
-        // Phase A seam that lets the sim move to its own thread later). `body_near` asks the builder
-        // for morphology layouts only for creatures near the camera at high zoom (where they're drawn).
+        // Tell the worker which creatures need a high-zoom morphology layout next snapshot (the AABB is
+        // a generous superset of the view; the render pass culls precisely).
         let px_per_m = screen_height() / cam.zoom;
         let cell_px = CREATURE_RADIUS_M * px_per_m * 2.0;
-        // Half-extent generous enough to cover the rotated iso view quad (so every on-screen creature
-        // gets its morphology, not just those near the target centre).
         let body_near = (px_per_m >= LOD_MAT_PX_PER_M && cell_px >= BODY_CELL_MIN_PX)
             .then(|| (vec2(cam.target.x, cam.target.z), cam.zoom * 2.0));
-        let snapshot = match (sim.as_ref(), terrain.as_ref()) {
-            (Some(s), Some(t)) => {
-                Some(RenderSnapshot::build(s, t, clock.tick(), ui_state.selected, body_near))
-            }
-            _ => None,
-        };
-        // Selected creature died (the builder found no live creature for the id) → drop the selection.
-        if ui_state.selected.is_some() && snapshot.as_ref().is_some_and(|s| s.inspect.is_none()) {
-            ui_state.selected = None;
-        }
+        sim_handle.send(SimCommand::SetViewport { body_near });
+        // Inspector selection intent → worker (it builds the inspect bundle for this id next snapshot).
+        sim_handle.send(SimCommand::Select(ui_state.selected));
 
         // ---- GUI pass (egui) — runs before world input so `wants_pointer` gates the mouse.
         // Perf counters (`drawn`/`on_screen`) come from LAST frame's render (produced after this
@@ -787,14 +780,22 @@ async fn main() {
         if let Some(ts) = actions.set_time_scale {
             clock.time_scale = ts.clamp(MIN_TIME_SCALE, MAX_TIME_SCALE);
         }
+        // Echo the time-scale/pause intent to the worker's clock (cheap; it owns the actual stepping).
+        sim_handle.send(SimCommand::SetClock {
+            scale: Some(clock.time_scale),
+            paused: Some(clock.paused),
+        });
         // Quick-save (`F5`) / quick-load (`F9`) the whole world to/from `SAVE_PATH`. Both the load's
         // terrain regen and save's serialise stay off the hot path: save is fast; load runs on a
         // background thread (`spawn_load`) and swaps in when ready, like a reseed.
         if is_key_pressed(KeyCode::F5) || actions.save {
-            match (sim.as_ref(), terrain.as_ref()) {
-                (Some(s), Some(t)) => match save_world(SAVE_PATH, seed, clock.tick(), s, t) {
+            // Ask the worker for a consistent state snapshot (it owns the world), then write the file.
+            let (tx, rx) = std::sync::mpsc::channel();
+            sim_handle.send(SimCommand::Save { reply: tx });
+            match rx.recv() {
+                Ok((sd, tk, ss, ts)) => match save_world(SAVE_PATH, sd, tk, ss, ts) {
                     Ok(()) => {
-                        eprintln!("[save] wrote {SAVE_PATH} at tick {}", clock.tick());
+                        eprintln!("[save] wrote {SAVE_PATH} at tick {tk}");
                         toast = Some(("Saved".into(), get_time()));
                     }
                     Err(e) => {
@@ -802,7 +803,7 @@ async fn main() {
                         toast = Some((format!("Save failed: {e}"), get_time()));
                     }
                 },
-                _ => eprintln!("[save] world not ready"),
+                Err(_) => eprintln!("[save] world not ready"),
             }
         }
         // Start a background load if one isn't already running. Cancel any in-flight regen — the
@@ -874,16 +875,14 @@ async fn main() {
         // the default-build consumer of `graze`, and a manual way to verify regrowth (graze a
         // spot in the Biomass view, watch it grow back). Patch radius so it shows on the
         // down-sampled minimap.
-        if !wants_ptr && is_mouse_button_down(MouseButton::Right) {
-            if let Some(t) = &mut terrain {
-                let g = ground_under_cursor(&cam);
-                let (gx, gy) = ((g.x / VOX).floor() as i32, (g.y / VOX).floor() as i32);
-                let r = GRAZE_PATCH_R;
-                let tick = clock.tick();
-                for yy in (gy - r).max(0)..(gy + r).min(ROWS as i32) {
-                    for xx in (gx - r).max(0)..(gx + r).min(COLS as i32) {
-                        t.graze(xx as usize, yy as usize, 1.0, tick); // clear-cut (take all)
-                    }
+        if !wants_ptr && is_mouse_button_down(MouseButton::Right) && terrain.is_some() {
+            let g = ground_under_cursor(&cam);
+            let (gx, gy) = ((g.x / VOX).floor() as i32, (g.y / VOX).floor() as i32);
+            let r = GRAZE_PATCH_R;
+            for yy in (gy - r).max(0)..(gy + r).min(ROWS as i32) {
+                for xx in (gx - r).max(0)..(gx + r).min(COLS as i32) {
+                    // The worker owns the terrain; graze runs there (clear-cut = take all).
+                    sim_handle.send(SimCommand::Graze { x: xx as usize, y: yy as usize, amount: 1.0 });
                 }
             }
         }
@@ -936,19 +935,48 @@ async fn main() {
             match cmd {
                 dev_bridge::Cmd::Status => {
                     let c = cam.camera();
-                    // Environment fields under the camera-centre column (steerable numeric
-                    // assert surface for the S1 substrate). `null` until the world is ready.
+                    let col_x = (cam.target.x / VOX).floor().clamp(0.0, (COLS - 1) as f32) as usize;
+                    let col_y = (cam.target.z / VOX).floor().clamp(0.0, (ROWS - 1) as f32) as usize;
+                    // Full sim status from the worker (it owns the world); `None` until a world exists.
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    sim_handle.send(SimCommand::QueryStatus { col: (col_x, col_y), reply: tx });
+                    let rep = rx.recv().ok();
+                    // Geometry/climate env from the render-side geo; live biomass from the report.
                     let env = terrain.as_ref().map(|t| {
-                        let x = (cam.target.x / VOX).floor().clamp(0.0, (COLS - 1) as f32) as usize;
-                        let y = (cam.target.z / VOX).floor().clamp(0.0, (ROWS - 1) as f32) as usize;
                         serde_json::json!({
-                            "col": [x, y],
-                            "temp": t.temperature_at(x, y),
-                            "moist": t.moisture_at(x, y),
-                            "slope": t.slope_at(x, y),
-                            "water_dist": t.water_dist_at(x, y),
-                            "biome": format!("{:?}", t.biome_at(x, y)),
-                            "biomass": t.biomass_at(x, y, clock.tick()),
+                            "col": [col_x, col_y],
+                            "temp": t.temperature_at(col_x, col_y),
+                            "moist": t.moisture_at(col_x, col_y),
+                            "slope": t.slope_at(col_x, col_y),
+                            "water_dist": t.water_dist_at(col_x, col_y),
+                            "biome": format!("{:?}", t.biome_at(col_x, col_y)),
+                            "biomass": rep.as_ref().map(|r| r.env_biomass),
+                        })
+                    });
+                    let sim_json = rep.as_ref().map(|r| {
+                        let profile: serde_json::Map<String, serde_json::Value> = r
+                            .profile
+                            .iter()
+                            .map(|(l, m, mx)| (l.to_string(), serde_json::json!({ "mean_ms": m, "max_ms": mx })))
+                            .collect();
+                        serde_json::json!({
+                            "population": r.population,
+                            "avg_energy": r.avg_energy,
+                            "avg_biomass": r.avg_biomass,
+                            "frac_multicellular": r.multi,
+                            "frac_complex": r.complex,
+                            "frac_carnivore": r.frac_carnivore,
+                            "frac_autotroph": r.frac_autotroph,
+                            "avg_nutrient": r.avg_nutrient,
+                            "allopatry": r.allopatry,
+                            "crypsis": r.crypsis,
+                            "species": r.species,
+                            "niche_coverage": r.niche_coverage,
+                            "strata_und_surf_air_water": r.strata,
+                            "births": r.births,
+                            "deaths": r.deaths,
+                            "kills": r.kills,
+                            "profile": profile,
                         })
                     });
                     let _ = reply.send(serde_json::json!({
@@ -963,40 +991,8 @@ async fn main() {
                         "clock": { "tick": clock.tick(), "sim_time": clock.sim_time(),
                                    "day_frac": clock.day_frac(), "time_scale": clock.time_scale,
                                    "paused": clock.paused },
-                        "sim": sim.as_ref().map(|s| {
-                            let (multi, complex) = s.complexity_mix();
-                            let allopatry = terrain.as_ref().map(|t| s.thermal_correlation(t));
-                            let strata = terrain.as_ref().map(|t| s.stratum_mix(t));
-                            // Per-phase wall-clock breakdown of `Sim::step` (mean/max ms over the
-                            // profiler window) — a performance-assert surface for automation.
-                            let profile: serde_json::Map<String, serde_json::Value> = s
-                                .profile_report()
-                                .into_iter()
-                                .map(|(span, mean, max)| {
-                                    (span.label().to_string(), serde_json::json!({ "mean_ms": mean, "max_ms": max }))
-                                })
-                                .collect();
-                            serde_json::json!({
-                                "population": s.population(),
-                                "avg_energy": s.avg_energy(),
-                                "avg_biomass": s.avg_biomass(),
-                                "frac_multicellular": multi,
-                                "frac_complex": complex,
-                                "frac_carnivore": s.frac_carnivore(),
-                                "frac_autotroph": s.frac_autotroph(),
-                                "avg_nutrient": terrain.as_ref().map(|t| s.avg_nutrient(t, clock.tick())),
-                                "allopatry": allopatry,
-                                "crypsis": terrain.as_ref().map(|t| s.crypsis_correlation(t)),
-                                "species": s.species_count(),
-                                "niche_coverage": terrain.as_ref().map(|t| s.niche_coverage(t)),
-                                "strata_und_surf_air_water": strata,
-                                "births": s.births,
-                                "deaths": s.deaths,
-                                "kills": s.kills,
-                                "profile": profile,
-                            })
-                        }),
-                        "config": config_json(sim.as_ref()),
+                        "sim": sim_json,
+                        "config": config_json(&sim_cfg),
                     }));
                 }
                 dev_bridge::Cmd::SetClock { scale, paused } => {
@@ -1006,25 +1002,30 @@ async fn main() {
                     if let Some(p) = paused {
                         clock.paused = p;
                     }
+                    sim_handle.send(SimCommand::SetClock {
+                        scale: Some(clock.time_scale),
+                        paused: Some(clock.paused),
+                    });
                     let _ = reply.send(serde_json::json!({
                         "time_scale": clock.time_scale, "paused": clock.paused,
                     }));
                 }
                 dev_bridge::Cmd::Graze { x, y, amount } => {
-                    let taken = terrain.as_mut().and_then(|t| {
-                        (x < COLS && y < ROWS).then(|| t.graze(x, y, amount, clock.tick()))
-                    });
-                    let _ = reply.send(serde_json::json!({
-                        "taken": taken, "tick": clock.tick(),
-                    }));
+                    let ok = x < COLS && y < ROWS;
+                    if ok {
+                        sim_handle.send(SimCommand::Graze { x, y, amount });
+                    }
+                    let _ = reply.send(serde_json::json!({ "ok": ok, "tick": clock.tick() }));
                 }
                 dev_bridge::Cmd::Biomass { x, y } => {
-                    let biomass = terrain.as_ref().and_then(|t| {
-                        (x < COLS && y < ROWS).then(|| t.biomass_at(x, y, clock.tick()))
-                    });
-                    let _ = reply.send(serde_json::json!({
-                        "biomass": biomass, "tick": clock.tick(),
-                    }));
+                    let biomass = if x < COLS && y < ROWS {
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        sim_handle.send(SimCommand::QueryBiomass { x, y, reply: tx });
+                        rx.recv().ok()
+                    } else {
+                        None
+                    };
+                    let _ = reply.send(serde_json::json!({ "biomass": biomass, "tick": clock.tick() }));
                 }
                 dev_bridge::Cmd::SetView { cx, cz, zoom, yaw } => {
                     if let Some(v) = cx {
@@ -1047,8 +1048,10 @@ async fn main() {
                     seed = s.unwrap_or(seed.wrapping_add(1));
                     gen = None; // cancel any in-flight background regen — this wins
                     let t = VoxelTerrain::new(seed);
-                    sim = Some(Sim::with_config(seed, &t, sim_cfg)); // re-seed the population from the new world
-                    terrain = Some(t);
+                    let sim_world = Sim::with_config(seed, &t, sim_cfg); // re-seed from the new world
+                    terrain = Some(VoxelTerrain::render_side(seed, t.chunks_x, t.chunks_y, t.geo()));
+                    clock.set_tick(0);
+                    sim_handle.send(SimCommand::LoadWorld { sim: Box::new(sim_world), terrain: Box::new(t), tick: 0 });
                     let InternalGlContext { quad_context: ctx, .. } = unsafe { get_internal_gl() };
                     streamer.clear(ctx);
                     let _ = reply.send(serde_json::json!({"seed": seed}));
@@ -1094,13 +1097,15 @@ async fn main() {
                 }
                 dev_bridge::Cmd::Select { id, nearest } => {
                     if nearest {
-                        if let (Some(s), Some(t)) = (sim.as_ref(), terrain.as_ref()) {
+                        if let (Some(snap), Some(t)) = (snapshot.as_ref(), terrain.as_ref()) {
                             let (sw, sh) = (screen_width(), screen_height());
                             let vp = cam.camera().matrix();
                             let (ccx, ccy) = (sw * 0.5, sh * 0.5);
                             let mut best: Option<(f32, u64)> = None;
-                            for c in &s.creatures {
-                                if let Some(p) = project_world(vp, sw, sh, creature_world(c, t)) {
+                            for c in &snap.creatures {
+                                let (cx, cy) = sim::column_index(c.pos);
+                                let wy = t.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
+                                if let Some(p) = project_world(vp, sw, sh, vec3(c.pos.x, wy, c.pos.y)) {
                                     let d = ((p[0] - ccx).powi(2) + (p[1] - ccy).powi(2)).sqrt();
                                     if best.is_none_or(|(bd, _)| d < bd) {
                                         best = Some((d, c.id));
@@ -1118,59 +1123,50 @@ async fn main() {
                     pending_shots.push((path, window, reply)); // serviced post-draw below
                 }
                 dev_bridge::Cmd::GetConfig => {
-                    let _ = reply.send(config_json(sim.as_ref()));
+                    let _ = reply.send(config_json(&sim_cfg));
                 }
                 dev_bridge::Cmd::SetFeature { name, enabled } => {
-                    let resp = match sim.as_mut() {
-                        Some(s) => {
-                            let mut c = s.config();
-                            if c.features.set(&name, enabled) {
-                                s.set_config(c);
-                                serde_json::json!({ "ok": true, "feature": name, "enabled": enabled })
-                            } else {
-                                serde_json::json!({ "ok": false, "error": format!("unknown feature: {name}") })
-                            }
-                        }
-                        None => serde_json::json!({ "ok": false, "error": "no sim yet" }),
+                    // `sim_cfg` is the main-side config mirror; mutate it and push to the worker.
+                    let resp = if sim_cfg.features.set(&name, enabled) {
+                        sim_handle.send(SimCommand::SetConfig(sim_cfg));
+                        serde_json::json!({ "ok": true, "feature": name, "enabled": enabled })
+                    } else {
+                        serde_json::json!({ "ok": false, "error": format!("unknown feature: {name}") })
                     };
                     let _ = reply.send(resp);
                 }
                 dev_bridge::Cmd::SetParam { name, value } => {
-                    let resp = match sim.as_mut() {
-                        Some(s) => {
-                            let mut c = s.config();
-                            if c.params.set(&name, value) {
-                                s.set_config(c);
-                                serde_json::json!({ "ok": true, "param": name, "value": value })
-                            } else {
-                                serde_json::json!({ "ok": false, "error": format!("unknown param: {name}") })
-                            }
-                        }
-                        None => serde_json::json!({ "ok": false, "error": "no sim yet" }),
+                    let resp = if sim_cfg.params.set(&name, value) {
+                        sim_handle.send(SimCommand::SetConfig(sim_cfg));
+                        serde_json::json!({ "ok": true, "param": name, "value": value })
+                    } else {
+                        serde_json::json!({ "ok": false, "error": format!("unknown param: {name}") })
                     };
                     let _ = reply.send(resp);
                 }
-                dev_bridge::Cmd::Metrics { id, last } => {
-                    let _ = reply.send(metrics_json(&metrics, id.as_deref(), last));
+                dev_bridge::Cmd::Metrics { id: _, last: _ } => {
+                    // Live metric sampling moved to the sim worker is not yet wired; report empty.
+                    let _ = reply.send(serde_json::json!({ "metrics": [], "note": "unavailable on the sim thread" }));
                 }
                 dev_bridge::Cmd::Save { path } => {
                     let p = path.unwrap_or_else(|| SAVE_PATH.to_string());
-                    let resp = match (sim.as_ref(), terrain.as_ref()) {
-                        (Some(s), Some(t)) => match save_world(&p, seed, clock.tick(), s, t) {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    sim_handle.send(SimCommand::Save { reply: tx });
+                    let resp = match rx.recv() {
+                        Ok((sd, tk, ss, ts)) => match save_world(&p, sd, tk, ss, ts) {
                             Ok(()) => {
                                 toast = Some(("Saved".into(), get_time())); // mirror the HUD toast
-                                serde_json::json!({ "ok": true, "saved": p, "tick": clock.tick() })
+                                serde_json::json!({ "ok": true, "saved": p, "tick": tk })
                             }
                             Err(e) => serde_json::json!({ "ok": false, "error": e }),
                         },
-                        _ => serde_json::json!({ "ok": false, "error": "world not ready" }),
+                        Err(_) => serde_json::json!({ "ok": false, "error": "world not ready" }),
                     };
                     let _ = reply.send(resp);
                 }
                 dev_bridge::Cmd::Load { path } => {
                     let p = path.unwrap_or_else(|| SAVE_PATH.to_string());
-                    // Synchronous (unlike the interactive F9 background load): scripted inspection
-                    // expects the loaded world present on the reply, so regenerate + restore inline.
+                    // Regenerate the geometry + restore the overlay, then hand the world to the worker.
                     let resp = match load_snapshot(&p) {
                         Ok(snap) => {
                             let mut t = VoxelTerrain::new(snap.terrain_seed);
@@ -1179,9 +1175,13 @@ async fn main() {
                                     let tick = snap.tick;
                                     seed = snap.terrain_seed;
                                     sim_cfg = snap.sim.cfg;
-                                    sim = Some(Sim::from_state(snap.sim));
+                                    terrain = Some(VoxelTerrain::render_side(seed, t.chunks_x, t.chunks_y, t.geo()));
                                     clock.set_tick(tick);
-                                    terrain = Some(t);
+                                    sim_handle.send(SimCommand::LoadWorld {
+                                        sim: Box::new(Sim::from_state(snap.sim)),
+                                        terrain: Box::new(t),
+                                        tick,
+                                    });
                                     gen = None; // cancel any in-flight regen/load — the load wins
                                     load = None;
                                     let InternalGlContext { quad_context: ctx, .. } =
@@ -1429,45 +1429,15 @@ async fn load_shader(path: &str, baked: &str) -> String {
     macroquad::file::load_string(path).await.unwrap_or_else(|_| baked.to_string())
 }
 
-/// The live `SimConfig` (features + params) as JSON, or `null` before the sim exists. Used by the
-/// dev bridge's `get_config` and embedded in `status`.
+/// The `SimConfig` (features + params) as JSON. Reads the main-side config mirror (`sim_cfg`), kept in
+/// sync with the worker. Used by the dev bridge's `get_config` and embedded in `status`.
 #[cfg(feature = "dev")]
-fn config_json(sim: Option<&Sim>) -> serde_json::Value {
-    match sim {
-        Some(s) => {
-            let cfg = s.config();
-            let features: serde_json::Map<String, serde_json::Value> =
-                cfg.features.pairs().iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect();
-            let params: serde_json::Map<String, serde_json::Value> =
-                cfg.params.pairs().iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect();
-            serde_json::json!({ "features": features, "params": params })
-        }
-        None => serde_json::Value::Null,
-    }
-}
-
-/// A metric value as JSON. `u64` checksums are stringified (they exceed JSON's exact-integer range).
-#[cfg(feature = "dev")]
-fn mv_json(v: MetricValue) -> serde_json::Value {
-    match v {
-        MetricValue::Scalar(x) => serde_json::json!(x),
-        MetricValue::Checksum(h) => serde_json::json!(h.to_string()),
-    }
-}
-
-/// `{ latest: {id: value…}, series: [[tick, value]…] | null }` — the latest of every metric, plus
-/// the time-series of `id` (capped to the last `last` samples) if requested.
-#[cfg(feature = "dev")]
-fn metrics_json(reg: &MetricRegistry, id: Option<&str>, last: Option<usize>) -> serde_json::Value {
-    let latest: serde_json::Map<String, serde_json::Value> = reg
-        .ids()
-        .filter_map(|name| reg.latest(name).map(|v| (name.to_string(), mv_json(v))))
-        .collect();
-    let series = id.and_then(|name| reg.series(name)).map(|s| {
-        let start = last.map(|k| s.len().saturating_sub(k)).unwrap_or(0);
-        s[start..].iter().map(|(t, v)| serde_json::json!([t, mv_json(*v)])).collect::<Vec<_>>()
-    });
-    serde_json::json!({ "latest": latest, "series": series })
+fn config_json(cfg: &SimConfig) -> serde_json::Value {
+    let features: serde_json::Map<String, serde_json::Value> =
+        cfg.features.pairs().iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect();
+    let params: serde_json::Map<String, serde_json::Value> =
+        cfg.params.pairs().iter().map(|(k, v)| (k.to_string(), serde_json::json!(v))).collect();
+    serde_json::json!({ "features": features, "params": params })
 }
 
 #[cfg(test)]
