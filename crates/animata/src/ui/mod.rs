@@ -111,6 +111,9 @@ pub struct SimMetrics {
     pub sim_time: f32,
     pub day_frac: f32,
     pub time_scale: f32,
+    /// Floating upper bound for the time-scale slider — the largest scale the CPU can sustain right
+    /// now (climbs on a light world, drops on a heavy one). The transport slider tops out here.
+    pub max_time_scale: f32,
     pub paused: bool,
     // Population & evolution
     pub life: Option<LifeStats>,
@@ -134,9 +137,8 @@ pub struct SimMetrics {
     pub conspecific_screen: Vec<[f32; 2]>,
 }
 
-// Mirror of main.rs time-scale tuning (kept local to avoid a cross-module const dependency).
+// Mirror of main.rs time-scale lower bound (the upper bound floats with CPU headroom, passed in).
 pub(crate) const MIN_TIME_SCALE: f32 = 0.1;
-pub(crate) const MAX_TIME_SCALE: f32 = 64.0;
 
 /// One-line ramp description for the active field map (mirrors `build_field_minimap`). The arrow is
 /// the Phosphor `ARROW_RIGHT` glyph, not U+2192 — the vendored IBM Plex subset lacks U+2192 and would

@@ -12,7 +12,7 @@ use animata_sim::terrain::VoxelTerrain;
 
 use super::theme;
 use super::theme::FrameKind;
-use super::{inspector, legend_text, minimap, ramp_color, MAX_TIME_SCALE, MIN_TIME_SCALE};
+use super::{inspector, legend_text, minimap, ramp_color, MIN_TIME_SCALE};
 use super::{HudCache, Panel, SimMetrics, UiActions, UiState};
 use crate::DebugView;
 
@@ -375,7 +375,7 @@ fn transport(ctx: &egui::Context, m: &SimMetrics, act: &mut UiActions) {
                     ui.painter()
                         .vline(rect.center().x, rect.top()..=rect.bottom(), Stroke::new(1.0, HAIR_12));
 
-                    if let Some(v) = speed_slider(ui, m.time_scale) {
+                    if let Some(v) = speed_slider(ui, m.time_scale, m.max_time_scale) {
                         act.set_time_scale = Some(v);
                     }
                     let val = if m.time_scale < 10.0 {
@@ -430,10 +430,11 @@ fn play_button(ui: &mut egui::Ui, paused: bool) -> egui::Response {
 }
 
 /// Logarithmic speed slider (0.1×–64×): uniform track + ringed amber thumb (mockup amSlider).
-fn speed_slider(ui: &mut egui::Ui, current: f32) -> Option<f32> {
+fn speed_slider(ui: &mut egui::Ui, current: f32, max: f32) -> Option<f32> {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 24.0), Sense::click_and_drag());
     let cy = rect.center().y;
-    let (lmin, lmax) = (MIN_TIME_SCALE.ln(), MAX_TIME_SCALE.ln());
+    // Upper bound floats with CPU headroom (`m.max_time_scale`); guard the log range against max≤min.
+    let (lmin, lmax) = (MIN_TIME_SCALE.ln(), max.max(MIN_TIME_SCALE * 2.0).ln());
     let t = ((current.ln() - lmin) / (lmax - lmin)).clamp(0.0, 1.0);
     let hx = rect.left() + t * rect.width();
     let p = ui.painter();
