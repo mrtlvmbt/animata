@@ -54,6 +54,36 @@ fn new_write_is_byte_identical_to_field0_magic_layout() {
     );
 }
 
+/// Migration lock (migrate-not-reject): a real ANM2 stream (`MAGIC_V2` + the frozen pre-gas-cycle
+/// body) decodes through the CURRENT `Snapshot::read` and upgrades to ANM3 — preserving every existing
+/// field and filling the new ones by CONTINUITY (oxygen feature off, `oxygen_tolerance`/overlay at 0).
+/// Built from a POPULATED world (≥1 creature with a developed genome + a dirtied overlay) so the
+/// volatile `Genome`/overlay bytes are actually exercised, then down-converted via `to_v2`.
+#[test]
+fn anm2_stream_migrates_to_current() {
+    let mut t = VoxelTerrain::new(7);
+    let mut s = Sim::new(7, &t);
+    for tick in 0..120 {
+        s.step(&mut t, tick);
+    }
+    let st = s.to_state();
+    let (n, photo, seed) = (st.creatures.len(), st.cfg.params.photo_rate, st.world_seed);
+    assert!(n > 1, "fixture must carry creatures to exercise the frozen Genome bytes");
+
+    // Write a genuine ANM2 stream: MAGIC_V2 prefix + the frozen ANM2 body (down-converted).
+    let body = super::v2::SnapshotBodyV2 { terrain_seed: 7, tick: 120, sim: st.to_v2(), terrain: t.clone_state().to_v2() };
+    let mut anm2 = MAGIC_V2.to_le_bytes().to_vec();
+    bincode::serialize_into(&mut anm2, &body).expect("write ANM2 body");
+
+    let snap = Snapshot::read(&anm2[..]).expect("ANM2 stream must MIGRATE, not be rejected");
+    assert_eq!(snap.tick, 120);
+    assert_eq!(snap.terrain_seed, 7);
+    assert_eq!(snap.sim.world_seed, seed);
+    assert_eq!(snap.sim.creatures.len(), n, "creatures preserved through migration");
+    assert_eq!(snap.sim.cfg.params.photo_rate, photo, "existing params preserved");
+    assert!(!snap.sim.cfg.features.oxygen, "CONTINUITY: a migrated ANM2 save resumes oxygen-off (anoxic)");
+}
+
 /// A foreign / corrupt file is rejected by the magic check, not silently mis-decoded.
 #[test]
 fn read_rejects_unknown_magic() {

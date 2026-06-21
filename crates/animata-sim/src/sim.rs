@@ -20,12 +20,12 @@ use rayon::prelude::*;
 use crate::config::*;
 use std::time::Instant;
 
-use crate::genome::{Genome, Phenotype, TrophicNiche};
+use crate::genome::{Genome, GenomeV2, Phenotype, TrophicNiche};
 use crate::grid::SpatialGrid;
 use crate::profile::Span;
 use crate::pressure::{PressureRegistry, Sample};
 use crate::rng::{seed_fold, splitmix64, Rng};
-use crate::sim_config::SimConfig;
+use crate::sim_config::{SimConfig, SimConfigV2};
 use crate::terrain::VoxelTerrain;
 
 // Fixed brain topology: inputs → tanh hidden → tanh outputs. The genome's `brain` vector holds
@@ -152,6 +152,95 @@ impl Creature {
             *ov = sum.tanh();
         }
         ((out[0] + 1.0) * 0.5, out[1])
+    }
+}
+
+/// Frozen ANM2 `Creature` shape (its `genome` is the pre-`oxygen_tolerance` `GenomeV2`) for save
+/// migration ([`crate::persist`] v2). NEVER edit. `pheno` is unchanged (oxygen is a genome trait).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct CreatureV2 {
+    id: u64,
+    founder: u64,
+    pos: Vec2,
+    heading: f32,
+    energy: f32,
+    age: u32,
+    alive: bool,
+    genome: GenomeV2,
+    pheno: Phenotype,
+}
+
+impl CreatureV2 {
+    fn migrate(self) -> Creature {
+        Creature {
+            id: self.id,
+            founder: self.founder,
+            pos: self.pos,
+            heading: self.heading,
+            energy: self.energy,
+            age: self.age,
+            alive: self.alive,
+            genome: self.genome.migrate(),
+            pheno: self.pheno,
+        }
+    }
+}
+
+/// Frozen ANM2 `SimState` (its `cfg`/`creatures` are the frozen V2 shapes) for save migration.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SimStateV2 {
+    world_seed: u64,
+    next_id: u64,
+    births: u64,
+    deaths: u64,
+    kills: u64,
+    cfg: SimConfigV2,
+    creatures: Vec<CreatureV2>,
+}
+
+impl SimStateV2 {
+    /// ANM2 → current: migrate the config (oxygen feature off, continuity) + each creature (genome
+    /// gains `oxygen_tolerance = 0`). Scalars carry over unchanged.
+    pub(crate) fn migrate(self) -> SimState {
+        SimState {
+            world_seed: self.world_seed,
+            next_id: self.next_id,
+            births: self.births,
+            deaths: self.deaths,
+            kills: self.kills,
+            cfg: self.cfg.migrate(),
+            creatures: self.creatures.into_iter().map(CreatureV2::migrate).collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SimState {
+    /// Down-convert to the frozen ANM2 shape — migration-test support only.
+    pub(crate) fn to_v2(&self) -> SimStateV2 {
+        SimStateV2 {
+            world_seed: self.world_seed,
+            next_id: self.next_id,
+            births: self.births,
+            deaths: self.deaths,
+            kills: self.kills,
+            cfg: self.cfg.to_v2(),
+            creatures: self
+                .creatures
+                .iter()
+                .map(|c| CreatureV2 {
+                    id: c.id,
+                    founder: c.founder,
+                    pos: c.pos,
+                    heading: c.heading,
+                    energy: c.energy,
+                    age: c.age,
+                    alive: c.alive,
+                    genome: c.genome.to_v2(),
+                    pheno: c.pheno.clone(),
+                })
+                .collect(),
+        }
     }
 }
 

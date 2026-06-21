@@ -11,14 +11,15 @@
 //!
 //! ## Versioning & migration (forward, never reject)
 //! The 4-byte magic is written/read as a **hand-managed LE prefix** — NOT a serde field — so the body
-//! struct is magic-less and `read()` can peek the tag, then dispatch to the matching version's
-//! deserializer and migrate forward to current. Today only `MAGIC` (ANM2) is current, so the single
-//! arm is an identity load. When a future change bumps the layout (e.g. a new `Params` field): bump
-//! `MAGIC` to ANM3, FREEZE the then-current body shape into a `v2` module (`SnapshotBodyV2` +
-//! whatever nested types diverge), and add a `MAGIC_V2 => migrate_v2(...)` arm that maps old→current
-//! (a new field gets its CONTINUITY no-op value unless product wants convergence). The
-//! `new_write_is_byte_identical_to_legacy_anm2_layout` test locks that this prefix split preserves the
-//! exact on-disk ANM2 bytes, so old files keep decoding.
+//! struct is magic-less and `read()` peeks the tag, then dispatches to the matching version's
+//! deserializer and MIGRATES forward to current. Current is `MAGIC` (ANM3); `MAGIC_V2` (ANM2) decodes
+//! through the frozen [`v2`] shapes and `v2::migrate`. To add the NEXT version: bump `MAGIC`, FREEZE
+//! the then-current body shape (the per-type frozen `*V2`-style structs live WITH the modules owning
+//! their private fields — `genome`/`sim`/`terrain`/`sim_config` — each with a `migrate` that fills new
+//! fields by CONTINUITY, i.e. the value that resumes the save AS IT RAN, unless product wants
+//! convergence), and add a `MAGIC_VPREV => migrate(...)` arm. The
+//! `new_write_is_byte_identical_to_field0_magic_layout` test locks the prefix split; the
+//! `anm2_stream_migrates_to_current` test locks old→new decoding.
 
 use crate::sim::SimState;
 use crate::terrain::TerrainState;
@@ -27,11 +28,12 @@ use std::io::{Read, Write};
 /// File magic: ASCII "ANM3" (LE on disk). The CURRENT snapshot version. Written as a 4-byte prefix
 /// before the body, and matched on read to pick the (de)serializer. Bumped from ANM2 for the gas-cycle
 /// Phase 1 (new fields: `Genome.oxygen_tolerance`, `Params.oxygen_lethality`, `Features.oxygen`,
-/// `TerrainState.oxygen`/`oxygen_update` — a deep layout change).
-/// TODO(gas-cycle): the policy is MIGRATE-not-reject ([[save-migration-over-reject]]); the
-/// ANM2→ANM3 migration (freeze the ANM2 graph + `migrate_v2`) lands in the focused follow-up PR. Until
-/// then pre-ANM3 saves are cleanly REJECTED (the 486k ANM2 save is restored by that PR).
+/// `TerrainState.oxygen`/`oxygen_update` — a deep layout change). Old ANM2 saves are MIGRATED forward
+/// (not rejected) via the frozen [`v2`] shapes — see the module-level versioning note.
 const MAGIC: u32 = 0x414E_4D33;
+/// Previous version "ANM2" (pre-gas-cycle). Decoded via the frozen [`v2::SnapshotBodyV2`] graph and
+/// upgraded by [`v2::migrate`] (continuity: oxygen_tolerance 0, oxygen overlay empty, oxygen feature off).
+const MAGIC_V2: u32 = 0x414E_4D32;
 
 /// A complete world snapshot body: the seed (to regenerate terrain geometry), the clock tick to
 /// resume at, the sim state (creatures + counters + config) and the terrain overlay. The magic tag is
@@ -66,13 +68,20 @@ impl Snapshot {
         let mut tag = [0u8; 4];
         r.read_exact(&mut tag).map_err(|e| e.to_string())?;
         match u32::from_le_bytes(tag) {
-            // Current == ANM2 ⇒ identity load. A future bump adds e.g.
-            //   MAGIC_V2 => migrate_v2(bincode::deserialize_from::<_, v2::SnapshotBodyV2>(r)?),
             MAGIC => bincode::deserialize_from(r).map_err(|e| e.to_string()),
+            // ANM2 (pre-gas-cycle): decode the frozen body, upgrade to current (continuity defaults).
+            MAGIC_V2 => {
+                let body: v2::SnapshotBodyV2 =
+                    bincode::deserialize_from(r).map_err(|e| e.to_string())?;
+                Ok(v2::migrate(body))
+            }
             other => Err(format!("not a supported animata snapshot (magic 0x{other:08X})")),
         }
     }
 }
+
+#[path = "persist_v2.rs"]
+mod v2;
 
 #[cfg(test)]
 #[path = "persist_tests.rs"]
