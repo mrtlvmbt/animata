@@ -9,6 +9,7 @@
 
 use crate::config::*;
 use crate::tectonics::TectonicField;
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Baseline slab thickness in levels: even the lowest land keeps this many levels
@@ -561,6 +562,11 @@ impl VoxelTerrain {
     /// monotonically rising fraction in `[0, 1]` as the phases (tectonics → elevation →
     /// erosion → hydrology → classification) complete, for a UI progress bar.
     pub fn generate(seed: u64, progress: &(dyn Fn(f32) + Sync)) -> Self {
+        // Per-phase baseline (MAP_SCALE=16, 3.69M cols, release, ~M-series laptop):
+        //   tectonics ~365ms (5%) · elevation ~312ms (4%) · erosion ~5960ms (85%) ·
+        //   hydrology ~300ms (4%) · classification ~98ms (1%) · total ~7.0s.
+        // Erosion (droplet) dominates; elevation/classification parallelize bit-identically
+        // (pure per-coordinate, no float reduction) — see `report_full_generation_cost`.
         let n = COLS * ROWS;
         // The tectonic macro layer is global (Voronoi plates + a distance transform from
         // boundaries), so it's built once up front; the per-column generator samples it.
@@ -569,46 +575,52 @@ impl VoxelTerrain {
         // Build the continuous elevation field, then ERODE it globally (droplet + thermal)
         // before classifying columns into height/biome — so valleys, drainage and fjords
         // are carved into the land, and the altitude bands follow the eroded surface.
+        // Parallel over rows: each row writes its own slice, no shared reduction, so the
+        // result is bit-identical to the serial loop (tectonic reads are &-shared/Sync).
         let mut elev = vec![0.0f32; n];
-        for y in 0..ROWS {
-            for x in 0..COLS {
-                elev[y * COLS + x] =
-                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+        elev.par_chunks_mut(COLS).enumerate().for_each(|(y, row)| {
+            for (x, h) in row.iter_mut().enumerate() {
+                *h = elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
             }
-            progress(0.10 + 0.20 * (y + 1) as f32 / ROWS as f32);
-        }
+        });
+        progress(0.30);
         // Erosion is the heavy pass; thread its local [0,1] progress into our 0.30..0.65 band.
         crate::erosion::erode(seed, &mut elev, &|f| progress(0.30 + 0.35 * f));
         // Hydrology (rivers via flow accumulation, lakes via depression filling) reads the
         // eroded field; it feeds the per-column water level + river/lake biomes below.
         let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
         progress(0.72);
-        let mut surf = vec![0.0f32; n];
-        let mut biome = vec![0u8; n];
-        let mut flags = vec![0u8; n];
-        let mut water = vec![0u8; n];
-        let mut temp = vec![0u8; n];
-        let mut moist = vec![0u8; n];
-        let mut toxicity = vec![0u8; n];
-        let mut biomass = vec![0u8; n];
-        let mut nutrient = vec![0u8; n];
-        for y in 0..ROWS {
-            for x in 0..COLS {
-                let i = y * COLS + x;
+        // Classification is pure per-column (climate fBm + Whittaker biome + per-cell water
+        // assignment from `hydro`) with no cross-cell reduction — produce in parallel
+        // (`into_par_iter().map().collect()` keeps index order ⇒ bit-identical to the serial
+        // loop), then scatter into the field arrays.
+        struct Cell {
+            s: f32,
+            biome: u8,
+            flags: u8,
+            water: u8,
+            temp: u8,
+            moist: u8,
+            toxicity: u8,
+            biomass: u8,
+            nutrient: u8,
+        }
+        let cells: Vec<Cell> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let (x, y) = (i % COLS, i / COLS);
                 let (mut s, mut b, ct, cm) = classify(seed, x, y, elev[i]);
-                temp[i] = quant_unit(ct);
-                moist[i] = quant_unit(cm);
                 // Toxicity: a coherent noise field, squared so MOST ground is benign and toxic
                 // belts are the minority (a real habitat filter, not a uniform haze).
                 let tox = fbm(seed, x as f32 / TOXIC_LATTICE, y as f32 / TOXIC_LATTICE, 707, TOXIC_OCTAVES);
-                toxicity[i] = quant_unit(tox * tox);
                 let mut f = 0u8;
+                let mut wlev = 0u8;
                 // Water priority on connectivity, not absolute height: ocean (sea-connected)
                 // wins, else a depression lake, else a river. `hydro` already cleared lake/river
                 // on ocean cells, so the `else if` chain is doubly exclusive.
                 if hydro.ocean[i] {
                     // Open sea: water plane at the global sea level over the sea floor.
-                    water[i] = SEA_ABS;
+                    wlev = SEA_ABS;
                     b = BiomeKind::Ocean;
                     f = FLAG_WATER;
                 } else if hydro.lake[i] {
@@ -624,7 +636,7 @@ impl VoxelTerrain {
                     if s.round() as u8 >= lvl {
                         s = lvl.saturating_sub(1) as f32;
                     }
-                    water[i] = lvl;
+                    wlev = lvl;
                     b = BiomeKind::Ocean; // underwater bed
                     f = FLAG_WATER;
                 } else if hydro.river[i] {
@@ -632,23 +644,49 @@ impl VoxelTerrain {
                     let top = s.round() as u8;
                     if top > LAND_FOOT {
                         s = (top - 1) as f32;
-                        water[i] = top;
+                        wlev = top;
                         b = BiomeKind::Ocean;
                         f = FLAG_WATER;
                     }
                 }
-                surf[i] = s;
-                biome[i] = b.id();
-                flags[i] = f;
                 // Nutrient starts at the geology baseline (the level weathering relaxes toward).
                 let nb = nutrient_baseline(b, s.round() as u8);
-                nutrient[i] = quant_unit(nb);
-                // Vegetation starts mature at the NUTRIENT-LIMITED capacity (carrying capacity ×
-                // nutrient fraction) on the FINAL biome + moisture; water columns get 0. Starting
-                // at the un-limited cap would overshoot and clamp down on the first read.
-                biomass[i] = quant_unit(carrying_capacity(b, cm) * nb);
-            }
-            progress(0.72 + 0.28 * (y + 1) as f32 / ROWS as f32);
+                Cell {
+                    s,
+                    biome: b.id(),
+                    flags: f,
+                    water: wlev,
+                    temp: quant_unit(ct),
+                    moist: quant_unit(cm),
+                    toxicity: quant_unit(tox * tox),
+                    // Vegetation starts mature at the NUTRIENT-LIMITED capacity (carrying capacity
+                    // × nutrient fraction) on the FINAL biome + moisture; water columns get 0.
+                    // Starting at the un-limited cap would overshoot and clamp down on first read.
+                    biomass: quant_unit(carrying_capacity(b, cm) * nb),
+                    nutrient: quant_unit(nb),
+                }
+            })
+            .collect();
+        progress(0.86);
+        let mut surf = vec![0.0f32; n];
+        let mut biome = vec![0u8; n];
+        let mut flags = vec![0u8; n];
+        let mut water = vec![0u8; n];
+        let mut temp = vec![0u8; n];
+        let mut moist = vec![0u8; n];
+        let mut toxicity = vec![0u8; n];
+        let mut biomass = vec![0u8; n];
+        let mut nutrient = vec![0u8; n];
+        for (i, c) in cells.iter().enumerate() {
+            surf[i] = c.s;
+            biome[i] = c.biome;
+            flags[i] = c.flags;
+            water[i] = c.water;
+            temp[i] = c.temp;
+            moist[i] = c.moist;
+            toxicity[i] = c.toxicity;
+            biomass[i] = c.biomass;
+            nutrient[i] = c.nutrient;
         }
         // Shoreline reconciliation (one pass, ALL water types). Terrain height and the water
         // surface are quantised to voxels INDEPENDENTLY (`surf.round()` vs

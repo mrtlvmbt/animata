@@ -214,6 +214,71 @@
         );
     }
 
+    /// Per-phase wall-clock of the whole generation pipeline — the baseline the
+    /// parallelization stages measure against. Mirrors `generate()`'s phase order using the
+    /// real phase functions. Run with `--release`; informational, not a gate.
+    #[test]
+    #[ignore]
+    fn report_full_generation_cost() {
+        let seed = 1u64;
+        let n = COLS * ROWS;
+
+        let t = std::time::Instant::now();
+        let tect = TectonicField::generate(seed);
+        let tect_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
+        let mut elev = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                elev[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        let elev_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
+        crate::erosion::erode(seed, &mut elev, &|_| {});
+        let erode_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
+        let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
+        let hydro_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        // Classification: run the real per-column work (classify + toxicity fbm) into a sink
+        // so the cost is representative, not just a memory touch.
+        let t = std::time::Instant::now();
+        let mut sink = 0.0f32;
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let i = y * COLS + x;
+                let (s, b, ct, cm) = classify(seed, x, y, elev[i]);
+                let tox = fbm(seed, x as f32 / TOXIC_LATTICE, y as f32 / TOXIC_LATTICE, 707, TOXIC_OCTAVES);
+                let _ = hydro.ocean[i];
+                sink += s + ct + cm + tox + b.id() as f32;
+            }
+        }
+        let classify_ms = t.elapsed().as_secs_f64() * 1000.0;
+        std::hint::black_box(sink);
+
+        let total = tect_ms + elev_ms + erode_ms + hydro_ms + classify_ms;
+        let pct = |ms: f64| ms / total * 100.0;
+        let report = format!(
+            "=== full generation timing (MAP_SCALE={MAP_SCALE}, {COLS}x{ROWS} = {n} cols) ===\n\
+             tectonics      {tect_ms:8.1} ms  {:5.1}%\n\
+             elevation      {elev_ms:8.1} ms  {:5.1}%\n\
+             erosion        {erode_ms:8.1} ms  {:5.1}%\n\
+             hydrology      {hydro_ms:8.1} ms  {:5.1}%\n\
+             classification {classify_ms:8.1} ms  {:5.1}%\n\
+             ----------------------------------------\n\
+             total          {total:8.1} ms",
+            pct(tect_ms), pct(elev_ms), pct(erode_ms), pct(hydro_ms), pct(classify_ms),
+        );
+        // Also mirror to a file — test-bar discards a passing test's stdout.
+        let _ = std::fs::write("/tmp/animata_gen_timing.txt", &report);
+        eprintln!("\n{report}");
+    }
+
     /// Climate must give the giant map real biome DIVERSITY: several lowland biomes
     /// present (temperature × moisture bands), none absurdly dominant. Prints the mix.
     #[test]
