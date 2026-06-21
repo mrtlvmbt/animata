@@ -85,14 +85,23 @@ pub fn compute(elev: &[f32], sea_fraction: f32) -> Hydrology {
     // receivers always leads to the map border (acyclic), even across flat lake surfaces —
     // which a plain steepest-descent can't do, so without this rivers die in micro-pits.
     let (filled, receiver, order) = priority_flood(elev);
+    // D∞ (Tarboton) flow split on the filled surface: flow disperses to the one or two neighbours
+    // straddling the steepest descent, instead of snapping to a single D8 direction (which strings
+    // parallel rivers down planar slopes). Flats/lakes/outlets fall back to the priority-flood
+    // single receiver, so routing still reaches the border.
+    let (recv1, recv2, frac1) = dinf_flow(&filled, &receiver);
     // Flow accumulation: every column drains one unit of rain; summing upstream→downstream
-    // (reverse pop order) gives the drainage area through each column.
+    // (reverse pop order) gives the drainage area through each column, split per the D∞ fractions.
     let mut accum = vec![1.0f32; n];
     for &iu in order.iter().rev() {
         let i = iu as usize;
-        let r = receiver[i] as usize;
-        if r != i {
-            accum[r] += accum[i];
+        let a = accum[i];
+        let (a1, a2) = (recv1[i] as usize, recv2[i] as usize);
+        if a1 != i {
+            accum[a1] += a * frac1[i];
+        }
+        if a2 != i {
+            accum[a2] += a * (1.0 - frac1[i]);
         }
     }
     let mut river = vec![false; n];
@@ -151,10 +160,83 @@ fn quant(e: f32) -> i64 {
     (e * 1_000_000.0) as i64
 }
 
+/// D∞ (Tarboton 1997) flow split on the depression-filled surface `filled`. For each cell it
+/// finds the steepest of the 8 triangular facets and apportions flow between the two neighbours
+/// bounding that facet by the descent angle — so flow disperses smoothly instead of snapping to
+/// one of 8 directions. Returns `(recv1, recv2, frac1)`: a fraction `frac1` of the cell's flow
+/// goes to `recv1` and `1-frac1` to `recv2`. Where no facet is downhill (a filled flat / lake /
+/// outlet) it falls back to the single priority-flood `receiver` (`recv2 = self`, `frac1 = 1`),
+/// which routes across the flat toward the spill, keeping the network acyclic and border-draining.
+fn dinf_flow(filled: &[f32], receiver: &[u32]) -> (Vec<u32>, Vec<u32>, Vec<f32>) {
+    let (w, h) = (COLS as i32, ROWS as i32);
+    let n = filled.len();
+    let mut recv1 = vec![0u32; n];
+    let mut recv2 = vec![0u32; n];
+    let mut frac1 = vec![1.0f32; n];
+    // The 8 facets, each (orthogonal neighbour, adjacent diagonal neighbour).
+    const FACETS: [((i32, i32), (i32, i32)); 8] = [
+        ((1, 0), (1, -1)),
+        ((0, -1), (1, -1)),
+        ((0, -1), (-1, -1)),
+        ((-1, 0), (-1, -1)),
+        ((-1, 0), (-1, 1)),
+        ((0, 1), (-1, 1)),
+        ((0, 1), (1, 1)),
+        ((1, 0), (1, 1)),
+    ];
+    let pi4 = std::f32::consts::FRAC_PI_4;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) as usize;
+            let e0 = filled[i];
+            let mut best_s = 0.0f32;
+            let mut best: Option<(u32, u32, f32)> = None; // (ortho, diag, frac_to_ortho)
+            for ((ox, oy), (dx, dy)) in FACETS {
+                let (oxx, oyy) = (x + ox, y + oy);
+                let (dxx, dyy) = (x + dx, y + dy);
+                if oxx < 0 || oyy < 0 || oxx >= w || oyy >= h || dxx < 0 || dyy < 0 || dxx >= w || dyy >= h {
+                    continue;
+                }
+                let jo = (oyy * w + oxx) as usize;
+                let jd = (dyy * w + dxx) as usize;
+                let s1 = e0 - filled[jo]; // orthogonal slope (unit distance)
+                let s2 = filled[jo] - filled[jd]; // the cross leg
+                let r = s2.atan2(s1);
+                let s = if r < 0.0 {
+                    s1 // steepest is along the orthogonal edge
+                } else if r > pi4 {
+                    (e0 - filled[jd]) / std::f32::consts::SQRT_2 // along the diagonal
+                } else {
+                    (s1 * s1 + s2 * s2).sqrt()
+                };
+                if s > best_s {
+                    let rr = r.clamp(0.0, pi4);
+                    best_s = s;
+                    best = Some((jo as u32, jd as u32, 1.0 - rr / pi4));
+                }
+            }
+            match best {
+                Some((jo, jd, fo)) if best_s > 0.0 => {
+                    recv1[i] = jo;
+                    recv2[i] = jd;
+                    frac1[i] = fo;
+                }
+                _ => {
+                    recv1[i] = receiver[i];
+                    recv2[i] = i as u32;
+                    frac1[i] = 1.0;
+                }
+            }
+        }
+    }
+    (recv1, recv2, frac1)
+}
+
 /// Priority-flood (Barnes): flood inward from the border, always expanding the lowest
 /// frontier cell. Returns the depression-filled surface, each cell's drainage receiver
 /// (the cell it was reached from; border cells point to themselves) and the pop order.
-fn priority_flood(elev: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+/// `pub(crate)` so the stream-power LEM ([`crate::lem`]) can reuse the same flow routing.
+pub(crate) fn priority_flood(elev: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
     let n = COLS * ROWS;
     let (w, h) = (COLS as i32, ROWS as i32);
     let mut water = vec![0f32; n];

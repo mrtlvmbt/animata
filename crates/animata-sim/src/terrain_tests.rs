@@ -214,6 +214,76 @@
         );
     }
 
+    /// Per-phase wall-clock of the whole generation pipeline — the baseline the
+    /// parallelization stages measure against. Mirrors `generate()`'s phase order using the
+    /// real phase functions. Run with `--release`; informational, not a gate.
+    #[test]
+    #[ignore]
+    fn report_full_generation_cost() {
+        let seed = 1u64;
+        let n = COLS * ROWS;
+
+        let t = std::time::Instant::now();
+        let tect = TectonicField::generate(seed);
+        let tect_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
+        let mut elev = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                elev[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        let elev_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
+        crate::lem::refine(&mut elev, tect.uplift_field());
+        let lem_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
+        crate::erosion::erode(seed, &mut elev, &|_| {});
+        let erode_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
+        let hydro = crate::hydrology::compute(&elev, SEA_FRACTION);
+        let hydro_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        // Classification: run the real per-column work (classify + toxicity fbm) into a sink
+        // so the cost is representative, not just a memory touch.
+        let t = std::time::Instant::now();
+        let mut sink = 0.0f32;
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                let i = y * COLS + x;
+                let (s, b, ct, cm) = classify(seed, x, y, elev[i]);
+                let tox = fbm(seed, x as f32 / TOXIC_LATTICE, y as f32 / TOXIC_LATTICE, 707, TOXIC_OCTAVES);
+                let _ = hydro.ocean[i];
+                sink += s + ct + cm + tox + b.id() as f32;
+            }
+        }
+        let classify_ms = t.elapsed().as_secs_f64() * 1000.0;
+        std::hint::black_box(sink);
+
+        let total = tect_ms + elev_ms + lem_ms + erode_ms + hydro_ms + classify_ms;
+        let pct = |ms: f64| ms / total * 100.0;
+        let report = format!(
+            "=== full generation timing (MAP_SCALE={MAP_SCALE}, {COLS}x{ROWS} = {n} cols) ===\n\
+             tectonics      {tect_ms:8.1} ms  {:5.1}%\n\
+             elevation      {elev_ms:8.1} ms  {:5.1}%\n\
+             lem            {lem_ms:8.1} ms  {:5.1}%\n\
+             erosion        {erode_ms:8.1} ms  {:5.1}%\n\
+             hydrology      {hydro_ms:8.1} ms  {:5.1}%\n\
+             classification {classify_ms:8.1} ms  {:5.1}%\n\
+             ----------------------------------------\n\
+             total          {total:8.1} ms",
+            pct(tect_ms), pct(elev_ms), pct(lem_ms), pct(erode_ms), pct(hydro_ms), pct(classify_ms),
+        );
+        // Also mirror to a file — test-bar discards a passing test's stdout.
+        let _ = std::fs::write("/tmp/animata_gen_timing.txt", &report);
+        eprintln!("\n{report}");
+    }
+
     /// Climate must give the giant map real biome DIVERSITY: several lowland biomes
     /// present (temperature × moisture bands), none absurdly dominant. Prints the mix.
     #[test]
@@ -293,6 +363,40 @@
         eprintln!("misset_water={misset}, isolated_water={isolated} ({:.3}% of water)", frac * 100.0);
         assert_eq!(misset, 0, "water rendered below terrain in {misset} columns");
         assert!(frac < 0.005, "too many 1-cell water specks: {:.3}% of water", frac * 100.0);
+    }
+
+    /// Land side of the shoreline: almost no dry column sits below a water surface it touches (a
+    /// "moat"). The reconciliation LIFT pass raises every non-river dry bank to the water it
+    /// touches, so the only residue is a few low RIVER-outlet cells it deliberately skips (lifting
+    /// one would dam the channel) — a few dozen on the whole map. This relies on reading the
+    /// PRE-close water snapshot, so it guards that the snapshot stays load-bearing: an in-place
+    /// read would make CLOSE order-dependent and re-grow ±1-voxel shoreline noise into THOUSANDS
+    /// of moats, blowing past the bound below.
+    #[test]
+    fn shoreline_has_no_moats() {
+        for seed in 1..4 {
+            let t = VoxelTerrain::new(seed);
+            let mut moats = 0u64;
+            for y in 0..ROWS as i32 {
+                for x in 0..COLS as i32 {
+                    if t.water_level(x, y) != 0 {
+                        continue; // water column — not dry land
+                    }
+                    let h = t.height(x, y) as i32;
+                    for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                        if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                            continue;
+                        }
+                        if t.water_level(nx, ny) as i32 > h {
+                            moats += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            eprintln!("seed {seed}: shoreline moats = {moats} (river-outlet residue)");
+            assert!(moats < 300, "shoreline moats re-grew for seed {seed}: {moats} (snapshot broken?)");
+        }
     }
 
     /// Diagnose the reported water/tree artifacts numerically on the FINAL world model:
