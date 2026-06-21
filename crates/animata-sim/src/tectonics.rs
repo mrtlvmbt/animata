@@ -10,6 +10,7 @@
 //! generator samples. Pure function of the seed (deterministic).
 
 use crate::config::*;
+use rayon::prelude::*;
 
 /// Average plate footprint in columns — scales with the map, so the plate COUNT stays
 /// roughly constant (~12-18) while plates grow with a gigantic map (big structures).
@@ -120,10 +121,12 @@ impl TectonicField {
         }
 
         // ---- Voronoi: nearest plate per column, with a domain-warped lookup so the
-        // boundaries meander instead of being straight perpendicular bisectors ----
+        // boundaries meander instead of being straight perpendicular bisectors. Per-column
+        // pure (warp fBm + nearest-plate scan, no cross-cell state) ⇒ parallel over rows,
+        // bit-identical to the serial loop. ----
         let mut plate_id = vec![0u16; n];
-        for y in 0..ROWS {
-            for x in 0..COLS {
+        plate_id.par_chunks_mut(COLS).enumerate().for_each(|(y, row)| {
+            for (x, pid) in row.iter_mut().enumerate() {
                 let wx = crate::terrain::fbm(
                     seed,
                     x as f32 / PLATE_WARP_LATTICE,
@@ -149,9 +152,9 @@ impl TectonicField {
                         best = p;
                     }
                 }
-                plate_id[y * COLS + x] = best as u16;
+                *pid = best as u16;
             }
-        }
+        });
 
         // ---- Boundaries + convergence between the meeting plates ----
         // Convergence = relative approach speed across the boundary: project the relative
