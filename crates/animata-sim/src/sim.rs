@@ -1263,9 +1263,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    12456973273077594211 // debug profile (re-pinned on merge: terrain-gen overhaul × gas-cycle Phase 1)
+    5234183620269017713 // debug profile (re-pinned on merge: parallel/LEM/D∞ terrain × gas-cycle Phase 2)
 } else {
-    8202237760573354478 // release profile (re-pinned on merge: parallel/LEM/D∞ terrain × gas cycle)
+    13845610500723458019 // release profile (re-pinned on merge: terrain-gen overhaul × aerobic respiration)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1275,7 +1275,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 11460425339150787582; // re-pinned on merge: terrain × gas cycle
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 2341791034864099782; // re-pinned on merge: terrain × gas Phase 2
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

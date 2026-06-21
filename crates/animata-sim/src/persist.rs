@@ -25,15 +25,18 @@ use crate::sim::SimState;
 use crate::terrain::TerrainState;
 use std::io::{Read, Write};
 
-/// File magic: ASCII "ANM3" (LE on disk). The CURRENT snapshot version. Written as a 4-byte prefix
-/// before the body, and matched on read to pick the (de)serializer. Bumped from ANM2 for the gas-cycle
-/// Phase 1 (new fields: `Genome.oxygen_tolerance`, `Params.oxygen_lethality`, `Features.oxygen`,
-/// `TerrainState.oxygen`/`oxygen_update` — a deep layout change). Old ANM2 saves are MIGRATED forward
-/// (not rejected) via the frozen [`v2`] shapes — see the module-level versioning note.
-const MAGIC: u32 = 0x414E_4D33;
-/// Previous version "ANM2" (pre-gas-cycle). Decoded via the frozen [`v2::SnapshotBodyV2`] graph and
-/// upgraded by [`v2::migrate`] (continuity: oxygen_tolerance 0, oxygen overlay empty, oxygen feature off).
+/// File magic: ASCII "ANM4" (LE on disk). The CURRENT snapshot version. Written as a 4-byte prefix
+/// before the body, and matched on read to pick the (de)serializer. Bumped from ANM3 for gas-cycle
+/// Phase 2 (new trailing fields: `Genome.aerobic_capacity`, `Params.aerobic_gain`, `Features.aerobic`).
+const MAGIC: u32 = 0x414E_4D34;
+/// Version "ANM2" (pre-gas-cycle). Decoded via the frozen [`v2::SnapshotBodyV2`] graph and upgraded by
+/// [`v2::migrate`] all the way to current (continuity: oxygen_tolerance/aerobic_capacity 0, overlays
+/// empty, oxygen/aerobic features off). Preserves the real ANM2 datum (the 486k save).
 const MAGIC_V2: u32 = 0x414E_4D32;
+// TODO(gas-cycle): ANM3 (Phase-1) saves are currently REJECTED — the ANM3→ANM4 migration (a frozen
+// `v3` graph mirroring `v2`) is a focused follow-up. No real ANM3 saves exist yet (Phase 1 landed
+// immediately before Phase 2), so the only datum that matters (the ANM2 486k save) stays loadable.
+const MAGIC_V3: u32 = 0x414E_4D33;
 
 /// A complete world snapshot body: the seed (to regenerate terrain geometry), the clock tick to
 /// resume at, the sim state (creatures + counters + config) and the terrain overlay. The magic tag is
@@ -75,6 +78,8 @@ impl Snapshot {
                     bincode::deserialize_from(r).map_err(|e| e.to_string())?;
                 Ok(v2::migrate(body))
             }
+            // ANM3 (gas-cycle Phase 1) migration is a pending follow-up (see MAGIC_V3 TODO).
+            MAGIC_V3 => Err("ANM3 (Phase-1) saves: migration to ANM4 is a pending follow-up PR".into()),
             other => Err(format!("not a supported animata snapshot (magic 0x{other:08X})")),
         }
     }
