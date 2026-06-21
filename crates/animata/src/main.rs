@@ -205,7 +205,7 @@ fn project_world(vp: Mat4, sw: f32, sh: f32, w: Vec3) -> Option<[f32; 2]> {
 }
 
 /// Top-of-column world point for a creature (its dot's render anchor), for projection.
-fn creature_world(c: &sim::Creature, terrain: &VoxelTerrain) -> Vec3 {
+pub(crate) fn creature_world(c: &sim::Creature, terrain: &VoxelTerrain) -> Vec3 {
     let (cx, cy) = sim::column_index(c.pos);
     let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
     vec3(c.pos.x, wy, c.pos.y)
@@ -265,7 +265,7 @@ fn species_name(founder: u64) -> String {
 /// Build the inspector snapshot for a creature. Real fields read from the phenotype/genome; fields
 /// the sim doesn't model (name/generation/health/hydration/activity/offspring) are derived
 /// deterministically so they stay stable per-creature and look alive (consensus: derive, not static).
-fn creature_view(c: &sim::Creature, terrain: &VoxelTerrain) -> ui::CreatureView {
+pub(crate) fn creature_view(c: &sim::Creature, terrain: &VoxelTerrain) -> ui::CreatureView {
     use animata_sim::genome::MAX_CELLS;
     let p = &c.pheno;
     let n = p.n_cells.max(1) as f32;
@@ -604,32 +604,24 @@ async fn main() {
         // gets its morphology, not just those near the target centre).
         let body_near = (px_per_m >= LOD_MAT_PX_PER_M && cell_px >= BODY_CELL_MIN_PX)
             .then(|| (vec2(cam.target.x, cam.target.z), cam.zoom * 2.0));
-        let snapshot = sim.as_ref().map(|s| RenderSnapshot::build(s, clock.tick(), body_near));
+        let snapshot = match (sim.as_ref(), terrain.as_ref()) {
+            (Some(s), Some(t)) => {
+                Some(RenderSnapshot::build(s, t, clock.tick(), ui_state.selected, body_near))
+            }
+            _ => None,
+        };
+        // Selected creature died (the builder found no live creature for the id) → drop the selection.
+        if ui_state.selected.is_some() && snapshot.as_ref().is_some_and(|s| s.inspect.is_none()) {
+            ui_state.selected = None;
+        }
 
         // ---- GUI pass (egui) — runs before world input so `wants_pointer` gates the mouse.
         // Perf counters (`drawn`/`on_screen`) come from LAST frame's render (produced after this
         // pass); `det`/`crs` read the current streamer state.
         let det = streamer.detail.len();
         let crs = streamer.coarse.len();
-        let life = match (sim.as_ref(), terrain.as_ref()) {
-            (Some(s), Some(t)) => {
-                let (multi, _) = s.complexity_mix();
-                let sm = s.stratum_mix(t);
-                Some(ui::LifeStats {
-                    population: s.population() as u64,
-                    avg_energy: s.avg_energy(),
-                    avg_biomass: s.avg_biomass(),
-                    multi,
-                    trophic: s.trophic_fractions(),
-                    species: s.species_count() as u64,
-                    niches: s.niche_coverage(t) as u64,
-                    allop: s.thermal_correlation(t),
-                    crypsis: s.crypsis_correlation(t),
-                    strata: sm,
-                })
-            }
-            _ => None,
-        };
+        // Population/evolution stats now come from the render snapshot (built above from the sim).
+        let life = snapshot.as_ref().and_then(|s| s.life.clone());
         // Expire the transient save notice; otherwise hand the HUD the elapsed ms (it owns the fade).
         let toast_view = match &toast {
             Some((msg, start)) => {
@@ -673,38 +665,24 @@ async fn main() {
                 })
                 .collect::<Vec<_>>()
         };
-        // Inspector snapshot + crosshair/conspecific screen projections (camera of the previous
-        // frame → ≤1-frame lag on the crosshair, imperceptible). Computed ONCE per frame here and
-        // reused by both the panel and the markers. If the selected creature died, clear selection.
-        let (inspect, inspect_screen, conspecific_screen) = {
-            let mut view = None;
-            let mut scr = None;
-            let mut cons = Vec::new();
-            if let (Some(id), Some(s), Some(t)) = (ui_state.selected, sim.as_ref(), terrain.as_ref()) {
-                if let Some(c) = s.creatures.iter().find(|c| c.id == id) {
-                    let vp = cam.camera().matrix();
-                    let (sw, sh) = (screen_width(), screen_height());
-                    view = Some(creature_view(c, t));
-                    scr = project_world(vp, sw, sh, creature_world(c, t));
-                    for idx in s.conspecifics(id) {
-                        if cons.len() >= 256 {
-                            break;
-                        }
-                        if let Some(p) = project_world(vp, sw, sh, creature_world(&s.creatures[idx], t)) {
-                            cons.push(p);
-                        }
-                    }
-                } else {
-                    ui_state.selected = None; // creature died → drop selection
-                }
+        // Inspector: the snapshot carries the view + WORLD anchors; project them to screen here with
+        // the current camera (≤1-frame crosshair lag, imperceptible). Selection-death already handled
+        // above (snapshot.inspect is None for a dead id).
+        let (inspect, inspect_screen, conspecific_screen) = match snapshot.as_ref().and_then(|s| s.inspect.as_ref())
+        {
+            Some(iv) => {
+                let vp = cam.camera().matrix();
+                let (sw, sh) = (screen_width(), screen_height());
+                let scr = iv.world.and_then(|w| project_world(vp, sw, sh, w));
+                let cons: Vec<[f32; 2]> =
+                    iv.conspecific_world.iter().filter_map(|&w| project_world(vp, sw, sh, w)).collect();
+                (Some(iv.view.clone()), scr, cons)
             }
-            (view, scr, cons)
+            None => (None, None, Vec::new()),
         };
-        // Per-phase sim timing (mean ms) for the perf panel — empty until the world is ready.
-        let sim_phases: Vec<(&'static str, f32)> = sim
-            .as_ref()
-            .map(|s| s.profile_report().into_iter().map(|(span, mean, _max)| (span.label(), mean)).collect())
-            .unwrap_or_default();
+        // Per-phase sim timing (mean ms) for the perf panel — from the snapshot.
+        let sim_phases: Vec<(&'static str, f32)> =
+            snapshot.as_ref().map(|s| s.sim_phases.clone()).unwrap_or_default();
         let hud_metrics = ui::SimMetrics {
             fps,
             frame_ms,
@@ -716,7 +694,7 @@ async fn main() {
             seed,
             cols: COLS,
             rows: ROWS,
-            tick: clock.tick(),
+            tick: snapshot.as_ref().map(|s| s.tick).unwrap_or_else(|| clock.tick()),
             sim_time: clock.sim_time() as f32,
             day_frac: clock.day_frac(),
             time_scale: clock.time_scale,

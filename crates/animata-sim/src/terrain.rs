@@ -415,6 +415,32 @@ impl VoxelTerrain {
         self.state.clone()
     }
 
+    /// The immutable geometry, shared by `Arc`. The renderer clones this to mesh + read heights from
+    /// the SAME memory (no copy) once the sim owns the authoritative terrain on its own thread.
+    pub fn geo(&self) -> Arc<TerrainGeo> {
+        self.geo.clone()
+    }
+
+    /// A renderer-side terrain that SHARES `geo` (meshing + all geometry/climate reads) with an EMPTY
+    /// mutable overlay. The renderer reads the live overlay (biomass) from the sim's snapshot, never
+    /// from this state, so a zeroed overlay is correct. Cheap: no geometry copy (Arc clone), only the
+    /// zeroed overlay alloc.
+    pub fn render_side(seed: u64, chunks_x: usize, chunks_y: usize, geo: Arc<TerrainGeo>) -> Self {
+        let n = COLS * ROWS;
+        VoxelTerrain {
+            seed,
+            chunks_x,
+            chunks_y,
+            geo,
+            state: TerrainState {
+                biomass: vec![0; n],
+                last_update: vec![0; n],
+                nutrient: vec![0; n],
+                nutrient_update: vec![0; n],
+            },
+        }
+    }
+
     /// Restore the mutable overlay on load, AFTER regenerating the geometry from the saved seed.
     /// Rejects a snapshot whose column count differs from this build's (e.g. a different
     /// `MAP_SCALE`), since the overlay vectors would no longer line up with the geometry.
