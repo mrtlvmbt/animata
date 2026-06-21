@@ -18,7 +18,10 @@ mod dev_bridge;
 mod mac_icon;
 
 mod render;
+mod render_snapshot;
 mod ui;
+
+use render_snapshot::{CreatureDot, RenderSnapshot};
 
 // The simulation + world model live in the graphics-free `animata-sim` crate. The renderer only
 // needs these modules by name; the rest (genome/grid/rng/tectonics/erosion/hydrology) are internal
@@ -210,18 +213,21 @@ fn creature_world(c: &sim::Creature, terrain: &VoxelTerrain) -> Vec3 {
 
 /// Screen-space creature pick: nearest creature to the cursor within its own on-screen radius
 /// (same radius the render pass draws), or `None` on a miss. Used to set the inspector selection.
-fn pick_creature(cam: &IsoCam, sim: Option<&Sim>, terrain: Option<&VoxelTerrain>) -> Option<u64> {
-    let (sim, terrain) = (sim?, terrain?);
+/// Reads the render snapshot (not `Sim`) so the seam is the only source of creature positions.
+fn pick_creature(cam: &IsoCam, creatures: &[CreatureDot], terrain: Option<&VoxelTerrain>) -> Option<u64> {
+    let terrain = terrain?;
     let (sw, sh) = (screen_width(), screen_height());
     let px_per_m = sh / cam.zoom;
     let vp = cam.camera().matrix();
     let (mx, my) = mouse_position();
     let mut best: Option<(f32, u64)> = None;
-    for c in &sim.creatures {
-        let Some(p) = project_world(vp, sw, sh, creature_world(c, terrain)) else {
+    for c in creatures {
+        let (cx, cy) = sim::column_index(c.pos);
+        let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
+        let Some(p) = project_world(vp, sw, sh, vec3(c.pos.x, wy, c.pos.y)) else {
             continue;
         };
-        let r = (CREATURE_RADIUS_M * (c.biomass() as f32).sqrt() * px_per_m).max(6.0);
+        let r = (CREATURE_RADIUS_M * (c.biomass as f32).sqrt() * px_per_m).max(6.0);
         let d = ((p[0] - mx).powi(2) + (p[1] - my).powi(2)).sqrt();
         if d <= r && best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, c.id));
@@ -589,6 +595,17 @@ async fn main() {
             }
         }
 
+        // Render snapshot — the world render pass AND picking read THIS, never `sim` directly (the
+        // Phase A seam that lets the sim move to its own thread later). `body_near` asks the builder
+        // for morphology layouts only for creatures near the camera at high zoom (where they're drawn).
+        let px_per_m = screen_height() / cam.zoom;
+        let cell_px = CREATURE_RADIUS_M * px_per_m * 2.0;
+        // Half-extent generous enough to cover the rotated iso view quad (so every on-screen creature
+        // gets its morphology, not just those near the target centre).
+        let body_near = (px_per_m >= LOD_MAT_PX_PER_M && cell_px >= BODY_CELL_MIN_PX)
+            .then(|| (vec2(cam.target.x, cam.target.z), cam.zoom * 2.0));
+        let snapshot = sim.as_ref().map(|s| RenderSnapshot::build(s, clock.tick(), body_near));
+
         // ---- GUI pass (egui) — runs before world input so `wants_pointer` gates the mouse.
         // Perf counters (`drawn`/`on_screen`) come from LAST frame's render (produced after this
         // pass); `det`/`crs` read the current streamer state.
@@ -856,7 +873,8 @@ async fn main() {
         // show_info (no selecting while the HUD is hidden).
         if !wants_ptr && is_mouse_button_pressed(MouseButton::Left) {
             let picked = if ui_state.show_info {
-                pick_creature(&cam, sim.as_ref(), terrain.as_ref())
+                let dots = snapshot.as_ref().map(|s| s.creatures.as_slice()).unwrap_or(&[]);
+                pick_creature(&cam, dots, terrain.as_ref())
             } else {
                 None
             };
@@ -1310,7 +1328,7 @@ async fn main() {
         // so we switch to BACTERIAL MATS: per-column density tinted by the colony's mean coloration
         // (dense colony → solid mat, sparse → faint film). Off-screen points are culled by projection.
         on_screen = 0; // reset the (loop-persistent) perf counter the GUI pass read this frame
-        if let (Some(sim), Some(terrain)) = (sim.as_ref(), terrain.as_ref()) {
+        if let (Some(snap), Some(terrain)) = (snapshot.as_ref(), terrain.as_ref()) {
             let (sw, sh) = (screen_width(), screen_height());
             let px_per_m = sh / cam.zoom; // ortho: visible world-height = zoom
             // Project a world point on a column top to screen px; None if behind/off-screen.
@@ -1325,26 +1343,29 @@ async fn main() {
                 // draw the cheaper world-scaled dot (also bounds cost: morphology only at high zoom,
                 // where few creatures are on screen).
                 let cell_px = CREATURE_RADIUS_M * px_per_m * 2.0;
-                for c in &sim.creatures {
+                for c in &snap.creatures {
                     let (cx, cy) = sim::column_index(c.pos);
                     let wy = terrain.height(cx as i32, cy as i32) as f32 * VOX + 0.5;
                     let Some((px, py)) = project(c.pos.x, c.pos.y, wy) else {
                         continue;
                     };
-                    let g = c.coloration();
-                    if cell_px >= BODY_CELL_MIN_PX {
-                        for (dx, dy, ty) in c.body_layout_for_render() {
-                            let bx = px + dx as f32 * cell_px;
-                            let by = py + dy as f32 * cell_px;
-                            let (h, s) = (cell_px * 0.5, cell_px);
-                            draw_rectangle(bx - h - 0.5, by - h - 0.5, s + 1.0, s + 1.0, Color::new(0.0, 0.0, 0.0, 0.5));
-                            draw_rectangle(bx - h, by - h, s, s, cell_color(ty, g));
+                    let g = c.coloration;
+                    match (cell_px >= BODY_CELL_MIN_PX).then_some(()).and(c.body.as_ref()) {
+                        Some(body) => {
+                            for &(dx, dy, ty) in body {
+                                let bx = px + dx as f32 * cell_px;
+                                let by = py + dy as f32 * cell_px;
+                                let (h, s) = (cell_px * 0.5, cell_px);
+                                draw_rectangle(bx - h - 0.5, by - h - 0.5, s + 1.0, s + 1.0, Color::new(0.0, 0.0, 0.0, 0.5));
+                                draw_rectangle(bx - h, by - h, s, s, cell_color(ty, g));
+                            }
                         }
-                    } else {
-                        // Body radius in metres (√biomass) → pixels; floor keeps a lone microbe clickable.
-                        let r = (CREATURE_RADIUS_M * (c.biomass() as f32).sqrt() * px_per_m).max(CREATURE_MIN_PX);
-                        draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
-                        draw_circle(px, py, r, Color::new(g, g, g, 1.0));
+                        None => {
+                            // Body radius in metres (√biomass) → pixels; floor keeps a lone microbe clickable.
+                            let r = (CREATURE_RADIUS_M * (c.biomass as f32).sqrt() * px_per_m).max(CREATURE_MIN_PX);
+                            draw_circle(px, py, r + 0.8, Color::new(0.0, 0.0, 0.0, 0.6));
+                            draw_circle(px, py, r, Color::new(g, g, g, 1.0));
+                        }
                     }
                     on_screen += 1;
                 }
@@ -1354,11 +1375,11 @@ async fn main() {
                 // greyscale = the colony's mean coloration. Adjacent dense columns tile into a mat.
                 let mut bucket: std::collections::HashMap<(usize, usize), (u32, f32)> =
                     std::collections::HashMap::new();
-                for c in &sim.creatures {
+                for c in &snap.creatures {
                     let (cx, cy) = sim::column_index(c.pos);
                     let e = bucket.entry((cx, cy)).or_insert((0, 0.0));
                     e.0 += 1;
-                    e.1 += c.coloration();
+                    e.1 += c.coloration;
                 }
                 let tile = (VOX * px_per_m).max(1.0); // a column footprint in px
                 for ((cx, cy), (count, colsum)) in bucket {
