@@ -14,6 +14,7 @@ egui = "0.31"
 egui-macroquad = "0.17.3"
 egui-phosphor = { version = "0.9", default-features = false, features = ["regular"] }
 animata-sim = { path = "../animata-sim" }
+rayon = "1" # parallel chunk-mesh build (CPU) off the main thread; GL upload stays main-thread
 tiny_http = { version = "0.12", optional = true }
 serde_json = { version = "1", optional = true }
 
