@@ -94,9 +94,15 @@ pub const MAX_ENERGY: f32 = 200.0;
 /// Base metabolic energy drain per **sim-second** at biomass 1 — scaled by `biomass^0.75`
 /// (Kleiber) and by a climate factor. Movement adds on top.
 pub const SIM_BASE_METABOLISM: f32 = 0.05;
-/// Extra energy per sim-second at full throttle (movement effort).
-pub const MOVE_COST: f32 = 0.05;
-/// World units travelled per sim-second at full throttle.
+/// Movement effort, charged per unit of DISTANCE actually travelled: the energy drain is
+/// `MOVE_COST · throttle · speed` per sim-second (so it integrates to `MOVE_COST` per world unit
+/// moved). Drifting/idling is then nearly free and only fast powered travel is costly — coherent
+/// with the thrust÷drag speed model (a body pays for the distance it covers, not for revving a motor
+/// that barely moves it). Raised from the old per-throttle 0.05 because it now multiplies by the
+/// (small) speed. ~0.01 = energy per world unit travelled (old per-unit cost was ~0.003–0.017).
+pub const MOVE_COST: f32 = 0.01;
+/// Overall speed scale: world units/sim-second at `drift + LOCO_GAIN·thrust = 1`. Real speed is the
+/// stratum drift plus the locomotor term (see `speed()` in sim.rs).
 pub const CREATURE_SPEED: f32 = 6.0;
 /// Max turn rate (radians per sim-second).
 pub const TURN_RATE: f32 = 3.0;
@@ -128,18 +134,21 @@ pub const MUTATION_STD: f32 = 0.12;
 /// BODY PLAN changes by rarer, gentler steps than behaviour — no mutational flood of giant
 /// bodies (the body is the costly part).
 pub const GRN_MUTATION_STD: f32 = 0.10;
-/// Locomotion floor: the share of `CREATURE_SPEED` a body with NO effector cells can manage —
-/// passive drift, not powered motility. A founder single cell drifts at `CREATURE_SPEED·DRIFT_FLOOR`
-/// = 3 m/s — HALF the old free baseline (a clear slowdown, and tiny on screen now), while real speed
-/// is EARNED by developing effector cells (`EFFECTOR_GAIN`). Not pushed lower because predation —
-/// hence the camouflage signal — collapses on the over-provisioned map once predators can't close on
-/// prey; 0.5 is the floor that keeps the trophic web (and crypsis) alive. Motility is now an
-/// emergent, selected trait, with a PREDATOR's earned effectors letting it outrun drifting prey.
-pub const DRIFT_FLOOR: f32 = 0.5;
-/// C1 body-stat coupling: each effector cell adds this fraction of `CREATURE_SPEED` to top speed.
-/// Raised with the `DRIFT_FLOOR` rebalance so a few contractile cells recover full speed (≈3 effectors
-/// ⇒ ~1.0×): the cost of motility is the body that carries it, paid in metabolism + development.
-pub const EFFECTOR_GAIN: f32 = 0.35;
+/// Passive drift floor (share of `CREATURE_SPEED` a body with NO effectors manages) — NOT powered
+/// motility. Stratum-dependent: on land grip/friction pins a non-swimmer almost in place; a fluid
+/// (water/air) carries a drifting body noticeably via buoyancy/currents/wind. Powered speed is EARNED
+/// by developing effector cells (the thrust÷drag term in `speed()`). Predation no longer leans on a
+/// high drift floor: a predator with effectors still out-swims near-stationary prey via that term, so
+/// the floor can drop to ≈0 on land. Calibrated against the acceptance corridors.
+pub const DRIFT_GROUND: f32 = 0.10; // Surface + Underground — friction; sits almost still
+pub const DRIFT_WATER: f32 = 0.35; // buoyancy / currents
+pub const DRIFT_AIR: f32 = 0.40; // wind / convection
+/// Locomotor thrust coupling: speed gains `CREATURE_SPEED · LOCO_GAIN · thrust`, where
+/// `thrust = organ_power(effector) / sqrt(n_cells)` is the muscle FRACTION (thrust over drag — drag
+/// rises with the body's linear size, √area in 2D). So a body that is mostly muscle is fast at any
+/// size, dead-weight bulk slows it, and absolute effector count still raises speed. Replaces the old
+/// per-effector `EFFECTOR_GAIN` (which let pure count fly regardless of body cost).
+pub const LOCO_GAIN: f32 = 0.15;
 /// Each storage cell adds this much to the energy cap.
 pub const STORAGE_PER_CELL: f32 = 25.0;
 /// Morphogenesis PR-C: a COHERENT organ beats the same cells scattered. A type's effective power is
