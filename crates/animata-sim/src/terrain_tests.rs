@@ -365,6 +365,40 @@
         assert!(frac < 0.005, "too many 1-cell water specks: {:.3}% of water", frac * 100.0);
     }
 
+    /// Land side of the shoreline: almost no dry column sits below a water surface it touches (a
+    /// "moat"). The reconciliation LIFT pass raises every non-river dry bank to the water it
+    /// touches, so the only residue is a few low RIVER-outlet cells it deliberately skips (lifting
+    /// one would dam the channel) — a few dozen on the whole map. This relies on reading the
+    /// PRE-close water snapshot, so it guards that the snapshot stays load-bearing: an in-place
+    /// read would make CLOSE order-dependent and re-grow ±1-voxel shoreline noise into THOUSANDS
+    /// of moats, blowing past the bound below.
+    #[test]
+    fn shoreline_has_no_moats() {
+        for seed in 1..4 {
+            let t = VoxelTerrain::new(seed);
+            let mut moats = 0u64;
+            for y in 0..ROWS as i32 {
+                for x in 0..COLS as i32 {
+                    if t.water_level(x, y) != 0 {
+                        continue; // water column — not dry land
+                    }
+                    let h = t.height(x, y) as i32;
+                    for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                        if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
+                            continue;
+                        }
+                        if t.water_level(nx, ny) as i32 > h {
+                            moats += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            eprintln!("seed {seed}: shoreline moats = {moats} (river-outlet residue)");
+            assert!(moats < 300, "shoreline moats re-grew for seed {seed}: {moats} (snapshot broken?)");
+        }
+    }
+
     /// Diagnose the reported water/tree artifacts numerically on the FINAL world model:
     /// mis-set water (rendered where it shouldn't), terrain poking into water (dry holes →
     /// internal walls), isolated 1-cell water (specks), and land trees overhanging water.

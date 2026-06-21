@@ -700,7 +700,13 @@ impl VoxelTerrain {
         // boundary, leaving ±1 voxel noise: a dry cell a step BELOW the water it touches (a moat),
         // or a step ABOVE it while ringed by water (a 1-cell spit/pillar). Both are the same root;
         // a morphological CLOSE + a bank LIFT kill the whole class, uniformly for ocean/lake/river.
-        let w0 = water.clone();
+        //
+        // `water_pre_close` is a LOAD-BEARING snapshot, not a stray allocation: CLOSE reads the
+        // water mask as it was BEFORE this pass while it writes new water cells, so a cell it
+        // closes early must NOT change a later cell's neighbour count. Reading the live `water`
+        // in-place instead would make CLOSE order-dependent and re-grow shoreline noise — see the
+        // `shoreline_has_no_moats` regression guard. (One 3.7 MB copy, once per generation.)
+        let water_pre_close = water.clone();
         let wl_at = |w: &[u8], nx: i32, ny: i32| -> u8 {
             if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
                 0
@@ -720,7 +726,12 @@ impl VoxelTerrain {
                     continue;
                 }
                 let (xi, yi) = (x as i32, y as i32);
-                let nbr = [wl_at(&w0, xi + 1, yi), wl_at(&w0, xi - 1, yi), wl_at(&w0, xi, yi + 1), wl_at(&w0, xi, yi - 1)];
+                let nbr = [
+                    wl_at(&water_pre_close, xi + 1, yi),
+                    wl_at(&water_pre_close, xi - 1, yi),
+                    wl_at(&water_pre_close, xi, yi + 1),
+                    wl_at(&water_pre_close, xi, yi - 1),
+                ];
                 let water_nb = nbr.iter().filter(|&&w| w > 0).count();
                 let wl = nbr.iter().copied().max().unwrap_or(0);
                 if water_nb >= 3 && wl > 0 && surf[i].round() as u8 <= wl + SHORE_NUB_CAP {
