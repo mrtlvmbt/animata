@@ -73,6 +73,14 @@ const MIN_TIME_SCALE: f32 = 0.1;
 const MAX_TIME_SCALE: f32 = 512.0;
 /// Floor for the floating cap, so there's always some fast-forward even on a heavy world.
 const MIN_AUTO_MAX: f32 = 2.0;
+/// Discrete values for the manual `CEIL` stepper (the user's hard cap on the slider ceiling). The
+/// effective slider ceiling is `min(CEIL, floating CPU cap)`.
+/// Last entry is `INFINITY` = "MAX" (no manual cap → the slider tops out at the floating CPU cap).
+const MAX_STEPS: [f32; 7] = [16.0, 32.0, 64.0, 128.0, 256.0, 512.0, f32::INFINITY];
+/// Default `CEIL` = `MAX` (no manual cap; the floating CPU cap is the only ceiling).
+const DEFAULT_CEIL: f32 = f32::INFINITY;
+/// "At the ceiling" tolerance for the lock-follow decision.
+const AT_MAX_EPS: f32 = 1e-6;
 
 /// Largest time-scale the CPU can actually sustain right now, from the live per-tick cost. At scale
 /// `M` the sim must do `M / TICK_LEN` ticks/s; the CPU does `1000 / tick_ms` ticks/s; keep-up ⇒
@@ -476,7 +484,17 @@ async fn main() {
         outline: true,
         open_panel: None,
         selected: None,
+        lock_max: true,
+        manual_ceil: DEFAULT_CEIL,
     };
+    // The ceiling the slider value was sitting against last frame — the lock-follow decision tests
+    // "was the value at the ceiling" against THIS (pre-change) value, so the value rides a moving
+    // ceiling in both directions (must be read before the ceiling is recomputed).
+    let mut eff_max_prev = DEFAULT_CEIL;
+    // Whether the value rode the ceiling last frame (lock on + at-max). Drives the lock-toggle armed
+    // dot — computed here (where `time_scale == eff_max` exactly) rather than in the HUD, where a
+    // cross-frame `time_scale`/`max` mismatch made the dot flicker against the jittering CPU cap.
+    let mut armed_prev = false;
     // Population sparkline buffer: last 48 samples, pushed on a tick cadence (freezes when paused).
     let mut pop_hist: std::collections::VecDeque<f32> = std::collections::VecDeque::with_capacity(48);
     let mut pop_last_tick: u64 = u64::MAX;
@@ -620,6 +638,8 @@ async fn main() {
         // one. `None` snapshot ⇒ hard ceiling.
         let sim_amdahl = snapshot.as_ref().map(|s| s.amdahl).unwrap_or((0.0, 0.0, 0.0));
         let max_ts = max_time_scale_for(sim_amdahl.0 + sim_amdahl.1);
+        // EFFECTIVE slider ceiling = floating CPU cap clamped by the user's manual CEIL.
+        let eff_max = max_ts.min(ui_state.manual_ceil);
         // Tell the worker which creatures need a high-zoom morphology layout next snapshot (the AABB is
         // a generous superset of the view; the render pass culls precisely).
         let px_per_m = screen_height() / cam.zoom;
@@ -714,7 +734,10 @@ async fn main() {
             sim_time: clock.sim_time() as f32,
             day_frac: clock.day_frac(),
             time_scale: clock.time_scale,
-            max_time_scale: max_ts,
+            max_time_scale: eff_max,
+            manual_ceil: ui_state.manual_ceil,
+            lock_max: ui_state.lock_max,
+            armed: armed_prev,
             paused: clock.paused,
             life,
             pop_hist: pop_hist.iter().copied().collect(),
@@ -791,25 +814,63 @@ async fn main() {
             clock.paused = !clock.paused;
         }
         // Time speed: `,` slows, `.` speeds (multiplicative), `/` resets to 1×; the panel slider/
-        // buttons feed `actions.set_time_scale`. The upper bound `max_ts` FLOATS with CPU headroom.
+        // buttons feed `actions.set_time_scale`.
         if is_key_pressed(KeyCode::Comma) {
             clock.time_scale = (clock.time_scale / TIME_SCALE_STEP).max(MIN_TIME_SCALE);
         }
         if is_key_pressed(KeyCode::Period) {
-            clock.time_scale = (clock.time_scale * TIME_SCALE_STEP).min(max_ts);
+            clock.time_scale = (clock.time_scale * TIME_SCALE_STEP).min(eff_max);
         }
         if is_key_pressed(KeyCode::Slash) {
             clock.time_scale = 1.0;
         }
         if let Some(ts) = actions.set_time_scale {
-            // The slider already keeps its handle within its (cap-or-current) range; just bound to the
-            // hard ceiling. NO per-frame clamp to the floating cap — that fought the drag.
             clock.time_scale = ts.clamp(MIN_TIME_SCALE, MAX_TIME_SCALE);
         }
-        // Echo to the worker: the EFFECTIVE scale is the intent capped to live CPU headroom, so the sim
-        // never tries to outrun the machine — but the user's slider intent itself is left untouched.
+        // Ceiling-lock controls: `L` toggles, `Shift+[`/`Shift+]` step the manual CEIL.
+        if actions.toggle_lock || is_key_pressed(KeyCode::L) {
+            ui_state.lock_max = !ui_state.lock_max;
+        }
+        let shift = is_key_down(KeyCode::LeftShift) || is_key_down(KeyCode::RightShift);
+        let step = actions
+            .step_ceil
+            .or_else(|| match (shift && is_key_pressed(KeyCode::RightBracket), shift && is_key_pressed(KeyCode::LeftBracket)) {
+                (true, _) => Some(1),
+                (_, true) => Some(-1),
+                _ => None,
+            });
+        let ceil_changed = step.is_some();
+        if let Some(dir) = step {
+            let i = MAX_STEPS.iter().position(|&x| x == ui_state.manual_ceil).unwrap_or(MAX_STEPS.len() - 1) as i32;
+            let j = (i + dir).clamp(0, MAX_STEPS.len() as i32 - 1) as usize;
+            ui_state.manual_ceil = MAX_STEPS[j];
+        }
+        // Lock-follow: decide AGAINST the ceiling the value sat at last frame (`eff_max_prev`) — BEFORE
+        // recomputing it — so a value pinned at the ceiling rides it up or down. Then clamp to the new
+        // ceiling (a frozen value above it gets pulled down; the thumb otherwise just re-slides).
+        let eff_max = max_ts.min(ui_state.manual_ceil);
+        let was_at_max = clock.time_scale >= eff_max_prev - AT_MAX_EPS;
+        let follow = ui_state.lock_max && was_at_max;
+        if follow {
+            clock.time_scale = eff_max;
+        }
+        clock.time_scale = clock.time_scale.clamp(MIN_TIME_SCALE, eff_max);
+        eff_max_prev = eff_max;
+        armed_prev = follow;
+        // Toast only on a manual CEIL change (not the continuous floating drift).
+        if ceil_changed {
+            let n = if ui_state.manual_ceil.is_finite() {
+                format!("{}×", ui_state.manual_ceil.round() as i32)
+            } else {
+                "MAX".to_string()
+            };
+            let msg = if follow { format!("Locked to ceiling · {n}") } else { format!("Ceiling {n}") };
+            toast = Some((msg, get_time()));
+        }
+        // Echo to the worker. `clock.time_scale` is already ≤ the effective ceiling (≤ CPU cap), so the
+        // sim never tries to outrun the machine.
         sim_handle.send(SimCommand::SetClock {
-            scale: Some(clock.time_scale.min(max_ts)),
+            scale: Some(clock.time_scale),
             paused: Some(clock.paused),
         });
         // Quick-save (`F5`) / quick-load (`F9`) the whole world to/from `SAVE_PATH`. Both the load's
@@ -857,8 +918,17 @@ async fn main() {
         } // end loader-gated keyboard hotkeys
         // Snapshot toggle state into Copy locals (`debug_view`/`mask`/`outline`/`water_on`) so the
         // render pass below reads them as before. `show_info` is handled inside the GUI pass.
-        let ui::UiState { show_info: _, debug_view, water_on, mask, outline, open_panel: _, selected: _ } =
-            ui_state;
+        let ui::UiState {
+            show_info: _,
+            debug_view,
+            water_on,
+            mask,
+            outline,
+            open_panel: _,
+            selected: _,
+            lock_max: _,
+            manual_ceil: _,
+        } = ui_state;
 
         // World mouse interactions are gated on `!wants_ptr` so a click on a panel doesn't reach
         // the world (F8). Keyboard pan/rotate stay live (egui claims no keys without a text focus).
