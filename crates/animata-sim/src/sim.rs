@@ -45,6 +45,7 @@ const SALT_BIRTH: u64 = 0xB127;
 const SALT_CAMO: u64 = 0xCA30;
 const SALT_TOXIN: u64 = 0x70_8127;
 const SALT_MORPH: u64 = 0xD2_0F; // morphogen READ-weight mutation (PR-D2) — an INDEPENDENT stream
+const SALT_GAS: u64 = 0x6A5_02; // oxygen-tolerance mutation (gas cycle) — an INDEPENDENT stream
 
 /// The serialisable live sim state — the half of a save snapshot that is the creatures (the other
 /// half is the terrain overlay). Restored via [`Sim::from_state`]; captured via [`Sim::to_state`].
@@ -674,6 +675,7 @@ impl Sim {
                 temperature: terrain.temperature_at(cx, cy),
                 light: light_for(layer, cy, tick),
                 toxicity: terrain.toxicity_at(cx, cy),
+                oxygen: terrain.oxygen_at(cx, cy, tick),
                 season_phase,
                 autotroph_shading,
             };
@@ -689,6 +691,12 @@ impl Sim {
                 layer.capacity() / stratum_count[layer.idx()].max(1.0) * TICK_LEN
             };
             c.energy = (c.energy + food * eff.food_mult + eff.energy_add).min(c.max_energy());
+            // O2 production (gas cycle Phase 1): photosynthesis emits oxygen into this column as an
+            // obligate byproduct, keyed on the ISOLATED `photo_yield` (not composed energy_add — F2).
+            // Serial (this `&mut terrain`) + f32 store ⇒ deterministic, gentle deposits accumulate.
+            if self.cfg.features.oxygen && eff.photo_yield > 0.0 {
+                terrain.deposit_oxygen(cx, cy, eff.photo_yield * OXYGEN_PER_PHOTO, tick);
+            }
             // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
             c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle) * TICK_LEN;
@@ -734,10 +742,13 @@ impl Sim {
                 // Morphogen READ weights evolve on their OWN stream (PR-D2) so the coupling's activation
                 // leaves `rng` — and thus the child's pos/heading later — byte-identical to the inert sim.
                 let mut morph_rng = Rng::new(seed_fold(self.world_seed, &[SALT_MORPH, c.id, tick]));
-                // Mutate the genome (brain + GRN + morphogen); the parent pays half its energy now. The
-                // body is grown later, in the parallel develop phase (it doesn't touch the RNG), so the
-                // post-mutate `rng` is queued to finish the birth there — same draw stream, same bits.
-                let genome = c.genome.mutate(&mut rng, &mut morph_rng, MUTATION_STD, GRN_MUTATION_STD);
+                // O2 tolerance evolves on its OWN independent stream too (gas cycle F9), so adding the
+                // gene consumes zero draws from `rng` (child pos/heading byte-identical to no-gas sim).
+                let mut gas_rng = Rng::new(seed_fold(self.world_seed, &[SALT_GAS, c.id, tick]));
+                // Mutate the genome (brain + GRN + morphogen + gas); the parent pays half its energy now.
+                // The body is grown later, in the parallel develop phase (it doesn't touch the RNG), so
+                // the post-mutate `rng` is queued to finish the birth there — same draw stream, same bits.
+                let genome = c.genome.mutate(&mut rng, &mut morph_rng, &mut gas_rng, MUTATION_STD, GRN_MUTATION_STD);
                 c.energy *= 0.5;
                 pending.push(PendingBirth {
                     genome,
@@ -1163,9 +1174,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    9204025271495943362 // debug profile (re-pinned: BIOMASS_REGROW_RATE 0.01→0.03 — more renewable food)
+    2825673250573028911 // debug profile (re-pinned: gas-cycle Phase 1 — O2 production + OxygenToxicity + oxygen_tolerance gene)
 } else {
-    17191699025293563262 // release profile (FMA contraction shifts the trajectory)
+    13438673166589317547 // release profile (FMA contraction shifts the trajectory)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1175,7 +1186,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 0xae7d_8282_6852_9b63;
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 18163420676954532087; // re-pinned: gas-cycle Phase 1 (O2 cycle)
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

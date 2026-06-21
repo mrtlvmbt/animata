@@ -24,6 +24,7 @@ use crate::sim_config::{Features, Params};
 mod autotrophy;
 mod climate;
 mod metabolism;
+mod oxygen;
 mod seasonality;
 mod toxicity;
 
@@ -40,6 +41,8 @@ pub struct Sample<'a> {
     pub light: f32,
     /// Ground toxicity `[0,1]` at the creature's column (env field).
     pub toxicity: f32,
+    /// Dissolved oxygen at the creature's column (env field; gas cycle). Read by the oxygen pressure.
+    pub oxygen: f32,
     /// Seasonal phase this tick in `[-1,1]` (`sin` of the year angle): +1 high summer, −1 deep
     /// winter. A per-tick global (same for all creatures), a pure function of the tick.
     pub season_phase: f32,
@@ -59,11 +62,17 @@ pub struct Effect {
     pub metab_mult: f32,
     /// Additive per-tick death hazard `[0,1]` (e.g. ground toxicity beyond a creature's tolerance).
     pub mortality_add: f32,
+    /// Photosynthetic energy yield this tick (gas cycle): the ISOLATED photosynthesis term, written
+    /// ONLY by the autotrophy pressure. O2 production keys on THIS (not composed `energy_add`), so the
+    /// Phase-2 aerobic boost — which writes `energy_add` — can't feed O2 production (gas-cycle F2). It
+    /// is NOT separately added to a creature's energy (autotrophy still writes its income to
+    /// `energy_add`); this is a production TAG.
+    pub photo_yield: f32,
 }
 
 impl Effect {
     pub fn identity() -> Self {
-        Effect { food_mult: 1.0, energy_add: 0.0, metab_mult: 1.0, mortality_add: 0.0 }
+        Effect { food_mult: 1.0, energy_add: 0.0, metab_mult: 1.0, mortality_add: 0.0, photo_yield: 0.0 }
     }
 
     /// Fold another effect in. Identity element under `compose`, and — because multiplying by `1.0`
@@ -75,6 +84,7 @@ impl Effect {
             energy_add: self.energy_add + o.energy_add,
             metab_mult: self.metab_mult * o.metab_mult,
             mortality_add: self.mortality_add + o.mortality_add,
+            photo_yield: self.photo_yield + o.photo_yield,
         }
     }
 }
@@ -112,6 +122,9 @@ impl PressureRegistry {
         }));
         if f.toxicity {
             active.push(Box::new(toxicity::Toxicity { lethality: p.toxin_lethality }));
+        }
+        if f.oxygen {
+            active.push(Box::new(oxygen::OxygenToxicity { lethality: p.oxygen_lethality }));
         }
         if f.seasonality {
             active.push(Box::new(seasonality::Seasonality { amplitude: p.season_amplitude }));

@@ -183,6 +183,21 @@ pub const NUTRIENT_PER_BIOMASS: f32 = 0.8;
 /// the weathering anchor absorbs imbalance between drain and return.
 pub const NUTRIENT_PER_CELL: f32 = 0.03;
 
+// ---- C3: oxygen (gas-cycle Phase 1; consumed in terrain.rs + sim.rs) ----
+/// Lazy exponential decay rate (per sim-second) of the dissolved-O2 overlay toward 0 (it disperses /
+/// is consumed abiotically). Closed-form on read like nutrient weathering — NO per-tick global sweep.
+/// Sets the decay time-constant (≈1/RATE sim-s); keeps the field's magnitude moderate so f32 deposits
+/// don't get absorbed (gas-cycle plan F7). Tunable at the spike.
+pub const OXYGEN_DECAY_RATE: f32 = 0.02;
+/// Oxygen produced per unit of photosynthetic energy yield (the `photo_yield` channel), deposited into
+/// the autotroph's column each tick. O2 is an OBLIGATE byproduct of photosynthesis (not gene-gated).
+/// Gentle by design (the brake is multi-generational) — survives because the overlay is f32, not
+/// quantised (plan F1/F5). Calibrated at the spike (A/B vs flat-mean control).
+pub const OXYGEN_PER_PHOTO: f32 = 0.05;
+/// Per-tick death hazard per unit of local O2 above a creature's `oxygen_tolerance` (the
+/// `OxygenToxicity` pressure, mirroring `TOXIN_LETHALITY`). Tunable at the spike.
+pub const OXYGEN_LETHALITY: f32 = 0.05;
+
 // ---- C3: autotrophs (photosynthesis) ----
 /// Energy per photosynthetic cell per sim-second at full light. The autotroph's income.
 pub const PHOTO_RATE: f32 = 3.0;

@@ -6,11 +6,12 @@ use super::*;
 use crate::sim::Sim;
 use crate::terrain::VoxelTerrain;
 
-/// Replicates the PRE-refactor on-disk layout: `magic` as serialized field 0, then the body fields in
-/// order. The legacy writer was `bincode::serialize_into(w, &Snapshot{ magic, terrain_seed, tick,
-/// sim, terrain })`; this struct reproduces those exact bytes.
+/// Replicates the field-0-magic on-disk layout: `magic` as serialized field 0, then the body fields in
+/// order — i.e. what `bincode::serialize_into(w, &Snapshot{ magic, terrain_seed, tick, sim, terrain })`
+/// would write. Used to prove the hand-written-prefix writer reproduces it byte-for-byte (the format
+/// lock is version-agnostic: it holds for whatever the CURRENT `Snapshot` body shape is).
 #[derive(serde::Serialize)]
-struct SnapshotV2WithMagic {
+struct SnapshotWithField0Magic {
     magic: u32,
     terrain_seed: u64,
     tick: u64,
@@ -18,15 +19,14 @@ struct SnapshotV2WithMagic {
     terrain: TerrainState,
 }
 
-/// THE old-write↔new-read lock (F4/F5/F6): the new writer (hand-written 4-byte magic prefix +
-/// magic-less body) must produce bytes IDENTICAL to the legacy `serialize_into(Snapshot{ magic, .. })`
-/// layout. Byte-identity on a POPULATED snapshot (≥1 creature with a developed phenotype + a dirtied
-/// overlay — never 0-creature, which would emit only a `Vec` length and skip the volatile
-/// `Genome`/`Phenotype` bytes) proves the prefix split preserves the exact ANM2 format, so any real
-/// old on-disk file (= legacy-writer output) still decodes through `Snapshot::read`. No committed blob
-/// and no profile-dependent hash needed: it compares the two write paths on the same in-memory data.
+/// Format lock: the writer (hand-written 4-byte magic prefix + magic-less body) must produce bytes
+/// IDENTICAL to the field-0-magic layout, on a POPULATED snapshot (≥1 creature with a developed
+/// phenotype + a dirtied overlay — never 0-creature, which would emit only a `Vec` length and skip the
+/// volatile `Genome`/`Phenotype` bytes). This proves the prefix split preserves the exact bincode
+/// layout for the current version, so a future frozen `SnapshotBodyVN` can be diffed against it. No
+/// committed blob and no profile-dependent hash: it compares the two write paths on the same data.
 #[test]
-fn new_write_is_byte_identical_to_legacy_anm2_layout() {
+fn new_write_is_byte_identical_to_field0_magic_layout() {
     let mut t = VoxelTerrain::new(42);
     let mut s = Sim::new(42, &t);
     for tick in 0..300 {
@@ -38,19 +38,19 @@ fn new_write_is_byte_identical_to_legacy_anm2_layout() {
     let mut new_bytes = Vec::new();
     snap.write(&mut new_bytes).expect("new writer");
 
-    // Move the (un-cloneable-cheaply) body into the legacy-layout struct AFTER new_bytes is captured.
-    let legacy = SnapshotV2WithMagic {
+    // Move the (un-cloneable-cheaply) body into the field-0-magic struct AFTER new_bytes is captured.
+    let legacy = SnapshotWithField0Magic {
         magic: MAGIC,
         terrain_seed: snap.terrain_seed,
         tick: snap.tick,
         sim: snap.sim,
         terrain: snap.terrain,
     };
-    let legacy_bytes = bincode::serialize(&legacy).expect("legacy layout");
+    let legacy_bytes = bincode::serialize(&legacy).expect("field-0-magic layout");
 
     assert_eq!(
         new_bytes, legacy_bytes,
-        "new writer must reproduce the legacy ANM2 on-disk byte layout (else old saves mis-decode)"
+        "writer must reproduce the field-0-magic on-disk byte layout (else old saves mis-decode)"
     );
 }
 

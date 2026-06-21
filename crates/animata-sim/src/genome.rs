@@ -233,6 +233,12 @@ pub struct Genome {
     /// creature standing on ground more toxic than its tolerance suffers an extra death hazard, so
     /// toxic regions select for resistant lineages (a habitat filter on a new abiotic axis).
     pub toxin_resistance: f32,
+    /// Tolerance `[0,1]` to dissolved OXYGEN (gas cycle Phase 1). Founder `0.0` ⇒ SENSITIVE: O2 is a
+    /// poison to the unadapted (reactive-oxygen damage), recapitulating the Great Oxygenation Event.
+    /// Excess local O2 above this tolerance is a per-tick death hazard, so O2-rich zones (which dense
+    /// autotrophs create as a photosynthesis byproduct) select for tolerant lineages AND brake the
+    /// autotroph density that produced the O2. Evolves UP on its own mutation stream.
+    pub oxygen_tolerance: f32,
 }
 
 impl Genome {
@@ -249,6 +255,9 @@ impl Genome {
             thermal_pref: rng.unit(),
             coloration: rng.unit(),
             toxin_resistance: rng.unit(),
+            // Founder SENSITIVE to O2 (tolerance 0) — the anoxic ancestor. A constant (no `rng` draw),
+            // so founders are byte-identical to the pre-feature sim; tolerance evolves up in `mutate`.
+            oxygen_tolerance: 0.0,
         }
     }
 
@@ -257,7 +266,7 @@ impl Genome {
     /// behaviour; the thermal pref drifts to track the climate it lives in. `grn_std` is kept smaller
     /// so body plans change by rarer, gentler steps than behaviour. The morphogen READ weights evolve
     /// on a SEPARATE stream (`morph_rng`) — see below.
-    pub fn mutate(&self, rng: &mut Rng, morph_rng: &mut Rng, brain_std: f32, grn_std: f32) -> Self {
+    pub fn mutate(&self, rng: &mut Rng, morph_rng: &mut Rng, gas_rng: &mut Rng, brain_std: f32, grn_std: f32) -> Self {
         let m = |v: &[f32], std: f32, rng: &mut Rng| -> Vec<f32> {
             v.iter().map(|&w| w + rng.signed() * std).collect()
         };
@@ -284,6 +293,11 @@ impl Genome {
         let morph_w = m(&self.morph_w, grn_std, morph_rng);
         let diff_rate = self.diff_rate.clone();
         let decay_rate = self.decay_rate.clone();
+        // O2 tolerance evolves on its OWN independent stream (`gas_rng`, salted apart in `sim::step`),
+        // consuming ZERO draws from `rng` — so adding this gene leaves every existing gene AND the
+        // child's pos/heading (drawn from `rng` after mutate returns) byte-identical (gas-cycle F9,
+        // the morph_w pattern). NOT a draw appended to `rng`, NOT a reuse of `morph_rng`.
+        let oxygen_tolerance = (self.oxygen_tolerance + gas_rng.signed() * grn_std).clamp(0.0, 1.0);
         Genome {
             grn_w,
             grn_b,
@@ -294,6 +308,7 @@ impl Genome {
             thermal_pref,
             coloration,
             toxin_resistance,
+            oxygen_tolerance,
         }
     }
 
@@ -629,6 +644,7 @@ impl Genome {
         crate::rng::fnv_fold_u32(&mut h, self.thermal_pref.to_bits());
         crate::rng::fnv_fold_u32(&mut h, self.coloration.to_bits());
         crate::rng::fnv_fold_u32(&mut h, self.toxin_resistance.to_bits());
+        crate::rng::fnv_fold_u32(&mut h, self.oxygen_tolerance.to_bits());
         h
     }
 }
