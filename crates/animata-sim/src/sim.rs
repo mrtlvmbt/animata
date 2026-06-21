@@ -45,7 +45,7 @@ const SALT_BIRTH: u64 = 0xB127;
 const SALT_CAMO: u64 = 0xCA30;
 const SALT_TOXIN: u64 = 0x70_8127;
 const SALT_MORPH: u64 = 0xD2_0F; // morphogen READ-weight mutation (PR-D2) — an INDEPENDENT stream
-const SALT_GAS: u64 = 0x6A5_02; // oxygen-tolerance mutation (gas cycle) — an INDEPENDENT stream
+const SALT_GAS: u64 = 0x6A502; // oxygen-tolerance mutation (gas cycle) — an INDEPENDENT stream
 
 /// The serialisable live sim state — the half of a save snapshot that is the creatures (the other
 /// half is the terrain overlay). Restored via [`Sim::from_state`]; captured via [`Sim::to_state`].
@@ -95,14 +95,20 @@ impl Creature {
         self.genome.body_layout()
     }
 
-    /// Top speed: effector cells add locomotor thrust (emergent — a body that develops more
-    /// contractile cells moves faster, at the metabolic cost of carrying them). A body with NO
-    /// effectors only drifts (`DRIFT_FLOOR`), so powered motility is an earned, selected trait — not
-    /// a free baseline every single cell gets.
-    fn speed(&self) -> f32 {
-        // Effector ORGAN power (count + coherence bonus): a real muscle moves better than the same
-        // contractile cells scattered (PR-C). At ≤1 cell the bonus is 0 ⇒ identical to the count.
-        CREATURE_SPEED * (DRIFT_FLOOR + EFFECTOR_GAIN * self.pheno.organ_power(0))
+    /// Top speed = stratum drift + powered thrust. Powered motility is the muscle FRACTION
+    /// (`thrust = effector organ power / sqrt(n_cells)`): thrust grows with effector cells (count +
+    /// coherence bonus), drag rises with the body's linear size (√area in 2D), so a body that is
+    /// mostly muscle is fast at any size while dead-weight bulk slows it. A body with no effectors
+    /// only drifts — almost nothing on land, more in a fluid (water/air carries it). `layer` is the
+    /// creature's stratum this tick (passed from the snapshot phase).
+    fn speed(&self, layer: Stratum) -> f32 {
+        let drift = match layer {
+            Stratum::Surface | Stratum::Underground => DRIFT_GROUND,
+            Stratum::Water => DRIFT_WATER,
+            Stratum::Air => DRIFT_AIR,
+        };
+        let thrust = self.pheno.organ_power(0) / (self.pheno.n_cells as f32).max(1.0).sqrt();
+        CREATURE_SPEED * (drift + LOCO_GAIN * thrust)
     }
 
     /// Energy capacity: storage cells enlarge the buffer (survive lean spells, bigger broods). A
@@ -237,7 +243,7 @@ impl SimState {
                     age: c.age,
                     alive: c.alive,
                     genome: c.genome.to_v2(),
-                    pheno: c.pheno.clone(),
+                    pheno: c.pheno,
                 })
                 .collect(),
         }
@@ -729,9 +735,13 @@ impl Sim {
                 continue; // eaten in the predation pass
             }
             let (throttle, turn, _) = decisions[idx];
-            // Move.
+            // Move. `layer` is the snapshot stratum (start-of-tick position) — it also drives the
+            // drift term in `speed()` and is reused below for food/light. `spd` is captured once so
+            // the movement cost can be charged per distance travelled (`MOVE_COST·throttle·spd`).
+            let layer = strata[idx];
+            let spd = c.speed(layer);
             c.heading += turn * TURN_RATE * TICK_LEN;
-            let step = throttle * c.speed() * TICK_LEN;
+            let step = throttle * spd * TICK_LEN;
             c.pos.x += c.heading.cos() * step;
             c.pos.y += c.heading.sin() * step;
             // Map edge = wall (reflect), via the single clamp helper for the column.
@@ -750,7 +760,6 @@ impl Sim {
                 c.heading = -c.heading;
             }
             let (cx, cy) = column_index(c.pos);
-            let layer = strata[idx];
             // Environmental selection pressures (climate / autotrophy / metabolism) compose into
             // one Effect for this creature; its channels plug into the energy budget below, bit-for-
             // bit as the former inline formulas (food_mult ← climate, energy_add ← photosynthesis,
@@ -786,9 +795,10 @@ impl Sim {
             if self.cfg.features.oxygen && eff.photo_yield > 0.0 {
                 terrain.deposit_oxygen(cx, cy, eff.photo_yield * OXYGEN_PER_PHOTO, tick);
             }
-            // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort.
+            // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort
+            // (charged per distance travelled: `MOVE_COST · throttle · spd`, so drift/idle is ~free).
             let kleiber = (c.biomass() as f32).powf(0.75);
-            c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle) * TICK_LEN;
+            c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle * spd) * TICK_LEN;
             c.age += 1;
             // Toxic death (C3 abiotic): ground toxicity beyond the creature's resistance is a
             // per-tick death hazard (the `mortality_add` channel). Deterministic per (id, tick).
@@ -1263,9 +1273,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    5234183620269017713 // debug profile (re-pinned on merge: parallel/LEM/D∞ terrain × gas-cycle Phase 2)
+    7589643348835578897 // debug profile (re-pinned: terrain-gen base × movement rebalance)
 } else {
-    13845610500723458019 // release profile (re-pinned on merge: terrain-gen overhaul × aerobic respiration)
+    10375473682301875586 // release profile (re-pinned: terrain-gen base × movement rebalance)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1275,7 +1285,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 2341791034864099782; // re-pinned on merge: terrain × gas Phase 2
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 2744380606710956587; // re-pinned: terrain-gen base × movement rebalance
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

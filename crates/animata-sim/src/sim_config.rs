@@ -256,6 +256,7 @@ impl SimConfigV2 {
 #[cfg(test)]
 impl SimConfig {
     /// Down-convert to the frozen ANM2 shape — migration-test support only.
+    #[allow(clippy::wrong_self_convention)] // `&self` kept: by-value would touch the frozen-shape callers
     pub(crate) fn to_v2(&self) -> SimConfigV2 {
         let f = &self.features;
         let p = &self.params;
