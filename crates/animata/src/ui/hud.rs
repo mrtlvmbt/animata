@@ -1044,5 +1044,12 @@ fn perf_panel(ui: &mut egui::Ui, m: &SimMetrics) {
         for (label, ms) in &m.sim_phases {
             kv(ui, label, format!("{ms:.2}"));
         }
+        // Live Amdahl: serial share of a tick + the most more cores could still shrink it (1/serial).
+        // Falls as population/complexity grow the serial phases.
+        let (_serial_ms, _par_ms, frac) = m.sim_amdahl;
+        if frac > 0.0 {
+            kv(ui, "serial share", format!("{:.0}%", frac * 100.0));
+            kv(ui, "core ceiling", format!("{:.1}×", 1.0 / frac));
+        }
     }
 }

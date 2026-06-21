@@ -67,6 +67,12 @@ impl Span {
             _ => 0,
         }
     }
+
+    /// Whether this phase runs across cores (rayon) vs serially on the sim thread. The split drives
+    /// the live Amdahl readout: only the serial phases bound how much more cores could ever help.
+    pub fn is_parallel(self) -> bool {
+        matches!(self, Span::Decide | Span::Develop)
+    }
 }
 
 const N_SPANS: usize = Span::ALL.len();
@@ -161,5 +167,24 @@ impl Profiler {
                 (s, w.mean_ms(), w.max_ms())
             })
             .collect()
+    }
+
+    /// Live Amdahl split over the window: `(serial_ms, parallel_ms, serial_fraction)`. `serial_fraction`
+    /// is the share of a tick stuck on one thread; `1 / serial_fraction` is the most that *adding more
+    /// cores* could ever still shrink the tick. It rises (ceiling falls) as population/complexity grow
+    /// the serial phases (snapshot copy O(N), apply graze/metabolism/births O(N), cull O(N log N)).
+    pub fn amdahl(&self) -> (f32, f32, f32) {
+        let (mut serial, mut parallel) = (0.0f32, 0.0f32);
+        for &s in Span::ALL {
+            let mean = self.windows[s as usize].mean_ms();
+            if s.is_parallel() {
+                parallel += mean;
+            } else {
+                serial += mean;
+            }
+        }
+        let total = serial + parallel;
+        let frac = if total > 0.0 { serial / total } else { 0.0 };
+        (serial, parallel, frac)
     }
 }

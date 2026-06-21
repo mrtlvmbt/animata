@@ -100,6 +100,9 @@ pub struct SimMetrics {
     /// `Sim::profile_report` each frame; the perf panel iterates it so a new span shows up
     /// automatically. Empty until the world is ready.
     pub sim_phases: Vec<(&'static str, f32)>,
+    /// Live Amdahl split `(serial_ms, parallel_ms, serial_fraction)` of a sim tick. The perf panel
+    /// shows `serial %` and the core-scaling ceiling `1 / serial_fraction`. `(0,0,0)` until ready.
+    pub sim_amdahl: (f32, f32, f32),
     // World & time
     pub seed: u64,
     pub cols: usize,

@@ -466,6 +466,12 @@ impl Sim {
         self.profiler.report()
     }
 
+    /// Live Amdahl split `(serial_ms, parallel_ms, serial_fraction)` of a tick — the speedup ceiling
+    /// from more cores is `1 / serial_fraction`, and it tightens as population/complexity grow.
+    pub fn profile_amdahl(&self) -> (f32, f32, f32) {
+        self.profiler.amdahl()
+    }
+
     /// Enable/disable the phase profiler (default on). Off ⇒ the timing windows freeze; never affects
     /// determinism either way.
     pub fn set_profiling(&mut self, on: bool) {

@@ -676,6 +676,7 @@ async fn main() {
         // Per-phase sim timing (mean ms) for the perf panel — from the snapshot.
         let sim_phases: Vec<(&'static str, f32)> =
             snapshot.as_ref().map(|s| s.sim_phases.clone()).unwrap_or_default();
+        let sim_amdahl = snapshot.as_ref().map(|s| s.amdahl).unwrap_or((0.0, 0.0, 0.0));
         let hud_metrics = ui::SimMetrics {
             fps,
             frame_ms,
@@ -684,6 +685,7 @@ async fn main() {
             coarse: crs,
             on_screen,
             sim_phases,
+            sim_amdahl,
             seed,
             cols: COLS,
             rows: ROWS,
@@ -977,6 +979,8 @@ async fn main() {
                             "deaths": r.deaths,
                             "kills": r.kills,
                             "profile": profile,
+                            "serial_frac": r.serial_frac,
+                            "core_ceiling": if r.serial_frac > 0.0 { 1.0 / r.serial_frac } else { 0.0 },
                         })
                     });
                     let _ = reply.send(serde_json::json!({
