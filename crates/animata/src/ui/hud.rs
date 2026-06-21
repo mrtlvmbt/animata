@@ -433,8 +433,9 @@ fn play_button(ui: &mut egui::Ui, paused: bool) -> egui::Response {
 fn speed_slider(ui: &mut egui::Ui, current: f32, max: f32) -> Option<f32> {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 24.0), Sense::click_and_drag());
     let cy = rect.center().y;
-    // Upper bound floats with CPU headroom (`m.max_time_scale`); guard the log range against max≤min.
-    let (lmin, lmax) = (MIN_TIME_SCALE.ln(), max.max(MIN_TIME_SCALE * 2.0).ln());
+    // Upper bound floats with CPU headroom (`m.max_time_scale`), but never below the current value —
+    // so when the cap drops after you hit max, the handle stays IN range and you can still drag down.
+    let (lmin, lmax) = (MIN_TIME_SCALE.ln(), max.max(current).max(MIN_TIME_SCALE * 2.0).ln());
     let t = ((current.ln() - lmin) / (lmax - lmin)).clamp(0.0, 1.0);
     let hx = rect.left() + t * rect.width();
     let p = ui.painter();
