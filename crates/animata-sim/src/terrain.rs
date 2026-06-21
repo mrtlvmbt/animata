@@ -422,9 +422,10 @@ impl VoxelTerrain {
     }
 
     /// A renderer-side terrain that SHARES `geo` (meshing + all geometry/climate reads) with an EMPTY
-    /// mutable overlay. The renderer reads the live overlay (biomass) from the sim's snapshot, never
-    /// from this state, so a zeroed overlay is correct. Cheap: no geometry copy (Arc clone), only the
-    /// zeroed overlay alloc.
+    /// mutable overlay. The live overlay (biomass) is the sim worker's; the renderer should read it
+    /// from the snapshot. NOTE: the biomass minimap view currently still reads THIS (zeroed) overlay,
+    /// so that one view is degraded until the overlay is shipped in the snapshot (a known follow-up);
+    /// all geo-backed views/meshing are correct. Cheap: no geometry copy (Arc clone), only the alloc.
     pub fn render_side(seed: u64, chunks_x: usize, chunks_y: usize, geo: Arc<TerrainGeo>) -> Self {
         let n = COLS * ROWS;
         VoxelTerrain {
