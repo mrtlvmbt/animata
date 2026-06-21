@@ -72,6 +72,8 @@ pub struct StatusReport {
     pub deaths: u64,
     pub kills: u64,
     pub profile: Vec<(&'static str, f32, f32)>,
+    /// Live serial fraction of a tick (Amdahl); core-scaling ceiling = `1 / serial_frac`.
+    pub serial_frac: f32,
     pub env_biomass: f32,
 }
 
@@ -255,6 +257,7 @@ fn apply(
                     deaths: s.deaths,
                     kills: s.kills,
                     profile: s.profile_report().into_iter().map(|(sp, m, mx)| (sp.label(), m, mx)).collect(),
+                    serial_frac: s.profile_amdahl().2,
                     env_biomass: t.biomass_at(col.0.min(COLS - 1), col.1.min(ROWS - 1), tick),
                 };
                 let _ = reply.send(Box::new(report));

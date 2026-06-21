@@ -67,7 +67,24 @@ const GRAZE_PATCH_R: i32 = 24;
 /// drops backlog instead of simulating faster — so this cap sits above that, not as the limiter.
 const TIME_SCALE_STEP: f32 = 1.5;
 const MIN_TIME_SCALE: f32 = 0.1;
-const MAX_TIME_SCALE: f32 = 64.0;
+/// Absolute hard ceiling for the time-scale slider — a safety bound. The EFFECTIVE max floats with
+/// CPU headroom (see `max_time_scale_for`): on a light world it climbs toward this; on a heavy one it
+/// drops to what the sim can actually sustain.
+const MAX_TIME_SCALE: f32 = 512.0;
+/// Floor for the floating cap, so there's always some fast-forward even on a heavy world.
+const MIN_AUTO_MAX: f32 = 2.0;
+
+/// Largest time-scale the CPU can actually sustain right now, from the live per-tick cost. At scale
+/// `M` the sim must do `M / TICK_LEN` ticks/s; the CPU does `1000 / tick_ms` ticks/s; keep-up ⇒
+/// `M ≤ 1000·TICK_LEN / tick_ms`. Clamped to `[MIN_AUTO_MAX, MAX_TIME_SCALE]`; falls back to the hard
+/// ceiling before the profiler has data.
+fn max_time_scale_for(tick_ms: f32) -> f32 {
+    if tick_ms > 0.05 {
+        (1000.0 * TICK_LEN / tick_ms).clamp(MIN_AUTO_MAX, MAX_TIME_SCALE)
+    } else {
+        MAX_TIME_SCALE
+    }
+}
 /// Whole-map zoom-out margin: the coarse tier covers all of it, so no empty edges however far out.
 const MAX_ZOOM_MARGIN: f32 = 1.2;
 // ---- Creature LOD (zoom-aware: individuals up close, bacterial mats when zoomed out) ----
@@ -598,6 +615,11 @@ async fn main() {
         if let Some(s) = &snapshot {
             clock.set_tick(s.tick);
         }
+        // Floating time-scale cap from the live per-tick cost (serial+parallel ms): the slider tops
+        // out at what the CPU can actually sustain, climbing on a light world and dropping on a heavy
+        // one. `None` snapshot ⇒ hard ceiling.
+        let sim_amdahl = snapshot.as_ref().map(|s| s.amdahl).unwrap_or((0.0, 0.0, 0.0));
+        let max_ts = max_time_scale_for(sim_amdahl.0 + sim_amdahl.1);
         // Tell the worker which creatures need a high-zoom morphology layout next snapshot (the AABB is
         // a generous superset of the view; the render pass culls precisely).
         let px_per_m = screen_height() / cam.zoom;
@@ -684,6 +706,7 @@ async fn main() {
             coarse: crs,
             on_screen,
             sim_phases,
+            sim_amdahl,
             seed,
             cols: COLS,
             rows: ROWS,
@@ -691,6 +714,7 @@ async fn main() {
             sim_time: clock.sim_time() as f32,
             day_frac: clock.day_frac(),
             time_scale: clock.time_scale,
+            max_time_scale: max_ts,
             paused: clock.paused,
             life,
             pop_hist: pop_hist.iter().copied().collect(),
@@ -766,20 +790,22 @@ async fn main() {
         if is_key_pressed(KeyCode::Space) || actions.toggle_pause {
             clock.paused = !clock.paused;
         }
-        // Time speed: `,` slows, `.` speeds (multiplicative, clamped), `/` resets to 1×; the panel
-        // slider/buttons feed `actions.set_time_scale`. Same `time_scale` the dev-bridge drives.
+        // Time speed: `,` slows, `.` speeds (multiplicative), `/` resets to 1×; the panel slider/
+        // buttons feed `actions.set_time_scale`. The upper bound `max_ts` FLOATS with CPU headroom.
         if is_key_pressed(KeyCode::Comma) {
             clock.time_scale = (clock.time_scale / TIME_SCALE_STEP).max(MIN_TIME_SCALE);
         }
         if is_key_pressed(KeyCode::Period) {
-            clock.time_scale = (clock.time_scale * TIME_SCALE_STEP).min(MAX_TIME_SCALE);
+            clock.time_scale = (clock.time_scale * TIME_SCALE_STEP).min(max_ts);
         }
         if is_key_pressed(KeyCode::Slash) {
             clock.time_scale = 1.0;
         }
         if let Some(ts) = actions.set_time_scale {
-            clock.time_scale = ts.clamp(MIN_TIME_SCALE, MAX_TIME_SCALE);
+            clock.time_scale = ts.clamp(MIN_TIME_SCALE, max_ts);
         }
+        // The floating cap can drop as the world grows heavier — track the current scale down to it.
+        clock.time_scale = clock.time_scale.min(max_ts);
         // Echo the time-scale/pause intent to the worker's clock (cheap; it owns the actual stepping).
         sim_handle.send(SimCommand::SetClock {
             scale: Some(clock.time_scale),
@@ -977,6 +1003,8 @@ async fn main() {
                             "deaths": r.deaths,
                             "kills": r.kills,
                             "profile": profile,
+                            "serial_frac": r.serial_frac,
+                            "core_ceiling": if r.serial_frac > 0.0 { 1.0 / r.serial_frac } else { 0.0 },
                         })
                     });
                     let _ = reply.send(serde_json::json!({

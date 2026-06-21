@@ -46,6 +46,9 @@ pub struct RenderSnapshot {
     pub inspect: Option<InspectView>,
     /// Per-phase `Sim::step` timing (label, mean ms) for the perf panel.
     pub sim_phases: Vec<(&'static str, f32)>,
+    /// Live Amdahl split `(serial_ms, parallel_ms, serial_fraction)` — the speedup ceiling from more
+    /// cores is `1 / serial_fraction`.
+    pub amdahl: (f32, f32, f32),
 }
 
 impl RenderSnapshot {
@@ -108,6 +111,6 @@ impl RenderSnapshot {
         let sim_phases =
             sim.profile_report().into_iter().map(|(span, mean, _max)| (span.label(), mean)).collect();
 
-        RenderSnapshot { tick, creatures, life, inspect, sim_phases }
+        RenderSnapshot { tick, creatures, life, inspect, sim_phases, amdahl: sim.profile_amdahl() }
     }
 }
