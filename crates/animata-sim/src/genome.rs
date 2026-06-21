@@ -239,6 +239,12 @@ pub struct Genome {
     /// autotrophs create as a photosynthesis byproduct) select for tolerant lineages AND brake the
     /// autotroph density that produced the O2. Evolves UP on its own mutation stream.
     pub oxygen_tolerance: f32,
+    /// Aerobic respiration capacity `[0,1]` (gas cycle Phase 2). Founder `0.0` ⇒ anaerobic. A creature
+    /// USES local dissolved O2 as an energy RESOURCE proportional to this gene (≈15× the anaerobic
+    /// yield in reality), drawing the O2 down. This is the energy windfall that finally pays for the
+    /// high-cost heterotroph lifestyles (motility, predation) — the rebalance away from the autotroph
+    /// monoculture toward animals. Evolves UP on the same independent gas stream as `oxygen_tolerance`.
+    pub aerobic_capacity: f32,
 }
 
 impl Genome {
@@ -258,6 +264,8 @@ impl Genome {
             // Founder SENSITIVE to O2 (tolerance 0) — the anoxic ancestor. A constant (no `rng` draw),
             // so founders are byte-identical to the pre-feature sim; tolerance evolves up in `mutate`.
             oxygen_tolerance: 0.0,
+            // Founder ANAEROBIC (no aerobic capacity) — constant, no rng draw; evolves up in `mutate`.
+            aerobic_capacity: 0.0,
         }
     }
 
@@ -298,6 +306,10 @@ impl Genome {
         // child's pos/heading (drawn from `rng` after mutate returns) byte-identical (gas-cycle F9,
         // the morph_w pattern). NOT a draw appended to `rng`, NOT a reuse of `morph_rng`.
         let oxygen_tolerance = (self.oxygen_tolerance + gas_rng.signed() * grn_std).clamp(0.0, 1.0);
+        // Aerobic capacity (Phase 2) drawn from the SAME gas stream, AFTER oxygen_tolerance — so adding
+        // it leaves oxygen_tolerance's draw (and the whole main `rng`) byte-identical; only this new
+        // gene's value is appended to the gas stream.
+        let aerobic_capacity = (self.aerobic_capacity + gas_rng.signed() * grn_std).clamp(0.0, 1.0);
         Genome {
             grn_w,
             grn_b,
@@ -309,6 +321,7 @@ impl Genome {
             coloration,
             toxin_resistance,
             oxygen_tolerance,
+            aerobic_capacity,
         }
     }
 
@@ -645,6 +658,7 @@ impl Genome {
         crate::rng::fnv_fold_u32(&mut h, self.coloration.to_bits());
         crate::rng::fnv_fold_u32(&mut h, self.toxin_resistance.to_bits());
         crate::rng::fnv_fold_u32(&mut h, self.oxygen_tolerance.to_bits());
+        crate::rng::fnv_fold_u32(&mut h, self.aerobic_capacity.to_bits());
         h
     }
 }
@@ -680,6 +694,7 @@ impl GenomeV2 {
             coloration: self.coloration,
             toxin_resistance: self.toxin_resistance,
             oxygen_tolerance: 0.0,
+            aerobic_capacity: 0.0,
         }
     }
 }
