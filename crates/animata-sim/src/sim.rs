@@ -1163,9 +1163,10 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    9204025271495943362 // debug profile (re-pinned: BIOMASS_REGROW_RATE 0.01→0.03 — more renewable food)
+    14846922439740308544 // debug profile (re-pinned: droplet erosion parallelised — see release note)
 } else {
-    17191699025293563262 // release profile (FMA contraction shifts the trajectory)
+    2066630792292556539 // release profile (re-pinned: droplet erosion parallelised — independent
+                        // per-droplet seeding + batched snapshot apply changed the eroded surface)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1175,7 +1176,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 0xae7d_8282_6852_9b63;
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 8182166719119468728; // re-pinned: parallel droplet erosion
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]
