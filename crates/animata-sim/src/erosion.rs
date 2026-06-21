@@ -209,9 +209,24 @@ fn simulate_droplet(seed: u64, d: u64, elev: &[f32], brush: &[(i32, i32, f32)], 
     }
 }
 
-/// Thermal/talus relaxation: where the drop to the steepest-descent neighbour exceeds the
-/// talus threshold, move material down. Smooths cliffs into scree and caps the slope.
+/// Thermal/talus relaxation: where the slope to a DOWNHILL neighbour exceeds the talus angle,
+/// shed the excess material downhill. Distributes to ALL lower 8-neighbours weighted by their
+/// slope (not just the single steepest) so scree spreads evenly with no directional bias, and
+/// uses distance-normalised slopes so diagonals are weighted correctly. Smooths cliffs, caps
+/// the slope. Serial (per-cell scatter into a shared delta) so the float-sum order is fixed.
 fn thermal(elev: &mut [f32], progress: &dyn Fn(f32)) {
+    const INV_SQRT2: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    // 8-neighbour offsets with the reciprocal of their distance (orthogonal 1, diagonal 1/√2).
+    const NB: [(i32, i32, f32); 8] = [
+        (1, 0, 1.0),
+        (-1, 0, 1.0),
+        (0, 1, 1.0),
+        (0, -1, 1.0),
+        (1, 1, INV_SQRT2),
+        (1, -1, INV_SQRT2),
+        (-1, 1, INV_SQRT2),
+        (-1, -1, INV_SQRT2),
+    ];
     let n = COLS * ROWS;
     let mut delta = vec![0f32; n];
     for pass in 0..THERMAL_PASSES {
@@ -223,23 +238,34 @@ fn thermal(elev: &mut [f32], progress: &dyn Fn(f32)) {
             for x in 0..COLS as i32 {
                 let i = y as usize * COLS + x as usize;
                 let h = elev[i];
-                let mut low_i = i;
-                let mut low_h = h;
-                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                // Gather downhill neighbours whose (distance-normalised) slope exceeds talus.
+                let mut lowers: [(usize, f32); 8] = [(0, 0.0); 8];
+                let mut k = 0usize;
+                let mut total = 0.0f32;
+                let mut smax = 0.0f32;
+                for (dx, dy, inv) in NB {
+                    let (nx, ny) = (x + dx, y + dy);
                     if nx < 0 || ny < 0 || nx >= COLS as i32 || ny >= ROWS as i32 {
                         continue;
                     }
                     let j = ny as usize * COLS + nx as usize;
-                    if elev[j] < low_h {
-                        low_h = elev[j];
-                        low_i = j;
+                    let s = (h - elev[j]) * inv; // drop per unit distance = slope
+                    if s > TALUS {
+                        lowers[k] = (j, s);
+                        k += 1;
+                        total += s;
+                        if s > smax {
+                            smax = s;
+                        }
                     }
                 }
-                let diff = h - low_h;
-                if low_i != i && diff > TALUS {
-                    let move_amt = (diff - TALUS) * 0.5 * THERMAL_RATE;
+                if k > 0 {
+                    // Move the steepest excess, shared out by each neighbour's slope fraction.
+                    let move_amt = (smax - TALUS) * 0.5 * THERMAL_RATE;
                     delta[i] -= move_amt;
-                    delta[low_i] += move_amt;
+                    for &(j, s) in &lowers[..k] {
+                        delta[j] += move_amt * (s / total);
+                    }
                 }
             }
         }

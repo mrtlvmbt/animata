@@ -1163,10 +1163,10 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    12272261688988170920 // debug profile (re-pinned: stream-power LEM pass — see release note)
+    10634983924377049709 // debug profile (re-pinned: D∞ flow routing + 8-neighbour thermal)
 } else {
-    263291681651153011 // release profile (re-pinned: stream-power LEM pass added between noise and
-                       // droplet erosion — uplift↔incision carves dendritic valleys, new surface)
+    15707891085674175148 // release profile (re-pinned: D∞ (Tarboton) flow accumulation + distributed
+                         // 8-neighbour thermal talus changed the river network + slopes)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1176,7 +1176,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 6638141017748170176; // re-pinned: stream-power LEM pass
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 5520900989564297945; // re-pinned: D∞ routing + 8-nbr thermal
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]
