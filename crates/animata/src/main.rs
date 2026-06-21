@@ -179,12 +179,19 @@ fn spawn_load(path: String) -> LoadJob {
     let p = progress.clone();
     std::thread::spawn(move || {
         let res = (|| -> Result<LoadedWorld, String> {
+            let t0 = std::time::Instant::now();
             let snap = load_snapshot(&path)?;
+            let parse_ms = t0.elapsed().as_secs_f64() * 1000.0;
             let seed = snap.terrain_seed;
+            let t1 = std::time::Instant::now();
             let mut terrain = VoxelTerrain::generate(seed, &|f| {
                 p.store((f.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
             });
+            let gen_ms = t1.elapsed().as_secs_f64() * 1000.0;
+            let t2 = std::time::Instant::now();
             terrain.set_state(snap.terrain)?; // size-checked; Err aborts before the main swap
+            let set_ms = t2.elapsed().as_secs_f64() * 1000.0;
+            eprintln!("[load] parse {parse_ms:.0}ms · generate {gen_ms:.0}ms · set_state {set_ms:.1}ms (worker)");
             Ok(LoadedWorld { terrain, sim: snap.sim, tick: snap.tick, seed })
         })();
         let _ = tx.send(res); // receiver may be gone if the app exited mid-load — ignore

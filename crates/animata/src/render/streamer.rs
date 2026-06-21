@@ -4,9 +4,11 @@ use macroquad::miniquad::RenderingBackend;
 use animata_sim::config::*;
 use animata_sim::terrain::VoxelTerrain;
 
+use rayon::prelude::*;
+
 use crate::render::camera::IsoCam;
 use crate::render::gpu::{GpuChunk, upload_chunks, free_chunks};
-use crate::render::mesh::{build_chunk_mesh, build_region_mesh};
+use crate::render::mesh::{build_chunk_mesh, build_region_mesh, Batch};
 
 pub struct LoadedChunk {
     pub opaque: Vec<GpuChunk>,
@@ -92,6 +94,12 @@ pub struct Streamer {
     /// and SKIPS their coarse twin. Until a super-tile is ready it shows coarse, so a
     /// detail→coarse swap never flashes empty and the tiers never overlap.
     pub ready: std::collections::HashSet<(i32, i32)>,
+    /// Diagnostic: accumulated CPU time in `build_region_mesh` for the coarse tier and the
+    /// count of super-tiles built, reported once when the whole-map overview first completes
+    /// after a (re)build — the post-load remesh cost an off-thread mesher would parallelise.
+    coarse_build_ns: u128,
+    coarse_built: u32,
+    coarse_reported: bool,
 }
 
 impl Streamer {
@@ -100,6 +108,9 @@ impl Streamer {
             detail: ChunkMap::new(),
             coarse: ChunkMap::new(),
             ready: std::collections::HashSet::new(),
+            coarse_build_ns: 0,
+            coarse_built: 0,
+            coarse_reported: false,
         }
     }
 
@@ -111,6 +122,9 @@ impl Streamer {
         self.detail.clear();
         self.coarse.clear();
         self.ready.clear();
+        self.coarse_build_ns = 0;
+        self.coarse_built = 0;
+        self.coarse_reported = false;
     }
 
     pub fn update(
@@ -153,12 +167,22 @@ impl Streamer {
                 }
             }
             todo.sort_unstable_by_key(|m| m.0);
-            for &(_, cx, cy, lod) in todo.iter().take(BUILD_BUDGET) {
+            // Build this frame's budgeted chunk meshes in PARALLEL (pure CPU reads of the
+            // terrain), then free/upload/insert serially — only the GL calls touch the context,
+            // which must stay on the main thread. `collect` preserves the distance-sorted order.
+            let built: Vec<(i32, i32, u32, (Vec<Batch>, Vec<Batch>))> = todo
+                .iter()
+                .take(BUILD_BUDGET)
+                .map(|&(_, cx, cy, lod)| (cx, cy, lod))
+                .collect::<Vec<_>>()
+                .into_par_iter()
+                .map(|(cx, cy, lod)| (cx, cy, lod, build_chunk_mesh(t, cx as usize, cy as usize, lod)))
+                .collect();
+            for (cx, cy, lod, (o, w)) in built {
                 if let Some(old) = self.detail.remove(&(cx, cy)) {
                     free_chunks(ctx, &old.opaque);
                     free_chunks(ctx, &old.water);
                 }
-                let (o, w) = build_chunk_mesh(t, cx as usize, cy as usize, lod);
                 let lc = LoadedChunk {
                     opaque: upload_chunks(ctx, &o),
                     water: upload_chunks(ctx, &w),
@@ -187,18 +211,42 @@ impl Streamer {
             }
         }
         ctodo.sort_unstable_by_key(|m| m.0);
-        for &(_, sx, sy) in ctodo.iter().take(COARSE_BUDGET) {
-            let x0 = sx as usize * SUPER as usize * CHUNK;
-            let y0 = sy as usize * SUPER as usize * CHUNK;
-            let x1 = (x0 + SUPER as usize * CHUNK).min(COLS);
-            let y1 = (y0 + SUPER as usize * CHUNK).min(ROWS);
-            let (o, w) = build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD);
+        // Coarse super-tile meshes built in PARALLEL (CPU), uploaded serially (GL). The timer
+        // is the parallel WALL-CLOCK of the build phase — what an off-thread mesher shaves off
+        // the main loop.
+        let tb = std::time::Instant::now();
+        let cbuilt: Vec<(i32, i32, (Vec<Batch>, Vec<Batch>))> = ctodo
+            .iter()
+            .take(COARSE_BUDGET)
+            .map(|&(_, sx, sy)| (sx, sy))
+            .collect::<Vec<_>>()
+            .into_par_iter()
+            .map(|(sx, sy)| {
+                let x0 = sx as usize * SUPER as usize * CHUNK;
+                let y0 = sy as usize * SUPER as usize * CHUNK;
+                let x1 = (x0 + SUPER as usize * CHUNK).min(COLS);
+                let y1 = (y0 + SUPER as usize * CHUNK).min(ROWS);
+                (sx, sy, build_region_mesh(t, x0, y0, x1, y1, COARSE_LOD))
+            })
+            .collect();
+        self.coarse_build_ns += tb.elapsed().as_nanos();
+        self.coarse_built += cbuilt.len() as u32;
+        for (sx, sy, (o, w)) in cbuilt {
             let lc = LoadedChunk {
                 opaque: upload_chunks(ctx, &o),
                 water: upload_chunks(ctx, &w),
                 lod: COARSE_LOD,
             };
             self.coarse.insert((sx, sy), lc);
+        }
+        // Report the whole-map coarse remesh cost once it first completes after a (re)build.
+        if !self.coarse_reported && self.coarse.len() >= (nsx * nsy) as usize {
+            self.coarse_reported = true;
+            eprintln!(
+                "[remesh] coarse tier: {} super-tiles, {:.0}ms parallel build wall-clock (main loop)",
+                self.coarse_built,
+                self.coarse_build_ns as f64 / 1e6
+            );
         }
 
         // ---- Readiness: a detail super-tile is ready once ALL its in-map chunks are
