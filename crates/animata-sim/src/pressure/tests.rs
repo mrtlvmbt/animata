@@ -5,7 +5,7 @@ use crate::sim::Stratum;
 use crate::sim_config::Params;
 
 fn sample_with<'a>(layer: Stratum, temperature: f32, light: f32, genome: &'a Genome, pheno: &'a Phenotype) -> Sample<'a> {
-    Sample { pheno, genome, layer, temperature, light, toxicity: 0.0, season_phase: 0.0, autotroph_shading: 1.0 }
+    Sample { pheno, genome, layer, temperature, light, toxicity: 0.0, oxygen: 0.0, season_phase: 0.0, autotroph_shading: 1.0 }
 }
 
 fn climate() -> climate::Climate {

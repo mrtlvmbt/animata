@@ -382,6 +382,13 @@ pub struct TerrainState {
     /// updated only on events (graze/deposit), weathered closed-form from `nutrient_update`.
     nutrient: Vec<u8>,
     nutrient_update: Vec<u32>,
+    /// Dissolved oxygen per column (C3 gas cycle Phase 1), stored as **`f32` (NOT quantised)** so a
+    /// gentle per-creature O2 drip accumulates exactly — a u8/u16 round-modify-write would round each
+    /// tiny deposit away (gas-cycle plan F1/F5). Produced by photosynthesis (`deposit_oxygen`), decays
+    /// lazily toward 0 (closed-form from `oxygen_update`, no per-tick sweep). Empty (`0.0`) at start —
+    /// the founder world is anoxic, O2 builds as autotrophs spread (the Great Oxygenation Event).
+    oxygen: Vec<f32>,
+    oxygen_update: Vec<u32>,
 }
 
 impl VoxelTerrain {
@@ -404,6 +411,13 @@ impl VoxelTerrain {
             crate::rng::fnv_fold_u32(&mut h, n as u32);
         }
         for &u in &self.state.nutrient_update {
+            crate::rng::fnv_fold_u32(&mut h, u);
+        }
+        // Oxygen overlay (gas cycle): fold the f32 bit-pattern (F2: never float-add into the hash).
+        for &o in &self.state.oxygen {
+            crate::rng::fnv_fold_u32(&mut h, o.to_bits());
+        }
+        for &u in &self.state.oxygen_update {
             crate::rng::fnv_fold_u32(&mut h, u);
         }
         h
@@ -438,6 +452,8 @@ impl VoxelTerrain {
                 last_update: vec![0; n],
                 nutrient: vec![0; n],
                 nutrient_update: vec![0; n],
+                oxygen: vec![0.0; n],
+                oxygen_update: vec![0; n],
             },
         }
     }
@@ -721,6 +737,8 @@ impl VoxelTerrain {
                 last_update: vec![0u32; n],
                 nutrient,
                 nutrient_update: vec![0u32; n],
+                oxygen: vec![0.0; n],
+                oxygen_update: vec![0u32; n],
             },
         }
     }
@@ -900,6 +918,50 @@ impl VoxelTerrain {
         let i = y * COLS + x;
         let elapsed = (tick - self.state.nutrient_update[i] as u64) as f32 * TICK_LEN;
         weather(self.state.nutrient[i] as f32 / 255.0, self.nutrient_base_at(i), elapsed)
+    }
+
+    /// Materialise the lazy O2 decay (toward 0) up to `tick` and persist it. f32 store ⇒ exact, no
+    /// quantisation round-trip (so gentle deposits accumulate — gas-cycle F1/F5). The only place O2
+    /// moves on its own — no per-tick global sweep.
+    fn materialize_oxygen(&mut self, i: usize, tick: u64) {
+        let elapsed = (tick - self.state.oxygen_update[i] as u64) as f32 * TICK_LEN;
+        self.state.oxygen[i] *= (-OXYGEN_DECAY_RATE * elapsed).exp();
+        self.state.oxygen_update[i] = tick as u32;
+    }
+
+    /// Deposit `amount` dissolved O2 into a column (the obligate photosynthesis byproduct). Decays to
+    /// now first, then adds exactly (f32). Steady state ≈ deposit-rate / `OXYGEN_DECAY_RATE` ⇒ bounded.
+    pub fn deposit_oxygen(&mut self, x: usize, y: usize, amount: f32, tick: u64) {
+        let i = y * COLS + x;
+        self.materialize_oxygen(i, tick);
+        self.state.oxygen[i] += amount;
+    }
+
+    /// Live dissolved-O2 level at a column (decayed to `tick`, read-only — does not persist, like
+    /// `nutrient_at`). The value the oxygen pressure reads via `Sample.oxygen`.
+    pub fn oxygen_at(&self, x: usize, y: usize, tick: u64) -> f32 {
+        let i = y * COLS + x;
+        let elapsed = (tick - self.state.oxygen_update[i] as u64) as f32 * TICK_LEN;
+        self.state.oxygen[i] * (-OXYGEN_DECAY_RATE * elapsed).exp()
+    }
+
+    /// O2 field stats `(max, mean-over-all-columns, nonzero-column-count)` at `tick` — observability
+    /// for the gas-cycle spike/probe (confirms gentle deposits ACCUMULATE in the f32 store, plan F1/F5).
+    /// Reads the stored value WITHOUT decay-to-now (the raw accumulator) so absorption is visible.
+    pub fn oxygen_field_stats(&self) -> (f32, f32, usize) {
+        let mut max = 0.0f32;
+        let mut sum = 0.0f64;
+        let mut nz = 0usize;
+        for &o in &self.state.oxygen {
+            if o > max {
+                max = o;
+            }
+            sum += o as f64;
+            if o > 0.0 {
+                nz += 1;
+            }
+        }
+        (max, (sum / self.state.oxygen.len() as f64) as f32, nz)
     }
 
     /// Ground tone `[0,1]` (dark .. light) a creature is seen AGAINST at a column — the camouflage

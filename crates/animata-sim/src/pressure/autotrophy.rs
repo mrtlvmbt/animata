@@ -22,6 +22,8 @@ impl SelectionPressure for Autotrophy {
         } else {
             0.0
         };
-        Effect { energy_add, ..Effect::identity() }
+        // `photo_yield` tags the photosynthetic income so O2 production can key on it ALONE (not the
+        // composed `energy_add`, which Phase 2's aerobic boost also writes — gas-cycle F2).
+        Effect { energy_add, photo_yield: energy_add, ..Effect::identity() }
     }
 }

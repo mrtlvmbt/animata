@@ -10,8 +10,8 @@
 //! (strata / predation / camouflage / development) are gated inside `Sim::step`.
 
 use crate::config::{
-    AIR_METAB_MULT, CAMO_BASE_DETECT, PHOTO_RATE, SEASON_AMPLITUDE, SEASON_LEN, THERMAL_PENALTY,
-    TOXIN_LETHALITY, UNDERGROUND_METAB_MULT,
+    AIR_METAB_MULT, CAMO_BASE_DETECT, OXYGEN_LETHALITY, PHOTO_RATE, SEASON_AMPLITUDE, SEASON_LEN,
+    THERMAL_PENALTY, TOXIN_LETHALITY, UNDERGROUND_METAB_MULT,
 };
 
 /// Which simulation features are active. All default to `true`.
@@ -35,6 +35,10 @@ pub struct Features {
     /// Seasonality (food swings over the year). **Default OFF** — an opt-in environmental mode, so
     /// the baseline world (and the determinism golden) stays aseasonal.
     pub seasonality: bool,
+    /// Oxygen gas cycle (Phase 1): photosynthesis emits O2, which poisons O2-intolerant creatures —
+    /// a density brake on the autotroph monoculture (the Great Oxygenation Event). Gates BOTH O2
+    /// production and the `OxygenToxicity` pressure, so OFF ⇒ no O2 at all (clean inert toggle).
+    pub oxygen: bool,
 }
 
 impl Default for Features {
@@ -48,13 +52,14 @@ impl Default for Features {
             development: true,
             toxicity: true,
             seasonality: false,
+            oxygen: true,
         }
     }
 }
 
 impl Features {
     /// `(name, on)` for every feature — the introspection surface (get_config / the dev bridge).
-    pub fn pairs(&self) -> [(&'static str, bool); 8] {
+    pub fn pairs(&self) -> [(&'static str, bool); 9] {
         [
             ("climate", self.climate),
             ("autotrophy", self.autotrophy),
@@ -64,6 +69,7 @@ impl Features {
             ("development", self.development),
             ("toxicity", self.toxicity),
             ("seasonality", self.seasonality),
+            ("oxygen", self.oxygen),
         ]
     }
 
@@ -78,6 +84,7 @@ impl Features {
             "development" => self.development = on,
             "toxicity" => self.toxicity = on,
             "seasonality" => self.seasonality = on,
+            "oxygen" => self.oxygen = on,
             _ => return false,
         }
         true
@@ -103,6 +110,8 @@ pub struct Params {
     /// Seasonality: food swing amplitude over the year, and the year length in sim-seconds.
     pub season_amplitude: f32,
     pub season_len: f32,
+    /// Oxygen: per-tick death hazard per unit of local O2 above a creature's tolerance.
+    pub oxygen_lethality: f32,
 }
 
 impl Default for Params {
@@ -116,13 +125,14 @@ impl Default for Params {
             toxin_lethality: TOXIN_LETHALITY,
             season_amplitude: SEASON_AMPLITUDE,
             season_len: SEASON_LEN,
+            oxygen_lethality: OXYGEN_LETHALITY,
         }
     }
 }
 
 impl Params {
     /// `(name, value)` for every parameter — the introspection surface.
-    pub fn pairs(&self) -> [(&'static str, f32); 8] {
+    pub fn pairs(&self) -> [(&'static str, f32); 9] {
         [
             ("thermal_penalty", self.thermal_penalty),
             ("photo_rate", self.photo_rate),
@@ -132,6 +142,7 @@ impl Params {
             ("toxin_lethality", self.toxin_lethality),
             ("season_amplitude", self.season_amplitude),
             ("season_len", self.season_len),
+            ("oxygen_lethality", self.oxygen_lethality),
         ]
     }
 
@@ -146,6 +157,7 @@ impl Params {
             "toxin_lethality" => self.toxin_lethality = v,
             "season_amplitude" => self.season_amplitude = v,
             "season_len" => self.season_len = v,
+            "oxygen_lethality" => self.oxygen_lethality = v,
             _ => return false,
         }
         true

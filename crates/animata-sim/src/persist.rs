@@ -24,11 +24,14 @@ use crate::sim::SimState;
 use crate::terrain::TerrainState;
 use std::io::{Read, Write};
 
-/// File magic: ASCII "ANM2" (LE on disk). The CURRENT snapshot version. Written as a 4-byte prefix
-/// before the body, and matched on read to pick the (de)serializer. Bump on an incompatible layout
-/// change AND add a migration arm (see the module-level "Versioning & migration" note) — the policy
-/// is to MIGRATE old saves forward, not reject them.
-const MAGIC: u32 = 0x414E_4D32;
+/// File magic: ASCII "ANM3" (LE on disk). The CURRENT snapshot version. Written as a 4-byte prefix
+/// before the body, and matched on read to pick the (de)serializer. Bumped from ANM2 for the gas-cycle
+/// Phase 1 (new fields: `Genome.oxygen_tolerance`, `Params.oxygen_lethality`, `Features.oxygen`,
+/// `TerrainState.oxygen`/`oxygen_update` — a deep layout change).
+/// TODO(gas-cycle): the policy is MIGRATE-not-reject ([[save-migration-over-reject]]); the
+/// ANM2→ANM3 migration (freeze the ANM2 graph + `migrate_v2`) lands in the focused follow-up PR. Until
+/// then pre-ANM3 saves are cleanly REJECTED (the 486k ANM2 save is restored by that PR).
+const MAGIC: u32 = 0x414E_4D33;
 
 /// A complete world snapshot body: the seed (to regenerate terrain geometry), the clock tick to
 /// resume at, the sim state (creatures + counters + config) and the terrain overlay. The magic tag is
