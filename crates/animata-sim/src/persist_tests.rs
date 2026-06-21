@@ -54,6 +54,38 @@ fn new_write_is_byte_identical_to_field0_magic_layout() {
     );
 }
 
+/// Diagnostic (ignored): the on-disk I/O cost of a save — `write` + `read`/parse of the snapshot
+/// (the overlay arrays dominate at MAP_SCALE=16) + the `set_state` restore. Quantifies the
+/// non-generation part of a world LOAD. Run with `--release`.
+#[test]
+#[ignore]
+fn report_load_io_cost() {
+    let mut t = VoxelTerrain::new(42);
+    let mut s = Sim::new(42, &t);
+    for tick in 0..300 {
+        s.step(&mut t, tick);
+    }
+    let snap = Snapshot::new(42, 300, s.to_state(), t.clone_state());
+    let mut bytes = Vec::new();
+    let tw = std::time::Instant::now();
+    snap.write(&mut bytes).expect("write");
+    let write_ms = tw.elapsed().as_secs_f64() * 1000.0;
+    let tr = std::time::Instant::now();
+    let restored = Snapshot::read(&bytes[..]).expect("read");
+    let read_ms = tr.elapsed().as_secs_f64() * 1000.0;
+    let mut t2 = VoxelTerrain::new(restored.terrain_seed);
+    let ts = std::time::Instant::now();
+    t2.set_state(restored.terrain).expect("set_state");
+    let set_ms = ts.elapsed().as_secs_f64() * 1000.0;
+    let line = format!(
+        "[persist] {} KB · write {write_ms:.0}ms · read/parse {read_ms:.0}ms · set_state {set_ms:.2}ms (MAP_SCALE={})",
+        bytes.len() / 1024,
+        crate::config::MAP_SCALE
+    );
+    let _ = std::fs::write("/tmp/animata_persist.txt", &line);
+    eprintln!("{line}");
+}
+
 /// Migration lock (migrate-not-reject): a real ANM2 stream (`MAGIC_V2` + the frozen pre-gas-cycle
 /// body) decodes through the CURRENT `Snapshot::read` and upgrades to ANM3 — preserving every existing
 /// field and filling the new ones by CONTINUITY (oxygen feature off, `oxygen_tolerance`/overlay at 0).
