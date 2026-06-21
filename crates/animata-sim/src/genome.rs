@@ -649,6 +649,59 @@ impl Genome {
     }
 }
 
+/// Frozen ANM2 `Genome` shape (pre-`oxygen_tolerance`) for save migration ([`crate::persist`] v2).
+/// NEVER edit — it must reproduce the EXACT ANM2 bincode layout (`Genome` minus the trailing
+/// `oxygen_tolerance`). Field order/types mirror ANM2 `Genome` verbatim.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct GenomeV2 {
+    grn_w: Vec<f32>,
+    grn_b: Vec<f32>,
+    morph_w: Vec<f32>,
+    diff_rate: Vec<f32>,
+    decay_rate: Vec<f32>,
+    brain: Vec<f32>,
+    thermal_pref: f32,
+    coloration: f32,
+    toxin_resistance: f32,
+}
+
+impl GenomeV2 {
+    /// ANM2 → current. The only added gene is `oxygen_tolerance`, filled with its CONTINUITY value
+    /// `0.0` — a pre-feature (anoxic) save's lineages never faced O2 selection, so they resume sensitive.
+    pub(crate) fn migrate(self) -> Genome {
+        Genome {
+            grn_w: self.grn_w,
+            grn_b: self.grn_b,
+            morph_w: self.morph_w,
+            diff_rate: self.diff_rate,
+            decay_rate: self.decay_rate,
+            brain: self.brain,
+            thermal_pref: self.thermal_pref,
+            coloration: self.coloration,
+            toxin_resistance: self.toxin_resistance,
+            oxygen_tolerance: 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Genome {
+    /// Down-convert to the frozen ANM2 shape (drops `oxygen_tolerance`) — migration-test support only.
+    pub(crate) fn to_v2(&self) -> GenomeV2 {
+        GenomeV2 {
+            grn_w: self.grn_w.clone(),
+            grn_b: self.grn_b.clone(),
+            morph_w: self.morph_w.clone(),
+            diff_rate: self.diff_rate.clone(),
+            decay_rate: self.decay_rate.clone(),
+            brain: self.brain.clone(),
+            thermal_pref: self.thermal_pref,
+            coloration: self.coloration,
+            toxin_resistance: self.toxin_resistance,
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "genome_tests.rs"]
 mod tests;

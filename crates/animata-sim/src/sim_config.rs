@@ -172,6 +172,104 @@ pub struct SimConfig {
     pub params: Params,
 }
 
+/// Frozen ANM2 `Features` (pre-`oxygen`) for save migration. NEVER edit — mirrors ANM2 layout.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct FeaturesV2 {
+    climate: bool,
+    autotrophy: bool,
+    strata: bool,
+    predation: bool,
+    camouflage: bool,
+    development: bool,
+    toxicity: bool,
+    seasonality: bool,
+}
+
+/// Frozen ANM2 `Params` (pre-`oxygen_lethality`) for save migration. NEVER edit.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct ParamsV2 {
+    thermal_penalty: f32,
+    photo_rate: f32,
+    air_metab_mult: f32,
+    underground_metab_mult: f32,
+    camo_base_detect: f32,
+    toxin_lethality: f32,
+    season_amplitude: f32,
+    season_len: f32,
+}
+
+/// Frozen ANM2 `SimConfig` for save migration.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SimConfigV2 {
+    features: FeaturesV2,
+    params: ParamsV2,
+}
+
+impl SimConfigV2 {
+    /// ANM2 → current. The oxygen FEATURE is set to `false` (CONTINUITY: a pre-feature save ran
+    /// anoxic — resume it faithfully, not retroactively oxygenated; the user can enable it live).
+    /// `oxygen_lethality` takes the const default (unused while the feature is off).
+    pub(crate) fn migrate(self) -> SimConfig {
+        let f = self.features;
+        let p = self.params;
+        SimConfig {
+            features: Features {
+                climate: f.climate,
+                autotrophy: f.autotrophy,
+                strata: f.strata,
+                predation: f.predation,
+                camouflage: f.camouflage,
+                development: f.development,
+                toxicity: f.toxicity,
+                seasonality: f.seasonality,
+                oxygen: false,
+            },
+            params: Params {
+                thermal_penalty: p.thermal_penalty,
+                photo_rate: p.photo_rate,
+                air_metab_mult: p.air_metab_mult,
+                underground_metab_mult: p.underground_metab_mult,
+                camo_base_detect: p.camo_base_detect,
+                toxin_lethality: p.toxin_lethality,
+                season_amplitude: p.season_amplitude,
+                season_len: p.season_len,
+                oxygen_lethality: OXYGEN_LETHALITY,
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+impl SimConfig {
+    /// Down-convert to the frozen ANM2 shape — migration-test support only.
+    pub(crate) fn to_v2(&self) -> SimConfigV2 {
+        let f = &self.features;
+        let p = &self.params;
+        SimConfigV2 {
+            features: FeaturesV2 {
+                climate: f.climate,
+                autotrophy: f.autotrophy,
+                strata: f.strata,
+                predation: f.predation,
+                camouflage: f.camouflage,
+                development: f.development,
+                toxicity: f.toxicity,
+                seasonality: f.seasonality,
+            },
+            params: ParamsV2 {
+                thermal_penalty: p.thermal_penalty,
+                photo_rate: p.photo_rate,
+                air_metab_mult: p.air_metab_mult,
+                underground_metab_mult: p.underground_metab_mult,
+                camo_base_detect: p.camo_base_detect,
+                toxin_lethality: p.toxin_lethality,
+                season_amplitude: p.season_amplitude,
+                season_len: p.season_len,
+            },
+        }
+    }
+}
+
 impl SimConfig {
     /// Parse a `SimConfig` from RON (e.g. `assets/config/sim.ron`). Missing fields fall back to the
     /// defaults (the consts), so a file may specify only what it wants to override.

@@ -391,6 +391,45 @@ pub struct TerrainState {
     oxygen_update: Vec<u32>,
 }
 
+/// Frozen ANM2 `TerrainState` (pre-oxygen overlay) for save migration ([`crate::persist`] v2). NEVER
+/// edit — must reproduce the EXACT ANM2 bincode layout (the four pre-oxygen overlay vectors).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct TerrainStateV2 {
+    biomass: Vec<u8>,
+    last_update: Vec<u32>,
+    nutrient: Vec<u8>,
+    nutrient_update: Vec<u32>,
+}
+
+impl TerrainStateV2 {
+    /// ANM2 → current: add the oxygen overlay, EMPTY (a pre-feature save was anoxic; O2 rebuilds as
+    /// autotrophs photosynthesise after resume).
+    pub(crate) fn migrate(self) -> TerrainState {
+        let n = self.biomass.len();
+        TerrainState {
+            biomass: self.biomass,
+            last_update: self.last_update,
+            nutrient: self.nutrient,
+            nutrient_update: self.nutrient_update,
+            oxygen: vec![0.0; n],
+            oxygen_update: vec![0; n],
+        }
+    }
+}
+
+#[cfg(test)]
+impl TerrainState {
+    /// Down-convert to the frozen ANM2 shape (drops the oxygen overlay) — migration-test support only.
+    pub(crate) fn to_v2(&self) -> TerrainStateV2 {
+        TerrainStateV2 {
+            biomass: self.biomass.clone(),
+            last_update: self.last_update.clone(),
+            nutrient: self.nutrient.clone(),
+            nutrient_update: self.nutrient_update.clone(),
+        }
+    }
+}
+
 impl VoxelTerrain {
     /// Fold the MUTABLE terrain state into a determinism checksum (PR1 lock). Geometry
     /// (`surf`/`biome`/`flags`/`water`/`temp`/`moist`/`water_dist`) is fixed after worldgen and
