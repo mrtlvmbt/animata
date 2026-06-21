@@ -375,7 +375,7 @@ fn transport(ctx: &egui::Context, m: &SimMetrics, act: &mut UiActions) {
                     ui.painter()
                         .vline(rect.center().x, rect.top()..=rect.bottom(), Stroke::new(1.0, HAIR_12));
 
-                    if let Some(v) = speed_slider(ui, m.time_scale, m.max_time_scale) {
+                    if let Some(v) = speed_slider(ui, m.time_scale, m.max_time_scale, m.lock_max) {
                         act.set_time_scale = Some(v);
                     }
                     let val = if m.time_scale < 10.0 {
@@ -391,6 +391,20 @@ fn transport(ctx: &egui::Context, m: &SimMetrics, act: &mut UiActions) {
                         theme::mono(14.0),
                         theme::ACCENT_TEXT,
                     );
+
+                    // Ceiling-lock toggle: armed (the dot) when the value is riding the ceiling.
+                    // Computed in `main.rs` (stable) — see `SimMetrics::armed`.
+                    if lock_toggle(ui, m.lock_max, m.armed).clicked() {
+                        act.toggle_lock = true;
+                    }
+
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 24.0), Sense::hover());
+                    ui.painter()
+                        .vline(rect.center().x, rect.top()..=rect.bottom(), Stroke::new(1.0, HAIR_12));
+
+                    if let Some(dir) = ceil_group(ui, m.manual_ceil) {
+                        act.step_ceil = Some(dir);
+                    }
 
                     if m.paused {
                         badge(ui, "PAUSED");
@@ -429,12 +443,14 @@ fn play_button(ui: &mut egui::Ui, paused: bool) -> egui::Response {
     resp
 }
 
-/// Logarithmic speed slider (0.1×–64×): uniform track + ringed amber thumb (mockup amSlider).
-fn speed_slider(ui: &mut egui::Ui, current: f32, max: f32) -> Option<f32> {
+/// Logarithmic speed slider (0.1×–ceiling): uniform track + ringed amber thumb (mockup amSlider).
+/// Range is `[MIN_TIME_SCALE .. max]`, where `max` is the EFFECTIVE ceiling (CPU cap ∧ manual CEIL).
+/// When `lock` is on, an amber end-cap marks the locked right edge.
+fn speed_slider(ui: &mut egui::Ui, current: f32, max: f32, lock: bool) -> Option<f32> {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(150.0, 24.0), Sense::click_and_drag());
     let cy = rect.center().y;
-    // Upper bound floats with CPU headroom (`m.max_time_scale`), but never below the current value —
-    // so when the cap drops after you hit max, the handle stays IN range and you can still drag down.
+    // `.max(current)` keeps the thumb in range if the value momentarily exceeds the ceiling (e.g. a
+    // frame before the clamp catches up); the floor keeps a sane span on a tiny ceiling.
     let (lmin, lmax) = (MIN_TIME_SCALE.ln(), max.max(current).max(MIN_TIME_SCALE * 2.0).ln());
     let t = ((current.ln() - lmin) / (lmax - lmin)).clamp(0.0, 1.0);
     let hx = rect.left() + t * rect.width();
@@ -443,6 +459,12 @@ fn speed_slider(ui: &mut egui::Ui, current: f32, max: f32) -> Option<f32> {
         [egui::pos2(rect.left(), cy), egui::pos2(rect.right(), cy)],
         Stroke::new(3.0, theme::straight(255, 255, 255, 41)), // .16 uniform track
     );
+    // Amber end-cap at the right edge = "ceiling locked" (indicator only).
+    if lock {
+        let cap = egui::Rect::from_center_size(egui::pos2(rect.right() - 1.5, cy), egui::vec2(3.0, 14.0));
+        p.rect_stroke(cap.expand(1.0), 2.0, Stroke::new(2.0, theme::straight(10, 12, 11, 235)), StrokeKind::Outside);
+        p.rect_filled(cap, 2.0, theme::ACCENT);
+    }
     let h = egui::pos2(hx, cy);
     p.circle_filled(h, 6.5, theme::ACCENT);
     p.circle_stroke(h, 6.5, Stroke::new(2.0, theme::straight(10, 12, 11, 230))); // .9 dark border
@@ -454,6 +476,97 @@ fn speed_slider(ui: &mut egui::Ui, current: f32, max: f32) -> Option<f32> {
         }
     }
     None
+}
+
+/// Ceiling-lock toggle (mockup): square button, "arrow into a wall" glyph. `armed` adds the amber
+/// corner dot (lock on AND value currently riding the ceiling). Two static states, no transition.
+fn lock_toggle(ui: &mut egui::Ui, on: bool, armed: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), Sense::click());
+    let hov = resp.hovered();
+    let (fill, line, icon) = if on {
+        let bg = if hov { theme::straight(242, 166, 75, 66) } else { theme::ACCENT_FILL };
+        (bg, ACCENT_LINE_50, theme::ACCENT_TEXT)
+    } else {
+        let bg = if hov { theme::straight(255, 255, 255, 26) } else { theme::straight(255, 255, 255, 13) };
+        let ic = if hov { theme::straight(233, 236, 230, 204) } else { theme::straight(233, 236, 230, 128) };
+        (bg, theme::straight(255, 255, 255, 31), ic)
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 9.0, fill);
+    p.rect_stroke(rect, 9.0, Stroke::new(1.0, line), StrokeKind::Inside);
+    // Glyph (viewBox 24, drawn at 17px): shaft M4 12 h9 · head M10 8 l4 4 -4 4 · wall M19 5 v14.
+    let ic = egui::Rect::from_center_size(rect.center(), egui::vec2(17.0, 17.0));
+    let s = Stroke::new(2.0 / 24.0 * ic.width(), icon);
+    p.line_segment([vb(ic, 4.0, 12.0), vb(ic, 13.0, 12.0)], s);
+    p.add(Shape::line(vec![vb(ic, 10.0, 8.0), vb(ic, 14.0, 12.0), vb(ic, 10.0, 16.0)], s));
+    p.line_segment([vb(ic, 19.0, 5.0), vb(ic, 19.0, 19.0)], s);
+    // Armed corner dot (static, no pulse): mockup `top:-3;right:-3` ⇒ centred ~on the top-right corner.
+    if on && armed {
+        let c = egui::pos2(rect.right() - 0.5, rect.top() + 0.5);
+        p.circle_filled(c, 3.5, theme::ACCENT);
+        p.circle_stroke(c, 3.5, Stroke::new(1.5, theme::straight(12, 15, 14, 242)));
+    }
+    resp
+}
+
+/// CEIL group: a caps label + a stepper capsule (`−  NNN×  +`). Returns `±1` if a button was clicked.
+///
+/// Items go DIRECTLY into the caller's row (the transport `horizontal`) — wrapping them in a nested
+/// `ui.horizontal` made the whole group sit ~6px below the rest of the bar (a nested horizontal isn't
+/// cross-centered against the taller parent row). `item_spacing.x` is set per item to keep the
+/// separator→label gap (14) and the label→capsule gap (8), then restored for any trailing widget.
+fn ceil_group(ui: &mut egui::Ui, ceil: f32) -> Option<i32> {
+    let mut dir = None;
+    ui.label(RichText::new("CEIL").font(theme::mono(9.0)).color(theme::TEXT_FAINT));
+    ui.spacing_mut().item_spacing.x = 8.0;
+    egui::Frame::new()
+        .fill(theme::straight(255, 255, 255, 13))
+        .stroke(Stroke::new(1.0, theme::straight(255, 255, 255, 26)))
+        .corner_radius(9)
+        // Asymmetric vertical margin nudges the capsule content up ~2px so the group sits on the
+        // bar's centerline (egui doesn't cross-centre a Frame in the row as cleanly as a widget).
+        .inner_margin(egui::Margin { left: 3, right: 3, top: 1, bottom: 5 })
+        .show(ui, |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.horizontal(|ui| {
+                if step_btn(ui, false).clicked() {
+                    dir = Some(-1);
+                }
+                let (r, _) = ui.allocate_exact_size(egui::vec2(40.0, 22.0), Sense::hover());
+                ui.painter().text(
+                    r.center(),
+                    Align2::CENTER_CENTER,
+                    if ceil.is_finite() { format!("{}×", ceil.round() as i32) } else { "MAX".to_string() },
+                    theme::mono(12.0),
+                    theme::TEXT,
+                );
+                if step_btn(ui, true).clicked() {
+                    dir = Some(1);
+                }
+            });
+        });
+    ui.spacing_mut().item_spacing.x = 14.0;
+    dir
+}
+
+/// A 22×22 `−`/`+` stepper button (mockup CEIL capsule).
+fn step_btn(ui: &mut egui::Ui, plus: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::click());
+    let p = ui.painter();
+    let (bg, fg) = if resp.hovered() {
+        (theme::straight(255, 255, 255, 26), theme::TEXT)
+    } else {
+        (Color32::TRANSPARENT, theme::straight(233, 236, 230, 179))
+    };
+    p.rect_filled(rect, 6.0, bg);
+    // Glyph 12px (mockup `<svg width=12 viewBox=24 stroke-width=2.4>`) → on-screen stroke 1.2px.
+    let ic = egui::Rect::from_center_size(rect.center(), egui::vec2(12.0, 12.0));
+    let s = Stroke::new(2.4 / 24.0 * ic.width(), fg);
+    p.line_segment([vb(ic, 5.0, 12.0), vb(ic, 19.0, 12.0)], s); // horizontal bar
+    if plus {
+        p.line_segment([vb(ic, 12.0, 5.0), vb(ic, 12.0, 19.0)], s); // vertical bar
+    }
+    resp
 }
 
 fn badge(ui: &mut egui::Ui, text: &str) {
