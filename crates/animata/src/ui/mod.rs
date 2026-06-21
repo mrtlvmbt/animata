@@ -70,6 +70,7 @@ pub struct UiActions {
 
 /// Population/evolution block — `None` until the world is ready. Pre-computed in `main.rs` so this
 /// module stays free of sim-getter knowledge (and the metrics reflect the latest `sim.step`).
+#[derive(Clone)]
 pub struct LifeStats {
     pub population: u64,
     pub avg_energy: f32,

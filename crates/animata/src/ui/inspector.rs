@@ -40,6 +40,7 @@ impl TrophicKind {
 /// A per-frame snapshot of the inspected creature, derived in `main.rs`. Strings are formatted there
 /// (this struct only renders). Fields that the sim doesn't model (name / generation / health /
 /// hydration / activity / offspring) are derived deterministically per-creature in `main.rs`.
+#[derive(Clone)]
 pub struct CreatureView {
     pub id: String,       // morphotype tag, e.g. "AX-7" (Mono)
     pub name: String,     // species name (Sans)
