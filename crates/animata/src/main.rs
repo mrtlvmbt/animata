@@ -802,13 +802,14 @@ async fn main() {
             clock.time_scale = 1.0;
         }
         if let Some(ts) = actions.set_time_scale {
-            clock.time_scale = ts.clamp(MIN_TIME_SCALE, max_ts);
+            // The slider already keeps its handle within its (cap-or-current) range; just bound to the
+            // hard ceiling. NO per-frame clamp to the floating cap — that fought the drag.
+            clock.time_scale = ts.clamp(MIN_TIME_SCALE, MAX_TIME_SCALE);
         }
-        // The floating cap can drop as the world grows heavier — track the current scale down to it.
-        clock.time_scale = clock.time_scale.min(max_ts);
-        // Echo the time-scale/pause intent to the worker's clock (cheap; it owns the actual stepping).
+        // Echo to the worker: the EFFECTIVE scale is the intent capped to live CPU headroom, so the sim
+        // never tries to outrun the machine — but the user's slider intent itself is left untouched.
         sim_handle.send(SimCommand::SetClock {
-            scale: Some(clock.time_scale),
+            scale: Some(clock.time_scale.min(max_ts)),
             paused: Some(clock.paused),
         });
         // Quick-save (`F5`) / quick-load (`F9`) the whole world to/from `SAVE_PATH`. Both the load's
