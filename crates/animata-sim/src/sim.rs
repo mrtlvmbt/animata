@@ -20,12 +20,12 @@ use rayon::prelude::*;
 use crate::config::*;
 use std::time::Instant;
 
-use crate::genome::{Genome, Phenotype, TrophicNiche};
+use crate::genome::{Genome, GenomeV2, Phenotype, TrophicNiche};
 use crate::grid::SpatialGrid;
 use crate::profile::Span;
 use crate::pressure::{PressureRegistry, Sample};
 use crate::rng::{seed_fold, splitmix64, Rng};
-use crate::sim_config::SimConfig;
+use crate::sim_config::{SimConfig, SimConfigV2};
 use crate::terrain::VoxelTerrain;
 
 // Fixed brain topology: inputs → tanh hidden → tanh outputs. The genome's `brain` vector holds
@@ -45,6 +45,7 @@ const SALT_BIRTH: u64 = 0xB127;
 const SALT_CAMO: u64 = 0xCA30;
 const SALT_TOXIN: u64 = 0x70_8127;
 const SALT_MORPH: u64 = 0xD2_0F; // morphogen READ-weight mutation (PR-D2) — an INDEPENDENT stream
+const SALT_GAS: u64 = 0x6A5_02; // oxygen-tolerance mutation (gas cycle) — an INDEPENDENT stream
 
 /// The serialisable live sim state — the half of a save snapshot that is the creatures (the other
 /// half is the terrain overlay). Restored via [`Sim::from_state`]; captured via [`Sim::to_state`].
@@ -151,6 +152,95 @@ impl Creature {
             *ov = sum.tanh();
         }
         ((out[0] + 1.0) * 0.5, out[1])
+    }
+}
+
+/// Frozen ANM2 `Creature` shape (its `genome` is the pre-`oxygen_tolerance` `GenomeV2`) for save
+/// migration ([`crate::persist`] v2). NEVER edit. `pheno` is unchanged (oxygen is a genome trait).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct CreatureV2 {
+    id: u64,
+    founder: u64,
+    pos: Vec2,
+    heading: f32,
+    energy: f32,
+    age: u32,
+    alive: bool,
+    genome: GenomeV2,
+    pheno: Phenotype,
+}
+
+impl CreatureV2 {
+    fn migrate(self) -> Creature {
+        Creature {
+            id: self.id,
+            founder: self.founder,
+            pos: self.pos,
+            heading: self.heading,
+            energy: self.energy,
+            age: self.age,
+            alive: self.alive,
+            genome: self.genome.migrate(),
+            pheno: self.pheno,
+        }
+    }
+}
+
+/// Frozen ANM2 `SimState` (its `cfg`/`creatures` are the frozen V2 shapes) for save migration.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct SimStateV2 {
+    world_seed: u64,
+    next_id: u64,
+    births: u64,
+    deaths: u64,
+    kills: u64,
+    cfg: SimConfigV2,
+    creatures: Vec<CreatureV2>,
+}
+
+impl SimStateV2 {
+    /// ANM2 → current: migrate the config (oxygen feature off, continuity) + each creature (genome
+    /// gains `oxygen_tolerance = 0`). Scalars carry over unchanged.
+    pub(crate) fn migrate(self) -> SimState {
+        SimState {
+            world_seed: self.world_seed,
+            next_id: self.next_id,
+            births: self.births,
+            deaths: self.deaths,
+            kills: self.kills,
+            cfg: self.cfg.migrate(),
+            creatures: self.creatures.into_iter().map(CreatureV2::migrate).collect(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl SimState {
+    /// Down-convert to the frozen ANM2 shape — migration-test support only.
+    pub(crate) fn to_v2(&self) -> SimStateV2 {
+        SimStateV2 {
+            world_seed: self.world_seed,
+            next_id: self.next_id,
+            births: self.births,
+            deaths: self.deaths,
+            kills: self.kills,
+            cfg: self.cfg.to_v2(),
+            creatures: self
+                .creatures
+                .iter()
+                .map(|c| CreatureV2 {
+                    id: c.id,
+                    founder: c.founder,
+                    pos: c.pos,
+                    heading: c.heading,
+                    energy: c.energy,
+                    age: c.age,
+                    alive: c.alive,
+                    genome: c.genome.to_v2(),
+                    pheno: c.pheno.clone(),
+                })
+                .collect(),
+        }
     }
 }
 
@@ -674,6 +764,7 @@ impl Sim {
                 temperature: terrain.temperature_at(cx, cy),
                 light: light_for(layer, cy, tick),
                 toxicity: terrain.toxicity_at(cx, cy),
+                oxygen: terrain.oxygen_at(cx, cy, tick),
                 season_phase,
                 autotroph_shading,
             };
@@ -689,6 +780,12 @@ impl Sim {
                 layer.capacity() / stratum_count[layer.idx()].max(1.0) * TICK_LEN
             };
             c.energy = (c.energy + food * eff.food_mult + eff.energy_add).min(c.max_energy());
+            // O2 production (gas cycle Phase 1): photosynthesis emits oxygen into this column as an
+            // obligate byproduct, keyed on the ISOLATED `photo_yield` (not composed energy_add — F2).
+            // Serial (this `&mut terrain`) + f32 store ⇒ deterministic, gentle deposits accumulate.
+            if self.cfg.features.oxygen && eff.photo_yield > 0.0 {
+                terrain.deposit_oxygen(cx, cy, eff.photo_yield * OXYGEN_PER_PHOTO, tick);
+            }
             // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort.
             let kleiber = (c.biomass() as f32).powf(0.75);
             c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle) * TICK_LEN;
@@ -734,10 +831,13 @@ impl Sim {
                 // Morphogen READ weights evolve on their OWN stream (PR-D2) so the coupling's activation
                 // leaves `rng` — and thus the child's pos/heading later — byte-identical to the inert sim.
                 let mut morph_rng = Rng::new(seed_fold(self.world_seed, &[SALT_MORPH, c.id, tick]));
-                // Mutate the genome (brain + GRN + morphogen); the parent pays half its energy now. The
-                // body is grown later, in the parallel develop phase (it doesn't touch the RNG), so the
-                // post-mutate `rng` is queued to finish the birth there — same draw stream, same bits.
-                let genome = c.genome.mutate(&mut rng, &mut morph_rng, MUTATION_STD, GRN_MUTATION_STD);
+                // O2 tolerance evolves on its OWN independent stream too (gas cycle F9), so adding the
+                // gene consumes zero draws from `rng` (child pos/heading byte-identical to no-gas sim).
+                let mut gas_rng = Rng::new(seed_fold(self.world_seed, &[SALT_GAS, c.id, tick]));
+                // Mutate the genome (brain + GRN + morphogen + gas); the parent pays half its energy now.
+                // The body is grown later, in the parallel develop phase (it doesn't touch the RNG), so
+                // the post-mutate `rng` is queued to finish the birth there — same draw stream, same bits.
+                let genome = c.genome.mutate(&mut rng, &mut morph_rng, &mut gas_rng, MUTATION_STD, GRN_MUTATION_STD);
                 c.energy *= 0.5;
                 pending.push(PendingBirth {
                     genome,
@@ -1163,10 +1263,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    10634983924377049709 // debug profile (re-pinned: D∞ flow routing + 8-neighbour thermal)
+    12456973273077594211 // debug profile (re-pinned on merge: terrain-gen overhaul × gas-cycle Phase 1)
 } else {
-    15707891085674175148 // release profile (re-pinned: D∞ (Tarboton) flow accumulation + distributed
-                         // 8-neighbour thermal talus changed the river network + slopes)
+    8202237760573354478 // release profile (re-pinned on merge: parallel/LEM/D∞ terrain × gas cycle)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1176,7 +1275,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 5520900989564297945; // re-pinned: D∞ routing + 8-nbr thermal
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 11460425339150787582; // re-pinned on merge: terrain × gas cycle
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

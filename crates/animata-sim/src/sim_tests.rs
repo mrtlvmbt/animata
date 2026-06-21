@@ -326,18 +326,20 @@ fn nutrient_cycle_is_bounded_and_self_sustaining() {
     assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
 }
 
-/// Crypsis DIAGNOSTIC (ignored — not a gate). Prints the coloration↔background correlation
-/// with predation ON vs OFF across seeds. It is NOT asserted because the signal is not robust
-/// enough to gate at a feasible sample size: predation is only a ~2% mortality source (a correct
-/// trophic pyramid) diluted by toxicity mortality, so the correlation is near-zero and dominated
-/// by a TERRAIN-DEPENDENT bias in the metric (predation-OFF runs — which have no crypsis selection
-/// at all — still read ±0.08, i.e. the bias exceeds the signal). Both an absolute threshold (the
-/// old `mean > 0.03`, which rode on a lucky 5-seed sample) and a 5-seed predation on−off
-/// differential flip sign between worldgen revisions. The mechanism still exists in the model; it
-/// is simply not measurable as a sharp pass/fail here. Run:
+/// Crypsis DIAGNOSTIC (ignored — not a gate). Prints the coloration↔background correlation with
+/// predation ON vs OFF across seeds, but asserts nothing: crypsis is a PREDATION-DERIVED signal and
+/// predation is weak in the current autotroph-dominated ecology (~2% mortality, diluted by toxicity),
+/// so the correlation is near-zero and dominated by a TERRAIN-DEPENDENT metric bias — predation-OFF
+/// runs (no crypsis selection at all) still read ±0.08, i.e. the bias exceeds the signal. Both the
+/// old absolute bar (`mean > 0.03`, which rode on a lucky 5-seed sample; the robust 16-seed mean is
+/// only ~+0.02) and a 5-seed predation on−off differential flip sign between worldgen / oxygen
+/// revisions. The mechanism still exists in the model; it is simply not gateable at a feasible sample
+/// size today. The gas-cycle program is what fixes predation: Phase 2 (aerobic energy → animals /
+/// predators) should restore a robust crypsis signal — RE-ENABLE a hard assertion (re-tune the
+/// multi-seed bar) once Phase 2 lands. Tracked in [[gas-cycle-program]]. Run:
 /// `./scripts/test-bar.sh -p animata-sim --release report_crypsis_signal -- --ignored`.
 #[test]
-#[ignore]
+#[ignore = "predation-fragile crypsis; re-enable a hard bar after gas-cycle Phase 2 strengthens predation"]
 fn report_crypsis_signal() {
     use crate::sim_config::SimConfig;
     let seeds = [1u64, 2, 3, 4, 5];

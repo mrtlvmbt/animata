@@ -233,6 +233,12 @@ pub struct Genome {
     /// creature standing on ground more toxic than its tolerance suffers an extra death hazard, so
     /// toxic regions select for resistant lineages (a habitat filter on a new abiotic axis).
     pub toxin_resistance: f32,
+    /// Tolerance `[0,1]` to dissolved OXYGEN (gas cycle Phase 1). Founder `0.0` ⇒ SENSITIVE: O2 is a
+    /// poison to the unadapted (reactive-oxygen damage), recapitulating the Great Oxygenation Event.
+    /// Excess local O2 above this tolerance is a per-tick death hazard, so O2-rich zones (which dense
+    /// autotrophs create as a photosynthesis byproduct) select for tolerant lineages AND brake the
+    /// autotroph density that produced the O2. Evolves UP on its own mutation stream.
+    pub oxygen_tolerance: f32,
 }
 
 impl Genome {
@@ -249,6 +255,9 @@ impl Genome {
             thermal_pref: rng.unit(),
             coloration: rng.unit(),
             toxin_resistance: rng.unit(),
+            // Founder SENSITIVE to O2 (tolerance 0) — the anoxic ancestor. A constant (no `rng` draw),
+            // so founders are byte-identical to the pre-feature sim; tolerance evolves up in `mutate`.
+            oxygen_tolerance: 0.0,
         }
     }
 
@@ -257,7 +266,7 @@ impl Genome {
     /// behaviour; the thermal pref drifts to track the climate it lives in. `grn_std` is kept smaller
     /// so body plans change by rarer, gentler steps than behaviour. The morphogen READ weights evolve
     /// on a SEPARATE stream (`morph_rng`) — see below.
-    pub fn mutate(&self, rng: &mut Rng, morph_rng: &mut Rng, brain_std: f32, grn_std: f32) -> Self {
+    pub fn mutate(&self, rng: &mut Rng, morph_rng: &mut Rng, gas_rng: &mut Rng, brain_std: f32, grn_std: f32) -> Self {
         let m = |v: &[f32], std: f32, rng: &mut Rng| -> Vec<f32> {
             v.iter().map(|&w| w + rng.signed() * std).collect()
         };
@@ -284,6 +293,11 @@ impl Genome {
         let morph_w = m(&self.morph_w, grn_std, morph_rng);
         let diff_rate = self.diff_rate.clone();
         let decay_rate = self.decay_rate.clone();
+        // O2 tolerance evolves on its OWN independent stream (`gas_rng`, salted apart in `sim::step`),
+        // consuming ZERO draws from `rng` — so adding this gene leaves every existing gene AND the
+        // child's pos/heading (drawn from `rng` after mutate returns) byte-identical (gas-cycle F9,
+        // the morph_w pattern). NOT a draw appended to `rng`, NOT a reuse of `morph_rng`.
+        let oxygen_tolerance = (self.oxygen_tolerance + gas_rng.signed() * grn_std).clamp(0.0, 1.0);
         Genome {
             grn_w,
             grn_b,
@@ -294,6 +308,7 @@ impl Genome {
             thermal_pref,
             coloration,
             toxin_resistance,
+            oxygen_tolerance,
         }
     }
 
@@ -629,7 +644,61 @@ impl Genome {
         crate::rng::fnv_fold_u32(&mut h, self.thermal_pref.to_bits());
         crate::rng::fnv_fold_u32(&mut h, self.coloration.to_bits());
         crate::rng::fnv_fold_u32(&mut h, self.toxin_resistance.to_bits());
+        crate::rng::fnv_fold_u32(&mut h, self.oxygen_tolerance.to_bits());
         h
+    }
+}
+
+/// Frozen ANM2 `Genome` shape (pre-`oxygen_tolerance`) for save migration ([`crate::persist`] v2).
+/// NEVER edit — it must reproduce the EXACT ANM2 bincode layout (`Genome` minus the trailing
+/// `oxygen_tolerance`). Field order/types mirror ANM2 `Genome` verbatim.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct GenomeV2 {
+    grn_w: Vec<f32>,
+    grn_b: Vec<f32>,
+    morph_w: Vec<f32>,
+    diff_rate: Vec<f32>,
+    decay_rate: Vec<f32>,
+    brain: Vec<f32>,
+    thermal_pref: f32,
+    coloration: f32,
+    toxin_resistance: f32,
+}
+
+impl GenomeV2 {
+    /// ANM2 → current. The only added gene is `oxygen_tolerance`, filled with its CONTINUITY value
+    /// `0.0` — a pre-feature (anoxic) save's lineages never faced O2 selection, so they resume sensitive.
+    pub(crate) fn migrate(self) -> Genome {
+        Genome {
+            grn_w: self.grn_w,
+            grn_b: self.grn_b,
+            morph_w: self.morph_w,
+            diff_rate: self.diff_rate,
+            decay_rate: self.decay_rate,
+            brain: self.brain,
+            thermal_pref: self.thermal_pref,
+            coloration: self.coloration,
+            toxin_resistance: self.toxin_resistance,
+            oxygen_tolerance: 0.0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl Genome {
+    /// Down-convert to the frozen ANM2 shape (drops `oxygen_tolerance`) — migration-test support only.
+    pub(crate) fn to_v2(&self) -> GenomeV2 {
+        GenomeV2 {
+            grn_w: self.grn_w.clone(),
+            grn_b: self.grn_b.clone(),
+            morph_w: self.morph_w.clone(),
+            diff_rate: self.diff_rate.clone(),
+            decay_rate: self.decay_rate.clone(),
+            brain: self.brain.clone(),
+            thermal_pref: self.thermal_pref,
+            coloration: self.coloration,
+            toxin_resistance: self.toxin_resistance,
+        }
     }
 }
 

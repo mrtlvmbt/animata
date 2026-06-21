@@ -55,6 +55,13 @@ pub struct UiState {
     /// (main.rs), cleared by `Esc` / the panel's `×` / re-clicking the same creature. Outside the
     /// "one panel at a time" rule — coexists with any rail flyout.
     pub selected: Option<u64>,
+    /// Ceiling-lock for the time-scale slider. `true` (default) = when the thumb sits at the
+    /// ceiling, the value rides the ceiling up/down; otherwise the value is frozen and only the
+    /// thumb re-slides as the ceiling moves. Flipped by the transport lock-toggle / `L`.
+    pub lock_max: bool,
+    /// User's hard ceiling for the time-scale (the `CEIL` stepper), one of `MAX_STEPS`. The slider's
+    /// effective ceiling is `min(this, CPU-floating cap)`. Stepped by the transport ± / `Shift+[`/`]`.
+    pub manual_ceil: f32,
 }
 
 /// Things a panel widget asked for that don't reduce to a plain `&mut bool` toggle.
@@ -62,6 +69,10 @@ pub struct UiState {
 pub struct UiActions {
     pub toggle_pause: bool,
     pub set_time_scale: Option<f32>,
+    /// Flip the ceiling-lock (transport lock-toggle clicked).
+    pub toggle_lock: bool,
+    /// Step the manual ceiling along `MAX_STEPS` by ±1 (transport `−`/`+` clicked).
+    pub step_ceil: Option<i32>,
     pub save: bool,
     pub load: bool,
     /// `ctx.wants_pointer_input()` — gate world mouse interactions (zoom/pan/graze) on `!this`.
@@ -111,9 +122,19 @@ pub struct SimMetrics {
     pub sim_time: f32,
     pub day_frac: f32,
     pub time_scale: f32,
-    /// Floating upper bound for the time-scale slider — the largest scale the CPU can sustain right
-    /// now (climbs on a light world, drops on a heavy one). The transport slider tops out here.
+    /// EFFECTIVE upper bound for the time-scale slider = `min(CPU-floating cap, manual_ceil)`. The
+    /// floating cap is the largest scale the CPU can sustain right now (climbs on a light world,
+    /// drops on a heavy one); `manual_ceil` is the user's hard cap. The slider tops out here.
     pub max_time_scale: f32,
+    /// The user's hard ceiling (the `CEIL` stepper readout), one of `MAX_STEPS`. May exceed
+    /// `max_time_scale` when the CPU cap is currently the binding one.
+    pub manual_ceil: f32,
+    /// Ceiling-lock state, for the amber end-cap + lock-toggle styling.
+    pub lock_max: bool,
+    /// The value is right now riding the ceiling (lock on + at-max) — lights the lock-toggle armed
+    /// dot. Computed in `main.rs` to avoid a cross-frame `time_scale`/`max` mismatch that made the
+    /// dot flicker against the jittering CPU cap.
+    pub armed: bool,
     pub paused: bool,
     // Population & evolution
     pub life: Option<LifeStats>,

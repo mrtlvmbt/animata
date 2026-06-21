@@ -6,11 +6,12 @@ use super::*;
 use crate::sim::Sim;
 use crate::terrain::VoxelTerrain;
 
-/// Replicates the PRE-refactor on-disk layout: `magic` as serialized field 0, then the body fields in
-/// order. The legacy writer was `bincode::serialize_into(w, &Snapshot{ magic, terrain_seed, tick,
-/// sim, terrain })`; this struct reproduces those exact bytes.
+/// Replicates the field-0-magic on-disk layout: `magic` as serialized field 0, then the body fields in
+/// order — i.e. what `bincode::serialize_into(w, &Snapshot{ magic, terrain_seed, tick, sim, terrain })`
+/// would write. Used to prove the hand-written-prefix writer reproduces it byte-for-byte (the format
+/// lock is version-agnostic: it holds for whatever the CURRENT `Snapshot` body shape is).
 #[derive(serde::Serialize)]
-struct SnapshotV2WithMagic {
+struct SnapshotWithField0Magic {
     magic: u32,
     terrain_seed: u64,
     tick: u64,
@@ -18,15 +19,14 @@ struct SnapshotV2WithMagic {
     terrain: TerrainState,
 }
 
-/// THE old-write↔new-read lock (F4/F5/F6): the new writer (hand-written 4-byte magic prefix +
-/// magic-less body) must produce bytes IDENTICAL to the legacy `serialize_into(Snapshot{ magic, .. })`
-/// layout. Byte-identity on a POPULATED snapshot (≥1 creature with a developed phenotype + a dirtied
-/// overlay — never 0-creature, which would emit only a `Vec` length and skip the volatile
-/// `Genome`/`Phenotype` bytes) proves the prefix split preserves the exact ANM2 format, so any real
-/// old on-disk file (= legacy-writer output) still decodes through `Snapshot::read`. No committed blob
-/// and no profile-dependent hash needed: it compares the two write paths on the same in-memory data.
+/// Format lock: the writer (hand-written 4-byte magic prefix + magic-less body) must produce bytes
+/// IDENTICAL to the field-0-magic layout, on a POPULATED snapshot (≥1 creature with a developed
+/// phenotype + a dirtied overlay — never 0-creature, which would emit only a `Vec` length and skip the
+/// volatile `Genome`/`Phenotype` bytes). This proves the prefix split preserves the exact bincode
+/// layout for the current version, so a future frozen `SnapshotBodyVN` can be diffed against it. No
+/// committed blob and no profile-dependent hash: it compares the two write paths on the same data.
 #[test]
-fn new_write_is_byte_identical_to_legacy_anm2_layout() {
+fn new_write_is_byte_identical_to_field0_magic_layout() {
     let mut t = VoxelTerrain::new(42);
     let mut s = Sim::new(42, &t);
     for tick in 0..300 {
@@ -38,20 +38,50 @@ fn new_write_is_byte_identical_to_legacy_anm2_layout() {
     let mut new_bytes = Vec::new();
     snap.write(&mut new_bytes).expect("new writer");
 
-    // Move the (un-cloneable-cheaply) body into the legacy-layout struct AFTER new_bytes is captured.
-    let legacy = SnapshotV2WithMagic {
+    // Move the (un-cloneable-cheaply) body into the field-0-magic struct AFTER new_bytes is captured.
+    let legacy = SnapshotWithField0Magic {
         magic: MAGIC,
         terrain_seed: snap.terrain_seed,
         tick: snap.tick,
         sim: snap.sim,
         terrain: snap.terrain,
     };
-    let legacy_bytes = bincode::serialize(&legacy).expect("legacy layout");
+    let legacy_bytes = bincode::serialize(&legacy).expect("field-0-magic layout");
 
     assert_eq!(
         new_bytes, legacy_bytes,
-        "new writer must reproduce the legacy ANM2 on-disk byte layout (else old saves mis-decode)"
+        "writer must reproduce the field-0-magic on-disk byte layout (else old saves mis-decode)"
     );
+}
+
+/// Migration lock (migrate-not-reject): a real ANM2 stream (`MAGIC_V2` + the frozen pre-gas-cycle
+/// body) decodes through the CURRENT `Snapshot::read` and upgrades to ANM3 — preserving every existing
+/// field and filling the new ones by CONTINUITY (oxygen feature off, `oxygen_tolerance`/overlay at 0).
+/// Built from a POPULATED world (≥1 creature with a developed genome + a dirtied overlay) so the
+/// volatile `Genome`/overlay bytes are actually exercised, then down-converted via `to_v2`.
+#[test]
+fn anm2_stream_migrates_to_current() {
+    let mut t = VoxelTerrain::new(7);
+    let mut s = Sim::new(7, &t);
+    for tick in 0..120 {
+        s.step(&mut t, tick);
+    }
+    let st = s.to_state();
+    let (n, photo, seed) = (st.creatures.len(), st.cfg.params.photo_rate, st.world_seed);
+    assert!(n > 1, "fixture must carry creatures to exercise the frozen Genome bytes");
+
+    // Write a genuine ANM2 stream: MAGIC_V2 prefix + the frozen ANM2 body (down-converted).
+    let body = super::v2::SnapshotBodyV2 { terrain_seed: 7, tick: 120, sim: st.to_v2(), terrain: t.clone_state().to_v2() };
+    let mut anm2 = MAGIC_V2.to_le_bytes().to_vec();
+    bincode::serialize_into(&mut anm2, &body).expect("write ANM2 body");
+
+    let snap = Snapshot::read(&anm2[..]).expect("ANM2 stream must MIGRATE, not be rejected");
+    assert_eq!(snap.tick, 120);
+    assert_eq!(snap.terrain_seed, 7);
+    assert_eq!(snap.sim.world_seed, seed);
+    assert_eq!(snap.sim.creatures.len(), n, "creatures preserved through migration");
+    assert_eq!(snap.sim.cfg.params.photo_rate, photo, "existing params preserved");
+    assert!(!snap.sim.cfg.features.oxygen, "CONTINUITY: a migrated ANM2 save resumes oxygen-off (anoxic)");
 }
 
 /// A foreign / corrupt file is rejected by the magic check, not silently mis-decoded.
