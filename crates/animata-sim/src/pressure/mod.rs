@@ -21,6 +21,7 @@ use crate::genome::{Genome, Phenotype};
 use crate::sim::Stratum;
 use crate::sim_config::{Features, Params};
 
+mod aerobic;
 mod autotrophy;
 mod climate;
 mod metabolism;
@@ -124,7 +125,13 @@ impl PressureRegistry {
             active.push(Box::new(toxicity::Toxicity { lethality: p.toxin_lethality }));
         }
         if f.oxygen {
-            active.push(Box::new(oxygen::OxygenToxicity { lethality: p.oxygen_lethality }));
+            active.push(Box::new(oxygen::OxygenToxicity {
+                lethality: p.oxygen_lethality,
+                aerobic_protects: f.aerobic,
+            }));
+        }
+        if f.aerobic {
+            active.push(Box::new(aerobic::AerobicRespiration { gain: p.aerobic_gain }));
         }
         if f.seasonality {
             active.push(Box::new(seasonality::Seasonality { amplitude: p.season_amplitude }));

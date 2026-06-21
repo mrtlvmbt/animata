@@ -1263,9 +1263,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    2825673250573028911 // debug profile (re-pinned: gas-cycle Phase 1 — O2 production + OxygenToxicity + oxygen_tolerance gene)
+    8108396653660630864 // debug profile (re-pinned: gas-cycle Phase 2 — aerobic respiration windfall + O2-immunity)
 } else {
-    13438673166589317547 // release profile (FMA contraction shifts the trajectory)
+    11322377997019380716 // release profile (FMA contraction shifts the trajectory)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1275,7 +1275,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 18163420676954532087; // re-pinned: gas-cycle Phase 1 (O2 cycle)
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 8025907354312757787; // re-pinned: gas-cycle Phase 2 (aerobic)
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

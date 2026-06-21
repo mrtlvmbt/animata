@@ -197,6 +197,11 @@ pub const OXYGEN_PER_PHOTO: f32 = 0.05;
 /// Per-tick death hazard per unit of local O2 above a creature's `oxygen_tolerance` (the
 /// `OxygenToxicity` pressure, mirroring `TOXIN_LETHALITY`). Tunable at the spike.
 pub const OXYGEN_LETHALITY: f32 = 0.05;
+/// Aerobic respiration energy yield (gas cycle Phase 2): `energy_add = oxygen · aerobic_capacity ·
+/// GAIN · TICK_LEN`, and the same O2 is drawn DOWN from the column (consumed). The windfall (~15× the
+/// anaerobic yield in reality) that pays for motility/predation — the rebalance toward animals. Set
+/// LARGE relative to grazing income so O2-users out-compete; tuned at the spike (A/B vs aerobic-off).
+pub const AEROBIC_GAIN: f32 = 3.0;
 
 // ---- C3: autotrophs (photosynthesis) ----
 /// Energy per photosynthetic cell per sim-second at full light. The autotroph's income.
