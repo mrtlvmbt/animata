@@ -154,7 +154,8 @@ fn quant(e: f32) -> i64 {
 /// Priority-flood (Barnes): flood inward from the border, always expanding the lowest
 /// frontier cell. Returns the depression-filled surface, each cell's drainage receiver
 /// (the cell it was reached from; border cells point to themselves) and the pop order.
-fn priority_flood(elev: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
+/// `pub(crate)` so the stream-power LEM ([`crate::lem`]) can reuse the same flow routing.
+pub(crate) fn priority_flood(elev: &[f32]) -> (Vec<f32>, Vec<u32>, Vec<u32>) {
     let n = COLS * ROWS;
     let (w, h) = (COLS as i32, ROWS as i32);
     let mut water = vec![0f32; n];

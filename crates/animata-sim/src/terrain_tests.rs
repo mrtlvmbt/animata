@@ -238,6 +238,10 @@
         let elev_ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let t = std::time::Instant::now();
+        crate::lem::refine(&mut elev, tect.uplift_field());
+        let lem_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        let t = std::time::Instant::now();
         crate::erosion::erode(seed, &mut elev, &|_| {});
         let erode_ms = t.elapsed().as_secs_f64() * 1000.0;
 
@@ -261,18 +265,19 @@
         let classify_ms = t.elapsed().as_secs_f64() * 1000.0;
         std::hint::black_box(sink);
 
-        let total = tect_ms + elev_ms + erode_ms + hydro_ms + classify_ms;
+        let total = tect_ms + elev_ms + lem_ms + erode_ms + hydro_ms + classify_ms;
         let pct = |ms: f64| ms / total * 100.0;
         let report = format!(
             "=== full generation timing (MAP_SCALE={MAP_SCALE}, {COLS}x{ROWS} = {n} cols) ===\n\
              tectonics      {tect_ms:8.1} ms  {:5.1}%\n\
              elevation      {elev_ms:8.1} ms  {:5.1}%\n\
+             lem            {lem_ms:8.1} ms  {:5.1}%\n\
              erosion        {erode_ms:8.1} ms  {:5.1}%\n\
              hydrology      {hydro_ms:8.1} ms  {:5.1}%\n\
              classification {classify_ms:8.1} ms  {:5.1}%\n\
              ----------------------------------------\n\
              total          {total:8.1} ms",
-            pct(tect_ms), pct(elev_ms), pct(erode_ms), pct(hydro_ms), pct(classify_ms),
+            pct(tect_ms), pct(elev_ms), pct(lem_ms), pct(erode_ms), pct(hydro_ms), pct(classify_ms),
         );
         // Also mirror to a file — test-bar discards a passing test's stdout.
         let _ = std::fs::write("/tmp/animata_gen_timing.txt", &report);

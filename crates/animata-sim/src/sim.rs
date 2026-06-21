@@ -1163,10 +1163,10 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    14846922439740308544 // debug profile (re-pinned: droplet erosion parallelised — see release note)
+    12272261688988170920 // debug profile (re-pinned: stream-power LEM pass — see release note)
 } else {
-    2066630792292556539 // release profile (re-pinned: droplet erosion parallelised — independent
-                        // per-droplet seeding + batched snapshot apply changed the eroded surface)
+    263291681651153011 // release profile (re-pinned: stream-power LEM pass added between noise and
+                       // droplet erosion — uplift↔incision carves dendritic valleys, new surface)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1176,7 +1176,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 8182166719119468728; // re-pinned: parallel droplet erosion
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 6638141017748170176; // re-pinned: stream-power LEM pass
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

@@ -66,6 +66,7 @@ struct Plate {
 pub struct TectonicField {
     macro_elev: Vec<f32>,
     mountainness: Vec<f32>,
+    uplift: Vec<f32>,
 }
 
 impl TectonicField {
@@ -77,6 +78,13 @@ impl TectonicField {
     /// ridged-noise amplitude so ridgelines/cliffs concentrate on real belts.
     pub fn mountain_at(&self, x: usize, y: usize) -> f32 {
         self.mountainness[y * COLS + x]
+    }
+    /// The orogenic **uplift-rate** field in `[0, 1]`: the distance-weighted plate
+    /// CONVERGENCE (not the static elevation), high where plates collide and falling off
+    /// inland over the belt reach. This is the `U(x)` a stream-power LEM ([`crate::lem`])
+    /// balances against fluvial incision — a real rate, not the `mountainness` proxy.
+    pub fn uplift_field(&self) -> &[f32] {
+        &self.uplift
     }
 
     #[cfg(test)]
@@ -249,9 +257,10 @@ impl TectonicField {
         }
         let base_field = box_blur(&base_field, SHELF_RADIUS);
 
-        // ---- Compose macro elevation + mountainness ----
+        // ---- Compose macro elevation + mountainness + uplift-rate ----
         let mut macro_elev = vec![0f32; n];
         let mut mountainness = vec![0f32; n];
+        let mut uplift_field = vec![0f32; n];
         for i in 0..n {
             // Chamfer distance is in thirds of a column → /3 for columns. SMOOTHSTEP the
             // falloff so the belt rises and FOOTS as a graded slope (no step at REACH).
@@ -266,9 +275,10 @@ impl TectonicField {
             macro_elev[i] =
                 (base_field[i] + uplift * UPLIFT_AMP - rift * RIFT_AMP).clamp(0.0, 1.0);
             mountainness[i] = uplift.clamp(0.0, 1.0);
+            uplift_field[i] = uplift.clamp(0.0, 1.0);
         }
 
-        TectonicField { macro_elev, mountainness }
+        TectonicField { macro_elev, mountainness, uplift: uplift_field }
     }
 }
 

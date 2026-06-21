@@ -12,6 +12,7 @@ pub mod erosion;
 pub mod genome;
 pub mod grid;
 pub mod hydrology;
+pub mod lem;
 pub mod metrics;
 pub mod persist;
 pub mod pressure;

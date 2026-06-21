@@ -583,6 +583,11 @@ impl VoxelTerrain {
                 *h = elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
             }
         });
+        progress(0.20);
+        // Stream-power LEM: couple the tectonic uplift rate to fluvial incision so the belts
+        // grow dendritic valleys + concave river profiles (the geomorphic structure noise +
+        // droplet can't make). Refines the surface in place before the droplet detail pass.
+        crate::lem::refine(&mut elev, tect.uplift_field());
         progress(0.30);
         // Erosion is the heavy pass; thread its local [0,1] progress into our 0.30..0.65 band.
         crate::erosion::erode(seed, &mut elev, &|f| progress(0.30 + 0.35 * f));
