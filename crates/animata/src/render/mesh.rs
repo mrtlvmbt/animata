@@ -1,48 +1,40 @@
 /// Chunk and region mesh building from voxel geometry.
 use macroquad::prelude::*;
 use animata_sim::config::*;
-use animata_sim::terrain::{self, VoxelTerrain, cell_biome, cell_height, feature_unit, BiomeKind};
+use animata_sim::terrain::{self, VoxelTerrain, cell_biome, cell_height, BiomeKind};
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum TreeKind {
-    None,
-    Broadleaf,
-    Conifer,
-}
-
+/// Biome surface colour definition. Trees are removed (no worldgen vegetation);
+/// autotroph creatures (rendered green in cell_color) are now the visible "vegetation".
 #[derive(Clone, Copy)]
 struct BiomeDef {
     surface: (f32, f32, f32),
-    tree_density: f32,
-    tree: TreeKind,
 }
 
-const fn def(surface: (f32, f32, f32), tree_density: f32, tree: TreeKind) -> BiomeDef {
-    BiomeDef {
-        surface,
-        tree_density,
-        tree,
-    }
+const fn def(surface: (f32, f32, f32)) -> BiomeDef {
+    BiomeDef { surface }
 }
 
 /// Indexed by `BiomeKind::id()` (0..12 used, 12..16 padded). Order matches the enum.
+/// Surface colours are neutral earth tones so autotroph creatures (rendered green) stand out as
+/// the visual "vegetation". Biomes remain visually distinct (sandy desert, rocky mountain, pale
+/// tundra, etc.) but the lush-green "grassy" look is gone.
 static BIOME_DEFS: [BiomeDef; 16] = [
-    def((0.13, 0.32, 0.55), 0.0, TreeKind::None), // 0 Ocean
-    def((0.84, 0.78, 0.54), 0.0, TreeKind::None), // 1 Beach
-    def((0.42, 0.62, 0.30), 0.04, TreeKind::Broadleaf), // 2 Plains
-    def((0.20, 0.46, 0.24), 0.30, TreeKind::Broadleaf), // 3 Forest
-    def((0.80, 0.70, 0.44), 0.0, TreeKind::None), // 4 Desert
-    def((0.48, 0.46, 0.45), 0.0, TreeKind::None), // 5 Mountain
-    def((0.93, 0.95, 0.98), 0.02, TreeKind::Conifer), // 6 Snow
-    def((0.17, 0.38, 0.29), 0.30, TreeKind::Conifer), // 7 Taiga
-    def((0.62, 0.64, 0.56), 0.0, TreeKind::None), // 8 Tundra
-    def((0.70, 0.66, 0.34), 0.03, TreeKind::Broadleaf), // 9 Savanna
-    def((0.31, 0.40, 0.25), 0.14, TreeKind::Broadleaf), // 10 Swamp
-    def((0.12, 0.43, 0.17), 0.50, TreeKind::Broadleaf), // 11 Jungle
-    def((0.42, 0.62, 0.30), 0.0, TreeKind::None), // 12-15 padding
-    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
-    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
-    def((0.42, 0.62, 0.30), 0.0, TreeKind::None),
+    def((0.13, 0.32, 0.55)), // 0 Ocean — deep blue
+    def((0.84, 0.78, 0.54)), // 1 Beach — sandy tan
+    def((0.55, 0.50, 0.45)), // 2 Plains — neutral earth/clay (autotrophs provide grassland look)
+    def((0.50, 0.46, 0.42)), // 3 Forest — darker earth (autotrophs provide forest look)
+    def((0.80, 0.70, 0.44)), // 4 Desert — pale sand
+    def((0.48, 0.46, 0.45)), // 5 Mountain — rocky grey
+    def((0.93, 0.95, 0.98)), // 6 Snow — pale white
+    def((0.60, 0.54, 0.48)), // 7 Taiga — brown earth (autotrophs provide conifer-like green)
+    def((0.62, 0.64, 0.56)), // 8 Tundra — pale grey-brown
+    def((0.68, 0.62, 0.50)), // 9 Savanna — warm tan (autotrophs provide grassy look)
+    def((0.48, 0.44, 0.38)), // 10 Swamp — dark earth (autotrophs provide aquatic green)
+    def((0.45, 0.40, 0.35)), // 11 Jungle — very dark earth (dense autotrophs = dense green)
+    def((0.55, 0.50, 0.45)), // 12-15 padding
+    def((0.55, 0.50, 0.45)),
+    def((0.55, 0.50, 0.45)),
+    def((0.55, 0.50, 0.45)),
 ];
 
 fn biome_def(biome: BiomeKind) -> &'static BiomeDef {
@@ -92,7 +84,7 @@ pub struct Batch {
 /// macroquad's `draw_mesh` pushes through the immediate batch buffer, which **clamps**
 /// (silently dropping geometry) at `>= 10000` vertices or `>= 5000` indices per call.
 /// Indices bind first (6 per quad vs 4 verts), so we split meshes on the index count,
-/// keeping a margin for the largest single-column burst (top + 4 cliff sides + a tree).
+/// keeping a margin for the largest single-column burst (top + 4 cliff sides).
 const MAX_MESH_INDICES: usize = 4800;
 /// Worst-case indices a single column/LOD-block can add at once: a block can emit four
 /// full-relief side faces (≈ `4 × MAX_H` strata quads) at a tall LOD step, plus the top.
@@ -113,10 +105,9 @@ pub fn build_chunk_mesh(t: &VoxelTerrain, cx: usize, cy: usize, lod: u32) -> (Ve
 ///
 /// At LOD>0 columns are read on a `stride` grid (blocks aligned globally because `x0/y0`
 /// are stride multiples) and each block emits one `stride×stride` footprint sampled from
-/// its origin column, with neighbour heights read a stride away. Trees are full-detail
-/// only. Returns `(opaque, water)`: the opaque seabed/land/trees, plus a translucent
-/// water surface (one quad per submerged column + connective faces for river steps),
-/// drawn in a second, animated pass.
+/// its origin column, with neighbour heights read a stride away. Returns `(opaque, water)`:
+/// the opaque seabed/land surface, plus a translucent water surface (one quad per submerged
+/// column + connective faces for river steps), drawn in a second, animated pass.
 pub fn build_region_mesh(
     t: &VoxelTerrain,
     x0: usize,
@@ -133,10 +124,6 @@ pub fn build_region_mesh(
     let mut water = Vec::new();
     let mut wv: Vec<Vertex> = Vec::new();
     let mut wi: Vec<u16> = Vec::new();
-    // Trees are voxelised into a set first, then meshed with EXPOSED faces only (like the
-    // terrain) — so overlapping canopies and adjacent cubes don't leave coincident,
-    // differently-shaded faces that z-fight into dashed seams.
-    let mut tvox: VoxMap = std::collections::HashMap::new();
     let mut gyc = y0;
     while gyc < y1 {
         let mut gxc = x0;
@@ -229,169 +216,12 @@ pub fn build_region_mesh(
                 }
             }
 
-            // Trees on dry land (through LOD1, one per block, so the canopy fades a ring
-            // out instead of a hard edge). Water itself is a separate translucent pass.
-            if !submerged && lod <= 1 {
-                let bd = biome_def(biome);
-                if bd.tree != TreeKind::None && feature_unit(t.seed, gx, gy, 101) < bd.tree_density
-                {
-                    collect_tree(&mut tvox, t, gx, gy, h, bd.tree);
-                }
-            }
         }
         gyc += stride;
     }
-    mesh_tree_voxels(&mut verts, &mut idx, &mut opaque, &tvox);
     flush_mesh(&mut verts, &mut idx, &mut opaque);
     flush_mesh(&mut wv, &mut wi, &mut water);
     (opaque, water)
-}
-
-/// A sparse voxel set (position → colour) the trees are rasterised into before meshing.
-type VoxMap = std::collections::HashMap<(i32, i32, u8), (f32, f32, f32)>;
-
-/// Voxelise a tree on column `(gx, gy)` standing on surface height `h` into `vox`.
-/// **Broadleaf**: short brown trunk under a 3×3 leaf canopy + cap (rounded, deciduous).
-/// **Conifer**: taller trunk with a narrow tapering spire (1-cell tip over a + of leaves).
-/// Per-column hashes keep it deterministic; canopy blocks overhanging the world / water are
-/// skipped. Writing into a SET de-duplicates overlapping canopies (no coincident faces).
-fn collect_tree(vox: &mut VoxMap, t: &VoxelTerrain, gx: usize, gy: usize, h: u8, kind: TreeKind) {
-    let seed = t.seed;
-    let trunk = (0.36, 0.26, 0.16);
-    let leaf = if kind == TreeKind::Conifer {
-        (0.09, 0.24, 0.16)
-    } else {
-        (0.16, 0.42, 0.20)
-    };
-    let (gxi, gyi) = (gx as i32, gy as i32);
-    // Leaves are skipped over water / off-map; the trunk sits on the tree's own (valid) column.
-    let leaf_at = |vox: &mut VoxMap, lx: i32, ly: i32, lz: u8| {
-        if (0..COLS as i32).contains(&lx)
-            && (0..ROWS as i32).contains(&ly)
-            && t.water_level(lx, ly) == 0
-        {
-            vox.insert((lx, ly, lz), leaf);
-        }
-    };
-    if kind == TreeKind::Conifer {
-        let th = 3 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 3 or 4
-        for gz in h..h + th {
-            vox.insert((gxi, gyi, gz), trunk);
-        }
-        for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
-            leaf_at(vox, gxi + dx, gyi + dy, h + th);
-        }
-        leaf_at(vox, gxi, gyi, h + th + 1);
-        leaf_at(vox, gxi, gyi, h + th + 2);
-    } else {
-        let th = 2 + (feature_unit(seed, gx, gy, 202) * 2.0) as u8; // 2 or 3
-        for gz in h..h + th {
-            vox.insert((gxi, gyi, gz), trunk);
-        }
-        let top = h + th;
-        for dy in -1i32..=1 {
-            for dx in -1i32..=1 {
-                leaf_at(vox, gxi + dx, gyi + dy, top);
-            }
-        }
-        leaf_at(vox, gxi, gyi, top + 1);
-    }
-}
-
-/// Mesh the tree voxel set, emitting only EXPOSED faces (a face is drawn only where the
-/// neighbour voxel is absent) — exactly like the terrain mesher, so there are no interior
-/// or coincident faces to z-fight. Bottom faces are omitted (unseen from the iso top-down
-/// view), matching the terrain. Side faces bias their top edge back (the column's own top
-/// wins the rim, no dark speckle).
-fn mesh_tree_voxels(
-    verts: &mut Vec<Vertex>,
-    idx: &mut Vec<u16>,
-    opaque: &mut Vec<Batch>,
-    vox: &VoxMap,
-) {
-    for (&(gx, gy, gz), &rgb) in vox {
-        if idx.len() + COLUMN_INDEX_BURST > MAX_MESH_INDICES {
-            flush_mesh(verts, idx, opaque);
-        }
-        let (x0, x1) = (gx as f32 * VOX, (gx + 1) as f32 * VOX);
-        let (z0, z1) = (gy as f32 * VOX, (gy + 1) as f32 * VOX);
-        let (y0, y1) = (gz as f32 * VOX, (gz + 1) as f32 * VOX);
-        // Side verts are bottom (0,1) then top (2,3). Bias the TOP edge back (the voxel's
-        // own top wins the rim) AND the BOTTOM edge forward (toward camera): a tree is a
-        // SEPARATE mesh sitting on the terrain, so its base edge ties the ground's top and
-        // would otherwise be eaten ("saw") — the forward nudge makes the trunk win there.
-        let top_back = [-1.0, -1.0, 1.0, 1.0];
-        if !vox.contains_key(&(gx, gy, gz + 1)) {
-            push_quad(
-                verts,
-                idx,
-                [
-                    vec3(x0, y1, z0),
-                    vec3(x1, y1, z0),
-                    vec3(x1, y1, z1),
-                    vec3(x0, y1, z1),
-                ],
-                shaded(rgb, SHADE_TOP),
-                0.0,
-            );
-        }
-        if !vox.contains_key(&(gx + 1, gy, gz)) {
-            push_quad_v(
-                verts,
-                idx,
-                [
-                    vec3(x1, y0, z0),
-                    vec3(x1, y0, z1),
-                    vec3(x1, y1, z1),
-                    vec3(x1, y1, z0),
-                ],
-                shaded(rgb, SHADE_PX),
-                top_back,
-            );
-        }
-        if !vox.contains_key(&(gx - 1, gy, gz)) {
-            push_quad_v(
-                verts,
-                idx,
-                [
-                    vec3(x0, y0, z1),
-                    vec3(x0, y0, z0),
-                    vec3(x0, y1, z0),
-                    vec3(x0, y1, z1),
-                ],
-                shaded(rgb, SHADE_NX),
-                top_back,
-            );
-        }
-        if !vox.contains_key(&(gx, gy + 1, gz)) {
-            push_quad_v(
-                verts,
-                idx,
-                [
-                    vec3(x1, y0, z1),
-                    vec3(x0, y0, z1),
-                    vec3(x0, y1, z1),
-                    vec3(x1, y1, z1),
-                ],
-                shaded(rgb, SHADE_PZ),
-                top_back,
-            );
-        }
-        if !vox.contains_key(&(gx, gy - 1, gz)) {
-            push_quad_v(
-                verts,
-                idx,
-                [
-                    vec3(x0, y0, z0),
-                    vec3(x1, y0, z0),
-                    vec3(x1, y1, z0),
-                    vec3(x0, y1, z0),
-                ],
-                shaded(rgb, SHADE_NZ),
-                top_back,
-            );
-        }
-    }
 }
 
 #[derive(Clone, Copy)]

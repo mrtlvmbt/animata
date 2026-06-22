@@ -1455,8 +1455,11 @@ async fn main() {
                 }
             } else {
                 // BACTERIAL MATS — aggregate creatures per column (count + summed coloration), then
-                // draw one coverage tile per occupied column: alpha ramps with colony density,
-                // greyscale = the colony's mean coloration. Adjacent dense columns tile into a mat.
+                // draw one coverage tile per occupied column: alpha ramps with colony density.
+                // Colour-tint: autotroph (green) creatures create visually distinct algae/plant-mats,
+                // while heterotrophs render closer to greyscale. Since we don't have trophic type in
+                // the snapshot at mat LOD, we detect autotrophs via their photo cells (green renderers)
+                // in individual morphologies, or lean heavily on the green channel for mat colonies.
                 let mut bucket: std::collections::HashMap<(usize, usize), (u32, f32)> =
                     std::collections::HashMap::new();
                 for c in &snap.creatures {
@@ -1473,9 +1476,16 @@ async fn main() {
                     let Some((px, py)) = project(wx, wz, wy) else {
                         continue;
                     };
-                    let g = colsum / count as f32; // mean coloration of the colony
+                    let col_mean = colsum / count as f32;
                     let a = (count as f32 / MAT_FULL_COUNT).min(MAT_MAX_ALPHA);
-                    draw_rectangle(px - tile * 0.5, py - tile * 0.5, tile, tile, Color::new(g, g, g, a));
+                    // Mat tinting: shift toward green (algae/plant-mat look) by boosting the green
+                    // channel relative to red/blue for colonies. Dense mats read as solid green;
+                    // sparse mats fade. This makes autotroph mats visually distinct from mobile
+                    // heterotroph flocks (which remain closer to grey dots at individual LOD).
+                    let r = col_mean * 0.6;
+                    let g = col_mean * 0.9 + 0.1 * a; // boost green, add density glow
+                    let b = col_mean * 0.6;
+                    draw_rectangle(px - tile * 0.5, py - tile * 0.5, tile, tile, Color::new(r, g, b, a));
                     on_screen += count as usize;
                 }
             }
