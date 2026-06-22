@@ -395,6 +395,61 @@
         assert!(biome_agree > 90.0, "GPU vs CPU biome agreement too low ({biome_agree:.1}%)");
     }
 
+    /// Sub-phase cost of LEM + hydrology — the serial bottlenecks the GPU pilot left on the CPU.
+    /// Isolates `priority_flood` (the shared serial heap) from the rest so we know whether to
+    /// attack the flood, the incision sweep, or the per-cell-parallel D∞/accumulation.
+    /// Run: `cargo test -p animata-sim --release lem_hydro_subphase_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lem_hydro_subphase_cost() {
+        let seed = 1u64;
+        let n = COLS * ROWS;
+        let tect = TectonicField::generate(seed);
+        let mut pre = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                pre[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+
+        // priority_flood standalone (LEM calls it STEPS/ROUTE_EVERY = 24/6 = 4 times).
+        let t = std::time::Instant::now();
+        let _ = crate::hydrology::priority_flood(&pre);
+        let flood_one = t.elapsed().as_secs_f64() * 1000.0;
+
+        let mut lemf = pre.clone();
+        let t = std::time::Instant::now();
+        crate::lem::refine(&mut lemf, tect.uplift_field());
+        let lem_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let lem_flood = flood_one * 4.0; // ~4 routing calls; elev drifts a little between them
+        let lem_rest = lem_ms - lem_flood; // 24× (uplift∥ + incision-serial + diffusion∥)
+
+        // Erode, then time hydrology and its flood separately.
+        let mut elev = lemf.clone();
+        crate::erosion::erode(seed, &mut elev, &|_| {});
+        let t = std::time::Instant::now();
+        let _ = crate::hydrology::priority_flood(&elev);
+        let flood_post = t.elapsed().as_secs_f64() * 1000.0;
+        let t = std::time::Instant::now();
+        let _ = crate::hydrology::compute(&elev, SEA_FRACTION);
+        let hydro_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let hydro_rest = hydro_ms - flood_post; // ocean-flood + D∞ + accumulation + classify + drop
+
+        let report = format!(
+            "=== LEM + hydrology sub-phase cost (MAP_SCALE={MAP_SCALE}, {COLS}x{ROWS}, seed {seed}) ===\n\
+             priority_flood (1 call)   {flood_one:8.1} ms   [serial heap — the shared core]\n\
+             --- LEM (refine, {lem_ms:.0} ms total) ---\n\
+             flood ×4 (est)            {lem_flood:8.1} ms\n\
+             rest (incision+diff+uplift){lem_rest:8.1} ms   [24 steps; incision sweep is serial]\n\
+             --- hydrology (compute, {hydro_ms:.0} ms total) ---\n\
+             priority_flood ×1         {flood_post:8.1} ms\n\
+             rest (ocean+Dinf+accum+..){hydro_rest:8.1} ms   [D∞ is per-cell ⇒ parallelisable]",
+        );
+        let _ = std::fs::write("/tmp/animata_lem_hydro.txt", &report);
+        eprintln!("\n{report}");
+    }
+
     /// Climate must give the giant map real biome DIVERSITY: several lowland biomes
     /// present (temperature × moisture bands), none absurdly dominant. Prints the mix.
     #[test]
