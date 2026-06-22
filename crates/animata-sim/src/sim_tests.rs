@@ -11,6 +11,24 @@ fn column_index_clamps_out_of_world() {
     assert_eq!(column_index(vec2(1e9, 1e9)), (COLS - 1, ROWS - 1));
 }
 
+/// `pack_col`/`unpack_col` round-trip every in-world column exactly — the `Outcome` column packing
+/// must recover the identical `(cx, cy)` the serial replay deposits at (a determinism lock: a wrong
+/// inverse would silently move oxygen/nutrient deposits to the wrong column).
+#[test]
+fn pack_col_round_trips_every_in_world_column() {
+    // Corners + interior + a stride sweep covering both axes' full extent.
+    for &(cx, cy) in &[(0, 0), (COLS - 1, 0), (0, ROWS - 1), (COLS - 1, ROWS - 1), (123, 456)] {
+        assert_eq!(unpack_col(pack_col(cx, cy)), (cx, cy));
+    }
+    for cy in (0..ROWS).step_by(317) {
+        for cx in (0..COLS).step_by(311) {
+            assert_eq!(unpack_col(pack_col(cx, cy)), (cx, cy), "round-trip at ({cx},{cy})");
+        }
+    }
+    // The largest packed id stays within u32 (world is 1920² columns).
+    assert!((pack_col(COLS - 1, ROWS - 1) as u64) <= u32::MAX as u64);
+}
+
 /// The genome's brain-weight count must match this module's brain topology.
 #[test]
 fn brain_weight_count_matches_topology() {
