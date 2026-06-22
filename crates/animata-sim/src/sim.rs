@@ -290,6 +290,23 @@ struct PendingBirth {
     founder: u64,
 }
 
+/// What the parallel apply pass emits for ONE creature index — the cross-creature side effects it must
+/// NOT perform itself (terrain deposits, the death tally, the queued birth), replayed afterwards by a
+/// serial fixed-index pass so float-add order + id assignment stay deterministic. Exactly one is
+/// produced per creature (a `.map`, never a `filter`), so the `Vec<Outcome>` is index-aligned with
+/// `creatures`. A dead-on-entry creature yields `Outcome::default()` (all-none).
+#[derive(Default)]
+struct Outcome {
+    /// Oxygen deposit `(cx, cy, amount)` from photosynthesis this tick (gated on the oxygen feature).
+    oxy: Option<(usize, usize, f32)>,
+    /// Nutrient deposit `(dx, dy, amount)` from a death this tick (matter returns to the pool).
+    nut: Option<(usize, usize, f32)>,
+    /// This creature died IN apply (toxin/starvation/senescence) → increment the death tally serially.
+    died: bool,
+    /// A queued reproduction (genome already mutated, energy already paid on the creature).
+    birth: Option<PendingBirth>,
+}
+
 /// A fully-developed child produced by the parallel develop phase, ready for the serial id-assigning
 /// append. `None` (vs this) marks a stillbirth (the parent couldn't afford the body) — drawn exactly
 /// when the old code drew, so no RNG is consumed for a stillborn child.
@@ -829,135 +846,167 @@ impl Sim {
         // Reproductions queued here (genome mutated, energy paid) but NOT yet developed — `develop()`
         // is the costly body-growth and is run in a parallel batch AFTER this serial loop. The loop
         // holds `&mut self.creatures`, so the heavy work must leave it.
-        let mut pending: Vec<PendingBirth> = Vec::new();
         let birth_gate = (1.0 - n as f32 / SOFT_CAP).clamp(0.0, 1.0);
-        for (idx, c) in self.creatures.iter_mut().enumerate() {
-            if !c.alive {
-                continue; // eaten in the predation pass
+        // PARALLEL apply (Phase 4). Each creature mutates ONLY itself (pos/heading/energy/age/alive) and
+        // EMITS its cross-creature side effects (terrain deposits, death tally, queued birth) as an
+        // `Outcome` — never touching shared state inside the parallel pass. All RNG is per-`(id,tick)`
+        // (`seed_fold`), so it is order-independent. `par_iter_mut().enumerate().map(...)` writes each
+        // index independently and `collect` keeps index order ⇒ the `Vec<Outcome>` is index-aligned.
+        //
+        // DETERMINISM NOTE (the ONE intended trajectory change): `Sample.oxygen` is read from the
+        // IMMUTABLE pre-apply terrain — i.e. START-OF-TICK O2 — so a creature no longer sees the oxygen
+        // deposited by lower-index creatures THIS tick (it never saw its own deposit even serially: the
+        // read preceded the deposit). Every other output is bit-identical to the old serial loop. This
+        // moves the oxygen feedback one tick → the golden is re-pinned (see GOLDEN_CHECKSUM_SEED42_300).
+        let registry = &self.registry;
+        let world_seed = self.world_seed;
+        let oxygen_feat = self.cfg.features.oxygen;
+        let terrain_ref: &VoxelTerrain = terrain;
+        let outcomes: Vec<Outcome> = self
+            .creatures
+            .par_iter_mut()
+            .enumerate()
+            .map(|(idx, c)| {
+                if !c.alive {
+                    return Outcome::default(); // eaten in the predation pass — index-aligned no-op
+                }
+                let (throttle, turn, _) = decisions[idx];
+                // Move. `layer` is the snapshot stratum (start-of-tick position) — it also drives the
+                // drift term in `speed()` and is reused below for food/light. `spd` is captured once so
+                // the movement cost can be charged per distance travelled (`MOVE_COST·throttle·spd`).
+                let layer = strata[idx];
+                let spd = c.speed(layer);
+                c.heading += turn * TURN_RATE * TICK_LEN;
+                let step = throttle * spd * TICK_LEN;
+                c.pos.x += c.heading.cos() * step;
+                c.pos.y += c.heading.sin() * step;
+                // Map edge = wall (reflect), via the single clamp helper for the column.
+                if c.pos.x < 0.0 {
+                    c.pos.x = 0.0;
+                    c.heading = std::f32::consts::PI - c.heading;
+                } else if c.pos.x > maxx {
+                    c.pos.x = maxx;
+                    c.heading = std::f32::consts::PI - c.heading;
+                }
+                if c.pos.y < 0.0 {
+                    c.pos.y = 0.0;
+                    c.heading = -c.heading;
+                } else if c.pos.y > maxy {
+                    c.pos.y = maxy;
+                    c.heading = -c.heading;
+                }
+                let (cx, cy) = column_index(c.pos);
+                // Environmental selection pressures (climate / autotrophy / metabolism) compose into
+                // one Effect for this creature; its channels plug into the energy budget below, bit-for-
+                // bit as the former inline formulas (food_mult ← climate, energy_add ← photosynthesis,
+                // metab_mult ← stratum cost). Predation, camouflage and the nutrient cycle are MECHANIC
+                // pressures (a multi-creature pass / a per-pair detection roll / terrain mutation), not
+                // pure per-creature channel effects, so they stay explicit phases in `step`.
+                let sample = Sample {
+                    pheno: &c.pheno,
+                    genome: &c.genome,
+                    layer,
+                    temperature: terrain_ref.temperature_at(cx, cy),
+                    light: light_for(layer, cy, tick),
+                    toxicity: terrain_ref.toxicity_at(cx, cy),
+                    oxygen: terrain_ref.oxygen_at(cx, cy, tick), // START-OF-TICK (immutable terrain)
+                    season_phase,
+                    autotroph_shading,
+                };
+                let eff = registry.eval_all(&sample);
+                let food = if layer == Stratum::Surface {
+                    // Autotroph-base (Phase 1): the free S3 grass no longer feeds. Primary production is
+                    // now PHOTOSYNTHESIS alone (the autotrophy pressure's `energy_add`); a Surface
+                    // heterotroph must EAT other creatures (the predation pass). The S3 biomass field
+                    // stays in the terrain (render / future) but yields no energy here — no graze call.
+                    0.0
+                } else {
+                    // Non-surface strata: a fixed foraging capacity split among occupants (density-
+                    // dependent → an empty stratum richly rewards colonisers, then self-limits).
+                    layer.capacity() / stratum_count[layer.idx()].max(1.0) * TICK_LEN
+                };
+                c.energy = (c.energy + food * eff.food_mult + eff.energy_add).min(c.max_energy());
+                // O2 production (gas cycle Phase 1): photosynthesis emits oxygen into this column as an
+                // obligate byproduct, keyed on the ISOLATED `photo_yield` (not composed energy_add — F2).
+                // Emitted now, applied in the serial replay (index order) — f32 accumulate, deterministic.
+                let oxy = if oxygen_feat && eff.photo_yield > 0.0 {
+                    Some((cx, cy, eff.photo_yield * OXYGEN_PER_PHOTO))
+                } else {
+                    None
+                };
+                // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort
+                // (charged per distance travelled: `MOVE_COST · throttle · spd`, so drift/idle is ~free).
+                let kleiber = (c.biomass() as f32).powf(0.75);
+                c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle * spd) * TICK_LEN;
+                c.age += 1;
+                // Death deposits the creature's matter back to the nutrient pool at the death site. The
+                // oxygen it already produced this tick (`oxy`) is kept — it photosynthesised before dying,
+                // exactly as the serial loop deposited O2 before the death checks.
+                let nutrient = |c: &Creature| c.biomass() as f32 * NUTRIENT_PER_CELL;
+                // Toxic death (C3 abiotic): ground toxicity beyond resistance is a per-tick death hazard
+                // (`mortality_add`). Deterministic per (id, tick).
+                if eff.mortality_add > 0.0
+                    && Rng::new(seed_fold(world_seed, &[SALT_TOXIN, c.id, tick])).unit() < eff.mortality_add
+                {
+                    c.alive = false;
+                    let (dx, dy) = column_index(c.pos);
+                    return Outcome { oxy, nut: Some((dx, dy, nutrient(c))), died: true, birth: None };
+                }
+                // Death by starvation (decomposition re-fertilises the death site).
+                if c.energy <= 0.0 {
+                    c.alive = false;
+                    let (dx, dy) = column_index(c.pos);
+                    return Outcome { oxy, nut: Some((dx, dy, nutrient(c))), died: true, birth: None };
+                }
+                // Death by senescence: old-age probability rising with age² gives demographic turnover.
+                // Scaled by 1/biomass — bigger bodies live longer (a real size benefit).
+                let sp = SENESCENCE_RATE * (c.age as f32 / LIFESPAN).powi(2) / c.biomass() as f32;
+                if sp > 0.0 && Rng::new(seed_fold(world_seed, &[SALT_DEATH, c.id, tick])).unit() < sp {
+                    c.alive = false;
+                    let (dx, dy) = column_index(c.pos);
+                    return Outcome { oxy, nut: Some((dx, dy, nutrient(c))), died: true, birth: None };
+                }
+                // Reproduction: bud a mutated child, splitting energy in half. Gated by the logistic
+                // birth term (population self-limits near SOFT_CAP) on top of the energy threshold.
+                let lucky = birth_gate >= 1.0
+                    || Rng::new(seed_fold(world_seed, &[SALT_BIRTH, c.id, tick])).unit() < birth_gate;
+                let birth = if c.energy >= REPRO_ENERGY && lucky {
+                    let mut rng = Rng::new(seed_fold(world_seed, &[SALT_MUTATE, c.id, tick]));
+                    // Morphogen READ weights evolve on their OWN stream (PR-D2) so the coupling's
+                    // activation leaves `rng` — and thus the child's pos/heading — byte-identical.
+                    let mut morph_rng = Rng::new(seed_fold(world_seed, &[SALT_MORPH, c.id, tick]));
+                    // O2 tolerance evolves on its OWN independent stream too (gas cycle F9), zero draws
+                    // from `rng` (child pos/heading byte-identical to no-gas sim).
+                    let mut gas_rng = Rng::new(seed_fold(world_seed, &[SALT_GAS, c.id, tick]));
+                    // Mutate the genome (brain + GRN + morphogen + gas); the parent pays half its energy
+                    // now. The body grows later in the develop phase (no RNG), so the post-mutate `rng`
+                    // is queued to finish the birth there — same draw stream, same bits.
+                    let genome = c.genome.mutate(&mut rng, &mut morph_rng, &mut gas_rng, MUTATION_STD, GRN_MUTATION_STD);
+                    c.energy *= 0.5;
+                    Some(PendingBirth { genome, rng, parent_pos: c.pos, parent_energy: c.energy, founder: c.founder })
+                } else {
+                    None
+                };
+                Outcome { oxy, nut: None, died: false, birth }
+            })
+            .collect();
+        // Serial fixed-index replay: apply the cross-creature side effects in creature-index order, so
+        // the f32 terrain accumulation + the id-assigning birth queue are deterministic. The Vec is
+        // index-aligned with `creatures` by construction (one Outcome per index — a `.map`, not a filter).
+        debug_assert_eq!(outcomes.len(), n, "Outcome Vec must stay index-aligned with creatures");
+        let mut pending: Vec<PendingBirth> = Vec::with_capacity(outcomes.len());
+        for out in outcomes {
+            if let Some((cx, cy, amt)) = out.oxy {
+                terrain.deposit_oxygen(cx, cy, amt, tick);
             }
-            let (throttle, turn, _) = decisions[idx];
-            // Move. `layer` is the snapshot stratum (start-of-tick position) — it also drives the
-            // drift term in `speed()` and is reused below for food/light. `spd` is captured once so
-            // the movement cost can be charged per distance travelled (`MOVE_COST·throttle·spd`).
-            let layer = strata[idx];
-            let spd = c.speed(layer);
-            c.heading += turn * TURN_RATE * TICK_LEN;
-            let step = throttle * spd * TICK_LEN;
-            c.pos.x += c.heading.cos() * step;
-            c.pos.y += c.heading.sin() * step;
-            // Map edge = wall (reflect), via the single clamp helper for the column.
-            if c.pos.x < 0.0 {
-                c.pos.x = 0.0;
-                c.heading = std::f32::consts::PI - c.heading;
-            } else if c.pos.x > maxx {
-                c.pos.x = maxx;
-                c.heading = std::f32::consts::PI - c.heading;
+            if let Some((dx, dy, amt)) = out.nut {
+                terrain.deposit_nutrient(dx, dy, amt, tick);
             }
-            if c.pos.y < 0.0 {
-                c.pos.y = 0.0;
-                c.heading = -c.heading;
-            } else if c.pos.y > maxy {
-                c.pos.y = maxy;
-                c.heading = -c.heading;
-            }
-            let (cx, cy) = column_index(c.pos);
-            // Environmental selection pressures (climate / autotrophy / metabolism) compose into
-            // one Effect for this creature; its channels plug into the energy budget below, bit-for-
-            // bit as the former inline formulas (food_mult ← climate, energy_add ← photosynthesis,
-            // metab_mult ← stratum cost). Predation, camouflage and the nutrient cycle are MECHANIC
-            // pressures (a multi-creature pass / a per-pair detection roll / terrain mutation), not
-            // pure per-creature channel effects, so they stay explicit phases in `step`.
-            let sample = Sample {
-                pheno: &c.pheno,
-                genome: &c.genome,
-                layer,
-                temperature: terrain.temperature_at(cx, cy),
-                light: light_for(layer, cy, tick),
-                toxicity: terrain.toxicity_at(cx, cy),
-                oxygen: terrain.oxygen_at(cx, cy, tick),
-                season_phase,
-                autotroph_shading,
-            };
-            let eff = self.registry.eval_all(&sample);
-            let food = if layer == Stratum::Surface {
-                // Autotroph-base (Phase 1): the free S3 grass no longer feeds. Primary production is now
-                // PHOTOSYNTHESIS alone (the autotrophy pressure's `energy_add`); a Surface heterotroph
-                // must EAT other creatures (the predation pass). The S3 biomass field stays in the
-                // terrain (render / future) but yields no energy here — no graze call, no depletion.
-                0.0
-            } else {
-                // Non-surface strata: a fixed foraging capacity split among occupants (density-
-                // dependent → an empty stratum richly rewards colonisers, then self-limits).
-                layer.capacity() / stratum_count[layer.idx()].max(1.0) * TICK_LEN
-            };
-            c.energy = (c.energy + food * eff.food_mult + eff.energy_add).min(c.max_energy());
-            // O2 production (gas cycle Phase 1): photosynthesis emits oxygen into this column as an
-            // obligate byproduct, keyed on the ISOLATED `photo_yield` (not composed energy_add — F2).
-            // Serial (this `&mut terrain`) + f32 store ⇒ deterministic, gentle deposits accumulate.
-            if self.cfg.features.oxygen && eff.photo_yield > 0.0 {
-                terrain.deposit_oxygen(cx, cy, eff.photo_yield * OXYGEN_PER_PHOTO, tick);
-            }
-            // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort
-            // (charged per distance travelled: `MOVE_COST · throttle · spd`, so drift/idle is ~free).
-            let kleiber = (c.biomass() as f32).powf(0.75);
-            c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle * spd) * TICK_LEN;
-            c.age += 1;
-            // Toxic death (C3 abiotic): ground toxicity beyond the creature's resistance is a
-            // per-tick death hazard (the `mortality_add` channel). Deterministic per (id, tick).
-            // Like the other deaths, the matter returns to the nutrient pool at the death site.
-            if eff.mortality_add > 0.0
-                && Rng::new(seed_fold(self.world_seed, &[SALT_TOXIN, c.id, tick])).unit() < eff.mortality_add
-            {
-                c.alive = false;
+            if out.died {
                 self.deaths += 1;
-                let (dx, dy) = column_index(c.pos);
-                terrain.deposit_nutrient(dx, dy, c.biomass() as f32 * NUTRIENT_PER_CELL, tick);
-                continue;
             }
-            // Death by starvation. The creature's matter returns to the nutrient pool here
-            // (decomposition) — closing the cycle and re-fertilising the death site.
-            if c.energy <= 0.0 {
-                c.alive = false;
-                self.deaths += 1;
-                let (dx, dy) = column_index(c.pos);
-                terrain.deposit_nutrient(dx, dy, c.biomass() as f32 * NUTRIENT_PER_CELL, tick);
-                continue;
-            }
-            // Death by senescence: old-age probability rising with age² gives demographic
-            // turnover. Scaled by 1/biomass — bigger bodies live longer (a real size benefit),
-            // so multicellularity has a gradient to climb against its build + Kleiber costs.
-            let sp = SENESCENCE_RATE * (c.age as f32 / LIFESPAN).powi(2) / c.biomass() as f32;
-            if sp > 0.0 && Rng::new(seed_fold(self.world_seed, &[SALT_DEATH, c.id, tick])).unit() < sp {
-                c.alive = false;
-                self.deaths += 1;
-                let (dx, dy) = column_index(c.pos);
-                terrain.deposit_nutrient(dx, dy, c.biomass() as f32 * NUTRIENT_PER_CELL, tick);
-                continue;
-            }
-            // Reproduction: bud a mutated child, splitting energy in half. Gated by the logistic
-            // birth term (population self-limits near SOFT_CAP) on top of the energy threshold.
-            let lucky = birth_gate >= 1.0
-                || Rng::new(seed_fold(self.world_seed, &[SALT_BIRTH, c.id, tick])).unit() < birth_gate;
-            if c.energy >= REPRO_ENERGY && lucky {
-                let mut rng = Rng::new(seed_fold(self.world_seed, &[SALT_MUTATE, c.id, tick]));
-                // Morphogen READ weights evolve on their OWN stream (PR-D2) so the coupling's activation
-                // leaves `rng` — and thus the child's pos/heading later — byte-identical to the inert sim.
-                let mut morph_rng = Rng::new(seed_fold(self.world_seed, &[SALT_MORPH, c.id, tick]));
-                // O2 tolerance evolves on its OWN independent stream too (gas cycle F9), so adding the
-                // gene consumes zero draws from `rng` (child pos/heading byte-identical to no-gas sim).
-                let mut gas_rng = Rng::new(seed_fold(self.world_seed, &[SALT_GAS, c.id, tick]));
-                // Mutate the genome (brain + GRN + morphogen + gas); the parent pays half its energy now.
-                // The body is grown later, in the parallel develop phase (it doesn't touch the RNG), so
-                // the post-mutate `rng` is queued to finish the birth there — same draw stream, same bits.
-                let genome = c.genome.mutate(&mut rng, &mut morph_rng, &mut gas_rng, MUTATION_STD, GRN_MUTATION_STD);
-                c.energy *= 0.5;
-                pending.push(PendingBirth {
-                    genome,
-                    rng,
-                    parent_pos: c.pos,
-                    parent_energy: c.energy,
-                    founder: c.founder,
-                });
+            if let Some(b) = out.birth {
+                pending.push(b);
             }
         }
         self.profiler.record(Span::Apply, t_apply.elapsed());
@@ -1405,7 +1454,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 15609532436604985031; // re-pinned: autotroph-base + climate→metab
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 235398328335312260; // re-pinned: parallel-apply reads start-of-tick O2
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]
