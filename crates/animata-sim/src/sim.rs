@@ -1014,6 +1014,45 @@ impl Sim {
         self.creatures.truncate(SIM_POP_CAP);
     }
 
+    /// DEV / RENDER-BENCH ONLY — inflate the live population to `n` by cloning the existing
+    /// (already-developed, multicellular) creatures round-robin, scattering positions across the
+    /// `maxx × maxy` map. NOT part of `step` or any golden/determinism path: it's a render-stress
+    /// harness (freeze the sim, then draw N bodies). Genomes/phenotypes are cloned verbatim, so the
+    /// inflated bodies keep the multicellular morphology of the population they were cloned from.
+    pub fn debug_inflate_to(&mut self, n: usize, maxx: f32, maxy: f32) {
+        self.creatures.retain(|c| c.alive); // clone only from living bodies
+        let src_len = self.creatures.len();
+        if src_len == 0 {
+            return;
+        }
+        // A dozen dense CLUMPS (mirrors the clustered distribution of a real run, not a uniform
+        // spread). Clump #0 is the map centre so a bench can aim the camera at a known blob.
+        const CLUMPS: u64 = 12;
+        let radius = maxx.min(maxy) * 0.035;
+        let centre = |i: u64| -> (f32, f32) {
+            if i == 0 {
+                return (maxx * 0.5, maxy * 0.5);
+            }
+            let h = crate::rng::splitmix64(i.wrapping_add(0xABCD));
+            ((h & 0xFFFF) as f32 / 65535.0 * maxx, ((h >> 16) & 0xFFFF) as f32 / 65535.0 * maxy)
+        };
+        self.creatures.reserve(n.saturating_sub(src_len));
+        let mut k = 0u64;
+        while self.creatures.len() < n {
+            let mut c = self.creatures[k as usize % src_len].clone();
+            c.id = self.next_id;
+            self.next_id += 1;
+            let (cxp, cyp) = centre(k % CLUMPS);
+            let h = crate::rng::splitmix64(k.wrapping_add(0x9E37_79B9_7F4A_7C15));
+            let jx = ((h & 0xFFFF) as f32 / 65535.0 * 2.0 - 1.0) * radius;
+            let jy = (((h >> 16) & 0xFFFF) as f32 / 65535.0 * 2.0 - 1.0) * radius;
+            c.pos.x = (cxp + jx).clamp(0.0, maxx);
+            c.pos.y = (cyp + jy).clamp(0.0, maxy);
+            self.creatures.push(c);
+            k += 1;
+        }
+    }
+
     pub fn population(&self) -> usize {
         self.creatures.len()
     }

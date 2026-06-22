@@ -17,7 +17,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use animata_sim::clock::WorldClock;
-use animata_sim::config::{COLS, ROWS};
+use animata_sim::config::{COLS, ROWS, VOX};
 use animata_sim::sim::{Sim, SimState};
 use animata_sim::sim_config::SimConfig;
 use animata_sim::terrain::{TerrainState, VoxelTerrain};
@@ -50,6 +50,9 @@ pub enum SimCommand {
     /// Full sim status at the worker's current tick (for the dev bridge `animata/status`). `col` is
     /// the camera-centre column whose live biomass to include.
     QueryStatus { col: (usize, usize), reply: Sender<Box<StatusReport>> },
+    /// DEV / RENDER-BENCH: inflate the population to `n` (clone the evolved multicellular bodies)
+    /// and PAUSE the clock — a pure render-load test isolated from the sim step.
+    DebugInflate { n: usize },
 }
 
 /// A full status read of the sim at the worker's current tick (dev bridge `animata/status`).
@@ -261,6 +264,14 @@ fn apply(
                     env_biomass: t.biomass_at(col.0.min(COLS - 1), col.1.min(ROWS - 1), tick),
                 };
                 let _ = reply.send(Box::new(report));
+            }
+        }
+        SimCommand::DebugInflate { n } => {
+            if let Some(w) = world {
+                let (maxx, maxy) = (COLS as f32 * VOX, ROWS as f32 * VOX);
+                w.sim.debug_inflate_to(n, maxx, maxy);
+                w.clock.paused = true; // freeze the sim: from here it's a pure render-load test
+                *view_dirty = true;
             }
         }
     }
