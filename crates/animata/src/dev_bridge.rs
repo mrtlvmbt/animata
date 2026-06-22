@@ -76,6 +76,9 @@ pub enum Cmd {
     Save { path: Option<String> },
     /// Load a world state from a file, replacing the current world (`path` omitted → default).
     Load { path: Option<String> },
+    /// DEV / RENDER-BENCH: inflate the population to `n` (clone the evolved multicellular bodies)
+    /// and pause the sim — isolates render cost. `n` omitted → 70000.
+    DebugInflate { n: usize },
 }
 
 /// A queued request: the command plus the channel to answer it on.
@@ -199,6 +202,7 @@ fn parse_cmd(method: &str, p: &Value) -> Result<Cmd, String> {
             yaw: f("yaw").map(|v| v as f32),
         }),
         "animata/reseed" => Ok(Cmd::Reseed { seed: u("seed") }),
+        "animata/debug_inflate" => Ok(Cmd::DebugInflate { n: u("n").unwrap_or(70_000) as usize }),
         "animata/set_timescale" => Ok(Cmd::SetClock {
             scale: f("scale").map(|v| v as f32),
             paused: b("paused"),

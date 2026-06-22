@@ -519,6 +519,16 @@ async fn main() {
     // fresh for input gating (the UI pass runs before world mouse input).
     let mut drawn = 0usize;
     let mut on_screen = 0usize;
+    // [PERF-MEASURE] frame-budget instrumentation. Silent unless `ANIMATA_PERF` is set in the env
+    // (timers are ~ns; only the every-60-frames stderr line is gated). `ANIMATA_PERF=1 cargo run ...`.
+    let dbg_perf = std::env::var("ANIMATA_PERF").is_ok();
+    let mut dbg_frame_n = 0u64;
+    let mut dbg_cr_ms_acc = 0.0f64;
+    let mut dbg_str_ms_acc = 0.0f64;
+    let mut dbg_str_ms_max = 0.0f64;
+    let mut dbg_dev_ms_max = 0.0f64;
+    let mut dbg_td_ms_acc = 0.0f64;
+    let mut dbg_egui_ms_acc = 0.0f64;
     // Fonts/style are installed on the first egui pass (egui keeps them for the context lifetime).
     let mut fonts_set = false;
     // Persistent HUD GPU resources (the minimap egui texture), held across frames.
@@ -1043,6 +1053,8 @@ async fn main() {
 
         // ---- Dev bridge: service queued commands on the main thread ----
         #[cfg(feature = "dev")]
+        {
+        let dbg_dev = std::time::Instant::now(); // [PERF-MEASURE] charge dev-command processing
         for req in dev_bridge::take(&bridge) {
             let dev_bridge::Req { cmd, reply } = req;
             match cmd {
@@ -1311,7 +1323,20 @@ async fn main() {
                     };
                     let _ = reply.send(resp);
                 }
+                dev_bridge::Cmd::DebugInflate { n } => {
+                    sim_handle.send(SimCommand::DebugInflate { n });
+                    // Pause on the MAIN side so the per-frame clock echo keeps the worker paused
+                    // (a worker-only pause is overwritten by the echo). Pure render-load from here.
+                    clock.paused = true;
+                    sim_handle.send(SimCommand::SetClock { scale: Some(clock.time_scale), paused: Some(true) });
+                    let _ = reply.send(serde_json::json!({ "ok": true, "inflated_to": n, "paused": true }));
+                }
             }
+        }
+        let ms = dbg_dev.elapsed().as_secs_f64() * 1000.0; // [PERF-MEASURE]
+        if ms > dbg_dev_ms_max {
+            dbg_dev_ms_max = ms;
+        }
         }
 
         // ---- Render ----
@@ -1335,7 +1360,13 @@ async fn main() {
             // No terrain yet (initial generation still running) ⇒ nothing to stream/draw;
             // the pass below just clears to sky and the progress bar shows over it.
             if let Some(terrain) = &terrain {
+                let dbg_ts = std::time::Instant::now(); // [PERF-MEASURE]
                 streamer.update(ctx, terrain, center, cam.zoom);
+                let ms = dbg_ts.elapsed().as_secs_f64() * 1000.0;
+                dbg_str_ms_acc += ms;
+                if ms > dbg_str_ms_max {
+                    dbg_str_ms_max = ms;
+                }
             }
             ctx.begin_pass(
                 Some(scene_rt.render_pass.raw_miniquad_id()),
@@ -1359,6 +1390,7 @@ async fn main() {
             // not-yet-ready tile shows coarse instead of flashing empty (no flicker).
             // Frustum-culled by AABB.
             let ready = &streamer.ready;
+            let dbg_td = std::time::Instant::now(); // [PERF-MEASURE] terrain draw-call submission
             let draw = |chunks: &[GpuChunk], drawn: &mut usize, ctx: &mut dyn RenderingBackend| {
                 for c in chunks {
                     if aabb_in_view(&vp, c.lo, c.hi) {
@@ -1400,6 +1432,7 @@ async fn main() {
                 }
             }
             ctx.end_render_pass();
+            dbg_td_ms_acc += dbg_td.elapsed().as_secs_f64() * 1000.0; // [PERF-MEASURE]
         }
 
         // Pass 2: blit the offscreen scene to the window (render targets are y-flipped).
@@ -1421,6 +1454,7 @@ async fn main() {
         // so we switch to BACTERIAL MATS: per-column density tinted by the colony's mean coloration
         // (dense colony → solid mat, sparse → faint film). Off-screen points are culled by projection.
         on_screen = 0; // reset the (loop-persistent) perf counter the GUI pass read this frame
+        let dbg_t_cr = std::time::Instant::now(); // [PERF-MEASURE]
         if let (Some(snap), Some(terrain)) = (snapshot.as_ref(), terrain.as_ref()) {
             let (sw, sh) = (screen_width(), screen_height());
             let px_per_m = sh / cam.zoom; // ortho: visible world-height = zoom
@@ -1499,6 +1533,26 @@ async fn main() {
                 }
             }
         }
+        // [PERF-MEASURE] report creature-block ms + on_screen + pop + fps every 60 frames.
+        dbg_cr_ms_acc += dbg_t_cr.elapsed().as_secs_f64() * 1000.0;
+        dbg_frame_n += 1;
+        if dbg_frame_n % 60 == 0 {
+            if dbg_perf {
+                let pop = snapshot.as_ref().map(|s| s.creatures.len()).unwrap_or(0);
+                eprintln!(
+                    "[perf] frame {:.1} ms | terrain-draw {:.2} | egui {:.2} | creature {:.2} | streamer-max {:.1} | dev-max {:.1} ms | chunks-drawn {} | on_screen {} | pop {} | zoom {:.0} | fps {}",
+                    1000.0 / get_fps().max(1) as f64,
+                    dbg_td_ms_acc / 60.0, dbg_egui_ms_acc / 60.0, dbg_cr_ms_acc / 60.0,
+                    dbg_str_ms_max, dbg_dev_ms_max, drawn, on_screen, pop, cam.zoom, get_fps()
+                );
+            }
+            dbg_cr_ms_acc = 0.0;
+            dbg_str_ms_acc = 0.0;
+            dbg_str_ms_max = 0.0;
+            dbg_dev_ms_max = 0.0;
+            dbg_td_ms_acc = 0.0;
+            dbg_egui_ms_acc = 0.0;
+        }
 
         // (The HUD/stats text is now the egui panels rendered at the start of the frame and
         // composited by `egui_macroquad::draw()` at the end; see the GUI pass above.)
@@ -1511,7 +1565,9 @@ async fn main() {
 
         // Composite the egui panels (built in the GUI pass at the frame's start) over the scene.
         // Its own render pass — drawn last so it sits on top, after creatures and the minimap.
+        let dbg_eg = std::time::Instant::now(); // [PERF-MEASURE]
         egui_macroquad::draw();
+        dbg_egui_ms_acc += dbg_eg.elapsed().as_secs_f64() * 1000.0;
 
         // Dev bridge: service deferred screenshots now the frame is FULLY drawn (incl. the egui HUD
         // just composited above). `window` → the whole window back-buffer with the HUD
