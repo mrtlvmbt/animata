@@ -23,13 +23,14 @@ fn metabolism() -> metabolism::Metabolism {
 #[test]
 fn each_pressure_touches_one_channel() {
     let mut rng = Rng::new(1);
-    let genome = Genome::founder(&mut rng); // no photo cells, thermal_pref set
+    let genome = Genome::founder(&mut rng); // autotroph-base: a photo founder, thermal_pref set
     let pheno = genome.develop();
 
-    // Climate → food_mult only (≠1 when temp far from pref), energy_add/metab identity.
+    // Climate → metab_mult only (raises the respiration cost off the thermal optimum); food/energy identity.
     let s = sample_with(Stratum::Surface, 0.0, 1.0, &genome, &pheno);
     let e = climate().eval(&s);
-    assert!(e.energy_add == 0.0 && e.metab_mult == 1.0);
+    assert!(e.food_mult == 1.0 && e.energy_add == 0.0);
+    assert!(e.metab_mult >= 1.0, "climate writes the metabolic channel");
 
     // Metabolism → metab_mult only; Air is dearer than Surface.
     let air = metabolism().eval(&sample_with(Stratum::Air, 0.0, 1.0, &genome, &pheno));
@@ -37,9 +38,9 @@ fn each_pressure_touches_one_channel() {
     assert!(air.metab_mult > surf.metab_mult);
     assert!(air.food_mult == 1.0 && air.energy_add == 0.0);
 
-    // Autotrophy → energy_add only; identity for a heterotroph (no photo cells).
+    // Autotrophy → energy_add only; the founder is now a PHOTOTROPH ⇒ positive photo income.
     let a = autotrophy().eval(&s);
-    assert_eq!(a.energy_add, 0.0);
+    assert!(a.energy_add > 0.0, "founder phototroph photosynthesises");
     assert!(a.food_mult == 1.0 && a.metab_mult == 1.0);
 }
 
@@ -53,10 +54,12 @@ fn compose_is_identity_preserving_bitexact() {
 
     let reg = PressureRegistry::default();
     let composed = reg.eval_all(&s);
-    // The composed channels must equal the individual contributors exactly.
-    assert_eq!(composed.food_mult, climate().eval(&s).food_mult);
+    // The composed channels equal the exact product/sum of their contributors (F4 bit-exactness).
+    // food_mult: no contributor in the autotroph-base default (aerobic is identity at oxygen 0) ⇒ 1.0.
+    assert_eq!(composed.food_mult, 1.0);
     assert_eq!(composed.energy_add, autotrophy().eval(&s).energy_add);
-    assert_eq!(composed.metab_mult, metabolism().eval(&s).metab_mult);
+    // metab_mult now has TWO multiplicative contributors: metabolism (stratum) × climate (thermal).
+    assert_eq!(composed.metab_mult, metabolism().eval(&s).metab_mult * climate().eval(&s).metab_mult);
 }
 
 /// The registry exposes its membership (extensibility surface).

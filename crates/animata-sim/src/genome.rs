@@ -53,6 +53,12 @@ const GENE_PREDATOR: usize = 5; // expressed ⇒ predatory/meat-digesting cell (
 const GENE_FLIGHT: usize = 6; // expressed ⇒ wing/lift cell — access to the AIR stratum (C3)
 const GENE_BURROW: usize = 7; // expressed ⇒ digging cell — access to the UNDERGROUND stratum (C3)
 const GENE_PHOTO: usize = 8; // expressed ⇒ photosynthetic cell — makes energy from light (C3)
+/// Founder photosynthesis bias (autotroph-base): a positive constant in the founder `grn_b[GENE_PHOTO]`
+/// so its single cell develops as a `photo` cell (the ancestral sedentary "plant cell"), not structural.
+/// `tanh(this) > SPECIALISE_THETA` (0.3) ⇒ photo wins the argmax; the divide gene stays 0 ⇒ one cell.
+/// A CONSTANT (no rng draw, like `oxygen_tolerance` founder) ⇒ the child RNG stream / spawn stays
+/// byte-identical; only the trajectory shifts from the new autotroph behaviour. Mutates away in children.
+const FOUNDER_PHOTO_BIAS: f32 = 1.0;
 const GENE_ADHESION: usize = 9; // how strongly the cell sticks to its own type (differential adhesion)
 /// Differential-adhesion sorting (PR-B). `GENE_ADHESION` is binned into `0..=ADH_Q` integer tiers at
 /// GRN exit (the one float read); the whole sort is then i32 ⇒ deterministic WITHIN a profile (it
@@ -251,9 +257,11 @@ impl Genome {
     /// Founder genome: empty GRN (develops to one cell) + random brain weights + random thermal
     /// preference + random coloration (deterministic from the threaded `rng`).
     pub fn founder(rng: &mut Rng) -> Self {
+        let mut grn_b = vec![0.0; G];
+        grn_b[GENE_PHOTO] = FOUNDER_PHOTO_BIAS; // ancestral photosynthetic "plant cell" (autotroph-base)
         Genome {
             grn_w: vec![0.0; G * G],
-            grn_b: vec![0.0; G],
+            grn_b,
             morph_w: vec![0.0; G * N_MORPH],
             diff_rate: vec![FOUNDER_DIFF; N_MORPH],
             decay_rate: vec![FOUNDER_DECAY; N_MORPH],
@@ -261,8 +269,9 @@ impl Genome {
             thermal_pref: rng.unit(),
             coloration: rng.unit(),
             toxin_resistance: rng.unit(),
-            // Founder SENSITIVE to O2 (tolerance 0) — the anoxic ancestor. A constant (no `rng` draw),
-            // so founders are byte-identical to the pre-feature sim; tolerance evolves up in `mutate`.
+            // Founder SENSITIVE to O2 (tolerance 0). A constant (no `rng` draw). NB autotroph-base
+            // retires O2-toxicity (OXYGEN_LETHALITY→0) — an all-photo start would self-poison otherwise;
+            // O2's role is now the aerobic energy source (Ф2), the monoculture brake is predation.
             oxygen_tolerance: 0.0,
             // Founder ANAEROBIC (no aerobic capacity) — constant, no rng draw; evolves up in `mutate`.
             aerobic_capacity: 0.0,

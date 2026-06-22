@@ -131,11 +131,6 @@ impl Creature {
         (SENSE_FLOOR + SENSE_GAIN * self.pheno.organ_power(2)).min(SENSE_CAP)
     }
 
-    /// Grazing throughput: a bigger body crops a little faster (sublinear, so size isn't free).
-    fn intake(&self) -> f32 {
-        EAT_RATE * (self.pheno.n_cells as f32).sqrt()
-    }
-
     /// Forward brain pass: inputs → tanh hidden → tanh outputs. Returns `(throttle∈[0,1],
     /// turn∈[-1,1])`. Plain matmul (ported shape from the archived `brain.rs`).
     fn think(&self, inputs: &[f32; N_INPUTS]) -> (f32, f32) {
@@ -779,10 +774,11 @@ impl Sim {
             };
             let eff = self.registry.eval_all(&sample);
             let food = if layer == Stratum::Surface {
-                // Surface feeds on the positioned S3 plant field; intake scales with body size, a
-                // carnivore digests plants poorly (efficiency = 1 − carnivory).
-                let taken = terrain.graze(cx, cy, c.intake() * TICK_LEN, tick);
-                taken * PLANT_BIOMASS_TO_ENERGY * (1.0 - c.pheno.carnivory())
+                // Autotroph-base (Phase 1): the free S3 grass no longer feeds. Primary production is now
+                // PHOTOSYNTHESIS alone (the autotrophy pressure's `energy_add`); a Surface heterotroph
+                // must EAT other creatures (the predation pass). The S3 biomass field stays in the
+                // terrain (render / future) but yields no energy here — no graze call, no depletion.
+                0.0
             } else {
                 // Non-surface strata: a fixed foraging capacity split among occupants (density-
                 // dependent → an empty stratum richly rewards colonisers, then self-limits).
@@ -999,6 +995,24 @@ impl Sim {
             temps.push(terrain.temperature_at(cx, cy));
         }
         pearson(&prefs, &temps)
+    }
+
+    /// Mean local temperature over the columns creatures occupy. In the autotroph-base world life is
+    /// LIGHT-gated (photosynthesis needs light, which peaks at the warm equator), so the population
+    /// concentrates in the warm/lit band — this metric reads that concentration (≫0.5 ⇒ warm-biased).
+    pub fn avg_occupied_temperature(&self, terrain: &VoxelTerrain) -> f32 {
+        if self.creatures.is_empty() {
+            return 0.0;
+        }
+        let s: f32 = self
+            .creatures
+            .iter()
+            .map(|c| {
+                let (cx, cy) = column_index(c.pos);
+                terrain.temperature_at(cx, cy)
+            })
+            .sum();
+        s / self.creatures.len() as f32
     }
 
     /// Toxic-adaptation metric: Pearson correlation between each creature's evolved
@@ -1273,9 +1287,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    7589643348835578897 // debug profile (re-pinned: terrain-gen base × movement rebalance)
+    6386103633512845205 // debug profile (re-pinned: autotroph-base — photo founders, no grass, drift≈0, O2-tox retired, climate→metab)
 } else {
-    10375473682301875586 // release profile (re-pinned: terrain-gen base × movement rebalance)
+    2932921516133839620 // release profile (re-pinned: autotroph-base — photo founders, no grass, drift≈0, O2-tox retired, climate→metab)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1285,7 +1299,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 2744380606710956587; // re-pinned: terrain-gen base × movement rebalance
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 15609532436604985031; // re-pinned: autotroph-base + climate→metab
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

@@ -140,7 +140,7 @@ pub const GRN_MUTATION_STD: f32 = 0.10;
 /// by developing effector cells (the thrust÷drag term in `speed()`). Predation no longer leans on a
 /// high drift floor: a predator with effectors still out-swims near-stationary prey via that term, so
 /// the floor can drop to ≈0 on land. Calibrated against the acceptance corridors.
-pub const DRIFT_GROUND: f32 = 0.10; // Surface + Underground — friction; sits almost still
+pub const DRIFT_GROUND: f32 = 0.01; // Surface + Underground — autotroph-base: sessile producers SIT
 pub const DRIFT_WATER: f32 = 0.35; // buoyancy / currents
 pub const DRIFT_AIR: f32 = 0.40; // wind / convection
 /// Locomotor thrust coupling: speed gains `CREATURE_SPEED · LOCO_GAIN · thrust`, where
@@ -205,7 +205,10 @@ pub const OXYGEN_DECAY_RATE: f32 = 0.02;
 pub const OXYGEN_PER_PHOTO: f32 = 0.05;
 /// Per-tick death hazard per unit of local O2 above a creature's `oxygen_tolerance` (the
 /// `OxygenToxicity` pressure, mirroring `TOXIN_LETHALITY`). Tunable at the spike.
-pub const OXYGEN_LETHALITY: f32 = 0.05;
+/// **Autotroph-base: RETIRED to 0** — when every founder is a photosynthesiser the all-photo start
+/// floods its own columns with O2 and self-poisons to extinction (Ф1 was tuned for SPARSE autotrophs).
+/// O2's role is now the aerobic energy source (Ф2); the monoculture brake is predation, not O2.
+pub const OXYGEN_LETHALITY: f32 = 0.0;
 /// Aerobic respiration energy yield (gas cycle Phase 2): `energy_add = oxygen · aerobic_capacity ·
 /// GAIN · TICK_LEN`, and the same O2 is drawn DOWN from the column (consumed). The windfall (~15× the
 /// anaerobic yield in reality) that pays for motility/predation — the rebalance toward animals. Set
