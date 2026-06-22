@@ -207,18 +207,18 @@ fn spike_gate_b_gradient_segregation_beats_random_cohesion() {
     );
 }
 
-/// The continuity keystone: an empty-GRN founder develops to EXACTLY one structural cell —
-/// biomass 1, no specialisation — i.e. the C0 organism, by construction.
+/// The continuity keystone (autotroph-base): an empty-GRN founder — save the single `FOUNDER_PHOTO_BIAS`
+/// constant — develops to EXACTLY one PHOTO cell (a sedentary ancestral "plant cell"): biomass 1, the
+/// only specialisation photosynthesis, no division. The divide gene stays `tanh(0)=0 < DIVIDE_THETA`.
 #[test]
-fn founder_develops_to_one_structural_cell() {
+fn founder_develops_to_one_photo_cell() {
     let mut rng = Rng::new(1);
     let g = Genome::founder(&mut rng);
     let p = g.develop();
-    assert_eq!(p, Phenotype { n_cells: 1, structural: 1, ..Default::default() });
-    assert_eq!(p.complexity(), 0);
-    // C0 organ anchor (determinism-critical): a single cell has NO coherent organ, so organ_power
-    // reduces to the raw count and the founder's stats are unchanged by morphogenesis.
-    assert_eq!(p.organ, [0; 7], "a single-cell founder must carry no organ");
+    assert_eq!(p, Phenotype { n_cells: 1, photo: 1, organ: [0, 0, 0, 0, 0, 0, 1], ..Default::default() });
+    assert_eq!(p.complexity(), 0); // one cell ⇒ no multicellular complexity
+    // A single photo cell registers as a size-1 photo organ but carries NO effector organ, so the
+    // effector organ_power is still the bare (zero) count — body-driven stats unchanged by morphogenesis.
     assert_eq!(p.organ_power(0), 0.0, "founder effector power must be the bare count (no organ bonus)");
     // PR-D1: a single cell has no spatial axis to speak of.
     assert_eq!(p.axis_order, 0, "a single-cell founder must have no axial order");
