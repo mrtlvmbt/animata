@@ -104,8 +104,10 @@ impl GpuCtx {
         })
     }
 
-    /// Block until the GPU is idle, then read `len` elements of type `T` back from `src`.
-    pub fn read_back<T: bytemuck::Pod>(&self, src: &wgpu::Buffer, len: usize) -> Vec<T> {
+    /// Block until the GPU is idle, then read `len` elements of type `T` back from `src`. Returns
+    /// `None` on a map/channel failure (a driver error) rather than panicking — the caller treats
+    /// that as "GPU declined" and falls back to the CPU path (the documented fallback contract).
+    pub fn read_back<T: bytemuck::Pod>(&self, src: &wgpu::Buffer, len: usize) -> Option<Vec<T>> {
         let bytes = (len * std::mem::size_of::<T>()) as u64;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback-staging"),
@@ -122,10 +124,10 @@ impl GpuCtx {
             let _ = tx.send(r);
         });
         self.device.poll(wgpu::Maintain::Wait);
-        rx.recv().expect("map channel").expect("map failed");
+        rx.recv().ok()?.ok()?; // channel dropped, or the map itself failed → fall back to CPU
         let out: Vec<T> = bytemuck::cast_slice(&slice.get_mapped_range()).to_vec();
         staging.unmap();
-        out
+        Some(out)
     }
 }
 
@@ -133,7 +135,7 @@ impl GpuCtx {
 /// and read it back. Exercises upload → bind group → dispatch → readback end-to-end. Used by the
 /// scaffold test before the real erosion kernels are trusted.
 #[cfg(test)]
-pub fn round_trip_scale(ctx: &GpuCtx, data: &[f32], factor: f32) -> Vec<f32> {
+pub fn round_trip_scale(ctx: &GpuCtx, data: &[f32], factor: f32) -> Option<Vec<f32>> {
     const SRC: &str = r#"
 @group(0) @binding(0) var<storage, read_write> buf: array<f32>;
 @group(0) @binding(1) var<uniform> factor: f32;
@@ -190,7 +192,7 @@ mod tests {
             return;
         };
         let data: Vec<f32> = (0..1000).map(|i| i as f32).collect();
-        let out = round_trip_scale(&ctx, &data, 3.0);
+        let out = round_trip_scale(&ctx, &data, 3.0).expect("gpu readback");
         assert_eq!(out.len(), data.len());
         for (i, (&o, &d)) in out.iter().zip(&data).enumerate() {
             assert!((o - d * 3.0).abs() < 1e-3, "mismatch at {i}: {o} != {}", d * 3.0);

@@ -230,12 +230,15 @@ pub fn erode_gpu(seed: u64, elev: &mut [f32]) -> bool {
         ctx.queue.submit(Some(enc.finish()));
     }
 
-    // One download. Then surface the overflow guard (the harness asserts it stayed clear).
-    let out: Vec<f32> = ctx.read_back(&elev_buf, n);
+    // One download. On a readback failure (driver error), leave `elev` untouched and decline so the
+    // caller re-runs the CPU path on the original field (the documented fallback — never panic).
+    let Some(out) = ctx.read_back::<f32>(&elev_buf, n) else { return false };
     elev.copy_from_slice(&out);
-    let overflow: Vec<u32> = ctx.read_back(&overflow_buf, 1);
-    if overflow[0] != 0 {
-        eprintln!("WARNING: gpu erosion fixed-point edit buffer neared i32 saturation (raise SCALE)");
+    // Surface the overflow guard (the harness asserts it stayed clear); a failed read is non-fatal.
+    if let Some(overflow) = ctx.read_back::<u32>(&overflow_buf, 1) {
+        if overflow[0] != 0 {
+            eprintln!("WARNING: gpu erosion fixed-point edit buffer neared i32 saturation (raise SCALE)");
+        }
     }
     true
 }
