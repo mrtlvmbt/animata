@@ -411,6 +411,15 @@ impl DebugView {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    // EXPERIMENTAL (feature `gpu`): turn on the wgpu erosion accelerator before the FIRST worldgen
+    // (`spawn_gen` below) so every gen/reseed in this run is GPU-accelerated. The toggle is a
+    // process-global flag read by `erosion::erode`; a GPU-generated world is NOT bit-identical to the
+    // CPU reference, so it must not be kept as a save (load re-derives geometry from the seed).
+    #[cfg(feature = "gpu")]
+    {
+        animata_sim::gpu::set_gpu_erosion(true);
+        eprintln!("[gpu] EXPERIMENTAL GPU erosion ENABLED — worldgen accelerated; do NOT keep saves of GPU worlds");
+    }
     let mut cam = IsoCam::new();
     let mut seed: u64 = 1;
     // The world is generated on a background thread so the first frame (and every regen)

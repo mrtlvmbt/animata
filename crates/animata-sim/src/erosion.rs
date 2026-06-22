@@ -14,27 +14,29 @@
 use crate::config::*;
 
 // ---- Hydraulic droplet parameters (tuned for the [0,1] elevation range) ----
+// NOTE: many are `pub(crate)` so the opt-in GPU erosion path (`crate::gpu`, feature `gpu`) reuses
+// the EXACT same constants — the GPU kernel must not drift from this CPU reference.
 /// Droplets simulated, as a fraction of the column count — denser = more carved.
-const DROPLET_FRACTION: f32 = 0.6;
-const MAX_LIFETIME: u32 = 40;
+pub(crate) const DROPLET_FRACTION: f32 = 0.6;
+pub(crate) const MAX_LIFETIME: u32 = 40;
 /// Blend between the previous direction and the downhill gradient (0 = pure gradient).
-const INERTIA: f32 = 0.05;
-const SEDIMENT_CAPACITY: f32 = 12.0;
-const MIN_CAPACITY: f32 = 0.005;
-const ERODE_SPEED: f32 = 0.35;
-const DEPOSIT_SPEED: f32 = 0.30;
-const EVAPORATE: f32 = 0.02;
-const GRAVITY: f32 = 6.0;
-const START_WATER: f32 = 1.0;
-const START_SPEED: f32 = 1.0;
+pub(crate) const INERTIA: f32 = 0.05;
+pub(crate) const SEDIMENT_CAPACITY: f32 = 12.0;
+pub(crate) const MIN_CAPACITY: f32 = 0.005;
+pub(crate) const ERODE_SPEED: f32 = 0.35;
+pub(crate) const DEPOSIT_SPEED: f32 = 0.30;
+pub(crate) const EVAPORATE: f32 = 0.02;
+pub(crate) const GRAVITY: f32 = 6.0;
+pub(crate) const START_WATER: f32 = 1.0;
+pub(crate) const START_SPEED: f32 = 1.0;
 /// Radius (columns) of the deposit/erode brush — spreads a droplet's effect so it carves
 /// smooth channels instead of single-cell pits.
-const EROSION_RADIUS: i32 = 3;
+pub(crate) const EROSION_RADIUS: i32 = 3;
 /// Per-droplet RNG salt (folded with the global seed + droplet index). Each droplet is
 /// seeded INDEPENDENTLY by its global index, not drawn from one shared stream — so the
 /// result is identical regardless of how many threads/groups run, and droplets can be
 /// simulated in parallel. (The bit pattern is the old single-stream XOR constant, reused.)
-const SALT_EROSION: u64 = 0xE051_0051_0051_0051;
+pub(crate) const SALT_EROSION: u64 = 0xE051_0051_0051_0051;
 /// Fixed number of parallel droplet groups. CONSTANT (not `current_num_threads()`) so the
 /// merge order — and thus the bit-exact result — does not depend on the host's core count.
 const DROPLET_GROUPS: usize = 16;
@@ -43,13 +45,13 @@ const DROPLET_GROUPS: usize = 16;
 /// still compounds. Small enough that channel cells don't over-erode (many droplets in ONE
 /// snapshot each taking `min(amount, elev[e])` would otherwise stack into a deep pit → knife
 /// cliff); large enough to keep the groups busy. Edit-buffer memory is trivial at this size.
-const DROPLET_BATCH: u64 = 1 << 13;
+pub(crate) const DROPLET_BATCH: u64 = 1 << 13;
 
 // ---- Thermal parameters ----
-const THERMAL_PASSES: u32 = 8;
+pub(crate) const THERMAL_PASSES: u32 = 8;
 /// Max height difference (elevation units) allowed to a neighbour before material slumps.
-const TALUS: f32 = 0.012;
-const THERMAL_RATE: f32 = 0.5;
+pub(crate) const TALUS: f32 = 0.012;
+pub(crate) const THERMAL_RATE: f32 = 0.5;
 
 use crate::rng::{seed_fold, Rng};
 use rayon::prelude::*;
@@ -72,6 +74,14 @@ fn height_grad(elev: &[f32], px: f32, py: f32) -> (f32, f32, f32) {
 /// Run hydraulic then thermal erosion over `elev` in place. Returns nothing; rivers are
 /// derived separately (flow accumulation) by the caller.
 pub fn erode(seed: u64, elev: &mut [f32], progress: &dyn Fn(f32)) {
+    // OPT-IN GPU accelerator (feature `gpu` + runtime toggle). Off by default and on every
+    // golden/headless/save-path caller, so the CPU path below is byte-identical to before. The GPU
+    // path runs BOTH erosion phases + the final clamp itself; on success we're done.
+    #[cfg(feature = "gpu")]
+    if crate::gpu::gpu_erosion_enabled() && crate::gpu::erode_gpu(seed, elev) {
+        progress(1.0);
+        return;
+    }
     // Hydraulic dominates the runtime; give it most of the [0,1] band, thermal the tail.
     hydraulic(seed, elev, &|f| progress(f * 0.9));
     thermal(elev, &|f| progress(0.9 + f * 0.1));

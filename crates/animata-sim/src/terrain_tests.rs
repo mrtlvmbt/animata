@@ -284,6 +284,172 @@
         eprintln!("\n{report}");
     }
 
+    /// GPU erosion accelerator (feature `gpu`) vs the CPU reference: build the pre-erosion field
+    /// once, erode it both ways, and report timing + geomorphic divergence. The PRIMARY pass gate
+    /// is the terrain invariants on a fully GPU-eroded world (mountains a minority, water balance);
+    /// the Δ metrics are secondary (GPU is geomorphically equivalent, not bit-identical). Run:
+    /// `cargo test -p animata-sim --release --features gpu -- --ignored --nocapture gpu_erosion_vs_cpu`
+    #[cfg(feature = "gpu")]
+    #[test]
+    #[ignore]
+    fn gpu_erosion_vs_cpu() {
+        if crate::gpu::ctx().is_none() {
+            eprintln!("no GPU adapter — skipping gpu_erosion_vs_cpu");
+            return;
+        }
+        let seed = 1u64;
+        let n = COLS * ROWS;
+
+        // Pre-erosion surface (tectonics + elevation + LEM), identical to both backends.
+        let tect = TectonicField::generate(seed);
+        let mut base = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                base[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        crate::lem::refine(&mut base, tect.uplift_field());
+
+        // CPU erosion (reference).
+        let mut cpu = base.clone();
+        let t = std::time::Instant::now();
+        crate::erosion::erode(seed, &mut cpu, &|_| {});
+        let cpu_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        // GPU erosion (toggle the process-level flag just for this call).
+        let mut gpu = base.clone();
+        crate::gpu::set_gpu_erosion(true);
+        let t = std::time::Instant::now();
+        crate::erosion::erode(seed, &mut gpu, &|_| {});
+        let gpu_ms = t.elapsed().as_secs_f64() * 1000.0;
+        crate::gpu::set_gpu_erosion(false);
+
+        // Geomorphic divergence: max/mean |Δelev|, 20-bin altitude histogram L1, biome agreement.
+        let (mut maxd, mut sumd) = (0.0f32, 0.0f64);
+        let (mut hc, mut hg) = ([0u64; 20], [0u64; 20]);
+        let (mut agree, mut total) = (0u64, 0u64);
+        for i in 0..n {
+            let d = (cpu[i] - gpu[i]).abs();
+            maxd = maxd.max(d);
+            sumd += d as f64;
+            let bin = |h: f32| ((h.clamp(0.0, 1.0) * 20.0) as usize).min(19);
+            hc[bin(cpu[i])] += 1;
+            hg[bin(gpu[i])] += 1;
+            let (x, y) = (i % COLS, i / COLS);
+            let bc = classify(seed, x, y, cpu[i]).1.id();
+            let bgid = classify(seed, x, y, gpu[i]).1.id();
+            if bc == bgid {
+                agree += 1;
+            }
+            total += 1;
+        }
+        let meand = sumd / n as f64;
+        let hist_l1: f64 = (0..20)
+            .map(|k| (hc[k] as f64 / n as f64 - hg[k] as f64 / n as f64).abs())
+            .sum::<f64>()
+            / 2.0; // total-variation distance ∈ [0,1]
+        let biome_agree = agree as f64 / total as f64 * 100.0;
+        let speedup = cpu_ms / gpu_ms.max(1e-6);
+
+        // PRIMARY GATE: full GPU-eroded world must pass the terrain invariants.
+        crate::gpu::set_gpu_erosion(true);
+        let world = VoxelTerrain::new(seed);
+        crate::gpu::set_gpu_erosion(false);
+        let (mut land, mut high, mut water) = (0u64, 0u64, 0u64);
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                if world.is_water(x, y) {
+                    water += 1;
+                    continue;
+                }
+                land += 1;
+                if matches!(world.biome_at(x, y), BiomeKind::Mountain | BiomeKind::Snow) {
+                    high += 1;
+                }
+            }
+        }
+        let mtn_frac = high as f64 / land.max(1) as f64;
+        let water_pct = water as f64 / n as f64 * 100.0;
+
+        let report = format!(
+            "=== gpu erosion vs cpu (MAP_SCALE={MAP_SCALE}, {COLS}x{ROWS}, seed {seed}) ===\n\
+             cpu erode       {cpu_ms:8.1} ms\n\
+             gpu erode       {gpu_ms:8.1} ms\n\
+             speedup         {speedup:8.2}x\n\
+             --- geomorphic divergence (secondary) ---\n\
+             max |Δelev|     {maxd:8.4}\n\
+             mean |Δelev|    {meand:8.5}\n\
+             altitude TV-dist{hist_l1:8.4}   (0=identical distribution)\n\
+             biome agreement {biome_agree:7.2}%\n\
+             --- PRIMARY GATE: invariants on GPU-eroded world ---\n\
+             mountain+snow   {:7.2}% of land   (must be < 35%)\n\
+             water           {water_pct:7.2}% of map   (must be 10..85%)",
+            mtn_frac * 100.0,
+        );
+        let _ = std::fs::write("/tmp/animata_gpu_erosion.txt", &report);
+        eprintln!("\n{report}");
+
+        assert!(mtn_frac < 0.35, "GPU world: mountains dominate ({:.1}%)", mtn_frac * 100.0);
+        assert!((10.0..85.0).contains(&water_pct), "GPU world: water balance off ({water_pct:.1}%)");
+        assert!(biome_agree > 90.0, "GPU vs CPU biome agreement too low ({biome_agree:.1}%)");
+    }
+
+    /// Sub-phase cost of LEM + hydrology — the serial bottlenecks the GPU pilot left on the CPU.
+    /// Isolates `priority_flood` (the shared serial heap) from the rest so we know whether to
+    /// attack the flood, the incision sweep, or the per-cell-parallel D∞/accumulation.
+    /// Run: `cargo test -p animata-sim --release lem_hydro_subphase_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn lem_hydro_subphase_cost() {
+        let seed = 1u64;
+        let n = COLS * ROWS;
+        let tect = TectonicField::generate(seed);
+        let mut pre = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                pre[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+
+        // priority_flood standalone (LEM calls it STEPS/ROUTE_EVERY = 24/6 = 4 times).
+        let t = std::time::Instant::now();
+        let _ = crate::hydrology::priority_flood(&pre);
+        let flood_one = t.elapsed().as_secs_f64() * 1000.0;
+
+        let mut lemf = pre.clone();
+        let t = std::time::Instant::now();
+        crate::lem::refine(&mut lemf, tect.uplift_field());
+        let lem_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let lem_flood = flood_one * 4.0; // ~4 routing calls; elev drifts a little between them
+        let lem_rest = lem_ms - lem_flood; // 24× (uplift∥ + incision-serial + diffusion∥)
+
+        // Erode, then time hydrology and its flood separately.
+        let mut elev = lemf.clone();
+        crate::erosion::erode(seed, &mut elev, &|_| {});
+        let t = std::time::Instant::now();
+        let _ = crate::hydrology::priority_flood(&elev);
+        let flood_post = t.elapsed().as_secs_f64() * 1000.0;
+        let t = std::time::Instant::now();
+        let _ = crate::hydrology::compute(&elev, SEA_FRACTION);
+        let hydro_ms = t.elapsed().as_secs_f64() * 1000.0;
+        let hydro_rest = hydro_ms - flood_post; // ocean-flood + D∞ + accumulation + classify + drop
+
+        let report = format!(
+            "=== LEM + hydrology sub-phase cost (MAP_SCALE={MAP_SCALE}, {COLS}x{ROWS}, seed {seed}) ===\n\
+             priority_flood (1 call)   {flood_one:8.1} ms   [serial heap — the shared core]\n\
+             --- LEM (refine, {lem_ms:.0} ms total) ---\n\
+             flood ×4 (est)            {lem_flood:8.1} ms\n\
+             rest (incision+diff+uplift){lem_rest:8.1} ms   [24 steps; incision sweep is serial]\n\
+             --- hydrology (compute, {hydro_ms:.0} ms total) ---\n\
+             priority_flood ×1         {flood_post:8.1} ms\n\
+             rest (ocean+Dinf+accum+..){hydro_rest:8.1} ms   [D∞ is per-cell ⇒ parallelisable]",
+        );
+        let _ = std::fs::write("/tmp/animata_lem_hydro.txt", &report);
+        eprintln!("\n{report}");
+    }
+
     /// Climate must give the giant map real biome DIVERSITY: several lowland biomes
     /// present (temperature × moisture bands), none absurdly dominant. Prints the mix.
     #[test]

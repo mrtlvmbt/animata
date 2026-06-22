@@ -24,3 +24,16 @@ ron = "0.8"
 # overlay) — RON text would be many× larger and slow. Pure data path; determinism is verified by a
 # state_checksum round-trip test, not by the format.
 bincode = "1.3"
+
+# ---- GPU worldgen accelerator (OPT-IN, feature `gpu`, default OFF) ----
+# wgpu compute path for the erosion phases. NEVER part of the deterministic golden/CI build: the
+# CPU path stays the reference, and these deps are absent unless `--features gpu` is set. See
+# `src/gpu/`. `pollster` blocks on wgpu's async device init; `bytemuck` casts the f32/i32 buffers.
+wgpu = { version = "22", optional = true }
+pollster = { version = "0.3", optional = true }
+bytemuck = { version = "1", optional = true, features = ["derive"] }
+
+[features]
+# Build the GPU erosion accelerator. Pulls in wgpu; only the opt-in benchmark / experimental
+# in-app toggle ever activates the GPU code path at runtime.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]

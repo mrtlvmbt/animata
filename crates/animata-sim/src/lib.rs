@@ -10,6 +10,8 @@ pub mod clock;
 pub mod config;
 pub mod erosion;
 pub mod genome;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod grid;
 pub mod hydrology;
 pub mod lem;

@@ -86,6 +86,8 @@ pub fn lod_hyst(d: i32, cur: Option<u32>) -> u32 {
 }
 
 type ChunkMap = std::collections::HashMap<(i32, i32), LoadedChunk>;
+/// One built chunk's meshes: (opaque batches, water batches) — the result of `build_chunk_mesh`.
+type ChunkMesh = (Vec<Batch>, Vec<Batch>);
 
 pub struct Streamer {
     pub detail: ChunkMap, // per-chunk, in the detail super-tiles
@@ -170,7 +172,7 @@ impl Streamer {
             // Build this frame's budgeted chunk meshes in PARALLEL (pure CPU reads of the
             // terrain), then free/upload/insert serially — only the GL calls touch the context,
             // which must stay on the main thread. `collect` preserves the distance-sorted order.
-            let built: Vec<(i32, i32, u32, (Vec<Batch>, Vec<Batch>))> = todo
+            let built: Vec<(i32, i32, u32, ChunkMesh)> = todo
                 .iter()
                 .take(BUILD_BUDGET)
                 .map(|&(_, cx, cy, lod)| (cx, cy, lod))
@@ -215,7 +217,7 @@ impl Streamer {
         // is the parallel WALL-CLOCK of the build phase — what an off-thread mesher shaves off
         // the main loop.
         let tb = std::time::Instant::now();
-        let cbuilt: Vec<(i32, i32, (Vec<Batch>, Vec<Batch>))> = ctodo
+        let cbuilt: Vec<(i32, i32, ChunkMesh)> = ctodo
             .iter()
             .take(COARSE_BUDGET)
             .map(|&(_, sx, sy)| (sx, sy))
