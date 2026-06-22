@@ -18,7 +18,39 @@ use glam::{vec2, Vec2};
 use rayon::prelude::*;
 
 use crate::config::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::Instant;
+
+// --- Predator-skip gate (perf): a non-predator with no carnivore within reach can skip the full
+// threat ring-scan in the decide phase — the dominant per-tick cost. The gate is a CONSERVATIVE
+// over-approximation (a per-cell predator count summed over a superset of the scan's cells), so it
+// is BYTE-IDENTICAL to running the scan (sum 0 ⟹ the scan would return `None`). The flag and the
+// hit-rate counters are profiling-only: read once, never per-tick, NEVER folded into the checksum
+// or the trajectory. `ANIMATA_PRED_SKIP=0` reproduces the pre-gate full scan exactly (A/B baseline).
+fn pred_skip_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("ANIMATA_PRED_SKIP").map(|v| v != "0").unwrap_or(true))
+}
+// Hit-rate accounting is itself opt-in (`ANIMATA_PRED_SKIP_STATS=1`) so the contended atomics never
+// touch a normal run / the clean A/B timing run — only the dedicated rate-measuring run pays them.
+fn pred_skip_stats_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| std::env::var("ANIMATA_PRED_SKIP_STATS").map(|v| v == "1").unwrap_or(false))
+}
+static PRED_DECIDE_TOTAL: AtomicU64 = AtomicU64::new(0);
+static PRED_SKIPPED: AtomicU64 = AtomicU64::new(0);
+fn record_pred_skip(run_full: bool) {
+    PRED_DECIDE_TOTAL.fetch_add(1, Ordering::Relaxed);
+    if !run_full {
+        PRED_SKIPPED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+/// Profiling-only: `(creatures decided, threat-scans skipped)` since process start. `(0, 0)` unless
+/// `ANIMATA_PRED_SKIP_STATS=1`. Not simulation state — never enters the checksum.
+pub fn pred_skip_stats() -> (u64, u64) {
+    (PRED_DECIDE_TOTAL.load(Ordering::Relaxed), PRED_SKIPPED.load(Ordering::Relaxed))
+}
 
 use crate::genome::{Genome, GenomeV2, Phenotype, TrophicNiche};
 use crate::grid::SpatialGrid;
@@ -641,6 +673,24 @@ impl Sim {
         let t_grid = Instant::now();
         self.grid.rebuild(&pos, maxx, maxy, GRID_CELL);
         self.profiler.record(Span::GridRebuild, t_grid.elapsed());
+        // Carnivore-body occupancy per grid cell (parallel to `grid.cells`), built from the SAME
+        // snapshot. Lets a non-predator skip the threat ring-scan when no carnivore body is within
+        // reach (the gate in the decide closure). The count condition (`carn > CARNIVORE_THRESHOLD`)
+        // MIRRORS the threat predicate `ok_b` EXACTLY — and `ok_b`, like this count, is independent of
+        // `feat.predation` (threats are sensed even when predation resolves nothing). So the gate is
+        // byte-identical in BOTH feature configs. Built whenever the gate is engaged (`pred_skip`);
+        // when disabled the all-zero vec is never consulted (the gate short-circuits on `!pred_skip`).
+        let pred_skip = pred_skip_enabled();
+        let stats = pred_skip_stats_enabled();
+        let mut pred_count = vec![0u32; self.grid.num_cells()];
+        if pred_skip {
+            for i in 0..n {
+                if carn[i] > CARNIVORE_THRESHOLD {
+                    pred_count[self.grid.cell_index(pos[i])] += 1;
+                }
+            }
+        }
+        let pred_count = &pred_count;
         // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
         // This phase is READ-ONLY (snapshots + the rebuilt grid + the terrain getters), so it runs
         // in parallel across cores. `par_iter().map().collect()` writes each `decisions[i]` from an
@@ -675,13 +725,28 @@ impl Sim {
                 // prey/threats farther AND feels the food gradient farther (inside `sense`).
                 let c = &this.creatures[i];
                 let reach = SENSE_RANGE * c.sense_mult();
-                let (prey, threat) = this.grid.nearest2_within(
-                    &pos,
-                    pos[i],
-                    reach,
-                    |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),
-                    |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm && strata[j] == self_layer,
-                );
+                // Threat-scan skip gate (perf, byte-identical). A non-predator's prey predicate is
+                // always false (`predator && …`), so for it the scan only ever yields a threat — and a
+                // non-predator with NO carnivore within reach has no threat. `sum_in_radius` sums the
+                // predator count over a SUPERSET of the scan's cells; sum 0 ⟹ the scan returns
+                // `(None, None)`, so we skip it. Predators (search prey) and the disabled-gate baseline
+                // always run the unchanged scan verbatim — same cell order, same `d2 < bd` tie-break.
+                let run_full =
+                    predator || !pred_skip || this.grid.sum_in_radius(pred_count, pos[i], reach) > 0;
+                if stats {
+                    record_pred_skip(run_full);
+                }
+                let (prey, threat) = if run_full {
+                    this.grid.nearest2_within(
+                        &pos,
+                        pos[i],
+                        reach,
+                        |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),
+                        |j| j != i && carn[j] > CARNIVORE_THRESHOLD && bm[j] >= self_bm && strata[j] == self_layer,
+                    )
+                } else {
+                    (None, None)
+                };
                 let prey_rel = prey.map(|j| rel(pos[i], c.heading, pos[j], reach));
                 let threat_rel = threat.map(|j| rel(pos[i], c.heading, pos[j], reach));
                 let inputs = this.sense(c, terrain_ref, tick, prey_rel, threat_rel);

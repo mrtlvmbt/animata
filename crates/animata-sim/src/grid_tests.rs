@@ -36,6 +36,36 @@ fn nearest_within_matches_brute_force() {
     }
 }
 
+// The predator-skip gate's safety invariant: `sum_in_radius` over a per-cell count is a conservative
+// SUPERSET of what `nearest2_within` can find, so it MUST never return 0 when the real threat scan
+// would return `Some`. A false 0 would let a creature wrongly skip a real threat → broken determinism.
+#[test]
+fn sum_in_radius_never_false_skips_a_real_match() {
+    let mut rng = Rng::new(9);
+    let pts: Vec<Vec2> = (0..500).map(|_| vec2(rng.unit() * 200.0, rng.unit() * 200.0)).collect();
+    let mut g = SpatialGrid::default();
+    g.rebuild(&pts, 200.0, 200.0, 12.0);
+    // A "predator" subset, and the per-cell count the sim would build from it (same `cell_index`).
+    let is_pred: Vec<bool> = (0..pts.len()).map(|i| i % 7 == 0).collect();
+    let mut counts = vec![0u32; g.num_cells()];
+    for (i, &p) in pts.iter().enumerate() {
+        if is_pred[i] {
+            counts[g.cell_index(p)] += 1;
+        }
+    }
+    for _ in 0..400 {
+        let from = vec2(rng.unit() * 200.0, rng.unit() * 200.0);
+        let r = rng.unit() * 60.0;
+        // The real scan's threat result (ok_b = "is a predator").
+        let (_, threat) = g.nearest2_within(&pts, from, r, |_| false, |i| is_pred[i]);
+        let sum = g.sum_in_radius(&counts, from, r);
+        // The gate would skip iff sum == 0; that is allowed ONLY when the real scan found nothing.
+        if threat.is_some() {
+            assert!(sum > 0, "false skip: scan found {threat:?} within {r} but sum_in_radius == 0");
+        }
+    }
+}
+
 #[test]
 fn nearest2_respects_both_predicates() {
     let pts = vec![vec2(0.0, 0.0), vec2(5.0, 0.0), vec2(10.0, 0.0), vec2(50.0, 0.0)];
