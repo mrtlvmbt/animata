@@ -173,7 +173,7 @@ impl Creature {
             for (i, &iv) in inputs.iter().enumerate() {
                 sum += iv * w[h * N_INPUTS + i];
             }
-            *hv = sum.tanh();
+            *hv = crate::fastmath::tanh(sum);
         }
         let base = N_INPUTS * N_HIDDEN;
         let mut out = [0.0f32; N_OUTPUTS];
@@ -182,7 +182,7 @@ impl Creature {
             for (h, &hv) in hidden.iter().enumerate() {
                 sum += hv * w[base + o * N_HIDDEN + h];
             }
-            *ov = sum.tanh();
+            *ov = crate::fastmath::tanh(sum);
         }
         ((out[0] + 1.0) * 0.5, out[1])
     }
@@ -1559,9 +1559,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    6386103633512845205 // debug profile (re-pinned: autotroph-base — photo founders, no grass, drift≈0, O2-tox retired, climate→metab)
+    4439464939350888674 // debug profile (re-pinned: fast-approx brain tanh — fastmath::tanh)
 } else {
-    2932921516133839620 // release profile (re-pinned: autotroph-base — photo founders, no grass, drift≈0, O2-tox retired, climate→metab)
+    8919928124538625473 // release profile (re-pinned: fast-approx brain tanh — fastmath::tanh)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1571,7 +1571,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 235398328335312260; // re-pinned: parallel-apply reads start-of-tick O2
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 5382418513030608869; // re-pinned: fast-approx brain tanh
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]
