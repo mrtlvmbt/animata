@@ -11,7 +11,7 @@
 //! Usage: `cargo run -p animata-sim --bin headless [--release] -- [seed] [ticks] [--metrics out.csv] [--profile]`
 
 use animata_sim::metrics::{MetricRegistry, SimView};
-use animata_sim::sim::{state_checksum, Sim};
+use animata_sim::sim::{pred_skip_stats, state_checksum, Sim};
 use animata_sim::terrain::VoxelTerrain;
 
 fn main() {
@@ -52,6 +52,13 @@ fn main() {
             Ok(()) => println!("  metrics      {} samples → {path}", reg.len()),
             Err(e) => eprintln!("  metrics write failed ({path}): {e}"),
         }
+    }
+
+    // Predator-skip hit-rate (only populated with ANIMATA_PRED_SKIP_STATS=1) — fraction of decide
+    // threat-scans skipped by the perf gate. Profiling-only; not simulation state.
+    let (decided, skipped) = pred_skip_stats();
+    if decided > 0 {
+        println!("  pred_skip    {skipped}/{decided} ({:.1}% of threat-scans skipped)", skipped as f64 / decided as f64 * 100.0);
     }
 
     if profile {
