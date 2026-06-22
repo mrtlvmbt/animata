@@ -29,3 +29,8 @@ objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSResponder", "
 # Localhost JSON-RPC control/inspection bridge for autonomous verification (drive the camera,
 # reseed, capture screenshots). Off by default. See DEV_BRIDGE.md. Run: cargo run -p animata --features dev
 dev = ["dep:tiny_http", "dep:serde_json"]
+# EXPERIMENTAL: route worldgen erosion onto the GPU (wgpu) — ~8x faster erosion, ~2x faster worldgen.
+# Geomorphically equivalent but NOT bit-identical to the CPU reference, so a GPU-generated world must
+# NOT be kept as a save (load re-derives geometry from the seed). Enabling this feature turns the
+# accelerator ON at startup. Run: cargo run -p animata --features gpu  (add `,dev` for the bridge).
+gpu = ["animata-sim/gpu"]

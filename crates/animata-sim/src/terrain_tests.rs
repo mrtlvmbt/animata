@@ -284,6 +284,117 @@
         eprintln!("\n{report}");
     }
 
+    /// GPU erosion accelerator (feature `gpu`) vs the CPU reference: build the pre-erosion field
+    /// once, erode it both ways, and report timing + geomorphic divergence. The PRIMARY pass gate
+    /// is the terrain invariants on a fully GPU-eroded world (mountains a minority, water balance);
+    /// the Δ metrics are secondary (GPU is geomorphically equivalent, not bit-identical). Run:
+    /// `cargo test -p animata-sim --release --features gpu -- --ignored --nocapture gpu_erosion_vs_cpu`
+    #[cfg(feature = "gpu")]
+    #[test]
+    #[ignore]
+    fn gpu_erosion_vs_cpu() {
+        if crate::gpu::ctx().is_none() {
+            eprintln!("no GPU adapter — skipping gpu_erosion_vs_cpu");
+            return;
+        }
+        let seed = 1u64;
+        let n = COLS * ROWS;
+
+        // Pre-erosion surface (tectonics + elevation + LEM), identical to both backends.
+        let tect = TectonicField::generate(seed);
+        let mut base = vec![0.0f32; n];
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                base[y * COLS + x] =
+                    elevation(seed, x as f32, y as f32, tect.macro_at(x, y), tect.mountain_at(x, y));
+            }
+        }
+        crate::lem::refine(&mut base, tect.uplift_field());
+
+        // CPU erosion (reference).
+        let mut cpu = base.clone();
+        let t = std::time::Instant::now();
+        crate::erosion::erode(seed, &mut cpu, &|_| {});
+        let cpu_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+        // GPU erosion (toggle the process-level flag just for this call).
+        let mut gpu = base.clone();
+        crate::gpu::set_gpu_erosion(true);
+        let t = std::time::Instant::now();
+        crate::erosion::erode(seed, &mut gpu, &|_| {});
+        let gpu_ms = t.elapsed().as_secs_f64() * 1000.0;
+        crate::gpu::set_gpu_erosion(false);
+
+        // Geomorphic divergence: max/mean |Δelev|, 20-bin altitude histogram L1, biome agreement.
+        let (mut maxd, mut sumd) = (0.0f32, 0.0f64);
+        let (mut hc, mut hg) = ([0u64; 20], [0u64; 20]);
+        let (mut agree, mut total) = (0u64, 0u64);
+        for i in 0..n {
+            let d = (cpu[i] - gpu[i]).abs();
+            maxd = maxd.max(d);
+            sumd += d as f64;
+            let bin = |h: f32| ((h.clamp(0.0, 1.0) * 20.0) as usize).min(19);
+            hc[bin(cpu[i])] += 1;
+            hg[bin(gpu[i])] += 1;
+            let (x, y) = (i % COLS, i / COLS);
+            let bc = classify(seed, x, y, cpu[i]).1.id();
+            let bgid = classify(seed, x, y, gpu[i]).1.id();
+            if bc == bgid {
+                agree += 1;
+            }
+            total += 1;
+        }
+        let meand = sumd / n as f64;
+        let hist_l1: f64 = (0..20)
+            .map(|k| (hc[k] as f64 / n as f64 - hg[k] as f64 / n as f64).abs())
+            .sum::<f64>()
+            / 2.0; // total-variation distance ∈ [0,1]
+        let biome_agree = agree as f64 / total as f64 * 100.0;
+        let speedup = cpu_ms / gpu_ms.max(1e-6);
+
+        // PRIMARY GATE: full GPU-eroded world must pass the terrain invariants.
+        crate::gpu::set_gpu_erosion(true);
+        let world = VoxelTerrain::new(seed);
+        crate::gpu::set_gpu_erosion(false);
+        let (mut land, mut high, mut water) = (0u64, 0u64, 0u64);
+        for y in 0..ROWS {
+            for x in 0..COLS {
+                if world.is_water(x, y) {
+                    water += 1;
+                    continue;
+                }
+                land += 1;
+                if matches!(world.biome_at(x, y), BiomeKind::Mountain | BiomeKind::Snow) {
+                    high += 1;
+                }
+            }
+        }
+        let mtn_frac = high as f64 / land.max(1) as f64;
+        let water_pct = water as f64 / n as f64 * 100.0;
+
+        let report = format!(
+            "=== gpu erosion vs cpu (MAP_SCALE={MAP_SCALE}, {COLS}x{ROWS}, seed {seed}) ===\n\
+             cpu erode       {cpu_ms:8.1} ms\n\
+             gpu erode       {gpu_ms:8.1} ms\n\
+             speedup         {speedup:8.2}x\n\
+             --- geomorphic divergence (secondary) ---\n\
+             max |Δelev|     {maxd:8.4}\n\
+             mean |Δelev|    {meand:8.5}\n\
+             altitude TV-dist{hist_l1:8.4}   (0=identical distribution)\n\
+             biome agreement {biome_agree:7.2}%\n\
+             --- PRIMARY GATE: invariants on GPU-eroded world ---\n\
+             mountain+snow   {:7.2}% of land   (must be < 35%)\n\
+             water           {water_pct:7.2}% of map   (must be 10..85%)",
+            mtn_frac * 100.0,
+        );
+        let _ = std::fs::write("/tmp/animata_gpu_erosion.txt", &report);
+        eprintln!("\n{report}");
+
+        assert!(mtn_frac < 0.35, "GPU world: mountains dominate ({:.1}%)", mtn_frac * 100.0);
+        assert!((10.0..85.0).contains(&water_pct), "GPU world: water balance off ({water_pct:.1}%)");
+        assert!(biome_agree > 90.0, "GPU vs CPU biome agreement too low ({biome_agree:.1}%)");
+    }
+
     /// Climate must give the giant map real biome DIVERSITY: several lowland biomes
     /// present (temperature × moisture bands), none absurdly dominant. Prints the mix.
     #[test]
