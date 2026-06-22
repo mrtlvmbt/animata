@@ -297,10 +297,13 @@ struct PendingBirth {
 /// `creatures`. A dead-on-entry creature yields `Outcome::default()` (all-none).
 #[derive(Default)]
 struct Outcome {
-    /// Oxygen deposit `(cx, cy, amount)` from photosynthesis this tick (gated on the oxygen feature).
-    oxy: Option<(usize, usize, f32)>,
-    /// Nutrient deposit `(dx, dy, amount)` from a death this tick (matter returns to the pool).
-    nut: Option<(usize, usize, f32)>,
+    /// Oxygen deposit `(packed column, amount)` from photosynthesis this tick (gated on the oxygen
+    /// feature). The column `(cx, cy)` is packed into one `u32` (`pack_col`) to keep `Outcome` small —
+    /// every surviving creature emits one each tick, so the `Vec<Outcome>` apply collects is bandwidth-
+    /// bound (cf. PR #87). Unpacked at the serial replay.
+    oxy: Option<(u32, f32)>,
+    /// Nutrient deposit `(packed column, amount)` from a death this tick (matter returns to the pool).
+    nut: Option<(u32, f32)>,
     /// This creature died IN apply (toxin/starvation/senescence) → increment the death tally serially.
     died: bool,
     /// A queued reproduction (genome already mutated, energy already paid on the creature). BOXED so a
@@ -372,6 +375,40 @@ pub struct Sim {
     /// like `grid`/`registry` it is NOT part of `state_checksum`, so the golden is identical whether
     /// profiling is on or off.
     profiler: crate::profile::Profiler,
+    /// Reused per-tick scratch buffers (see [`StepScratch`]). Their capacity persists across ticks so
+    /// `step` does ~no allocation in steady state; every element is fully overwritten each tick, so the
+    /// trajectory is byte-identical and this is NOT part of `state_checksum`.
+    scratch: StepScratch,
+}
+
+/// One row of the read-only snapshot pass: `(pos, biomass, carnivory, coloration, ground_tone,
+/// stratum, is_autotroph)`. Collected in parallel, then scattered into the SoA columns below.
+type SnapRow = (Vec2, u32, f32, f32, f32, Stratum, bool);
+
+/// Per-tick scratch buffers owned by [`Sim`] and reused every `step` (capacity grows to the
+/// high-water mark, then stays put — no per-tick alloc/free churn). `mem::take`n out of `self` at the
+/// top of `step` so the parallel closures can borrow `&self` disjointly, and put back at the end.
+/// Holds NO simulation state between ticks: `collect_into_vec`/`clear`+push overwrites every element
+/// each tick, and the birth/outcome buffers are `drain`ed empty before the next use.
+#[derive(Default)]
+struct StepScratch {
+    /// Snapshot rows (AoS) before the scatter into the SoA columns.
+    rows: Vec<SnapRow>,
+    /// SoA snapshot columns the decide/apply phases index by creature position.
+    pos: Vec<Vec2>,
+    bm: Vec<u32>,
+    carn: Vec<f32>,
+    color: Vec<f32>,
+    bg: Vec<f32>,
+    strata: Vec<Stratum>,
+    /// Carnivore-body occupancy per grid cell (the pred-skip gate).
+    pred_count: Vec<u32>,
+    /// Per-creature decisions `(throttle, turn, hunt target)` from the parallel decide pass.
+    decisions: Vec<(f32, f32, Option<usize>)>,
+    /// Per-creature side effects from the parallel apply pass (replayed serially in index order).
+    outcomes: Vec<Outcome>,
+    /// Queued reproductions awaiting the develop phase (drained empty each tick).
+    pending: Vec<PendingBirth>,
 }
 
 /// Dimensions of the species feature vector: 7 cell-type fractions (the developmental body plan)
@@ -440,6 +477,21 @@ pub fn column_index(pos: Vec2) -> (usize, usize) {
     let x = (pos.x / VOX).floor().clamp(0.0, (COLS - 1) as f32) as usize;
     let y = (pos.y / VOX).floor().clamp(0.0, (ROWS - 1) as f32) as usize;
     (x, y)
+}
+
+/// Pack an in-world column `(cx, cy)` into a single `u32` for compact storage in `Outcome`. The
+/// world is `COLS × ROWS = 1920²` columns, so `cy·COLS + cx < 3.7M` fits a `u32`. Inverse of
+/// [`unpack_col`]; the round-trip is exact for every in-world column (tested).
+#[inline]
+fn pack_col(cx: usize, cy: usize) -> u32 {
+    (cy * COLS + cx) as u32
+}
+
+/// Inverse of [`pack_col`]: recover `(cx, cy)` from a packed column id.
+#[inline]
+fn unpack_col(c: u32) -> (usize, usize) {
+    let c = c as usize;
+    (c % COLS, c / COLS)
 }
 
 /// Vertical strata (C3). Which one a creature occupies is set by its morphology + where it
@@ -575,6 +627,7 @@ impl Sim {
             registry: PressureRegistry::build(&cfg.features, &cfg.params),
             cfg,
             profiler: crate::profile::Profiler::default(),
+            scratch: StepScratch::default(),
         }
     }
 
@@ -597,6 +650,7 @@ impl Sim {
             registry: PressureRegistry::build(&SimConfig::default().features, &SimConfig::default().params),
             cfg: SimConfig::default(),
             profiler: crate::profile::Profiler::default(),
+            scratch: StepScratch::default(),
         }
     }
 
@@ -631,6 +685,7 @@ impl Sim {
             registry,
             cfg: state.cfg,
             profiler: crate::profile::Profiler::default(),
+            scratch: StepScratch::default(),
         }
     }
 
@@ -674,6 +729,11 @@ impl Sim {
     pub fn step(&mut self, terrain: &mut VoxelTerrain, tick: u64) {
         let n = self.creatures.len();
         let (maxx, maxy) = (COLS as f32 * VOX, ROWS as f32 * VOX);
+        // Reused per-tick buffers, taken out of `self` so the parallel closures below can borrow
+        // `&self.creatures` / `&self` without aliasing them; put back at the end of the tick. Their
+        // capacity persists across ticks (no per-tick alloc churn); every element is overwritten or
+        // the buffer drained empty before reuse, so the trajectory is byte-identical.
+        let mut sc = std::mem::take(&mut self.scratch);
         // Feature toggles + params, read once as `Copy` locals so the hot closures don't borrow
         // `self`. All-on/default reproduces the pre-config behaviour bit-for-bit.
         let feat = self.cfg.features;
@@ -692,8 +752,7 @@ impl Sim {
         // serial collects. `bg` is the camouflage ground tone; `strata` is the predator-refuge layer
         // (hunting only reaches the same stratum). The cheap reductions (`stratum_count`, `n_auto`) fold
         // SERIALLY below in fixed index order — no float-add reorder.
-        let rows: Vec<(Vec2, u32, f32, f32, f32, Stratum, bool)> = self
-            .creatures
+        self.creatures
             .par_iter()
             .map(|c| {
                 let (cx, cy) = column_index(c.pos);
@@ -706,22 +765,22 @@ impl Sim {
                 let is_auto = c.pheno.photo_frac() > PHOTO_THETA;
                 (c.pos, c.biomass(), c.pheno.carnivory(), c.genome.coloration, bg, strat, is_auto)
             })
-            .collect();
-        let mut pos: Vec<Vec2> = Vec::with_capacity(n);
-        let mut bm: Vec<u32> = Vec::with_capacity(n);
-        let mut carn: Vec<f32> = Vec::with_capacity(n);
-        let mut color: Vec<f32> = Vec::with_capacity(n);
-        let mut bg: Vec<f32> = Vec::with_capacity(n);
-        let mut strata: Vec<Stratum> = Vec::with_capacity(n);
+            .collect_into_vec(&mut sc.rows);
+        sc.pos.clear();
+        sc.bm.clear();
+        sc.carn.clear();
+        sc.color.clear();
+        sc.bg.clear();
+        sc.strata.clear();
         let mut stratum_count = [0.0f32; 4];
         let mut n_auto = 0usize; // autotroph headcount for self-shading (order-independent)
-        for &(p, b, cn, cl, g, s, is_auto) in &rows {
-            pos.push(p);
-            bm.push(b);
-            carn.push(cn);
-            color.push(cl);
-            bg.push(g);
-            strata.push(s);
+        for &(p, b, cn, cl, g, s, is_auto) in &sc.rows {
+            sc.pos.push(p);
+            sc.bm.push(b);
+            sc.carn.push(cn);
+            sc.color.push(cl);
+            sc.bg.push(g);
+            sc.strata.push(s);
             stratum_count[s.idx()] += 1.0;
             if is_auto {
                 n_auto += 1;
@@ -732,7 +791,7 @@ impl Sim {
         let autotroph_shading = 1.0 / (1.0 + n_auto as f32 / PHOTO_SOFTCAP);
         self.profiler.record(Span::Snapshot, t_snapshot.elapsed());
         let t_grid = Instant::now();
-        self.grid.rebuild(&pos, maxx, maxy, GRID_CELL);
+        self.grid.rebuild(&sc.pos, maxx, maxy, GRID_CELL);
         self.profiler.record(Span::GridRebuild, t_grid.elapsed());
         // Carnivore-body occupancy per grid cell (parallel to `grid.cells`), built from the SAME
         // snapshot. Lets a non-predator skip the threat ring-scan when no carnivore body is within
@@ -743,15 +802,15 @@ impl Sim {
         // when disabled the all-zero vec is never consulted (the gate short-circuits on `!pred_skip`).
         let pred_skip = pred_skip_enabled();
         let stats = pred_skip_stats_enabled();
-        let mut pred_count = vec![0u32; self.grid.num_cells()];
+        sc.pred_count.clear();
+        sc.pred_count.resize(self.grid.num_cells(), 0);
         if pred_skip {
             for i in 0..n {
-                if carn[i] > CARNIVORE_THRESHOLD {
-                    pred_count[self.grid.cell_index(pos[i])] += 1;
+                if sc.carn[i] > CARNIVORE_THRESHOLD {
+                    sc.pred_count[self.grid.cell_index(sc.pos[i])] += 1;
                 }
             }
         }
-        let pred_count = &pred_count;
         // Decision per creature: (throttle, turn, optional prey index to attack THIS tick).
         // This phase is READ-ONLY (snapshots + the rebuilt grid + the terrain getters), so it runs
         // in parallel across cores. `par_iter().map().collect()` writes each `decisions[i]` from an
@@ -760,9 +819,18 @@ impl Sim {
         // Shared reborrows so the parallel closure captures `&Sim`/`&VoxelTerrain` (both `Sync`),
         // never the `&mut` from `step`.
         let t_decide = Instant::now();
+        // Local refs into the reused snapshot columns so the parallel closure captures slices, not
+        // `sc` (and `&mut sc.decisions` stays a disjoint borrow of a different field).
+        let pos = &sc.pos;
+        let bm = &sc.bm;
+        let carn = &sc.carn;
+        let color = &sc.color;
+        let bg = &sc.bg;
+        let strata = &sc.strata;
+        let pred_count = &sc.pred_count;
         let this: &Sim = self;
         let terrain_ref: &VoxelTerrain = terrain;
-        let decisions: Vec<(f32, f32, Option<usize>)> = (0..n)
+        (0..n)
             .into_par_iter()
             .map(|i| {
                 // Predation off ⇒ no creature targets prey ⇒ the predation pass resolves nothing.
@@ -799,7 +867,7 @@ impl Sim {
                 }
                 let (prey, threat) = if run_full {
                     this.grid.nearest2_within(
-                        &pos,
+                        pos,
                         pos[i],
                         reach,
                         |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),
@@ -816,8 +884,10 @@ impl Sim {
                 let hunt = prey.filter(|&j| (pos[j] - pos[i]).length() <= ATTACK_RANGE);
                 (throttle, turn, hunt)
             })
-            .collect();
+            .collect_into_vec(&mut sc.decisions);
         self.profiler.record(Span::Decide, t_decide.elapsed());
+        // Shared read-only slices for the predation + apply phases (disjoint from `&mut sc.outcomes`).
+        let decisions = &sc.decisions;
         // (b) predation: resolve hunts by snapshot index. Flag prey dead (never remove mid-pass
         // — indices must stay stable, F7); credit the predator with the trophic-scaled energy.
         let t_predation = Instant::now();
@@ -865,8 +935,8 @@ impl Sim {
         let world_seed = self.world_seed;
         let oxygen_feat = self.cfg.features.oxygen;
         let terrain_ref: &VoxelTerrain = terrain;
-        let outcomes: Vec<Outcome> = self
-            .creatures
+        let strata = &sc.strata;
+        self.creatures
             .par_iter_mut()
             .enumerate()
             .map(|(idx, c)| {
@@ -933,7 +1003,7 @@ impl Sim {
                 // obligate byproduct, keyed on the ISOLATED `photo_yield` (not composed energy_add — F2).
                 // Emitted now, applied in the serial replay (index order) — f32 accumulate, deterministic.
                 let oxy = if oxygen_feat && eff.photo_yield > 0.0 {
-                    Some((cx, cy, eff.photo_yield * OXYGEN_PER_PHOTO))
+                    Some((pack_col(cx, cy), eff.photo_yield * OXYGEN_PER_PHOTO))
                 } else {
                     None
                 };
@@ -953,13 +1023,13 @@ impl Sim {
                 {
                     c.alive = false;
                     let (dx, dy) = column_index(c.pos);
-                    return Outcome { oxy, nut: Some((dx, dy, nutrient(c))), died: true, birth: None };
+                    return Outcome { oxy, nut: Some((pack_col(dx, dy), nutrient(c))), died: true, birth: None };
                 }
                 // Death by starvation (decomposition re-fertilises the death site).
                 if c.energy <= 0.0 {
                     c.alive = false;
                     let (dx, dy) = column_index(c.pos);
-                    return Outcome { oxy, nut: Some((dx, dy, nutrient(c))), died: true, birth: None };
+                    return Outcome { oxy, nut: Some((pack_col(dx, dy), nutrient(c))), died: true, birth: None };
                 }
                 // Death by senescence: old-age probability rising with age² gives demographic turnover.
                 // Scaled by 1/biomass — bigger bodies live longer (a real size benefit).
@@ -967,7 +1037,7 @@ impl Sim {
                 if sp > 0.0 && Rng::new(seed_fold(world_seed, &[SALT_DEATH, c.id, tick])).unit() < sp {
                     c.alive = false;
                     let (dx, dy) = column_index(c.pos);
-                    return Outcome { oxy, nut: Some((dx, dy, nutrient(c))), died: true, birth: None };
+                    return Outcome { oxy, nut: Some((pack_col(dx, dy), nutrient(c))), died: true, birth: None };
                 }
                 // Reproduction: bud a mutated child, splitting energy in half. Gated by the logistic
                 // birth term (population self-limits near SOFT_CAP) on top of the energy threshold.
@@ -992,24 +1062,26 @@ impl Sim {
                 };
                 Outcome { oxy, nut: None, died: false, birth }
             })
-            .collect();
+            .collect_into_vec(&mut sc.outcomes);
         // Serial fixed-index replay: apply the cross-creature side effects in creature-index order, so
         // the f32 terrain accumulation + the id-assigning birth queue are deterministic. The Vec is
         // index-aligned with `creatures` by construction (one Outcome per index — a `.map`, not a filter).
-        debug_assert_eq!(outcomes.len(), n, "Outcome Vec must stay index-aligned with creatures");
-        let mut pending: Vec<PendingBirth> = Vec::with_capacity(outcomes.len());
-        for out in outcomes {
-            if let Some((cx, cy, amt)) = out.oxy {
+        debug_assert_eq!(sc.outcomes.len(), n, "Outcome Vec must stay index-aligned with creatures");
+        sc.pending.clear();
+        for out in sc.outcomes.drain(..) {
+            if let Some((c, amt)) = out.oxy {
+                let (cx, cy) = unpack_col(c);
                 terrain.deposit_oxygen(cx, cy, amt, tick);
             }
-            if let Some((dx, dy, amt)) = out.nut {
+            if let Some((c, amt)) = out.nut {
+                let (dx, dy) = unpack_col(c);
                 terrain.deposit_nutrient(dx, dy, amt, tick);
             }
             if out.died {
                 self.deaths += 1;
             }
             if let Some(b) = out.birth {
-                pending.push(*b);
+                sc.pending.push(*b);
             }
         }
         self.profiler.record(Span::Apply, t_apply.elapsed());
@@ -1022,10 +1094,11 @@ impl Sim {
         // assignment is deferred to the ordered pass below. Do NOT move id assignment in here.
         let t_develop = Instant::now();
         let dev = feat.development;
-        let born: Vec<Option<BornChild>> = if dev && pending.len() >= PAR_DEVELOP_THRESHOLD {
-            pending.into_par_iter().map(|p| develop_birth(p, dev, maxx, maxy)).collect()
+        // Drain (not move) `sc.pending` so its capacity is retained for the next tick.
+        let born: Vec<Option<BornChild>> = if dev && sc.pending.len() >= PAR_DEVELOP_THRESHOLD {
+            sc.pending.par_drain(..).map(|p| develop_birth(p, dev, maxx, maxy)).collect()
         } else {
-            pending.into_iter().map(|p| develop_birth(p, dev, maxx, maxy)).collect()
+            sc.pending.drain(..).map(|p| develop_birth(p, dev, maxx, maxy)).collect()
         };
         self.profiler.record(Span::Develop, t_develop.elapsed());
         // (c3) append the survivors in index order, assigning the deterministic id sequence.
@@ -1052,6 +1125,8 @@ impl Sim {
         self.cull_to_cap(tick);
         self.profiler.record(Span::Compact, t_compact.elapsed());
         self.profiler.commit_tick();
+        // Return the reused buffers to `self` (capacity retained for the next tick).
+        self.scratch = sc;
     }
 
     /// Build the brain inputs: the plant-biomass field ahead / left / right (a gradient to
