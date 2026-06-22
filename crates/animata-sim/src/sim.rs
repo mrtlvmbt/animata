@@ -867,7 +867,6 @@ impl Sim {
                 }
                 let (prey, threat) = if run_full {
                     this.grid.nearest2_within(
-                        pos,
                         pos[i],
                         reach,
                         |j| predator && j != i && bm[j] <= self_bm && strata[j] == self_layer && detected(j),

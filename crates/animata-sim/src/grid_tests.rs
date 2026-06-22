@@ -22,7 +22,7 @@ fn nearest_within_matches_brute_force() {
     for _ in 0..200 {
         let from = vec2(rng.unit() * 200.0, rng.unit() * 200.0);
         let r = rng.unit() * 60.0;
-        let (got, _) = g.nearest2_within(&pts, from, r, |_| true, |_| false);
+        let (got, _) = g.nearest2_within(from, r, |_| true, |_| false);
         let want = brute_nearest(&pts, from, r, |_| true);
         // Same point, or (ties aside) the same distance.
         match (got, want) {
@@ -57,7 +57,7 @@ fn sum_in_radius_never_false_skips_a_real_match() {
         let from = vec2(rng.unit() * 200.0, rng.unit() * 200.0);
         let r = rng.unit() * 60.0;
         // The real scan's threat result (ok_b = "is a predator").
-        let (_, threat) = g.nearest2_within(&pts, from, r, |_| false, |i| is_pred[i]);
+        let (_, threat) = g.nearest2_within(from, r, |_| false, |i| is_pred[i]);
         let sum = g.sum_in_radius(&counts, from, r);
         // The gate would skip iff sum == 0; that is allowed ONLY when the real scan found nothing.
         if threat.is_some() {
@@ -72,7 +72,7 @@ fn nearest2_respects_both_predicates() {
     let mut g = SpatialGrid::default();
     g.rebuild(&pts, 100.0, 100.0, 8.0);
     // From the origin point: nearest "even index" and nearest "odd index" within 20.
-    let (a, b) = g.nearest2_within(&pts, vec2(0.0, 0.0), 20.0, |i| i % 2 == 0 && i != 0, |i| i % 2 == 1);
+    let (a, b) = g.nearest2_within(vec2(0.0, 0.0), 20.0, |i| i % 2 == 0 && i != 0, |i| i % 2 == 1);
     assert_eq!(a, Some(2)); // even, index 2 at x=10
     assert_eq!(b, Some(1)); // odd, index 1 at x=5
 }
