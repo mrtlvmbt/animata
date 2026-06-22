@@ -22,9 +22,16 @@ fn main() {
     let ticks: u64 = positional.next().and_then(|s| s.parse().ok()).unwrap_or(4000);
     let metrics_path = args.iter().position(|a| a == "--metrics").and_then(|i| args.get(i + 1)).cloned();
     let profile = args.iter().any(|a| a == "--profile");
+    // PROFILING-ONLY high-pop seed: `--bench-pop N` pre-stuffs N founders to time `step` at a scale the
+    // economy won't reach in a short replay. NOT a real trajectory — never a checksum/acceptance path.
+    let bench_pop: Option<u64> =
+        args.iter().position(|a| a == "--bench-pop").and_then(|i| args.get(i + 1)).and_then(|s| s.parse().ok());
 
     let mut terrain = VoxelTerrain::new(seed);
-    let mut sim = Sim::new(seed, &terrain);
+    let mut sim = match bench_pop {
+        Some(n) => Sim::bench_populate(seed, n, &terrain),
+        None => Sim::new(seed, &terrain),
+    };
     let mut metrics = metrics_path.as_ref().map(|_| MetricRegistry::default());
 
     for tick in 0..ticks {

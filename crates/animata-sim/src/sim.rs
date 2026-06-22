@@ -500,6 +500,40 @@ fn light_for(stratum: Stratum, cy: usize, tick: u64) -> f32 {
     }
 }
 
+/// Spawn `count` founder creatures on land columns, deterministically from `world_seed` — the shared
+/// body behind `with_config` (count = `START_CREATURES`, the golden path) and the profiling-only
+/// `bench_populate` (count = N). Factoring it keeps the bench harness from touching the golden init
+/// path: both callers run the SAME per-creature seeding, only the count differs.
+fn spawn_founders(world_seed: u64, terrain: &VoxelTerrain, count: u64) -> Vec<Creature> {
+    let mut creatures = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let mut rng = Rng::new(seed_fold(world_seed, &[SALT_FOUNDER, i]));
+        // Place on land: a few tries to dodge water, else accept (clamped) wherever.
+        let mut pos = vec2(0.0, 0.0);
+        for _ in 0..FOUNDER_PLACE_TRIES {
+            pos = vec2(rng.unit() * COLS as f32 * VOX, rng.unit() * ROWS as f32 * VOX);
+            let (cx, cy) = column_index(pos);
+            if !terrain.is_water(cx, cy) {
+                break;
+            }
+        }
+        let genome = Genome::founder(&mut rng); // empty GRN → single cell (== C0)
+        let pheno = genome.develop();
+        creatures.push(Creature {
+            id: i,
+            founder: i,
+            pos,
+            heading: rng.unit() * std::f32::consts::TAU,
+            energy: START_ENERGY,
+            age: 0,
+            alive: true,
+            genome,
+            pheno,
+        });
+    }
+    creatures
+}
+
 impl Sim {
     /// Spawn the founder population with the default config (all features on) — the golden path.
     pub fn new(world_seed: u64, terrain: &VoxelTerrain) -> Self {
@@ -509,32 +543,7 @@ impl Sim {
     /// Spawn the founder population on land columns, deterministically from `world_seed`, under a
     /// given runtime config. `cfg` is part of the sim's input, so `(seed, cfg)` replays exactly.
     pub fn with_config(world_seed: u64, terrain: &VoxelTerrain, cfg: SimConfig) -> Self {
-        let mut creatures = Vec::with_capacity(START_CREATURES);
-        for i in 0..START_CREATURES as u64 {
-            let mut rng = Rng::new(seed_fold(world_seed, &[SALT_FOUNDER, i]));
-            // Place on land: a few tries to dodge water, else accept (clamped) wherever.
-            let mut pos = vec2(0.0, 0.0);
-            for _ in 0..FOUNDER_PLACE_TRIES {
-                pos = vec2(rng.unit() * COLS as f32 * VOX, rng.unit() * ROWS as f32 * VOX);
-                let (cx, cy) = column_index(pos);
-                if !terrain.is_water(cx, cy) {
-                    break;
-                }
-            }
-            let genome = Genome::founder(&mut rng); // empty GRN → single cell (== C0)
-            let pheno = genome.develop();
-            creatures.push(Creature {
-                id: i,
-                founder: i,
-                pos,
-                heading: rng.unit() * std::f32::consts::TAU,
-                energy: START_ENERGY,
-                age: 0,
-                alive: true,
-                genome,
-                pheno,
-            });
-        }
+        let creatures = spawn_founders(world_seed, terrain, START_CREATURES as u64);
         Sim {
             creatures,
             world_seed,
@@ -545,6 +554,28 @@ impl Sim {
             grid: SpatialGrid::default(),
             registry: PressureRegistry::build(&cfg.features, &cfg.params),
             cfg,
+            profiler: crate::profile::Profiler::default(),
+        }
+    }
+
+    /// PROFILING-ONLY: build a sim pre-seeded with `n` founder creatures, to time `step` at a
+    /// population the economy would take a long replay to reach (or never). This is NOT a simulation
+    /// entry point — it is never folded into `state_checksum`, never used by `Sim::new`/`with_config`
+    /// or any acceptance test, and it deliberately does NOT reproduce a real trajectory (it just
+    /// stuffs the creature Vec). Use it only from the headless `--bench-pop` harness to measure
+    /// per-phase scaling. Determinism of the golden path is untouched because this path is disjoint.
+    pub fn bench_populate(world_seed: u64, n: u64, terrain: &VoxelTerrain) -> Self {
+        let creatures = spawn_founders(world_seed, terrain, n);
+        Sim {
+            creatures,
+            world_seed,
+            next_id: n,
+            births: 0,
+            deaths: 0,
+            kills: 0,
+            grid: SpatialGrid::default(),
+            registry: PressureRegistry::build(&SimConfig::default().features, &SimConfig::default().params),
+            cfg: SimConfig::default(),
             profiler: crate::profile::Profiler::default(),
         }
     }
@@ -634,40 +665,50 @@ impl Sim {
         // (a) snapshot + decide — reads only, terrain unmutated. Snapshot arrays feed the grid
         // predicates without borrowing `self.creatures` inside the closures.
         let t_snapshot = Instant::now();
-        let pos: Vec<Vec2> = self.creatures.iter().map(|c| c.pos).collect();
-        let bm: Vec<u32> = self.creatures.iter().map(|c| c.biomass()).collect();
-        let carn: Vec<f32> = self.creatures.iter().map(|c| c.pheno.carnivory()).collect();
-        let color: Vec<f32> = self.creatures.iter().map(|c| c.genome.coloration).collect();
-        // Ground tone each creature stands on (camouflage background, snapshot — read-only).
-        let bg: Vec<f32> = self
+        // ONE parallel read-only pass builds every per-creature snapshot array the decide/apply phases
+        // index by position. Each row is pure reads — creature fields + STATIC terrain getters
+        // (`ground_tone_at` → biome, `is_water`), neither mutated until apply — so the rayon map writes
+        // each index independently and `collect` preserves index order ⇒ BYTE-IDENTICAL to the former
+        // serial collects. `bg` is the camouflage ground tone; `strata` is the predator-refuge layer
+        // (hunting only reaches the same stratum). The cheap reductions (`stratum_count`, `n_auto`) fold
+        // SERIALLY below in fixed index order — no float-add reorder.
+        let rows: Vec<(Vec2, u32, f32, f32, f32, Stratum, bool)> = self
             .creatures
-            .iter()
+            .par_iter()
             .map(|c| {
                 let (cx, cy) = column_index(c.pos);
-                terrain.ground_tone_at(cx, cy)
+                let bg = terrain.ground_tone_at(cx, cy);
+                let strat = if !feat.strata {
+                    Stratum::Surface // strata off ⇒ one flat layer
+                } else {
+                    stratum_of(&c.pheno, terrain.is_water(cx, cy))
+                };
+                let is_auto = c.pheno.photo_frac() > PHOTO_THETA;
+                (c.pos, c.biomass(), c.pheno.carnivory(), c.genome.coloration, bg, strat, is_auto)
             })
             .collect();
-        // Each creature's stratum (from its body + whether its column is water) and the per-stratum
-        // headcount (for the density-split non-surface food). A stratum is a predator refuge:
-        // hunting only reaches prey in the SAME stratum.
-        let strata: Vec<Stratum> = self
-            .creatures
-            .iter()
-            .map(|c| {
-                if !feat.strata {
-                    return Stratum::Surface; // strata off ⇒ one flat layer
-                }
-                let (cx, cy) = column_index(c.pos);
-                stratum_of(&c.pheno, terrain.is_water(cx, cy))
-            })
-            .collect();
+        let mut pos: Vec<Vec2> = Vec::with_capacity(n);
+        let mut bm: Vec<u32> = Vec::with_capacity(n);
+        let mut carn: Vec<f32> = Vec::with_capacity(n);
+        let mut color: Vec<f32> = Vec::with_capacity(n);
+        let mut bg: Vec<f32> = Vec::with_capacity(n);
+        let mut strata: Vec<Stratum> = Vec::with_capacity(n);
         let mut stratum_count = [0.0f32; 4];
-        for s in &strata {
+        let mut n_auto = 0usize; // autotroph headcount for self-shading (order-independent)
+        for &(p, b, cn, cl, g, s, is_auto) in &rows {
+            pos.push(p);
+            bm.push(b);
+            carn.push(cn);
+            color.push(cl);
+            bg.push(g);
+            strata.push(s);
             stratum_count[s.idx()] += 1.0;
+            if is_auto {
+                n_auto += 1;
+            }
         }
-        // Autotroph self-shading (F3: computed in the snapshot phase, order-independent). Light is
-        // a finite flux, so more autotrophs ⇒ less photosynthesis per head ⇒ the niche self-limits.
-        let n_auto = self.creatures.iter().filter(|c| c.pheno.photo_frac() > PHOTO_THETA).count();
+        // Autotroph self-shading (F3): light is a finite flux, so more autotrophs ⇒ less photosynthesis
+        // per head ⇒ the niche self-limits.
         let autotroph_shading = 1.0 / (1.0 + n_auto as f32 / PHOTO_SOFTCAP);
         self.profiler.record(Span::Snapshot, t_snapshot.elapsed());
         let t_grid = Instant::now();
