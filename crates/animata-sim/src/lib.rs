@@ -9,6 +9,7 @@
 pub mod clock;
 pub mod config;
 pub mod erosion;
+pub(crate) mod fastmath;
 pub mod genome;
 #[cfg(feature = "gpu")]
 pub mod gpu;
