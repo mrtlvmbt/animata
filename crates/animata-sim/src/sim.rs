@@ -303,8 +303,11 @@ struct Outcome {
     nut: Option<(usize, usize, f32)>,
     /// This creature died IN apply (toxin/starvation/senescence) → increment the death tally serially.
     died: bool,
-    /// A queued reproduction (genome already mutated, energy already paid on the creature).
-    birth: Option<PendingBirth>,
+    /// A queued reproduction (genome already mutated, energy already paid on the creature). BOXED so a
+    /// childless `Outcome` (the overwhelming majority each tick) does NOT inline a whole `Genome` (6
+    /// Vecs) — keeping the `Vec<Outcome>` the parallel apply collects small (births heap-allocate only
+    /// when they actually happen). Byte-identical: only WHERE the `PendingBirth` lives changes.
+    birth: Option<Box<PendingBirth>>,
 }
 
 /// A fully-developed child produced by the parallel develop phase, ready for the serial id-assigning
@@ -983,7 +986,7 @@ impl Sim {
                     // is queued to finish the birth there — same draw stream, same bits.
                     let genome = c.genome.mutate(&mut rng, &mut morph_rng, &mut gas_rng, MUTATION_STD, GRN_MUTATION_STD);
                     c.energy *= 0.5;
-                    Some(PendingBirth { genome, rng, parent_pos: c.pos, parent_energy: c.energy, founder: c.founder })
+                    Some(Box::new(PendingBirth { genome, rng, parent_pos: c.pos, parent_energy: c.energy, founder: c.founder }))
                 } else {
                     None
                 };
@@ -1006,7 +1009,7 @@ impl Sim {
                 self.deaths += 1;
             }
             if let Some(b) = out.birth {
-                pending.push(b);
+                pending.push(*b);
             }
         }
         self.profiler.record(Span::Apply, t_apply.elapsed());
