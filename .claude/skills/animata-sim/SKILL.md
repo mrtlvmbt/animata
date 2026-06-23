@@ -190,13 +190,13 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
 
 - **Big feature / architecture / new mechanism → plan-consensus FIRST** (`/plan-consensus`, the critic
   loop) before writing code. Land the hardened plan in `~/.claude/plans/`.
-- **Determinism-critical or behavioural change → subsystem-reviewer BEFORE merge** (mandatory per
-  [[review-before-merge]]). Fix every FAIL, re-confirm, then merge. Docs/test-only changes don't need
+- **Determinism-critical or behavioural change → subsystem-reviewer BEFORE merge** (mandatory). Fix
+  every FAIL, re-confirm, then merge. Docs/test-only changes don't need
   it (state why). Pass the reviewer the relevant `reference/*.md` (e.g. `reference/determinism.md`) so a
   cold fork starts grounded.
 - **CI green is the merge gate, not a local run** — push, `bash scripts/ci-report.sh`, merge ONLY on
   exit 0 (§4; `.github/workflows/tests.yml`). Do NOT run the full local suite as the gate (CLAUDE.md).
-- **Land on main ONLY via a GitHub PR** ([[always-pr-to-main]]). Create the branch in a SEPARATE Bash
+- **Land on main ONLY via a GitHub PR.** Create the branch in a SEPARATE Bash
   call first (a guard hook blocks committing on main even inside a `checkout -b && commit` compound),
   confirm `git rev-parse --abbrev-ref HEAD`, then commit. Don't stage `.claude-dev-kit` (submodule).
   Delete the branch after merge; sync local main.
