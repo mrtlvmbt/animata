@@ -215,7 +215,8 @@ fn founder_develops_to_one_photo_cell() {
     let mut rng = Rng::new(1);
     let g = Genome::founder(&mut rng);
     let p = g.develop();
-    assert_eq!(p, Phenotype { n_cells: 1, photo: 1, organ: [0, 0, 0, 0, 0, 0, 1], ..Default::default() });
+    // PR-D-zones: a one-cell body is a single uniform zone (`zones = 1`), so the exact phenotype carries it.
+    assert_eq!(p, Phenotype { n_cells: 1, photo: 1, organ: [0, 0, 0, 0, 0, 0, 1], zones: 1, ..Default::default() });
     assert_eq!(p.complexity(), 0); // one cell ⇒ no multicellular complexity
     // A single photo cell registers as a size-1 photo organ but carries NO effector organ, so the
     // effector organ_power is still the bare (zero) count — body-driven stats unchanged by morphogenesis.
