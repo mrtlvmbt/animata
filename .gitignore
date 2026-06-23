@@ -29,3 +29,6 @@
 
 # Quick-save artifact (F5/F9)
 animata-save.bin
+
+# CI feedback report (scripts/ci-report.sh runtime output)
+/.ci-report/

@@ -1,0 +1,93 @@
+name: tests
+on:
+  push:
+  workflow_dispatch:
+
+# Why two jobs (see CLAUDE.md / .claude/skills/animata-sim §0 — determinism is per-arch):
+#   The sim replays BIT-IDENTICALLY only within one architecture+toolchain. The state_checksum
+#   goldens were pinned on the dev machine (arm64 macOS): aarch64 fuses `a*b+c` into a single FMA and
+#   uses Apple's libm for cos/sin, which an x86-64 runner does NOT reproduce — so the 3 exact-golden
+#   tests diverge on x86 while every threshold-based emergence corridor + same-machine replay/save-load
+#   stays green there. So:
+#     * test-x86 (ubuntu, fast/cheap) runs EVERYTHING EXCEPT the 3 golden-constant tests — the agent's
+#       primary signal (the expensive corridors run here).
+#     * golden-arm64 (macos-latest = Apple Silicon, matched arch, toolchain pinned to the dev's 1.96.0)
+#       runs ONLY the 3 exact-golden locks — the bit-identity gate, on hardware that can reproduce it.
+#   Both jobs emit JUnit + upload under a UNIQUE artifact name; the overall run is green iff both pass.
+
+jobs:
+  test-x86:
+    name: tests (corridors, x86)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Everything except the 3 arch-bound golden-constant tests (those run on golden-arm64).
+      - name: Run tests
+        run: |
+          cargo nextest run --profile ci --release -p animata-sim \
+            -E 'not (test(state_checksum_replays_to_golden) | test(state_checksum_multicell_lock) | test(feature_toggles_bite_and_replay))'
+
+      - name: Append summary
+        if: always()
+        run: |
+          echo "### x86 corridors for \`${GITHUB_SHA::8}\`" >> "$GITHUB_STEP_SUMMARY"
+          test -f target/nextest/ci/junit.xml \
+            && echo '```xml' >> "$GITHUB_STEP_SUMMARY" \
+            && cat target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY" \
+            && echo '```' >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report-x86
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  golden-arm64:
+    name: golden lock (arm64, matched arch)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # ONLY the 3 exact-golden locks — they reproduce bit-for-bit only on the dev's arch (arm64).
+      - name: Run golden locks
+        run: |
+          cargo nextest run --profile ci --release -p animata-sim \
+            -E 'test(state_checksum_replays_to_golden) | test(state_checksum_multicell_lock) | test(feature_toggles_bite_and_replay)'
+
+      - name: Append summary
+        if: always()
+        run: |
+          echo "### arm64 golden lock for \`${GITHUB_SHA::8}\`" >> "$GITHUB_STEP_SUMMARY"
+          test -f target/nextest/ci/junit.xml \
+            && echo '```xml' >> "$GITHUB_STEP_SUMMARY" \
+            && cat target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY" \
+            && echo '```' >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report-arm64
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn

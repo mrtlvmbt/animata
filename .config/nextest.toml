@@ -1,0 +1,14 @@
+# nextest config for cloud CI (.github/workflows/tests.yml uses `--profile ci`).
+
+[profile.ci]
+# This sim drives macroquad's GLOBAL rng (srand/gen_range), so tests that seed it interfere when run
+# concurrently inside ONE process — that is exactly why `.cargo/config.toml` forces
+# RUST_TEST_THREADS=1. nextest already runs each test in its OWN process (so the global rng is
+# isolated per test), but we pin single-threaded as well: it removes any residual cross-process
+# timing/filesystem contention and keeps the determinism-locked suite maximally reliable in CI.
+test-threads = 1
+
+[profile.ci.junit]
+# Emit a JUnit report at target/nextest/ci/junit.xml — the machine-readable artifact ci-report.sh
+# downloads to tell the agent WHICH tests failed.
+path = "junit.xml"
