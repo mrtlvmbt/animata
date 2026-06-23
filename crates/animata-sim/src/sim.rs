@@ -1008,7 +1008,7 @@ impl Sim {
                 };
                 // Metabolism: Kleiber (biomass^0.75) × stratum cost (metab_mult) + movement effort
                 // (charged per distance travelled: `MOVE_COST · throttle · spd`, so drift/idle is ~free).
-                let kleiber = (c.biomass() as f32).powf(0.75);
+                let kleiber = crate::fastmath::kleiber075(c.biomass());
                 c.energy -= (SIM_BASE_METABOLISM * kleiber * eff.metab_mult + MOVE_COST * throttle * spd) * TICK_LEN;
                 c.age += 1;
                 // Death deposits the creature's matter back to the nutrient pool at the death site. The
