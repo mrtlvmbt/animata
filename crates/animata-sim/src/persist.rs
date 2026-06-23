@@ -25,10 +25,11 @@ use crate::sim::SimState;
 use crate::terrain::TerrainState;
 use std::io::{Read, Write};
 
-/// File magic: ASCII "ANM4" (LE on disk). The CURRENT snapshot version. Written as a 4-byte prefix
-/// before the body, and matched on read to pick the (de)serializer. Bumped from ANM3 for gas-cycle
-/// Phase 2 (new trailing fields: `Genome.aerobic_capacity`, `Params.aerobic_gain`, `Features.aerobic`).
-const MAGIC: u32 = 0x414E_4D34;
+/// File magic: ASCII "ANM5" (LE on disk). The CURRENT snapshot version. Written as a 4-byte prefix
+/// before the body, and matched on read to pick the (de)serializer. Bumped from ANM4 for PR-D-zones:
+/// the new `Phenotype.zones` field shifts every following bincode byte, so a pre-zones ANM4 save must be
+/// cleanly REJECTED, not silently mis-decoded.
+const MAGIC: u32 = 0x414E_4D35;
 /// Version "ANM2" (pre-gas-cycle). Decoded via the frozen [`v2::SnapshotBodyV2`] graph and upgraded by
 /// [`v2::migrate`] all the way to current (continuity: oxygen_tolerance/aerobic_capacity 0, overlays
 /// empty, oxygen/aerobic features off). Preserves the real ANM2 datum (the 486k save).

@@ -188,8 +188,29 @@ impl Creature {
     }
 }
 
-/// Frozen ANM2 `Creature` shape (its `genome` is the pre-`oxygen_tolerance` `GenomeV2`) for save
-/// migration ([`crate::persist`] v2). NEVER edit. `pheno` is unchanged (oxygen is a genome trait).
+/// Frozen ANM2-era `Phenotype` byte layout (PR-D-zones froze this): the body counts + `organ` +
+/// `axis_order` exactly as they sit on disk in an ANM2 save — i.e. the live `Phenotype` BEFORE its
+/// trailing `zones` field was added. It exists ONLY so [`CreatureV2`] consumes the exact ANM2 pheno
+/// bytes (bincode is positional — a live `Phenotype` would read one byte too many and misalign every
+/// following creature). The migrated `pheno` is RE-DERIVED from the genome (`develop()`), since `zones`
+/// needs the cell LAYOUT the stored counts don't carry. NEVER edit — its shape is the ANM2 contract.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PhenotypeV2 {
+    n_cells: u32,
+    effector: u32,
+    storage: u32,
+    sensor: u32,
+    predator: u32,
+    flight: u32,
+    burrow: u32,
+    photo: u32,
+    structural: u32,
+    organ: [u8; 7],
+    axis_order: u8,
+}
+
+/// Frozen ANM2 `Creature` shape (its `genome` is the pre-`oxygen_tolerance` `GenomeV2`, its `pheno` the
+/// pre-`zones` [`PhenotypeV2`]) for save migration ([`crate::persist`] v2). NEVER edit.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreatureV2 {
     id: u64,
@@ -200,11 +221,17 @@ pub(crate) struct CreatureV2 {
     age: u32,
     alive: bool,
     genome: GenomeV2,
-    pheno: Phenotype,
+    pheno: PhenotypeV2,
 }
 
 impl CreatureV2 {
     fn migrate(self) -> Creature {
+        let genome = self.genome.migrate();
+        // `pheno` is a pure function of the genome, and `zones` (PR-D-zones) needs the developed cell
+        // layout the ANM2 stream never stored (only counts) — so the frozen `self.pheno` is consumed for
+        // byte-alignment and the live phenotype is RE-DERIVED. `develop()` is deterministic and ignores
+        // the migrated genome's new `oxygen_tolerance`, so the body (and its counts) reproduce exactly.
+        let pheno = genome.develop();
         Creature {
             id: self.id,
             founder: self.founder,
@@ -213,8 +240,8 @@ impl CreatureV2 {
             energy: self.energy,
             age: self.age,
             alive: self.alive,
-            genome: self.genome.migrate(),
-            pheno: self.pheno,
+            genome,
+            pheno,
         }
     }
 }
@@ -270,7 +297,19 @@ impl SimState {
                     age: c.age,
                     alive: c.alive,
                     genome: c.genome.to_v2(),
-                    pheno: c.pheno,
+                    pheno: PhenotypeV2 {
+                        n_cells: c.pheno.n_cells,
+                        effector: c.pheno.effector,
+                        storage: c.pheno.storage,
+                        sensor: c.pheno.sensor,
+                        predator: c.pheno.predator,
+                        flight: c.pheno.flight,
+                        burrow: c.pheno.burrow,
+                        photo: c.pheno.photo,
+                        structural: c.pheno.structural,
+                        organ: c.pheno.organ,
+                        axis_order: c.pheno.axis_order,
+                    },
                 })
                 .collect(),
         }
@@ -1511,6 +1550,54 @@ impl Sim {
         }
         (cov / (vx.sqrt() * vy.sqrt())) as f32
     }
+
+    /// Fraction of the population whose body has REGIONALISED into `>= ZONE_MIN` distinct type-zones
+    /// along the radial axis (PR-D-zones). Founders (one cell) have `zones = 1`; this rises from ~0 only
+    /// as the morphogen read carves the axis into multiple body regions — a finer body-plan signal than
+    /// `frac_with_axis` (which measures the STRENGTH of the coupling, not the number of regions).
+    pub fn frac_with_zones(&self) -> f32 {
+        let n = self.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let with = self.creatures.iter().filter(|c| c.pheno.zones >= ZONE_MIN).count();
+        with as f32 / n as f32
+    }
+
+    /// Mean `zones` over the population (PR-D-zones observability) — the average number of axial body
+    /// regions. Rises from 1 (a uniform body) as regionalisation evolves.
+    pub fn avg_zones(&self) -> f32 {
+        let n = self.creatures.len();
+        if n == 0 {
+            return 0.0;
+        }
+        self.creatures.iter().map(|c| c.pheno.zones as f32).sum::<f32>() / n as f32
+    }
+
+    /// Pearson correlation between `zones` and body size (`n_cells`) — the DECORRELATION control for the
+    /// zones-emerges acceptance (PR-D-zones). A regionalised body plan must be genuine axial structure,
+    /// NOT a by-product of growing more cells (a spike over 4916 bodies measured ≈ −0.02), so this stays
+    /// well below 1. Read-only observer; f64 serial sum (off the determinism-critical path).
+    pub fn zones_size_correlation(&self) -> f32 {
+        let n = self.creatures.len();
+        if n < 2 {
+            return 0.0;
+        }
+        let (xs, ys): (Vec<f64>, Vec<f64>) =
+            self.creatures.iter().map(|c| (c.pheno.zones as f64, c.pheno.n_cells as f64)).unzip();
+        let nf = n as f64;
+        let (mx, my) = (xs.iter().sum::<f64>() / nf, ys.iter().sum::<f64>() / nf);
+        let (mut cov, mut vx, mut vy) = (0.0, 0.0, 0.0);
+        for (x, y) in xs.iter().zip(&ys) {
+            cov += (x - mx) * (y - my);
+            vx += (x - mx).powi(2);
+            vy += (y - my).powi(2);
+        }
+        if vx <= 0.0 || vy <= 0.0 {
+            return 0.0;
+        }
+        (cov / (vx.sqrt() * vy.sqrt())) as f32
+    }
 }
 
 /// Full-state determinism checksum (PR1 lock, F1/F7): an integer fold of the COMPLETE
@@ -1545,6 +1632,7 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
             fnv_fold_u32(&mut h, o as u32); // organ coherence per type (PR-C; part of the body state)
         }
         fnv_fold_u32(&mut h, p.axis_order as u32); // axial body-plan order (PR-D1; part of the body state)
+        fnv_fold_u32(&mut h, p.zones as u32); // regionalisation count (PR-D-zones; part of the body state)
     }
     fnv_fold_u64(&mut h, terrain.mut_state_checksum());
     h
@@ -1558,9 +1646,9 @@ pub fn state_checksum(sim: &Sim, terrain: &VoxelTerrain) -> u64 {
 /// Canonical verification profile is **release** (acceptance corridors are tuned there).
 #[allow(dead_code)]
 pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
-    4439464939350888674 // debug profile (re-pinned: fast-approx brain tanh — fastmath::tanh)
+    3919512816253306363 // debug profile (re-pinned: PR-D-zones folds Phenotype.zones — inert-by-meaning)
 } else {
-    8919928124538625473 // release profile (re-pinned: fast-approx brain tanh — fastmath::tanh)
+    7894441724097031988 // release profile (re-pinned: PR-D-zones folds Phenotype.zones — inert-by-meaning)
 };
 
 /// Multi-cell determinism lock: `Sim::new(1)` stepped 8000 ticks grows complex MULTICELLULAR bodies,
@@ -1570,7 +1658,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 5382418513030608869; // re-pinned: fast-approx brain tanh
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 6132762536545207687; // re-pinned: PR-D-zones folds Phenotype.zones
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

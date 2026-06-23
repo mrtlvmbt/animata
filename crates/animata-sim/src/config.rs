@@ -165,6 +165,11 @@ pub const ORGAN_MIN: u8 = 3;
 /// the axis-emerges acceptance). Tuned against the post-activation trajectory (a modest bar: emergence
 /// from zero is the signal, magnitude grows later via French-flag bands in PR-D-segments).
 pub const AXIS_MIN: u8 = 26;
+/// Body-regionalisation bar (PR-D-zones): a body counts as REGIONALISED when its `zones` (distinct
+/// contiguous type-regions along the radial axis) reaches this. `3` = at least a head/trunk/tail-like
+/// three-zone plan, beyond the founder's single uniform zone — the `frac_with_zones` metric / the
+/// zones-emerges acceptance threshold. A modest bar: emergence from ~0 is the signal.
+pub const ZONE_MIN: u8 = 3;
 /// Energy to build one cell beyond the first when budding a child — so a larger body costs
 /// more to reproduce (an interior optimum) and is the mass a C2 predator will convert.
 pub const CELL_BIOMASS_COST: f32 = 8.0;

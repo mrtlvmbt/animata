@@ -114,6 +114,13 @@ fn anm2_stream_migrates_to_current() {
     assert_eq!(snap.sim.creatures.len(), n, "creatures preserved through migration");
     assert_eq!(snap.sim.cfg.params.photo_rate, photo, "existing params preserved");
     assert!(!snap.sim.cfg.features.oxygen, "CONTINUITY: a migrated ANM2 save resumes oxygen-off (anoxic)");
+    // PR-D-zones: an ANM2 save predates `Phenotype.zones` and stored only body COUNTS, not the cell
+    // layout `zones` needs — so migration RE-DERIVES pheno from the genome. Every migrated creature's
+    // pheno must therefore equal a fresh `develop()` (and so carry a correct `zones`, not a 0).
+    assert!(
+        snap.sim.creatures.iter().all(|c| c.pheno.zones >= 1),
+        "migrated pheno must be re-derived (every developed body has >=1 zone, never a deserialise-0)"
+    );
 }
 
 /// A foreign / corrupt file is rejected by the magic check, not silently mis-decoded.
