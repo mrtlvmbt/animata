@@ -89,18 +89,21 @@ Pillars (do not violate — they protect perf + determinism):
 
 ## 3. Re-pinning the golden (the exact procedure)
 
-When a behavioural change shifts the trajectory, BOTH profile goldens move. To read the new values:
+When a behavioural change shifts the trajectory, BOTH profile goldens move. Read the new values:
 
 ```sh
-# ALWAYS run tests via ./scripts/test-bar.sh (mandatory, see CLAUDE.md) — it bypasses rtk (which
-# otherwise swallows cargo-test stdout) AND passes the assert left:/right: lines through.
-./scripts/test-bar.sh -p animata-sim --release state_checksum_replays_to_golden | grep -iE "left:|right:"
-./scripts/test-bar.sh -p animata-sim          state_checksum_replays_to_golden | grep -iE "left:|right:"
+# RELEASE golden — from CI (the gate runs release on the matched arch). Push, then the golden-arm64
+# job's failure carries the assert left:/right:.
+git push && bash scripts/ci-report.sh        # on failure: read .ci-report/failed.log
+grep -iE "left:|right:" .ci-report/failed.log
+# DEBUG golden — CI runs release only, so read the debug value from a TARGETED local run on the dev
+# machine (the allowed local use, §4); on the arm64 dev box it matches the pinned debug golden.
+./scripts/test-bar.sh -p animata-sim state_checksum_replays_to_golden | grep -iE "left:|right:"
 ```
 
 `left:` is the actual (new) value, `right:` is the stale golden. Paste both into
 `GOLDEN_CHECKSUM_SEED42_300` in `sim.rs` (debug branch + release branch), with a comment saying WHY it
-moved. Then a full `./scripts/test-bar.sh -p animata-sim --release` must be green.
+moved (same for `GOLDEN_CHECKSUM_SEED1_8000`). Then push and confirm `ci-report.sh` exits 0.
 
 **Before re-pinning, ask: did I MEAN to move the trajectory?** If the change was supposed to be inert
 (machinery only), a moved golden means it leaked — fix the leak (§5), don't re-pin. The legitimate
@@ -108,18 +111,23 @@ inert re-pin is *only* when you ADDED a field to the checksum fold (the hash inp
 trajectory didn't). Moving the golden for an INTENDED change is routine, not a deterrent — memory
 `golden-repin-is-fine-for-intended-change`; just do the §5 multi-seed corridor work.
 
-## 4. Running tests — always via `./scripts/test-bar.sh`
+## 4. Running tests — the cloud CI pipeline is the gate
 
-**Mandatory (CLAUDE.md): run tests through `./scripts/test-bar.sh`, never bare `cargo test`.** The
-script wraps `cargo test`, streams progress (so the human sees how far a long run is), passes
-failure detail through (panic body, assert `left:`/`right:`), and runs raw cargo internally so the
-rtk proxy (which otherwise collapses cargo-test output to a one-line summary) is bypassed.
-- `./scripts/test-bar.sh` — full suite (`--release --workspace`); `./scripts/test-bar.sh <args>` — any
-  `cargo test` args pass through (one positional filter; multiple need `-- f1 f2` or separate runs).
-- Non-TTY (captured/backgrounded) → periodic checkpoint lines instead of a `\r` bar; cadence `BAR_EVERY=N`.
-- The 8000-tick acceptance tests run ~14 s each in release, minutes in debug — the full release suite
-  is ~6 min. Background it and wait for the completion notification rather than polling.
-- Fallback only if the script is unavailable: `rtk proxy cargo test ... -- --nocapture`, or the tee log
+**The authoritative green gate is CI, not a local run (CLAUDE.md).** Standard loop: commit → `git
+push` → `bash scripts/ci-report.sh`; **merge ONLY on exit 0**. On failure read `.ci-report/failed.log`
+(panic body, assert `left:`/`right:`) + `.ci-report/artifacts/*/junit.xml` (which tests). CI is two
+jobs, per-arch — see [[ci-push-triggered]]; it covers **`animata-sim`** (the corridors + the 3
+golden locks), not the render bin. **Do NOT run the full `./scripts/test-bar.sh` suite locally** — that
+is exactly the machine load CI removes.
+
+**Local `./scripts/test-bar.sh` stays available but OPTIONAL — only for fast targeted iteration** on
+one test while developing (`./scripts/test-bar.sh -p animata-sim --release state_checksum`); never bare
+`cargo test`. It wraps cargo (runs raw cargo internally so the rtk proxy doesn't swallow output),
+honours `.cargo/config.toml`'s `RUST_TEST_THREADS=1`, passes failure detail through; non-TTY → periodic
+checkpoint lines instead of a `\r` bar (cadence `BAR_EVERY=N`).
+- The 8000-tick corridors run ~14 s each in release (~6 min full local / ~18 min on the x86 CI runner).
+  Let CI carry the full suite; keep any local run to the single test you're iterating on.
+- Fallback if the script is unavailable: `rtk proxy cargo test ... -- --nocapture`, or the tee log
   `~/Library/Application Support/rtk/tee/<ts>_cargo_test.log`.
 
 ## 5. The fragility lesson (single-seed corridors) — the #1 way to break things
@@ -182,10 +190,13 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
 
 - **Big feature / architecture / new mechanism → plan-consensus FIRST** (`/plan-consensus`, the critic
   loop) before writing code. Land the hardened plan in `~/.claude/plans/`.
-- **Determinism-critical or behavioural change → subsystem-reviewer BEFORE merge** (mandatory). Fix
-  every FAIL, re-confirm, then merge. Docs/test-only changes don't need it (state why). Pass the reviewer
-  the relevant `reference/*.md` (e.g. `reference/determinism.md`) so a cold fork starts grounded.
-- **Land on main ONLY via a GitHub PR.** Create the branch in a SEPARATE Bash
+- **Determinism-critical or behavioural change → subsystem-reviewer BEFORE merge** (mandatory per
+  [[review-before-merge]]). Fix every FAIL, re-confirm, then merge. Docs/test-only changes don't need
+  it (state why). Pass the reviewer the relevant `reference/*.md` (e.g. `reference/determinism.md`) so a
+  cold fork starts grounded.
+- **CI green is the merge gate, not a local run** — push, `bash scripts/ci-report.sh`, merge ONLY on
+  exit 0 (§4, [[ci-push-triggered]]). Do NOT run the full local suite as the gate (CLAUDE.md).
+- **Land on main ONLY via a GitHub PR** ([[always-pr-to-main]]). Create the branch in a SEPARATE Bash
   call first (a guard hook blocks committing on main even inside a `checkout -b && commit` compound),
   confirm `git rev-parse --abbrev-ref HEAD`, then commit. Don't stage `.claude-dev-kit` (submodule).
   Delete the branch after merge; sync local main.
@@ -197,7 +208,8 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
 
 ## 10. Running & inspecting
 
-- Tests: **always `./scripts/test-bar.sh`** (§4), never bare `cargo test`.
+- Tests: **the gate is CI** (push → `bash scripts/ci-report.sh`, §4); local `./scripts/test-bar.sh` is
+  optional for targeted iteration only, never bare `cargo test`.
 - Headless: `cargo run -p animata-sim --bin headless --release`.
 - Bench at scale: `headless --bench-pop N --profile` (per-phase ms). Read the iron-rules first
   (`reference/measurement.md`) — interleaved A/B only, and the **rtk-proxy stale-binary trap**: for a
@@ -216,11 +228,11 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
    `critic` (or any fork-agent) here, **pass it the relevant `reference/*.md`** — a cold fork can't see
    this skill.
 3. Implement smallest-first; prefer inert-then-activate for risky determinism-critical work.
-4. `cargo build -p animata-sim --release`; run the targeted tests, then the FULL release suite —
-   always via `./scripts/test-bar.sh` (§4), never bare `cargo test`.
+4. `cargo build -p animata-sim --release`; optionally run the ONE test you're iterating on locally
+   (§4). The full-suite gate is CI, reached by pushing in step 8 — don't run it locally.
 5. If the golden moved: confirm it was MEANT to, re-pin both profiles (§3) with a why-comment.
 6. If a corridor broke: apply §5 (inert / RNG-preserve / multi-seed) — never silently weaken a test.
 7. New field? Run the §7 checklist.
-8. Branch (separate Bash call) → commit → subsystem-reviewer on the diff (**pass it the relevant
-   `reference/*.md`**, e.g. `reference/determinism.md`) → fix FAILs → PR → merge → sync main → update
-   the relevant memory.
+8. Branch (separate Bash call) → commit → **push → `bash scripts/ci-report.sh` (the gate: merge only
+   on exit 0)** → subsystem-reviewer on the diff (**pass it the relevant `reference/*.md`**, e.g.
+   `reference/determinism.md`) → fix FAILs → PR → merge → sync main → update the relevant memory.
