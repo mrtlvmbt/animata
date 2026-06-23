@@ -3,6 +3,11 @@
 #   scripts/sim-run.sh <scenario> [k=v ...]
 #   e.g.  scripts/sim-run.sh perf seed=1 ticks=4000 bench_pop=200000
 #         scripts/sim-run.sh sweep param=photo_rate values=0.5,1,2 seeds=1,2,3 force=true
+#         scripts/sim-run.sh gridsweep param=photo_rate values=0.5,1,2,4 seeds=1,2  # one runner per value
+#
+# sweep vs gridsweep: same single-param value grid, but `sweep` runs the cells SERIALLY in one job while
+# `gridsweep` fans each value onto its OWN runner (a job matrix) so a wide grid finishes in ~1× per-cell
+# wallclock. Both download into the same per-nonce dir (gridsweep lands one artifact per value).
 # Exit: 0 = прогон success, 1 = прогон провалился, 2 = usage/инфра/таймаут.
 #
 # ВАЖНО: требует, чтобы sim-run.yml со сценарием/инпутами УЖЕ был на main — workflow_dispatch читает
@@ -16,7 +21,7 @@ VALID_KEYS="scenario seed ticks bench_pop param values seeds force run_nonce"
 
 die() { echo "✗ $*" >&2; exit 2; }
 
-[ $# -ge 1 ] || die "usage: sim-run.sh <scenario> [k=v ...]  (scenario: evo-stats|perf|multiseed|sweep)"
+[ $# -ge 1 ] || die "usage: sim-run.sh <scenario> [k=v ...]  (scenario: evo-stats|perf|multiseed|sweep|gridsweep)"
 SCENARIO="$1"; shift
 
 command -v gh >/dev/null 2>&1 || die "gh CLI не найден"
