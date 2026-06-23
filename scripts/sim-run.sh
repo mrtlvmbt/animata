@@ -10,7 +10,7 @@
 set -uo pipefail
 
 WORKFLOW="sim-run.yml"
-OUT_DIR=".sim-run"
+OUT_BASE=".sim-run"               # OUT_DIR = OUT_BASE/<nonce> (per-nonce → параллельные sim-run.sh & не затирают друг друга).
 CAP="${SIM_RUN_TIMEOUT:-21600}"   # 6 ч — sim-прогоны длинные; НЕ наследуем 30-мин cap из ci-report.sh.
 VALID_KEYS="scenario seed ticks bench_pop param values seeds force run_nonce"
 
@@ -38,6 +38,7 @@ done
 # Нонс → в run_nonce → в run-name, чтобы найти ИМЕННО наш прогон (часо-независимо, без гонки).
 NONCE="$(date +%s)-$$-${RANDOM}"
 FARGS+=(-f "run_nonce=$NONCE")
+OUT_DIR="$OUT_BASE/$NONCE"   # уникальна по нонсу → несколько фоновых sim-run.sh не дерутся за артефакты
 
 echo "→ Диспатч $WORKFLOW scenario=$SCENARIO nonce=$NONCE ..."
 gh workflow run "$WORKFLOW" --ref main "${FARGS[@]}" || die "gh workflow run упал"
