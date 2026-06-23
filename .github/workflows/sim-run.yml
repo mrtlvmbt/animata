@@ -17,7 +17,8 @@ on:
           - evo-stats   # headless run on one seed → emergent stats + time-series metrics.csv
           - perf        # phase-timing breakdown (optionally at a forced high population)
           - multiseed   # the same run across seeds 1..5 → cross-seed emergence (fragility probe)
-          - sweep       # vary one Params field across a value grid (× seeds) → emergent stats CSV
+          - sweep       # vary one Params field across a value grid (× seeds) SERIALLY in one job → CSV
+          - gridsweep   # same grid as sweep but FANNED across a job matrix (one runner per value) → parallel
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -28,16 +29,16 @@ on:
         description: "perf only — pre-stuff N founders to time step() at scale (e.g. 200000); blank = natural"
         default: ""
       param:
-        description: "sweep only — Params field to vary (e.g. photo_rate, toxin_lethality)"
+        description: "sweep / gridsweep — Params field to vary (e.g. photo_rate, toxin_lethality)"
         default: ""
       values:
-        description: "sweep only — comma-separated values for --param (e.g. 0.0,0.5,1.0)"
+        description: "sweep / gridsweep — comma-separated values for --param (e.g. 0.0,0.5,1.0)"
         default: ""
       seeds:
-        description: "sweep only — comma-separated seeds (e.g. 1,2,3)"
+        description: "sweep / gridsweep — comma-separated seeds (e.g. 1,2,3)"
         default: "1"
       force:
-        description: "sweep only — override the 64-cell grid cap"
+        description: "sweep: override the 64-cell grid cap; gridsweep: override the 24-value matrix cap"
         type: boolean
         default: false
       run_nonce:
@@ -48,7 +49,9 @@ on:
 run-name: sim-run ${{ inputs.scenario }} [${{ inputs.run_nonce }}]
 
 jobs:
+  # ── Scenarios that run in ONE job (evo-stats / perf / multiseed / serial sweep) ────────────────────
   run:
+    if: inputs.scenario != 'gridsweep'
     # Label: the single seed is meaningless for a multi-seed sweep, so show the swept param there instead.
     name: ${{ inputs.scenario }} (${{ inputs.scenario == 'sweep' && format('grid {0}', inputs.param) || format('seed {0}', inputs.seed) }}, ${{ inputs.ticks }} ticks)
     runs-on: ubuntu-latest
@@ -116,5 +119,88 @@ jobs:
         if: always()
         with:
           name: sim-run-${{ inputs.scenario }}
+          path: sim-out/
+          if-no-files-found: warn
+
+  # ── gridsweep: the SAME single-param grid as `sweep`, but each value runs on its OWN runner ─────────
+  # Concurrently (a job matrix) instead of serially in one job — so a wide value grid finishes in ~1×
+  # per-cell wallclock instead of N×. Still OBSERVATIONAL and off the golden path: every cell shells out
+  # to the SAME `sweep` bin with a single `--values <v>`, so this shares sweep's zero-determinism story
+  # (each cell builds a non-default SimConfig) and writes NO golden constant. The grid is fanned by value
+  # (× all seeds per cell) — the cheap axis to parallelise, since worldgen is paid once per seed per cell.
+  grid-setup:
+    if: inputs.scenario == 'gridsweep'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Build value matrix from --values
+        id: gen
+        run: |
+          set -euo pipefail
+          PARAM='${{ inputs.param }}'
+          [ -n "$PARAM" ] || { echo "gridsweep: --param is required"; exit 2; }
+          # "0.0, 0.5 ,1.0" → trimmed, blank-stripped JSON array ["0.0","0.5","1.0"] for fromJSON below.
+          JSON="$(printf '%s' '${{ inputs.values }}' \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d' \
+            | jq -R . | jq -cs .)"
+          N="$(printf '%s' "$JSON" | jq 'length')"
+          [ "$N" -gt 0 ] || { echo "gridsweep: --values produced an empty grid"; exit 2; }
+          # Cap the matrix WIDTH (one runner per value) — GitHub allows ≤256 matrix jobs; keep wide sweeps
+          # deliberate. `force` lifts it (mirrors sweep's CELL_CAP override), still bounded by the 256 hard cap.
+          if [ "$N" -gt 24 ] && [ "${{ inputs.force }}" != "true" ]; then
+            echo "gridsweep: $N values > matrix cap 24; pass force=true to override (≤256 hard cap)"; exit 2
+          fi
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "gridsweep: $N parallel cells (param=$PARAM) → $JSON"
+
+  grid-cell:
+    if: inputs.scenario == 'gridsweep'
+    needs: grid-setup
+    name: gridsweep ${{ inputs.param }}=${{ matrix.value }} (seeds ${{ inputs.seeds }}, ${{ inputs.ticks }} ticks)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false   # one bad value must not cancel the rest of the grid
+      matrix:
+        value: ${{ fromJSON(needs.grid-setup.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build sweep
+        run: cargo build -p animata-sim --bin sweep --release
+
+      - name: Run one grid cell
+        run: |
+          set -euo pipefail
+          mkdir -p sim-out
+          V='${{ matrix.value }}'
+          # One value, all seeds → this cell's rows of the same CSV schema `sweep` emits.
+          target/release/sweep --param '${{ inputs.param }}' --values "$V" \
+            --seeds '${{ inputs.seeds }}' --ticks '${{ inputs.ticks }}' \
+            --out "sim-out/sweep-${V}.csv" | tee "sim-out/summary.txt"
+
+      - name: Append summary
+        if: always()
+        run: |
+          echo "### gridsweep cell: ${{ inputs.param }}=${{ matrix.value }} — seeds ${{ inputs.seeds }}, ${{ inputs.ticks }} ticks (\`${GITHUB_SHA::8}\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat sim-out/summary.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(no output)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          # Unique per cell (upload-artifact@v4 rejects duplicate names); `value` is sanitised for the path.
+          name: sim-run-gridsweep-${{ strategy.job-index }}-${{ matrix.value }}
           path: sim-out/
           if-no-files-found: warn
