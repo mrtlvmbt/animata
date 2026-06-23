@@ -102,6 +102,16 @@ pub struct Phenotype {
     /// type↔position map is read before the cosmetic sort scrambles it. `0` for a founder / no axial
     /// patterning; high when types segregate along the axis (an emergent body plan).
     pub axis_order: u8,
+    /// REGIONALISATION (Phase 2 / PR-D-zones): the count of distinct contiguous TYPE-regions along the
+    /// radial axis (head / trunk / tail-like zones), computed PRE-`adhesion_sort` from the per-radius
+    /// dominant type. Unlike `axis_order` (the STRENGTH of the type↔position coupling) this is the
+    /// GRANULARITY — how many body regions the gradient carved. `1` for a founder / a uniform body; rises
+    /// as more morphogen-read thresholds segment the axis into more zones. Scale-INDEPENDENT: a spike
+    /// over 4916 bodies measured `corr(zones, n_cells) ≈ −0.02`, so it rewards genuine regionalisation,
+    /// NOT sheer size. Each zone is a cohesive single-type band, so it is COMPATIBLE with `organ_power`
+    /// (the Gate-B finding: regionalised bodies keep large organs) — unlike metamerism (one type
+    /// repeating), which a single monotone morphogen read cannot express and which would shrink organs.
+    pub zones: u8,
 }
 
 impl Phenotype {
@@ -253,6 +263,12 @@ pub struct Genome {
     pub aerobic_capacity: f32,
 }
 
+/// The PRE-`adhesion_sort` output of [`Genome::grow`]: each cell's final GRN `states`, its integer
+/// lattice `pos`, and the two body-plan metrics read off that layout — `axis_order` (coupling strength)
+/// and `zones` (regionalisation count). A named alias so the shared core has one non-`type_complexity`
+/// signature both `develop()` and `body_layout()` destructure.
+type GrownBody = (Vec<[f32; G]>, Vec<(i16, i16)>, u8, u8);
+
 impl Genome {
     /// Founder genome: empty GRN (develops to one cell) + random brain weights + random thermal
     /// preference + random coloration (deterministic from the threaded `rng`).
@@ -362,7 +378,7 @@ impl Genome {
     /// intentionally lifted. Deterministic (within a profile); depends only on the genome.
     /// **Empty GRN ⇒ exactly one structural cell at the origin (C0): with `W=0` the morphogen is never
     /// read, so the armed rates change nothing.**
-    fn grow(&self) -> (Vec<[f32; G]>, Vec<(i16, i16)>, u8) {
+    fn grow(&self) -> GrownBody {
         let mut seed = [0.0f32; G];
         seed[0] = 1.0; // a maternal factor to bootstrap a non-empty GRN (ignored by W=0)
         let mut states: Vec<[f32; G]> = vec![seed];
@@ -409,17 +425,18 @@ impl Genome {
         // AXIS ORDER (F6): measured on the PRE-sort type↔position map the gradient built, before the
         // cosmetic `adhesion_sort` permutes cells across slots.
         let axis_order = axis_order_metric(&states, &pos);
+        let zones = radial_zones(&states, &pos); // regionalisation count, also PRE-sort (F6)
         // Differential adhesion: cluster same-type cells into tissues by permuting which cell sits at
         // which lattice slot (positions fixed). Preserves the cell multiset ⇒ type counts unchanged.
         adhesion_sort(&mut states, &pos);
-        (states, pos, axis_order)
+        (states, pos, axis_order, zones)
     }
 
     /// Develop the body and tally cell-type COUNTS (the per-tick stat inputs). Reduces the shared
     /// [`grow`](Self::grow) core to the same `Phenotype` counts as before morphogenesis.
     pub fn develop(&self) -> Phenotype {
-        let (states, pos, axis_order) = self.grow();
-        let mut p = Phenotype { n_cells: states.len() as u32, axis_order, ..Default::default() };
+        let (states, pos, axis_order, zones) = self.grow();
+        let mut p = Phenotype { n_cells: states.len() as u32, axis_order, zones, ..Default::default() };
         for s in &states {
             match cell_type(s) {
                 1 => p.effector += 1,
@@ -441,7 +458,7 @@ impl Genome {
     /// drawn body always matches the stats. `cell_type`: 0 = structural, 1..=7 = effector / storage /
     /// sensor / predator / flight / burrow / photo. Re-derived on demand; nothing is stored per-creature.
     pub fn body_layout(&self) -> Vec<(i16, i16, u8)> {
-        let (states, pos, _axis) = self.grow();
+        let (states, pos, _axis, _zones) = self.grow();
         states.iter().zip(pos).map(|(s, p)| (p.0, p.1, cell_type(s))).collect()
     }
 }
@@ -567,6 +584,39 @@ fn axis_order_metric(states: &[[f32; G]], pos: &[(i16, i16)]) -> u8 {
         ss_between += members.len() as f32 * (mg - mean_all).powi(2);
     }
     ((ss_between / ss_total).clamp(0.0, 1.0) * 255.0) as u8
+}
+
+/// REGIONALISATION (PR-D-zones): the count of distinct contiguous TYPE-regions walked outward along the
+/// radial (Manhattan-from-origin) axis. For each radius `r` the DOMINANT cell type (the mode over the
+/// cells at that radius) is taken; `zones` counts the maximal runs of equal per-radius dominant type
+/// (a `structural / effector / sensor` shell sequence = 3 zones). Empty radii (body gaps) are skipped,
+/// not treated as boundaries. A RUN-COUNT on the monotone gradient, so it needs NO flood-fill (a radial
+/// ring is Manhattan-distance ≥2 across and is NOT 4-connected — a flood-fill would shatter it). Measured
+/// PRE-`adhesion_sort` (the cosmetic sort scrambles the type↔position map; F6), the same layout
+/// `axis_order_metric` uses. Scale-independent (spike: `corr(zones, n_cells) ≈ −0.02`). `0`/`1` for a
+/// founder or a uniform body; rises as the morphogen read carves more type bands along the axis.
+fn radial_zones(states: &[[f32; G]], pos: &[(i16, i16)]) -> u8 {
+    let maxd = pos.iter().map(|&(x, y)| (x.abs() + y.abs()) as i32).max().unwrap_or(0);
+    let mut zones = 0u8;
+    let mut prev: Option<u8> = None;
+    for r in 0..=maxd {
+        let mut tally = [0u32; 8];
+        for (i, &(x, y)) in pos.iter().enumerate() {
+            if (x.abs() + y.abs()) as i32 == r {
+                tally[cell_type(&states[i]) as usize] += 1;
+            }
+        }
+        if tally.iter().sum::<u32>() == 0 {
+            continue; // empty radius — a body gap, not a zone boundary
+        }
+        // Dominant type at this radius (first-max wins ties ⇒ deterministic, like `cell_type`).
+        let dom = (0u8..8).max_by_key(|&t| tally[t as usize]).unwrap();
+        if prev != Some(dom) {
+            zones = zones.saturating_add(1);
+        }
+        prev = Some(dom);
+    }
+    zones
 }
 
 /// Largest CONNECTED same-type cluster size per function type (4-adjacency on the lattice), index

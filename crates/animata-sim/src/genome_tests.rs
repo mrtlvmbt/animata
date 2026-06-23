@@ -261,6 +261,25 @@ fn morphogen_inert_when_unread() {
     assert_eq!(p.axis_order, 0, "an unread gradient must leave the body axis-less");
 }
 
+/// PR-D-zones: REGIONALISATION counts distinct contiguous type-regions along the radial axis. A founder
+/// (one uniform cell) is a single zone; a body that reads the morphogen to segregate type by radius
+/// carves ≥2 zones — and `zones` is deterministic. (The ≥3 emergence-under-selection is the 8000-tick
+/// acceptance; here we lock the mechanism + the founder floor.)
+#[test]
+fn radial_zones_counts_regionalisation() {
+    let f = Genome::founder(&mut Rng::new(1)).develop();
+    assert_eq!(f.zones, 1, "a one-cell founder is a single uniform zone, got {}", f.zones);
+
+    let mut g = Genome::founder(&mut Rng::new(1));
+    g.grn_b[GENE_DIVIDE] = 1.0; // force a real body to regionalise
+    g.morph_w[GENE_EFFECTOR * N_MORPH] = 6.0; // effector gene reads the axis morphogen
+    let p = g.develop();
+    eprintln!("zones {} (n_cells {}, axis_order {})", p.zones, p.n_cells, p.axis_order);
+    assert!(p.n_cells >= 16, "need a real body to judge zones: {} cells", p.n_cells);
+    assert!(p.zones >= 2, "morphogen regionalisation must carve ≥2 zones, got {}", p.zones);
+    assert_eq!(p, g.develop(), "zones must be deterministic");
+}
+
 /// `organ_power` is monotone in BOTH cell count and organ coherence: adding a cell of the type, or
 /// growing its largest cluster, never LOWERS the type's power. This is the no-fitness-valley
 /// guarantee — the climb from scattered cells to a coherent organ is a smooth selective gradient,
@@ -384,4 +403,195 @@ fn body_layout_is_deterministic_and_preserves_counts() {
     }
     eprintln!("body_layout: checked {checked} multicellular layouts — deterministic, unique slots, counts preserved");
     assert!(checked > 50, "too few multicellular layouts exercised: {checked}");
+}
+
+// ============================================================================
+// PR-D-segments SPIKE (throwaway, #[ignore], exploratory — NEVER ships, no assert
+// thresholds yet). Resolves the plan's two gates by MEASURING genome space:
+//   Gate A — what axial structure is REACHABLE from the existing linear read?
+//     * ZONES (regionalisation): distinct contiguous TYPE-regions along the radius
+//       — monotone-achievable (k thresholds → k+1 zones). The CHEAP rung.
+//     * SEGMENTS (metamerism): one type repeating along the radius (A/gap/A) —
+//       needs a NON-monotone M→type map. The HARD rung (a single linear morph read
+//       + tanh is monotone in M(r) ∝ exp(−r/λ), so a SINGLE type should give 1 run;
+//       any segments≥2 means the DEV_STEPS recurrence / polarity flip bent it).
+//   Gate B — does a segmented/zoned body keep an organ_power channel, or does
+//     splitting a type into bands strictly shrink its largest cluster (organ_power
+//     genome.rs:112 rewards ONE big cluster) ⇒ selection opposes it ⇒ need B1.
+// Uses the REAL grow path (regulate FED the morphogen), PRE-adhesion_sort (F6).
+// ============================================================================
+
+/// The real `grow` dev loop, returning the PRE-`adhesion_sort` `(states, pos)` (what the production
+/// metric will see, F6). A faithful copy of `Genome::grow` (genome.rs:365-411) minus the sort.
+#[cfg(test)]
+fn grow_presort(g: &Genome) -> (Vec<[f32; G]>, Vec<(i16, i16)>) {
+    let mut seed = [0.0f32; G];
+    seed[0] = 1.0;
+    let mut states: Vec<[f32; G]> = vec![seed];
+    let mut pos: Vec<(i16, i16)> = vec![(0, 0)];
+    let mut morph: Vec<[f32; N_MORPH]> = vec![[0.0; N_MORPH]];
+    let reads_morph = g.morph_w.iter().any(|&w| w != 0.0);
+    for _ in 0..DEV_STEPS {
+        let cur = states.len();
+        let (mut nb, mut nb_pos, mut nb_m) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..cur {
+            let ns = g.regulate(&states[i], &morph[i]);
+            states[i] = ns;
+            if ns[GENE_DIVIDE] > DIVIDE_THETA && cur + nb.len() < MAX_CELLS {
+                let mut child = ns;
+                child[GENE_POLARITY] = -child[GENE_POLARITY];
+                let p = place_cell(pos[i], ns[GENE_POLARITY], &pos, &nb_pos);
+                nb.push(child);
+                nb_pos.push(p);
+                nb_m.push(morph[i]);
+            }
+        }
+        let settled = nb.is_empty();
+        states.extend(nb);
+        pos.extend(nb_pos);
+        morph.extend(nb_m);
+        if reads_morph {
+            diffuse_morphogen(&mut morph, &pos, &g.diff_rate, &g.decay_rate);
+        }
+        if settled || states.len() >= MAX_CELLS {
+            break;
+        }
+    }
+    (states, pos)
+}
+
+/// METAMERISM: for each function type, presence runs along the radius — the count of SEPARATED bands of
+/// that one type (A present / absent / present = 2). Returns the (best type, its run count). A run needs
+/// ≥1 cell at a radius to be "present"; segments≥2 for one type ⇒ that type recurs at separated radii ⇒
+/// the M→type map was NON-monotone (the hard rung). Min run cell-count guards scattered singletons.
+#[cfg(test)]
+fn type_metamerism(states: &[[f32; G]], pos: &[(i16, i16)]) -> (u8, u8) {
+    let maxd = pos.iter().map(|&(x, y)| (x.abs() + y.abs()) as i32).max().unwrap_or(0);
+    let (mut best_t, mut best_runs) = (0u8, 0u8);
+    for t in 1u8..=7 {
+        let mut present: Vec<bool> = Vec::new();
+        let mut run_cells: Vec<u32> = Vec::new(); // cells of t at each radius
+        for r in 0..=maxd {
+            let c = (0..pos.len())
+                .filter(|&i| (pos[i].0.abs() + pos[i].1.abs()) as i32 == r && cell_type(&states[i]) == t)
+                .count() as u32;
+            present.push(c >= 1);
+            run_cells.push(c);
+        }
+        // Count runs whose TOTAL cells ≥ ORGAN_MIN (kills scattered singletons, per-run not per-radius).
+        let (mut runs, mut k) = (0u8, 0usize);
+        while k < present.len() {
+            if present[k] {
+                let (start, mut total) = (k, 0u32);
+                while k < present.len() && present[k] {
+                    total += run_cells[k];
+                    k += 1;
+                }
+                let _ = start;
+                if total >= crate::config::ORGAN_MIN as u32 {
+                    runs = runs.saturating_add(1);
+                }
+            } else {
+                k += 1;
+            }
+        }
+        if runs > best_runs {
+            best_runs = runs;
+            best_t = t;
+        }
+    }
+    (best_t, best_runs)
+}
+
+/// SPIKE: sweep genome space from a growing genome (random grn_w + morph_w perturbations) and tally what
+/// axial structure is reachable. Prints the ZONES and SEGMENTS distributions + the Gate-B organ tradeoff.
+#[test]
+#[ignore = "exploratory PR-D-segments spike — run with --ignored, read the log, decide go/no-go"]
+fn spike_segments_reachability() {
+    let mut rng = Rng::new(20260623);
+    let mut zones_hist = [0u32; 12];
+    let mut seg_hist = [0u32; 12];
+    let mut bodies = 0u32;
+    // Gate B: dominant-type largest cluster (POST-sort, as organ_power reads it) bucketed by segments.
+    let (mut org_seg1, mut n_seg1, mut org_seg2, mut n_seg2) = (0u64, 0u32, 0u64, 0u32);
+    let mut best_seg_example = (0u8, 0u8, 0u32); // (segments, type, n_cells)
+    let mut best_zone_example = (0u8, 0u32);
+    // Decorrelation: corr(zones, n_cells) — is `zones` a real plan descriptor or just body size?
+    let (mut sz, mut sn, mut szz, mut snn, mut szn, mut cnt) = (0f64, 0f64, 0f64, 0f64, 0f64, 0f64);
+
+    for std_w in [0.4f32, 0.8, 1.4, 2.0] {
+        for std_m in [2.0f32, 4.0, 7.0] {
+            for _ in 0..600 {
+                let mut g = growing_genome();
+                for w in g.grn_w.iter_mut() {
+                    *w += std_w * rng.signed();
+                }
+                g.grn_b[GENE_DIVIDE] = 1.0; // keep growth alive after the perturbation
+                for c in 0..G {
+                    g.morph_w[c * N_MORPH] = std_m * rng.signed(); // every gene may read the axis morphogen
+                }
+                let (states, pos) = grow_presort(&g);
+                if states.len() < 12 {
+                    continue; // need a real body to judge an axis
+                }
+                bodies += 1;
+                let z = radial_zones(&states, &pos) as usize;
+                let (seg_t, seg) = type_metamerism(&states, &pos);
+                zones_hist[z.min(11)] += 1;
+                seg_hist[(seg as usize).min(11)] += 1;
+                if seg >= best_seg_example.0 {
+                    best_seg_example = (seg, seg_t, states.len() as u32);
+                }
+                if (z as u8) >= best_zone_example.0 {
+                    best_zone_example = (z as u8, states.len() as u32);
+                }
+                let (zf, nf) = (z as f64, states.len() as f64);
+                sz += zf;
+                sn += nf;
+                szz += zf * zf;
+                snn += nf * nf;
+                szn += zf * nf;
+                cnt += 1.0;
+                // Gate B: organ = largest connected cluster of the dominant function type, POST-sort.
+                let mut ss = states.clone();
+                adhesion_sort(&mut ss, &pos);
+                let organ = largest_organs(&ss, &pos);
+                let dom = (1u8..=7).max_by_key(|&t| organ[(t - 1) as usize]).unwrap();
+                let dom_org = organ[(dom - 1) as usize] as u64;
+                if seg >= 2 {
+                    org_seg2 += dom_org;
+                    n_seg2 += 1;
+                } else {
+                    org_seg1 += dom_org;
+                    n_seg1 += 1;
+                }
+            }
+        }
+    }
+    eprintln!("=== PR-D-segments SPIKE: {bodies} bodies (≥12 cells) ===");
+    eprintln!("ZONES (regionalisation, monotone-OK) distribution:");
+    for (z, &c) in zones_hist.iter().enumerate() {
+        if c > 0 {
+            eprintln!("  {z} zones: {c}");
+        }
+    }
+    eprintln!("  best: {} zones at {} cells", best_zone_example.0, best_zone_example.1);
+    eprintln!("SEGMENTS (metamerism, needs non-monotone) distribution:");
+    for (s, &c) in seg_hist.iter().enumerate() {
+        if c > 0 {
+            eprintln!("  {s} segments: {c}");
+        }
+    }
+    eprintln!(
+        "  best: {} segments of type {} at {} cells",
+        best_seg_example.0, best_seg_example.1, best_seg_example.2
+    );
+    let m1 = if n_seg1 > 0 { org_seg1 as f32 / n_seg1 as f32 } else { 0.0 };
+    let m2 = if n_seg2 > 0 { org_seg2 as f32 / n_seg2 as f32 } else { 0.0 };
+    eprintln!(
+        "GATE B: mean dominant-organ size — segments≤1: {m1:.2} (n={n_seg1})  vs  segments≥2: {m2:.2} (n={n_seg2})"
+    );
+    eprintln!("  (if segments≥2 organ << segments≤1 organ ⇒ banding shrinks organs ⇒ selection opposes ⇒ B1 needed)");
+    let corr = (cnt * szn - sz * sn) / (((cnt * szz - sz * sz) * (cnt * snn - sn * sn)).sqrt());
+    eprintln!("DECORRELATION: corr(zones, n_cells) = {corr:.3}  (axis_order's bar is < 0.6)");
 }

@@ -129,6 +129,23 @@ fn snapshot_round_trips_bit_identical() {
     );
 }
 
+/// PR-D-zones §7 fold reflection: `state_checksum` MUST fold `Phenotype.zones`, so a future change that
+/// alters only the regionalisation count can't silently escape the determinism lock. Perturb just the
+/// `zones` field of one live creature and require the checksum to react. (Guards the hand-written fold
+/// list in `state_checksum` against a forgotten field — the §7 trap.)
+#[test]
+fn state_checksum_folds_zones() {
+    let mut t = world();
+    let mut s = Sim::new(42, &t);
+    for tick in 0..50 {
+        s.step(&mut t, tick);
+    }
+    let before = state_checksum(&s, &t);
+    let c = s.creatures.first_mut().expect("fixture must carry a creature");
+    c.pheno.zones = c.pheno.zones.wrapping_add(1);
+    assert_ne!(before, state_checksum(&s, &t), "state_checksum must fold Phenotype.zones (PR-D-zones §7)");
+}
+
 /// The lock metric: over a headless run the herbivore population neither dies out nor pins
 /// the cap — a living, self-limiting ecosystem on the new world. (Tuning target for C0.)
 #[test]
@@ -275,6 +292,34 @@ fn axis_emerges_under_selection() {
     // DECORRELATION control (F1): the axis is genuine type↔position structure, not a by-product of
     // growing more cells — the η² ratio must stay weakly correlated with body size.
     assert!(corr < 0.6, "axis_order is just tracking body size (corr {corr:.3}) — not an emergent plan");
+    assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
+}
+
+/// Morphogenesis PR-D-zones acceptance: bodies REGIONALISE under selection — a real fraction develop
+/// `>= ZONE_MIN` distinct type-zones along the radial axis (head/trunk/tail-like), rising from the
+/// founders' single uniform zone. This is the GRANULARITY companion to `axis_emerges_under_selection`
+/// (which measures the coupling STRENGTH): the same evolving `morph_w` that builds an axis carves it
+/// into multiple body regions, each a cohesive organ (the Gate-B compatibility with `organ_power`).
+/// CRUCIALLY not a body-size artefact — `zones` is scale-independent (spike corr ≈ −0.02), so its
+/// correlation with `n_cells` stays low. Single seed ⇒ deterministic.
+#[test]
+fn zones_emerge_under_selection() {
+    let mut t = world();
+    let mut s = Sim::new(1, &t);
+    assert_eq!(s.frac_with_zones(), 0.0, "founders (single cells) are one uniform zone, not regionalised");
+    for tick in 0..8000 {
+        s.step(&mut t, tick);
+    }
+    let (frac, corr) = (s.frac_with_zones(), s.zones_size_correlation());
+    eprintln!(
+        "after 8000 ticks: {:.1}% regionalised ≥{ZONE_MIN} zones (avg_zones {:.2}), corr(zones,n_cells) {corr:.3}, pop {}",
+        frac * 100.0,
+        s.avg_zones(),
+        s.population()
+    );
+    assert!(frac > 0.05, "no body regionalisation emerged ({:.1}%)", frac * 100.0);
+    // DECORRELATION control: zones is genuine axial regionalisation, not a by-product of body size.
+    assert!(corr < 0.6, "zones is just tracking body size (corr {corr:.3}) — not an emergent plan");
     assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
 }
 
