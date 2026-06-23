@@ -1,11 +1,11 @@
 # Convenience aliases.
-#   cargo play          -> run the optimized (release) GUI
-#   cargo prof <seed> <steps>  -> headless per-phase profiling, e.g. `cargo prof neural 1 40000`
-#   cargo sweep [steps] [seeds] -> parameter sweep -> sweep.csv
+#   cargo play                              -> run the optimized (release) GUI
+#   cargo prof <seed> <ticks> --profile     -> headless per-phase profiling
+#   cargo sweep --param P --values a,b,c ... -> parameter sweep -> CSV (see src/bin/sweep.rs)
 [alias]
 play = "run --release"
-prof = "run --release --example headless --"
-sweep = "run --release --example sweep --"
+prof = "run -p animata-sim --bin headless --release --"
+sweep = "run -p animata-sim --bin sweep --release --"
 
 # The sim uses macroquad's *global* RNG (srand/gen_range), so tests that seed it
 # interfere when run in parallel (flaky determinism failures). Force the test

@@ -32,3 +32,6 @@ animata-save.bin
 
 # CI feedback report (scripts/ci-report.sh runtime output)
 /.ci-report/
+
+# sim-run.sh fetched artifacts
+/.sim-run/

@@ -1,10 +1,11 @@
 name: sim-run
 
 # Manually-triggered simulation runs (NOT the test gate — that's tests.yml). These OBSERVE behaviour
-# (emergence / perf / cross-seed fragility) on cheap cloud compute instead of taxing the dev machine,
-# and upload the result (stdout summary + any CSV) as an artifact. Runs on x86 ubuntu: these scenarios
-# read emergent statistics + wall-clock, they do NOT compare against the arch-bound golden, so the
-# cheap runner is fine. Trigger from the Actions tab → "sim-run" → Run workflow (pick a scenario).
+# (emergence / perf / cross-seed fragility / param sweeps) on cheap cloud compute instead of taxing the
+# dev machine, and upload the result (stdout summary + any CSV) as an artifact. Runs on x86 ubuntu:
+# these scenarios read emergent statistics + wall-clock, they do NOT compare against the arch-bound
+# golden, so the cheap runner is fine. Trigger from the Actions tab → "sim-run" → Run workflow (pick a
+# scenario), or via `scripts/sim-run.sh` (which also fetches the result).
 on:
   workflow_dispatch:
     inputs:
@@ -16,6 +17,7 @@ on:
           - evo-stats   # headless run on one seed → emergent stats + time-series metrics.csv
           - perf        # phase-timing breakdown (optionally at a forced high population)
           - multiseed   # the same run across seeds 1..5 → cross-seed emergence (fragility probe)
+          - sweep       # vary one Params field across a value grid (× seeds) → emergent stats CSV
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -25,10 +27,30 @@ on:
       bench_pop:
         description: "perf only — pre-stuff N founders to time step() at scale (e.g. 200000); blank = natural"
         default: ""
+      param:
+        description: "sweep only — Params field to vary (e.g. photo_rate, toxin_lethality)"
+        default: ""
+      values:
+        description: "sweep only — comma-separated values for --param (e.g. 0.0,0.5,1.0)"
+        default: ""
+      seeds:
+        description: "sweep only — comma-separated seeds (e.g. 1,2,3)"
+        default: "1"
+      force:
+        description: "sweep only — override the 64-cell grid cap"
+        type: boolean
+        default: false
+      run_nonce:
+        description: "internal — correlation nonce set by scripts/sim-run.sh (leave blank in the UI)"
+        default: ""
+
+# Nonce in the run title so scripts/sim-run.sh can grep its own dispatch (clock-independent).
+run-name: sim-run ${{ inputs.scenario }} [${{ inputs.run_nonce }}]
 
 jobs:
   run:
-    name: ${{ inputs.scenario }} (seed ${{ inputs.seed }}, ${{ inputs.ticks }} ticks)
+    # Label: the single seed is meaningless for a multi-seed sweep, so show the swept param there instead.
+    name: ${{ inputs.scenario }} (${{ inputs.scenario == 'sweep' && format('grid {0}', inputs.param) || format('seed {0}', inputs.seed) }}, ${{ inputs.ticks }} ticks)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +92,13 @@ jobs:
                 echo | tee -a "$SUM"
               done
               ;;
+            sweep)
+              cargo build -p animata-sim --bin sweep --release
+              FORCE=""
+              if [ "${{ inputs.force }}" = "true" ]; then FORCE="--force"; fi
+              target/release/sweep --param "${{ inputs.param }}" --values "${{ inputs.values }}" \
+                --seeds "${{ inputs.seeds }}" --ticks "${{ inputs.ticks }}" $FORCE --out sim-out/sweep.csv | tee "$SUM"
+              ;;
             *)
               echo "unknown scenario: ${{ inputs.scenario }}" | tee "$SUM"; exit 2 ;;
           esac
@@ -77,7 +106,8 @@ jobs:
       - name: Append summary
         if: always()
         run: |
-          echo "### sim-run: ${{ inputs.scenario }} — seed ${{ inputs.seed }}, ${{ inputs.ticks }} ticks (\`${GITHUB_SHA::8}\`)" >> "$GITHUB_STEP_SUMMARY"
+          LABEL='${{ inputs.scenario == 'sweep' && format('grid {0}', inputs.param) || format('seed {0}', inputs.seed) }}'
+          echo "### sim-run: ${{ inputs.scenario }} — $LABEL, ${{ inputs.ticks }} ticks (\`${GITHUB_SHA::8}\`)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat sim-out/summary.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(no output)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -85,6 +115,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: sim-run-${{ inputs.scenario }}-seed${{ inputs.seed }}
+          name: sim-run-${{ inputs.scenario }}
           path: sim-out/
           if-no-files-found: warn
