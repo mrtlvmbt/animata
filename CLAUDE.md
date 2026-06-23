@@ -29,13 +29,27 @@ The kit is **read-only** here — it is a shared mechanism layer, not project co
 
 ## Running tests (ALL agents — mandatory)
 
-Run tests through **`./scripts/test-bar.sh`**, never bare `cargo test`. It wraps `cargo test`, streams
-a progress indicator (so the human sees how far a long run is), and passes failure detail through
-(panic body, assert `left:`/`right:` — needed when re-pinning the golden checksum).
+**The authoritative green gate is the cloud CI pipeline, NOT a local run.** The heavy suite (the
+8000-tick acceptance corridors) is offloaded to GitHub Actions so it never taxes the dev machine. The
+standard loop is **commit → `git push` → `bash scripts/ci-report.sh`**:
 
-- Full suite: `./scripts/test-bar.sh` (defaults to `--release --workspace`).
-- Filtered: `./scripts/test-bar.sh -p animata-sim --release state_checksum` (any `cargo test` args pass through).
-- It runs raw `cargo test` internally (bypasses the rtk proxy that otherwise swallows test output), and
-  honours `.cargo/config.toml`'s `RUST_TEST_THREADS=1`. In a non-TTY context (a captured/backgrounded
-  run) it prints periodic checkpoint lines instead of a `\r` bar — set cadence with `BAR_EVERY=N`.
-- The canonical green gate is still a full **`--release`** run (acceptance corridors are tuned there).
+- `ci-report.sh` finds the run for HEAD, waits for it, and exits **0 = all green / 1 = tests failed /
+  2 = infra/timeout**. The exit code is the signal; on failure read `.ci-report/failed.log` (panic
+  body, assert `left:`/`right:`) and `.ci-report/artifacts/*/junit.xml` (which tests failed).
+- **Merge ONLY when `ci-report.sh` exits 0.** That replaces the old "run the full `--release` suite
+  locally" gate. Do NOT run the full `./scripts/test-bar.sh` suite locally — that is exactly the
+  machine-load CI exists to remove.
+- CI is two jobs (determinism is per-arch — see the memory [[ci-push-triggered]]): `test-x86`
+  (ubuntu, the corridors + everything except the 3 exact-golden tests) and `golden-arm64`
+  (macos-latest, matched arch, the 3 `state_checksum`/golden locks). It covers **`animata-sim` only**.
+  The `animata` render bin is deliberately out of CI, so UI/render changes still verify locally
+  (clippy + in-app — see the `animata-ui` skill).
+- **Re-pinning the golden:** read the new `left:`/`right:` from `.ci-report/failed.log` (the
+  `golden-arm64` job), not a local run.
+
+**Local `./scripts/test-bar.sh` stays available but OPTIONAL — only for fast targeted iteration** on a
+single test while developing (e.g. `./scripts/test-bar.sh -p animata-sim --release state_checksum`); it
+is NOT the gate. It wraps `cargo test` (never bare `cargo test`), runs raw cargo internally (bypasses
+the rtk proxy that swallows test output), honours `.cargo/config.toml`'s `RUST_TEST_THREADS=1`, and
+passes failure detail through; in a non-TTY run it prints checkpoint lines instead of a `\r` bar
+(cadence `BAR_EVERY=N`).

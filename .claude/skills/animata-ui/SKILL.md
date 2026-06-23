@@ -151,6 +151,9 @@ draw on a background `layer_painter` (under panels, non-interactive → world st
   for new panels.
 - **Gate:** `cargo clippy -p animata --all-targets -- -D warnings` (add `--features dev` if dev code
   changed) must be clean. Don't `cargo fmt`.
+- **The render bin is NOT in cloud CI** (it links macroquad → needs a GPU/display; CI covers
+  `animata-sim` only — see [[ci-push-triggered]]). So for UI/render changes the clippy gate above AND
+  the in-app visual verification stay **local** — `ci-report.sh` green does not vet the bin.
 
 ## 8. Workflow gates (non-negotiable)
 
