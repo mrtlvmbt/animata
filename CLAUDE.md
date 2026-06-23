@@ -39,7 +39,7 @@ standard loop is **commit → `git push` → `bash scripts/ci-report.sh`**:
 - **Merge ONLY when `ci-report.sh` exits 0.** That replaces the old "run the full `--release` suite
   locally" gate. Do NOT run the full `./scripts/test-bar.sh` suite locally — that is exactly the
   machine-load CI exists to remove.
-- CI is two jobs (determinism is per-arch — see the memory [[ci-push-triggered]]): `test-x86`
+- CI is two jobs (determinism is per-arch — see the `.github/workflows/tests.yml` header): `test-x86`
   (ubuntu, the corridors + everything except the 3 exact-golden tests) and `golden-arm64`
   (macos-latest, matched arch, the 3 `state_checksum`/golden locks). It covers **`animata-sim` only**.
   The `animata` render bin is deliberately out of CI, so UI/render changes still verify locally

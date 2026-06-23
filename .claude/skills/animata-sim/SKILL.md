@@ -116,7 +116,7 @@ trajectory didn't). Moving the golden for an INTENDED change is routine, not a d
 **The authoritative green gate is CI, not a local run (CLAUDE.md).** Standard loop: commit → `git
 push` → `bash scripts/ci-report.sh`; **merge ONLY on exit 0**. On failure read `.ci-report/failed.log`
 (panic body, assert `left:`/`right:`) + `.ci-report/artifacts/*/junit.xml` (which tests). CI is two
-jobs, per-arch — see [[ci-push-triggered]]; it covers **`animata-sim`** (the corridors + the 3
+jobs, per-arch — see the `.github/workflows/tests.yml` header; it covers **`animata-sim`** (the corridors + the 3
 golden locks), not the render bin. **Do NOT run the full `./scripts/test-bar.sh` suite locally** — that
 is exactly the machine load CI removes.
 
@@ -195,7 +195,7 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
   it (state why). Pass the reviewer the relevant `reference/*.md` (e.g. `reference/determinism.md`) so a
   cold fork starts grounded.
 - **CI green is the merge gate, not a local run** — push, `bash scripts/ci-report.sh`, merge ONLY on
-  exit 0 (§4, [[ci-push-triggered]]). Do NOT run the full local suite as the gate (CLAUDE.md).
+  exit 0 (§4; `.github/workflows/tests.yml`). Do NOT run the full local suite as the gate (CLAUDE.md).
 - **Land on main ONLY via a GitHub PR** ([[always-pr-to-main]]). Create the branch in a SEPARATE Bash
   call first (a guard hook blocks committing on main even inside a `checkout -b && commit` compound),
   confirm `git rev-parse --abbrev-ref HEAD`, then commit. Don't stage `.claude-dev-kit` (submodule).
