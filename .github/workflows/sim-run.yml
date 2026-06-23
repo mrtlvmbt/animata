@@ -18,6 +18,7 @@ on:
           - perf        # phase-timing breakdown (optionally at a forced high population)
           - multiseed   # the same run across seeds 1..5 → cross-seed emergence (fragility probe)
           - sweep       # vary one Params field across a value grid (× seeds) → emergent stats CSV
+          - zones       # examples/probe_zones: per-seed zones-emergence fraction (§5 re-validate)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -91,6 +92,9 @@ jobs:
                 "$BIN" "$s" "${{ inputs.ticks }}" | tee -a "$SUM"
                 echo | tee -a "$SUM"
               done
+              ;;
+            zones)
+              cargo run -p animata-sim --release --example probe_zones -- "${{ inputs.seed }}" | tee "$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
