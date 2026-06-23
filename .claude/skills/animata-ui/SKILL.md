@@ -9,9 +9,10 @@ The in-app GUI is an **egui overlay composited over the macroquad 3D world** —
 warm amber accent, IBM Plex type ("naturalist's dashboard"). egui has no native letter-spacing, SVG,
 rounded clipping, backdrop blur, or mesh gradients, and `egui_macroquad` distorts translucent fills, so
 the HUD is hand-painted against exact mockup numbers. Most mistakes here are alpha/geometry surprises or
-frame-ordering lag. This skill is the spine: read it, then act. Pairs with the memories (`MEMORY.md`):
-[[hud-redesign-state]], [[creature-inspector-state]], [[dev-bridge-port]], [[verify-visual-fixes-in-app]],
-[[review-before-merge]], [[always-pr-to-main]].
+frame-ordering lag. This skill is the spine: read it, then act. The dev-bridge control channel is
+documented in `DEV_BRIDGE.md` (repo root); the PR / review / verify-in-app rules are §7–§8 here +
+`CLAUDE.md`. (The HUD-redesign and creature-inspector feature state is dated/volatile — it lives in the
+code + `~/.claude/plans/`, not a durable doc.)
 
 Stack: `egui = "0.31"`, `egui-macroquad = "0.17.3"`, `egui-phosphor = "0.9"` (Regular), `macroquad 0.4`.
 **No rustfmt** — match surrounding style by hand; the ONLY gate is
@@ -135,11 +136,11 @@ index), and it COEXISTS with any flyout. Picking is screen-space and runs as its
 `MouseButton::Left` can't do both). Gate picking on `show_info`. A dead selection clears itself. Markers
 draw on a background `layer_painter` (under panels, non-interactive → world stays clickable through them).
 
-## 7. Verifying — never eyeball from reasoning ([[verify-visual-fixes-in-app]])
+## 7. Verifying — never eyeball from reasoning
 
 - **Run it:** `cargo run -p animata --features dev`. Drive the HUD over the dev bridge for scripted
   screenshots — the port is **PER-BRANCH**, read it from `.animata-dev-port`, never assume 8127
-  ([[dev-bridge-port]]). Methods: `animata/set_panel{panel,debug,show_info}`, `animata/select{id|nearest}`
+  (full protocol: `DEV_BRIDGE.md`). Methods: `animata/set_panel{panel,debug,show_info}`, `animata/select{id|nearest}`
   (drives the inspector), `animata/set_timescale{paused}`, `animata/render{water}`,
   `animata/screenshot{path,window}`. Read the PNG back and LOOK.
 - **Pixel-match a mockup:** the reference mockups are the `Animata GUI*.html` files. Render one in
@@ -159,12 +160,11 @@ draw on a background `layer_painter` (under panels, non-interactive → world st
 
 - **Big HUD feature / redesign → plan-consensus FIRST** (`/plan-consensus`) before code; land the plan in
   `~/.claude/plans/`. (The inspector and the pixel-perfect redesign both went through it.)
-- **Land on main ONLY via a GitHub PR** ([[always-pr-to-main]]). Create the branch in a SEPARATE Bash
+- **Land on main ONLY via a GitHub PR.** Create the branch in a SEPARATE Bash
   call (a guard hook blocks committing on main even in a `checkout -b && commit` compound); confirm
   `git rev-parse --abbrev-ref HEAD`; then commit. Rebase onto fresh `origin/main`, re-run clippy, push,
   PR, merge. Commit messages end with the `Co-Authored-By` trailer; PR bodies end with the Claude Code
-  line. Pure docs/UI-polish PRs don't need subsystem-reviewer (state why); behavioural changes do
-  ([[review-before-merge]]).
+  line. Pure docs/UI-polish PRs don't need subsystem-reviewer (state why); behavioural changes do.
 - **`.claude-dev-kit/**` is READ-ONLY** — never edit it locally.
 
 ## 9. The standard loop for a HUD change
