@@ -260,6 +260,23 @@ pub const THERMAL_PENALTY: f32 = 0.9;
 /// in before the lineage is wiped), not instant death.
 pub const TOXIN_LETHALITY: f32 = 0.02;
 
+// ---- Density-dependent mortality (population-stability fix) ----
+// The boom-bust is a Hutchinson delayed-logistic limit cycle (period ~4×LIFESPAN), INVARIANT to the
+// feedback magnitude — the enemy is the demographic DELAY (density acts on the population only through
+// slow channels: age² senescence + the energy buffer). The cure is an IMMEDIATE density-dependent death
+// SINK keyed on the START-OF-TICK local head-count: a saturating hazard
+// `1 − exp(−DENSITY_LETHALITY · max(0, n_local/DENSITY_CAP − 1))` summed into the single death roll. It
+// converts the old explosion-to-cap / extinction into a BOUNDED fluctuation (verified across seeds 1–5:
+// pop ~2–5k, no explode, no extinct). `exp` saturates → no whole-cell pulse / period-2 flip-flop.
+/// Resource-cell edge in columns — the spatial granularity of the local head-count `n_local`.
+pub const DENSITY_CELL: usize = 32;
+/// Per-cell carrying number: the sink starts biting above this many creatures in a `DENSITY_CELL²` block.
+/// 50 (the gentlest of the verified-BOUNDED configs) keeps the equilibrium higher (cloud seeds 1–5: med
+/// ~3.2–4.5k) so it bounds the explosion with the least collateral on the emergent corridors.
+pub const DENSITY_CAP: f32 = 50.0;
+/// Hazard coefficient for the saturating density sink (mirrors `TOXIN_LETHALITY`'s role).
+pub const DENSITY_LETHALITY: f32 = 0.2;
+
 // ---- C3: seasonality (a TIME-varying environmental pressure; default OFF) ----
 /// Length of one in-world year in **sim-seconds** — the period of the seasonal food cycle. Short
 /// enough (vs `LIFESPAN`) that a lineage feels the swing within a few generations.
