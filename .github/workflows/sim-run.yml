@@ -1,0 +1,90 @@
+name: sim-run
+
+# Manually-triggered simulation runs (NOT the test gate — that's tests.yml). These OBSERVE behaviour
+# (emergence / perf / cross-seed fragility) on cheap cloud compute instead of taxing the dev machine,
+# and upload the result (stdout summary + any CSV) as an artifact. Runs on x86 ubuntu: these scenarios
+# read emergent statistics + wall-clock, they do NOT compare against the arch-bound golden, so the
+# cheap runner is fine. Trigger from the Actions tab → "sim-run" → Run workflow (pick a scenario).
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "What to run"
+        type: choice
+        default: evo-stats
+        options:
+          - evo-stats   # headless run on one seed → emergent stats + time-series metrics.csv
+          - perf        # phase-timing breakdown (optionally at a forced high population)
+          - multiseed   # the same run across seeds 1..5 → cross-seed emergence (fragility probe)
+      seed:
+        description: "World seed (evo-stats / perf)"
+        default: "1"
+      ticks:
+        description: "Ticks to run"
+        default: "8000"
+      bench_pop:
+        description: "perf only — pre-stuff N founders to time step() at scale (e.g. 200000); blank = natural"
+        default: ""
+
+jobs:
+  run:
+    name: ${{ inputs.scenario }} (seed ${{ inputs.seed }}, ${{ inputs.ticks }} ticks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build headless
+        run: cargo build -p animata-sim --bin headless --release
+
+      - name: Run scenario
+        run: |
+          set -euo pipefail
+          BIN=target/release/headless
+          mkdir -p sim-out
+          SUM=sim-out/summary.txt
+          case "${{ inputs.scenario }}" in
+            evo-stats)
+              "$BIN" "${{ inputs.seed }}" "${{ inputs.ticks }}" --metrics sim-out/metrics.csv | tee "$SUM"
+              ;;
+            perf)
+              if [ -n "${{ inputs.bench_pop }}" ]; then
+                "$BIN" "${{ inputs.seed }}" "${{ inputs.ticks }}" --bench-pop "${{ inputs.bench_pop }}" --profile | tee "$SUM"
+              else
+                "$BIN" "${{ inputs.seed }}" "${{ inputs.ticks }}" --profile | tee "$SUM"
+              fi
+              ;;
+            multiseed)
+              : > "$SUM"
+              for s in 1 2 3 4 5; do
+                echo "===== seed $s =====" | tee -a "$SUM"
+                "$BIN" "$s" "${{ inputs.ticks }}" | tee -a "$SUM"
+                echo | tee -a "$SUM"
+              done
+              ;;
+            *)
+              echo "unknown scenario: ${{ inputs.scenario }}" | tee "$SUM"; exit 2 ;;
+          esac
+
+      - name: Append summary
+        if: always()
+        run: |
+          echo "### sim-run: ${{ inputs.scenario }} — seed ${{ inputs.seed }}, ${{ inputs.ticks }} ticks (\`${GITHUB_SHA::8}\`)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat sim-out/summary.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(no output)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sim-run-${{ inputs.scenario }}-seed${{ inputs.seed }}
+          path: sim-out/
+          if-no-files-found: warn
