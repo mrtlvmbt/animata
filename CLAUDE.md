@@ -52,14 +52,15 @@ The kit is **read-only** here — it is a shared mechanism layer, not project co
 **Heavy simulations AND any new test/check run in the CLOUD, not on the dev machine.** Long headless
 runs, perf benchmarks at scale, high-population timing, parameter sweeps, multi-seed probes → dispatch
 via **`scripts/sim-run.sh <scenario> [k=v …]`** (the manual `sim-run.yml` pipelines:
-`evo-stats`/`perf`/`multiseed`/`sweep`), which waits and fetches the result (it preflights the `gh`
+`evo-stats`/`perf`/`multiseed`/`sweep`/`gridsweep`), which waits and fetches the result (it preflights the `gh`
 `workflow` scope and tells you if it's missing). When you ADD a new test or acceptance check, land it in
 the suite and let the CI gate run it (push → `ci-report.sh`) — don't burn the dev machine verifying it
 locally. The cloud is the default execution surface for anything heavy or new.
 
 **Observational runs PARALLELISE — experiments don't have to be serial.** GitHub Actions runs
 dispatches concurrently (no `concurrency:` gate), so independent probes (different seeds / params /
-scenarios) can run at once: either a grid inside ONE `sweep`/`multiseed` dispatch, or several
+scenarios) can run at once: either a grid inside ONE `sweep`/`multiseed` dispatch (serial cells), a
+`gridsweep` dispatch (each value on its own runner, concurrently), or several
 `scripts/sim-run.sh … &` backgrounded together (each writes a per-nonce `.sim-run/<nonce>/`, so
 parallel fetches don't collide). **This is ONLY for observational sim-runs and independent
 experiments.** The determinism golden + acceptance corridors stay single-writer (animata-sim skill §9):
