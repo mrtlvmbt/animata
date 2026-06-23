@@ -418,12 +418,6 @@ pub struct Sim {
     /// `step` does ~no allocation in steady state; every element is fully overwritten each tick, so the
     /// trajectory is byte-identical and this is NOT part of `state_checksum`.
     scratch: StepScratch,
-    /// Density death-sink tuning OVERRIDES (NOT serialized, NOT in `state_checksum`). Default to the
-    /// `DENSITY_CAP` / `DENSITY_LETHALITY` consts ⇒ the default `Sim` is byte-identical (golden holds);
-    /// a sweep probe overrides them to find the gentlest cap that still bounds while sparing the zones
-    /// corridor. Bake the winner into the consts and drop these.
-    pub density_cap: f32,
-    pub density_lethality: f32,
 }
 
 /// One row of the read-only snapshot pass: `(pos, biomass, carnivory, coloration, ground_tone,
@@ -672,8 +666,6 @@ impl Sim {
             registry: PressureRegistry::build(&cfg.features, &cfg.params),
             cfg,
             profiler: crate::profile::Profiler::default(),
-            density_cap: DENSITY_CAP,
-            density_lethality: DENSITY_LETHALITY,
             scratch: StepScratch::default(),
         }
     }
@@ -697,8 +689,6 @@ impl Sim {
             registry: PressureRegistry::build(&SimConfig::default().features, &SimConfig::default().params),
             cfg: SimConfig::default(),
             profiler: crate::profile::Profiler::default(),
-            density_cap: DENSITY_CAP,
-            density_lethality: DENSITY_LETHALITY,
             scratch: StepScratch::default(),
         }
     }
@@ -734,8 +724,6 @@ impl Sim {
             registry,
             cfg: state.cfg,
             profiler: crate::profile::Profiler::default(),
-            density_cap: DENSITY_CAP,
-            density_lethality: DENSITY_LETHALITY,
             scratch: StepScratch::default(),
         }
     }
@@ -994,8 +982,6 @@ impl Sim {
         let world_seed = self.world_seed;
         let oxygen_feat = self.cfg.features.oxygen;
         let terrain_ref: &VoxelTerrain = terrain;
-        let dsink_cap = self.density_cap; // override (default DENSITY_CAP); the sweep probe varies it
-        let dsink_leth = self.density_lethality; // override (default DENSITY_LETHALITY)
         let density_count = &density_count; // per-cell head-count for the density death-sink (read-only)
         let snap_pos = &sc.pos; // START-OF-TICK positions (the count was built on these) for the sink cell
         let strata = &sc.strata;
@@ -1087,7 +1073,7 @@ impl Sim {
                 // age²/buffer channels — converting explode/extinct into a bounded fluctuation.
                 let (scx, scy) = column_index(snap_pos[idx]);
                 let n_local = density_count[(scy / DENSITY_CELL) * density_cells_x + (scx / DENSITY_CELL)] as f32;
-                let density_haz = 1.0 - (-dsink_leth * (n_local / dsink_cap - 1.0).max(0.0)).exp();
+                let density_haz = 1.0 - (-DENSITY_LETHALITY * (n_local / DENSITY_CAP - 1.0).max(0.0)).exp();
                 let mortality = (eff.mortality_add + density_haz).clamp(0.0, 1.0);
                 // Toxic / density death: a per-tick hazard (`mortality`). Deterministic per (id, tick).
                 if mortality > 0.0
@@ -1692,7 +1678,7 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 15018857545783211373; // re-pinned: density-dependent death-sink (DENSITY_CAP=50) shifts the 8000t trajectory
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 17965443279439971932; // re-pinned: density death-sink (DENSITY_CAP=80) shifts the 8000t trajectory
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]

@@ -271,9 +271,10 @@ pub const TOXIN_LETHALITY: f32 = 0.02;
 /// Resource-cell edge in columns — the spatial granularity of the local head-count `n_local`.
 pub const DENSITY_CELL: usize = 32;
 /// Per-cell carrying number: the sink starts biting above this many creatures in a `DENSITY_CELL²` block.
-/// 50 (the gentlest of the verified-BOUNDED configs) keeps the equilibrium higher (cloud seeds 1–5: med
-/// ~3.2–4.5k) so it bounds the explosion with the least collateral on the emergent corridors.
-pub const DENSITY_CAP: f32 = 50.0;
+/// 80 — a cloud cap-sweep (seeds 1–5, current main) showed EVERY cap 50–200 already bounds (the death-sink
+/// has wide margin; only sink-OFF explodes), so pick the gentler 80: it keeps a higher equilibrium (~8k,
+/// closer to the natural pre-explosion level) ⇒ least trajectory perturbation of the emergent corridors.
+pub const DENSITY_CAP: f32 = 80.0;
 /// Hazard coefficient for the saturating density sink (mirrors `TOXIN_LETHALITY`'s role).
 pub const DENSITY_LETHALITY: f32 = 0.2;
 

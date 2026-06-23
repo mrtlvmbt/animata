@@ -312,30 +312,42 @@ fn axis_emerges_under_selection() {
 
 /// Morphogenesis PR-D-zones acceptance: bodies REGIONALISE under selection — a real fraction develop
 /// `>= ZONE_MIN` distinct type-zones along the radial axis (head/trunk/tail-like), rising from the
-/// founders' single uniform zone. This is the GRANULARITY companion to `axis_emerges_under_selection`
-/// (which measures the coupling STRENGTH): the same evolving `morph_w` that builds an axis carves it
-/// into multiple body regions, each a cohesive organ (the Gate-B compatibility with `organ_power`).
-/// CRUCIALLY not a body-size artefact — `zones` is scale-independent (spike corr ≈ −0.02), so its
-/// correlation with `n_cells` stays low. Single seed ⇒ deterministic.
+/// founders' single uniform zone. The GRANULARITY companion to `axis_emerges_under_selection` (coupling
+/// STRENGTH): the same evolving `morph_w` that builds an axis carves it into multiple body regions.
+/// CRUCIALLY not a body-size artefact — `zones` is scale-independent, so its corr with `n_cells` stays low.
+///
+/// MULTI-SEED (§5 re-validation): the density death-sink (`DENSITY_CAP`) bounds the population into a
+/// fluctuation (~6–8k) instead of the old unbounded growth, which lowers the STANDING zoned fraction
+/// (fewer multicellular bodies accreted at any instant) AND makes a single-tick snapshot phase-noisy
+/// (the t8000 sample lands on a random point of the cycle: cloud seeds 1–5 gave 7.2/2.3/3.8/2.4/1.1%,
+/// mean ~3.4%). So this is now a multi-seed MEAN bar, not a fragile single-seed 5% snapshot. The
+/// mechanism is intact — its siblings `axis_emerges_under_selection`, `radial_zones_counts_
+/// regionalisation`, `multicellularity_emerges_under_selection` all pass — only the standing fraction is
+/// lower under the bounded regime. Bar = mean > 0.02 (regionalisation genuinely emerges across seeds);
+/// NOT lowered silently — re-derived from the measured multi-seed distribution under the death-sink.
 #[test]
 fn zones_emerge_under_selection() {
-    let mut t = world();
-    let mut s = Sim::new(1, &t);
-    assert_eq!(s.frac_with_zones(), 0.0, "founders (single cells) are one uniform zone, not regionalised");
-    for tick in 0..8000 {
-        s.step(&mut t, tick);
+    let mut fracs = Vec::new();
+    for seed in 1..=5u64 {
+        let mut t = VoxelTerrain::new(seed);
+        let mut s = Sim::new(seed, &t);
+        assert_eq!(s.frac_with_zones(), 0.0, "founders (single cells) are one uniform zone, not regionalised");
+        for tick in 0..8000 {
+            s.step(&mut t, tick);
+        }
+        let (frac, corr) = (s.frac_with_zones(), s.zones_size_correlation());
+        eprintln!(
+            "seed {seed}: {:.1}% regionalised ≥{ZONE_MIN} zones (avg_zones {:.2}), corr {corr:.3}, pop {}",
+            frac * 100.0, s.avg_zones(), s.population()
+        );
+        // DECORRELATION control: zones is genuine axial regionalisation, not a by-product of body size.
+        assert!(corr < 0.6, "seed {seed}: zones is just tracking body size (corr {corr:.3})");
+        assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "seed {seed} pop unhealthy: {}", s.population());
+        fracs.push(frac);
     }
-    let (frac, corr) = (s.frac_with_zones(), s.zones_size_correlation());
-    eprintln!(
-        "after 8000 ticks: {:.1}% regionalised ≥{ZONE_MIN} zones (avg_zones {:.2}), corr(zones,n_cells) {corr:.3}, pop {}",
-        frac * 100.0,
-        s.avg_zones(),
-        s.population()
-    );
-    assert!(frac > 0.05, "no body regionalisation emerged ({:.1}%)", frac * 100.0);
-    // DECORRELATION control: zones is genuine axial regionalisation, not a by-product of body size.
-    assert!(corr < 0.6, "zones is just tracking body size (corr {corr:.3}) — not an emergent plan");
-    assert!(s.population() > 100 && s.population() < SIM_POP_CAP, "population unhealthy: {}", s.population());
+    let mean = fracs.iter().sum::<f32>() / fracs.len() as f32;
+    eprintln!("mean regionalised fraction over 5 seeds: {:.1}%", mean * 100.0);
+    assert!(mean > 0.02, "body regionalisation did not emerge across seeds (mean {:.1}%)", mean * 100.0);
 }
 
 /// C2 acceptance: a predatory second trophic level EMERGES — some creatures evolve predator
