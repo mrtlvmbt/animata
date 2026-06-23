@@ -131,18 +131,33 @@ fn snapshot_round_trips_bit_identical() {
 
 /// The lock metric: over a headless run the herbivore population neither dies out nor pins
 /// the cap — a living, self-limiting ecosystem on the new world. (Tuning target for C0.)
+///
+/// **Phase-independent over-run invariant (§5), NOT a single-tick snapshot.** The herbivore
+/// population is a boom-bust oscillator (troughs of a few dozen, peaks of tens of thousands —
+/// verified: seed 1 reads 48 at tick 5000 yet 23 030 at tick 7000). A single-tick `pop > 100`
+/// read at one fixed tick is brittle: it can land in a trough and read "collapsed" on a healthy
+/// ecosystem (false-fail), or land on the peak of a degrading one and read "alive" (false-pass).
+/// Both failure modes corrupt the guard exactly when it matters most — during a trophic migration
+/// that shifts the oscillator's phase/amplitude. So we measure the ecosystem over the WHOLE run,
+/// phase-independently: it must reach a healthy uncapped PEAK and never go EXTINCT. Multi-seed so
+/// it is not seed luck. Same robustness shape as `multicellularity_emerges_under_selection`.
 #[test]
 fn population_stays_in_a_living_corridor() {
     for &seed in &[1u64, 2, 3] {
         let mut t = world();
         let mut s = Sim::new(seed, &t);
+        let (mut peak, mut min_pop) = (0usize, usize::MAX);
         for tick in 0..4000 {
             s.step(&mut t, tick);
+            let pop = s.population();
+            peak = peak.max(pop);
+            min_pop = min_pop.min(pop);
         }
-        let pop = s.population();
-        eprintln!("seed {seed}: pop {pop}, avg_energy {:.1}, births {}, deaths {}", s.avg_energy(), s.births, s.deaths);
-        assert!(pop > 100, "population collapsed for seed {seed}: {pop}");
-        assert!(pop < SIM_POP_CAP, "population pinned the cap for seed {seed}: {pop}");
+        eprintln!("seed {seed}: peak {peak} min {min_pop}, avg_energy {:.1}, births {}, deaths {}", s.avg_energy(), s.births, s.deaths);
+        // Alive ecosystem: reaches a healthy, uncapped population peak and never goes extinct —
+        // independent of which phase of the boom-bust cycle the final tick happens to sample.
+        assert!(peak > 1000 && peak < SIM_POP_CAP, "ecosystem never reached a healthy peak for seed {seed}: peak {peak}");
+        assert!(min_pop > 0, "ecosystem went extinct for seed {seed}");
     }
 }
 
