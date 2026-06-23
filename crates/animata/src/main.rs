@@ -524,7 +524,6 @@ async fn main() {
     let dbg_perf = std::env::var("ANIMATA_PERF").is_ok();
     let mut dbg_frame_n = 0u64;
     let mut dbg_cr_ms_acc = 0.0f64;
-    let mut dbg_str_ms_acc = 0.0f64;
     let mut dbg_str_ms_max = 0.0f64;
     let mut dbg_dev_ms_max = 0.0f64;
     let mut dbg_td_ms_acc = 0.0f64;
@@ -1363,7 +1362,6 @@ async fn main() {
                 let dbg_ts = std::time::Instant::now(); // [PERF-MEASURE]
                 streamer.update(ctx, terrain, center, cam.zoom);
                 let ms = dbg_ts.elapsed().as_secs_f64() * 1000.0;
-                dbg_str_ms_acc += ms;
                 if ms > dbg_str_ms_max {
                     dbg_str_ms_max = ms;
                 }
@@ -1536,7 +1534,7 @@ async fn main() {
         // [PERF-MEASURE] report creature-block ms + on_screen + pop + fps every 60 frames.
         dbg_cr_ms_acc += dbg_t_cr.elapsed().as_secs_f64() * 1000.0;
         dbg_frame_n += 1;
-        if dbg_frame_n % 60 == 0 {
+        if dbg_frame_n.is_multiple_of(60) {
             if dbg_perf {
                 let pop = snapshot.as_ref().map(|s| s.creatures.len()).unwrap_or(0);
                 eprintln!(
@@ -1547,7 +1545,6 @@ async fn main() {
                 );
             }
             dbg_cr_ms_acc = 0.0;
-            dbg_str_ms_acc = 0.0;
             dbg_str_ms_max = 0.0;
             dbg_dev_ms_max = 0.0;
             dbg_td_ms_acc = 0.0;
