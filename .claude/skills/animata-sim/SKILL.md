@@ -210,10 +210,15 @@ apply phase — never give a pressure `&mut terrain` in eval. New pressure = new
 
 - Tests: **the gate is CI** (push → `bash scripts/ci-report.sh`, §4); local `./scripts/test-bar.sh` is
   optional for targeted iteration only, never bare `cargo test`.
-- Headless: `cargo run -p animata-sim --bin headless --release`.
-- Bench at scale: `headless --bench-pop N --profile` (per-phase ms). Read the iron-rules first
-  (`reference/measurement.md`) — interleaved A/B only, and the **rtk-proxy stale-binary trap**: for a
-  fresh A/B run the built binary DIRECTLY, never through `rtk proxy cargo …`.
+- **Heavy/long sim runs go to the CLOUD, not the dev machine** (CLAUDE.md): long headless runs, perf
+  benchmarks at scale, high-pop timing, parameter sweeps, multi-seed probes → `scripts/sim-run.sh
+  <scenario> [k=v …]` (the `sim-run.yml` pipelines: `evo-stats`/`perf`/`multiseed`/`sweep`), which
+  waits + fetches the artifact. The local commands below are for SMALL/quick checks only.
+- Headless (quick/local): `cargo run -p animata-sim --bin headless --release`.
+- Bench at scale → prefer `sim-run.sh perf bench_pop=N` (cloud, isolated runner — steadier than the
+  noisy local box). A local `headless --bench-pop N --profile` is fine for a quick look; read the
+  iron-rules first (`reference/measurement.md`) — interleaved A/B only, and the **rtk-proxy
+  stale-binary trap**: run the built binary DIRECTLY, never through `rtk proxy cargo …`.
 - Viewer + dev-bridge: `cargo run -p animata --features dev` (the dev-bridge port is PER-BRANCH —
   read it from `.animata-dev-port`, never assume 8127). Verify visual/render
   claims IN the running app, not by reasoning.

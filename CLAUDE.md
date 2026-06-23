@@ -30,8 +30,10 @@ The kit is **read-only** here — it is a shared mechanism layer, not project co
 ## Running tests (ALL agents — mandatory)
 
 **The authoritative green gate is the cloud CI pipeline, NOT a local run.** The heavy suite (the
-8000-tick acceptance corridors) is offloaded to GitHub Actions so it never taxes the dev machine. The
-standard loop is **commit → `git push` → `bash scripts/ci-report.sh`**:
+8000-tick acceptance corridors) is offloaded to GitHub Actions so it never taxes the dev machine.
+**Precondition (per host): `gh` is installed and authenticated** (`gh auth login`, scope `repo`) —
+`ci-report.sh` preflights this and tells you exactly what to fix if it's missing. The standard loop is
+**commit → `git push` → `bash scripts/ci-report.sh`**:
 
 - `ci-report.sh` finds the run for HEAD, waits for it, and exits **0 = all green / 1 = tests failed /
   2 = infra/timeout**. The exit code is the signal; on failure read `.ci-report/failed.log` (panic
@@ -46,6 +48,14 @@ standard loop is **commit → `git push` → `bash scripts/ci-report.sh`**:
   (clippy + in-app — see the `animata-ui` skill).
 - **Re-pinning the golden:** read the new `left:`/`right:` from `.ci-report/failed.log` (the
   `golden-arm64` job), not a local run.
+
+**Heavy simulations AND any new test/check run in the CLOUD, not on the dev machine.** Long headless
+runs, perf benchmarks at scale, high-population timing, parameter sweeps, multi-seed probes → dispatch
+via **`scripts/sim-run.sh <scenario> [k=v …]`** (the manual `sim-run.yml` pipelines:
+`evo-stats`/`perf`/`multiseed`/`sweep`), which waits and fetches the result (it preflights the `gh`
+`workflow` scope and tells you if it's missing). When you ADD a new test or acceptance check, land it in
+the suite and let the CI gate run it (push → `ci-report.sh`) — don't burn the dev machine verifying it
+locally. The cloud is the default execution surface for anything heavy or new.
 
 **Local `./scripts/test-bar.sh` stays available but OPTIONAL — only for fast targeted iteration** on a
 single test while developing (e.g. `./scripts/test-bar.sh -p animata-sim --release state_checksum`); it

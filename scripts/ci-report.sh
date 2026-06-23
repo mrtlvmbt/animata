@@ -4,6 +4,11 @@
 # Exit code: 0 = success, 1 = тесты упали, 2 = ошибка инфраструктуры/таймаут.
 set -uo pipefail
 
+# Префлайт: на ЛЮБОМ хосте нужен залогиненный gh (scope repo), иначе gh-вызовы ниже тихо фейлят и
+# скрипт ложно сообщит «не нашёл run» вместо реальной причины. Падаем рано с понятной инструкцией.
+command -v gh >/dev/null 2>&1 || { echo "✗ gh CLI не найден — установи gh и выполни: gh auth login" >&2; exit 2; }
+gh auth status >/dev/null 2>&1 || { echo "✗ gh не авторизован на этом хосте — выполни: gh auth login (scope repo)" >&2; exit 2; }
+
 WORKFLOW="tests.yml"
 OUT_DIR=".ci-report"
 SHA="$(git rev-parse HEAD)"
