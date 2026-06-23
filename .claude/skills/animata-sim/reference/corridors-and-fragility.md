@@ -41,6 +41,7 @@ pop trajectory (checkpoints to 8000t) before declaring a corridor break a regres
 
 Re-pin both profile goldens (`determinism.md`, `SKILL.md` §3) AND do this corridor work — the re-pin and
 the §5 robustness pass are the *same job*, routine cost for an intended change (memory
-`golden-repin-is-fine-for-intended-change`), not a deterrent. Then a full `--release`
-`./scripts/test-bar.sh` must be green, and a `subsystem-reviewer` pass is mandatory (pass it
-`reference/determinism.md` + the diff).
+`golden-repin-is-fine-for-intended-change`), not a deterrent. Then the **CI gate must be green** — `git
+push` → `bash scripts/ci-report.sh` exit 0 (the cloud pipeline runs the corridors; the full local
+`test-bar.sh` suite is NOT the gate — `SKILL.md` §4) — and a `subsystem-reviewer` pass is mandatory (pass
+it `reference/determinism.md` + the diff).

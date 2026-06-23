@@ -38,6 +38,9 @@ thousand ticks). A single-tick metric (`pop > 100` at tick T) **aliases the phas
 
 ## Verify a "byte-identical" claim, don't assume it
 
-A structural change that should be inert must keep `state_checksum` (`sim.rs:1523`) equal OFF vs ON. Run
-`state_checksum_replays_to_golden` (both profiles via `./scripts/test-bar.sh`) — if the golden moved, the
-relayout leaked a reorder/round-trip bug; FIX it, do not re-pin (`determinism.md`).
+A structural change that should be inert must keep `state_checksum` (`sim.rs:1523`) equal OFF vs ON. The
+authoritative check is the CI gate (`git push` → `bash scripts/ci-report.sh` exit 0 — the `golden-arm64`
+job runs the release golden locks; `SKILL.md` §4). For fast local iteration on a spike, a TARGETED
+`./scripts/test-bar.sh -p animata-sim state_checksum_replays_to_golden` is the allowed optional run (not
+the gate). If the golden moved, the relayout leaked a reorder/round-trip bug; FIX it, do not re-pin
+(`determinism.md`).
