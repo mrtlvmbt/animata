@@ -188,8 +188,29 @@ impl Creature {
     }
 }
 
-/// Frozen ANM2 `Creature` shape (its `genome` is the pre-`oxygen_tolerance` `GenomeV2`) for save
-/// migration ([`crate::persist`] v2). NEVER edit. `pheno` is unchanged (oxygen is a genome trait).
+/// Frozen ANM2-era `Phenotype` byte layout (PR-D-zones froze this): the body counts + `organ` +
+/// `axis_order` exactly as they sit on disk in an ANM2 save — i.e. the live `Phenotype` BEFORE its
+/// trailing `zones` field was added. It exists ONLY so [`CreatureV2`] consumes the exact ANM2 pheno
+/// bytes (bincode is positional — a live `Phenotype` would read one byte too many and misalign every
+/// following creature). The migrated `pheno` is RE-DERIVED from the genome (`develop()`), since `zones`
+/// needs the cell LAYOUT the stored counts don't carry. NEVER edit — its shape is the ANM2 contract.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct PhenotypeV2 {
+    n_cells: u32,
+    effector: u32,
+    storage: u32,
+    sensor: u32,
+    predator: u32,
+    flight: u32,
+    burrow: u32,
+    photo: u32,
+    structural: u32,
+    organ: [u8; 7],
+    axis_order: u8,
+}
+
+/// Frozen ANM2 `Creature` shape (its `genome` is the pre-`oxygen_tolerance` `GenomeV2`, its `pheno` the
+/// pre-`zones` [`PhenotypeV2`]) for save migration ([`crate::persist`] v2). NEVER edit.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreatureV2 {
     id: u64,
@@ -200,11 +221,17 @@ pub(crate) struct CreatureV2 {
     age: u32,
     alive: bool,
     genome: GenomeV2,
-    pheno: Phenotype,
+    pheno: PhenotypeV2,
 }
 
 impl CreatureV2 {
     fn migrate(self) -> Creature {
+        let genome = self.genome.migrate();
+        // `pheno` is a pure function of the genome, and `zones` (PR-D-zones) needs the developed cell
+        // layout the ANM2 stream never stored (only counts) — so the frozen `self.pheno` is consumed for
+        // byte-alignment and the live phenotype is RE-DERIVED. `develop()` is deterministic and ignores
+        // the migrated genome's new `oxygen_tolerance`, so the body (and its counts) reproduce exactly.
+        let pheno = genome.develop();
         Creature {
             id: self.id,
             founder: self.founder,
@@ -213,8 +240,8 @@ impl CreatureV2 {
             energy: self.energy,
             age: self.age,
             alive: self.alive,
-            genome: self.genome.migrate(),
-            pheno: self.pheno,
+            genome,
+            pheno,
         }
     }
 }
@@ -270,7 +297,19 @@ impl SimState {
                     age: c.age,
                     alive: c.alive,
                     genome: c.genome.to_v2(),
-                    pheno: c.pheno,
+                    pheno: PhenotypeV2 {
+                        n_cells: c.pheno.n_cells,
+                        effector: c.pheno.effector,
+                        storage: c.pheno.storage,
+                        sensor: c.pheno.sensor,
+                        predator: c.pheno.predator,
+                        flight: c.pheno.flight,
+                        burrow: c.pheno.burrow,
+                        photo: c.pheno.photo,
+                        structural: c.pheno.structural,
+                        organ: c.pheno.organ,
+                        axis_order: c.pheno.axis_order,
+                    },
                 })
                 .collect(),
         }
