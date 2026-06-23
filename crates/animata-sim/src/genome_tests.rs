@@ -215,7 +215,10 @@ fn founder_develops_to_one_photo_cell() {
     let mut rng = Rng::new(1);
     let g = Genome::founder(&mut rng);
     let p = g.develop();
-    assert_eq!(p, Phenotype { n_cells: 1, photo: 1, organ: [0, 0, 0, 0, 0, 0, 1], ..Default::default() });
+    // `zones: 1` — a single cell is trivially ONE radial zone (PR-D-zones #103 added the field but left
+    // this exact-match expectation at the `Default` 0; the founder genuinely develops 1 zone, and
+    // `zones_emerge` agrees — its founders read `frac_with_zones()==0` since ZONE_MIN=3 > 1).
+    assert_eq!(p, Phenotype { n_cells: 1, photo: 1, organ: [0, 0, 0, 0, 0, 0, 1], zones: 1, ..Default::default() });
     assert_eq!(p.complexity(), 0); // one cell ⇒ no multicellular complexity
     // A single photo cell registers as a size-1 photo organ but carries NO effector organ, so the
     // effector organ_power is still the bare (zero) count — body-driven stats unchanged by morphogenesis.
