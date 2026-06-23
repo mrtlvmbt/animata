@@ -828,6 +828,15 @@ impl Sim {
         // Autotroph self-shading (F3): light is a finite flux, so more autotrophs ⇒ less photosynthesis
         // per head ⇒ the niche self-limits.
         let autotroph_shading = 1.0 / (1.0 + n_auto as f32 / PHOTO_SOFTCAP);
+        // Density-dependent mortality (population-stability): per-cell head-count `n_local` on the
+        // START-OF-TICK snapshot positions, integer increments in fixed creature order ⇒ deterministic,
+        // core-count-independent (no float reduce). The immediate density death-SINK (apply loop) reads it.
+        let density_cells_x = COLS.div_ceil(DENSITY_CELL);
+        let mut density_count = vec![0u32; density_cells_x * ROWS.div_ceil(DENSITY_CELL)];
+        for &p in &sc.pos {
+            let (cx, cy) = column_index(p);
+            density_count[(cy / DENSITY_CELL) * density_cells_x + (cx / DENSITY_CELL)] += 1;
+        }
         self.profiler.record(Span::Snapshot, t_snapshot.elapsed());
         let t_grid = Instant::now();
         self.grid.rebuild(&sc.pos, maxx, maxy, GRID_CELL);
@@ -973,6 +982,8 @@ impl Sim {
         let world_seed = self.world_seed;
         let oxygen_feat = self.cfg.features.oxygen;
         let terrain_ref: &VoxelTerrain = terrain;
+        let density_count = &density_count; // per-cell head-count for the density death-sink (read-only)
+        let snap_pos = &sc.pos; // START-OF-TICK positions (the count was built on these) for the sink cell
         let strata = &sc.strata;
         self.creatures
             .par_iter_mut()
@@ -1054,10 +1065,19 @@ impl Sim {
                 // oxygen it already produced this tick (`oxy`) is kept — it photosynthesised before dying,
                 // exactly as the serial loop deposited O2 before the death checks.
                 let nutrient = |c: &Creature| c.biomass() as f32 * NUTRIENT_PER_CELL;
-                // Toxic death (C3 abiotic): ground toxicity beyond resistance is a per-tick death hazard
-                // (`mortality_add`). Deterministic per (id, tick).
-                if eff.mortality_add > 0.0
-                    && Rng::new(seed_fold(world_seed, &[SALT_TOXIN, c.id, tick])).unit() < eff.mortality_add
+                // Density-dependent mortality (population-stability): an IMMEDIATE, SATURATING death
+                // hazard in the START-OF-TICK local head-count above `DENSITY_CAP`, summed INTO the toxin
+                // hazard so both share the ONE death roll (no second roll, no new salt ⇒ no channel
+                // correlation). `1−exp` saturates → each creature draws independently, no whole-cell pulse.
+                // This is the delayed-logistic cure: density acts on death NOW (τ≈1 tick), not via the slow
+                // age²/buffer channels — converting explode/extinct into a bounded fluctuation.
+                let (scx, scy) = column_index(snap_pos[idx]);
+                let n_local = density_count[(scy / DENSITY_CELL) * density_cells_x + (scx / DENSITY_CELL)] as f32;
+                let density_haz = 1.0 - (-DENSITY_LETHALITY * (n_local / DENSITY_CAP - 1.0).max(0.0)).exp();
+                let mortality = (eff.mortality_add + density_haz).clamp(0.0, 1.0);
+                // Toxic / density death: a per-tick hazard (`mortality`). Deterministic per (id, tick).
+                if mortality > 0.0
+                    && Rng::new(seed_fold(world_seed, &[SALT_TOXIN, c.id, tick])).unit() < mortality
                 {
                     c.alive = false;
                     let (dx, dy) = column_index(c.pos);
@@ -1658,9 +1678,13 @@ pub const GOLDEN_CHECKSUM_SEED42_300: u64 = if cfg!(debug_assertions) {
 /// too slow for routine testing. Re-pin (with a why-comment) only for an intended trajectory change.
 #[cfg(not(debug_assertions))]
 #[allow(dead_code)]
-pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 6132762536545207687; // re-pinned: PR-D-zones folds Phenotype.zones
+pub const GOLDEN_CHECKSUM_SEED1_8000: u64 = 17965443279439971932; // re-pinned: density death-sink (DENSITY_CAP=80) shifts the 8000t trajectory
 
 #[cfg(test)]
 #[path = "sim_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "economy_tests.rs"]
+mod economy_tests;
 
