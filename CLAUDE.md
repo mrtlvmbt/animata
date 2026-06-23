@@ -57,6 +57,14 @@ via **`scripts/sim-run.sh <scenario> [k=v …]`** (the manual `sim-run.yml` pipe
 the suite and let the CI gate run it (push → `ci-report.sh`) — don't burn the dev machine verifying it
 locally. The cloud is the default execution surface for anything heavy or new.
 
+**Observational runs PARALLELISE — experiments don't have to be serial.** GitHub Actions runs
+dispatches concurrently (no `concurrency:` gate), so independent probes (different seeds / params /
+scenarios) can run at once: either a grid inside ONE `sweep`/`multiseed` dispatch, or several
+`scripts/sim-run.sh … &` backgrounded together (each writes a per-nonce `.sim-run/<nonce>/`, so
+parallel fetches don't collide). **This is ONLY for observational sim-runs and independent
+experiments.** The determinism golden + acceptance corridors stay single-writer (animata-sim skill §9):
+never race two agents on one golden-touching change — that is unattributable drift, not parallelism.
+
 **Local `./scripts/test-bar.sh` stays available but OPTIONAL — only for fast targeted iteration** on a
 single test while developing (e.g. `./scripts/test-bar.sh -p animata-sim --release state_checksum`); it
 is NOT the gate. It wraps `cargo test` (never bare `cargo test`), runs raw cargo internally (bypasses
