@@ -338,20 +338,42 @@ pub struct VoxelTerrain {
     state: TerrainState,
 }
 
+/// Packed immutable geo pair (`biome`+`moist`) — co-read by the hot `cap_at`/`current_biomass`
+/// path, so storing them adjacent puts a column's pair on ONE cache line (Tier-3). Geo is
+/// regenerated from `seed`, so this is NOT serialized and NOT in the checksum.
+#[derive(Clone, Copy, Default)]
+pub struct GeoCell {
+    /// Biome id (`BiomeKind::id`), 0-11. Decode with `BiomeKind::from_id`.
+    biome: u8,
+    /// Moisture, quantised `[0,1]→[0,255]`.
+    moist: u8,
+}
+
+/// Packed mutable overlay cell — the three fields the hot `current_biomass`/`cap_at` read needs
+/// (`last_update`+`biomass`+`nutrient`) stored adjacent so a column lands on ONE cache line
+/// (Tier-3). `last_update` first keeps the struct 8 B (u32-aligned, 2 B tail pad). This is the
+/// in-memory SOURCE OF TRUTH; the on-disk save layout is preserved via [`TerrainStateWire`].
+#[derive(Clone, Copy, Default)]
+pub struct BioCell {
+    last_update: u32,
+    biomass: u8,
+    nutrient: u8,
+}
+
 /// Immutable per-column geometry + climate (the part the renderer meshes from). Shared by `Arc`.
 pub struct TerrainGeo {
     surf: Vec<f32>,
-    biome: Vec<u8>,
     flags: Vec<u8>,
     /// Water surface level per column (voxel levels): `SEA_ABS` for ocean, the fill level
     /// for lakes, the channel top for rivers, `0` = dry. The renderer floats a translucent
     /// plane here when it sits above the column's terrain.
     water: Vec<u8>,
-    /// Climate fields the SIM reads (the renderer only uses biome). Quantised `[0,1]→[0,255]`
-    /// (≈0.4% step — coarser than the climate itself; saves 3× the RAM of `f32` at ×16).
-    /// `temp`: 0 cold .. 1 hot. `moist`: 0 dry .. 1 wet. Present for every column.
+    /// Temperature the SIM reads. Quantised `[0,1]→[0,255]` (≈0.4% step — coarser than the
+    /// climate itself; saves 3× the RAM of `f32` at ×16). 0 cold .. 1 hot. Per column.
     temp: Vec<u8>,
-    moist: Vec<u8>,
+    /// Packed `biome`+`moist` (Tier-3): biome id (0-11) and moisture (`[0,1]→[0,255]`), stored
+    /// adjacent because the hot `cap_at` read needs both. The renderer reads them via getters.
+    bio_geo: Vec<GeoCell>,
     /// Ground toxicity per column, quantised `[0,1]→[0,255]` — an abiotic axis (heavy metals /
     /// pollutants) selecting for `toxin_resistance`. Geometry-fixed after worldgen.
     toxicity: Vec<u8>,
@@ -366,22 +388,16 @@ pub struct TerrainGeo {
 /// save snapshot carries (the `geo` is regenerated from `seed`), and (later) what the sim thread
 /// ships to the renderer.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(into = "TerrainStateWire", from = "TerrainStateWire")]
 pub struct TerrainState {
-    /// Vegetation biomass per column (S3), quantised `[0,1]→[0,255]` — the consumable base of
-    /// the food chain. The value is what biomass was AS OF `last_update[i]`; the live amount
-    /// is recovered LAZILY (see [`biomass_at`](VoxelTerrain::biomass_at)) by regrowing it toward
-    /// the column's `carrying_capacity` over the ticks elapsed since. So an untouched column costs
-    /// nothing — there is no per-tick global sweep over the 3.69M columns.
-    biomass: Vec<u8>,
-    /// The `WorldClock` tick at which `biomass[i]` was last written (by a graze). Lazy regrow
-    /// reads `tick - last_update[i]`. Integer ticks (not an `f32` time) so the timestamp never
-    /// drifts. `0` at generation, when biomass starts at full capacity.
-    last_update: Vec<u32>,
-    /// Inorganic nutrient pool per column (C3 nutrient cycle), `[0,255]`. Plant capacity is
-    /// scaled by it (Liebig limit), grazing CARRIES it away with the herbivore, creature death
-    /// returns it (decomposition), and it weathers toward a geology baseline. Lazy like biomass:
-    /// updated only on events (graze/deposit), weathered closed-form from `nutrient_update`.
-    nutrient: Vec<u8>,
+    /// Packed `last_update`+`biomass`+`nutrient` per column (Tier-3 source of truth). Vegetation
+    /// biomass (S3, `[0,1]→[0,255]`) is the consumable food base; its value is what biomass was AS
+    /// OF `last_update` (the tick it was last written), recovered LAZILY on read by regrowing toward
+    /// `carrying_capacity` (so an untouched column costs nothing — no per-tick global sweep).
+    /// `nutrient` is the inorganic pool (`[0,255]`, Liebig limit on capacity; grazing carries it
+    /// off, death returns it, weathering relaxes it via `nutrient_update`). Co-stored because the hot
+    /// read touches all three. On-disk layout stays the three separate vectors via `TerrainStateWire`.
+    bio: Vec<BioCell>,
     nutrient_update: Vec<u32>,
     /// Dissolved oxygen per column (C3 gas cycle Phase 1), stored as **`f32` (NOT quantised)** so a
     /// gentle per-creature O2 drip accumulates exactly — a u8/u16 round-modify-write would round each
@@ -390,6 +406,51 @@ pub struct TerrainState {
     /// the founder world is anoxic, O2 builds as autotrophs spread (the Great Oxygenation Event).
     oxygen: Vec<f32>,
     oxygen_update: Vec<u32>,
+}
+
+/// On-disk shape of [`TerrainState`] — the THREE separate overlay vectors as before Tier-3 packing.
+/// `TerrainState` (de)serializes THROUGH this (`#[serde(into/from)]`) so the save byte layout is
+/// **identical to ANM4** — Tier-3 is a RAM-only relayout, the MAGIC does NOT bump and old saves
+/// decode unchanged (the §7 mis-decode risk is moot: disk bytes are the same). Field order/types
+/// MUST match the pre-Tier-3 `TerrainState` exactly.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TerrainStateWire {
+    biomass: Vec<u8>,
+    last_update: Vec<u32>,
+    nutrient: Vec<u8>,
+    nutrient_update: Vec<u32>,
+    oxygen: Vec<f32>,
+    oxygen_update: Vec<u32>,
+}
+
+impl From<TerrainState> for TerrainStateWire {
+    fn from(s: TerrainState) -> Self {
+        let n = s.bio.len();
+        let (mut biomass, mut last_update, mut nutrient) =
+            (Vec::with_capacity(n), Vec::with_capacity(n), Vec::with_capacity(n));
+        for c in &s.bio {
+            biomass.push(c.biomass);
+            last_update.push(c.last_update);
+            nutrient.push(c.nutrient);
+        }
+        TerrainStateWire {
+            biomass,
+            last_update,
+            nutrient,
+            nutrient_update: s.nutrient_update,
+            oxygen: s.oxygen,
+            oxygen_update: s.oxygen_update,
+        }
+    }
+}
+
+impl From<TerrainStateWire> for TerrainState {
+    fn from(w: TerrainStateWire) -> Self {
+        let bio = (0..w.biomass.len())
+            .map(|i| BioCell { last_update: w.last_update[i], biomass: w.biomass[i], nutrient: w.nutrient[i] })
+            .collect();
+        TerrainState { bio, nutrient_update: w.nutrient_update, oxygen: w.oxygen, oxygen_update: w.oxygen_update }
+    }
 }
 
 /// Frozen ANM2 `TerrainState` (pre-oxygen overlay) for save migration ([`crate::persist`] v2). NEVER
@@ -407,7 +468,7 @@ impl TerrainStateV2 {
     /// autotrophs photosynthesise after resume).
     pub(crate) fn migrate(self) -> TerrainState {
         let n = self.biomass.len();
-        TerrainState {
+        TerrainStateWire {
             biomass: self.biomass,
             last_update: self.last_update,
             nutrient: self.nutrient,
@@ -415,6 +476,7 @@ impl TerrainStateV2 {
             oxygen: vec![0.0; n],
             oxygen_update: vec![0; n],
         }
+        .into()
     }
 }
 
@@ -423,9 +485,9 @@ impl TerrainState {
     /// Down-convert to the frozen ANM2 shape (drops the oxygen overlay) — migration-test support only.
     pub(crate) fn to_v2(&self) -> TerrainStateV2 {
         TerrainStateV2 {
-            biomass: self.biomass.clone(),
-            last_update: self.last_update.clone(),
-            nutrient: self.nutrient.clone(),
+            biomass: self.bio.iter().map(|c| c.biomass).collect(),
+            last_update: self.bio.iter().map(|c| c.last_update).collect(),
+            nutrient: self.bio.iter().map(|c| c.nutrient).collect(),
             nutrient_update: self.nutrient_update.clone(),
         }
     }
@@ -441,14 +503,16 @@ impl VoxelTerrain {
     pub fn mut_state_checksum(&self) -> u64 {
         let mut h = crate::rng::FNV_OFFSET;
         crate::rng::fnv_fold_u64(&mut h, self.seed);
-        for &b in &self.state.biomass {
-            crate::rng::fnv_fold_u32(&mut h, b as u32);
+        // SAME fold ORDER as the pre-Tier-3 separate vectors (biomass-all, then last_update-all, then
+        // nutrient-all) so the golden stays byte-identical — the data moved cells, the hash inputs did not.
+        for c in &self.state.bio {
+            crate::rng::fnv_fold_u32(&mut h, c.biomass as u32);
         }
-        for &u in &self.state.last_update {
-            crate::rng::fnv_fold_u32(&mut h, u);
+        for c in &self.state.bio {
+            crate::rng::fnv_fold_u32(&mut h, c.last_update);
         }
-        for &n in &self.state.nutrient {
-            crate::rng::fnv_fold_u32(&mut h, n as u32);
+        for c in &self.state.bio {
+            crate::rng::fnv_fold_u32(&mut h, c.nutrient as u32);
         }
         for &u in &self.state.nutrient_update {
             crate::rng::fnv_fold_u32(&mut h, u);
@@ -488,9 +552,7 @@ impl VoxelTerrain {
             chunks_y,
             geo,
             state: TerrainState {
-                biomass: vec![0; n],
-                last_update: vec![0; n],
-                nutrient: vec![0; n],
+                bio: vec![BioCell::default(); n],
                 nutrient_update: vec![0; n],
                 oxygen: vec![0.0; n],
                 oxygen_update: vec![0; n],
@@ -502,11 +564,11 @@ impl VoxelTerrain {
     /// Rejects a snapshot whose column count differs from this build's (e.g. a different
     /// `MAP_SCALE`), since the overlay vectors would no longer line up with the geometry.
     pub fn set_state(&mut self, state: TerrainState) -> Result<(), String> {
-        if state.biomass.len() != self.state.biomass.len() {
+        if state.bio.len() != self.state.bio.len() {
             return Err(format!(
                 "snapshot terrain has {} columns, this build has {} (different MAP_SCALE?)",
-                state.biomass.len(),
-                self.state.biomass.len()
+                state.bio.len(),
+                self.state.bio.len()
             ));
         }
         self.state = state;
@@ -820,15 +882,20 @@ impl VoxelTerrain {
         // grid (one O(N) pass, like hydrology). The sim reads it for hydration / water-seeking.
         // Computed AFTER shoreline reconciliation so it reflects the reconciled water mask.
         let water_dist = compute_water_dist(&water);
+        // Pack the hot-co-read geo pair (biome+moist) and the mutable trio (last_update+biomass+nutrient).
+        let bio_geo = biome.iter().zip(moist.iter()).map(|(&biome, &moist)| GeoCell { biome, moist }).collect();
+        let bio = biomass
+            .iter()
+            .zip(nutrient.iter())
+            .map(|(&biomass, &nutrient)| BioCell { last_update: 0, biomass, nutrient })
+            .collect();
         VoxelTerrain {
             seed,
             chunks_x: COLS.div_ceil(CHUNK),
             chunks_y: ROWS.div_ceil(CHUNK),
-            geo: Arc::new(TerrainGeo { surf, biome, flags, water, temp, moist, toxicity, water_dist }),
+            geo: Arc::new(TerrainGeo { surf, flags, water, temp, bio_geo, toxicity, water_dist }),
             state: TerrainState {
-                biomass,
-                last_update: vec![0u32; n],
-                nutrient,
+                bio,
                 nutrient_update: vec![0u32; n],
                 oxygen: vec![0.0; n],
                 oxygen_update: vec![0u32; n],
@@ -868,7 +935,7 @@ impl VoxelTerrain {
     pub fn cell(&self, x: i32, y: i32) -> u16 {
         match self.index(x, y) {
             Some(i) => {
-                pack_cell(self.geo.surf[i].round() as u8, BiomeKind::from_id(self.geo.biome[i]), self.geo.flags[i])
+                pack_cell(self.geo.surf[i].round() as u8, BiomeKind::from_id(self.geo.bio_geo[i].biome), self.geo.flags[i])
             }
             None => 0,
         }
@@ -891,7 +958,7 @@ impl VoxelTerrain {
         self.height(x as i32, y as i32)
     }
     pub fn biome_at(&self, x: usize, y: usize) -> BiomeKind {
-        BiomeKind::from_id(self.geo.biome[y * COLS + x])
+        BiomeKind::from_id(self.geo.bio_geo[y * COLS + x].biome)
     }
     pub fn is_water(&self, x: usize, y: usize) -> bool {
         self.geo.flags[y * COLS + x] & FLAG_WATER != 0
@@ -908,7 +975,7 @@ impl VoxelTerrain {
     }
     /// Moisture in `[0,1]` (0 dry .. 1 wet) at a column. De-quantised from the `u8` field.
     pub fn moisture_at(&self, x: usize, y: usize) -> f32 {
-        self.geo.moist[y * COLS + x] as f32 / 255.0
+        self.geo.bio_geo[y * COLS + x].moist as f32 / 255.0
     }
     /// Ground toxicity in `[0,1]` at a column (heavy metals / pollutants). De-quantised.
     pub fn toxicity_at(&self, x: usize, y: usize) -> f32 {
@@ -942,13 +1009,14 @@ impl VoxelTerrain {
     /// plant). Uses the STORED nutrient (frozen since the last event), so the cap is constant
     /// between events and the lazy biomass regrow stays a valid closed form (F4 discipline).
     fn cap_at(&self, i: usize) -> f32 {
-        let base = carrying_capacity(BiomeKind::from_id(self.geo.biome[i]), self.geo.moist[i] as f32 / 255.0);
-        base * (self.state.nutrient[i] as f32 / 255.0)
+        let g = self.geo.bio_geo[i]; // one cache line for biome+moist (Tier-3)
+        let base = carrying_capacity(BiomeKind::from_id(g.biome), g.moist as f32 / 255.0);
+        base * (self.state.bio[i].nutrient as f32 / 255.0)
     }
 
     /// Geology nutrient baseline (`[0,1]`) for a column — what weathering relaxes toward.
     fn nutrient_base_at(&self, i: usize) -> f32 {
-        nutrient_baseline(BiomeKind::from_id(self.geo.biome[i]), self.geo.surf[i].round() as u8)
+        nutrient_baseline(BiomeKind::from_id(self.geo.bio_geo[i].biome), self.geo.surf[i].round() as u8)
     }
 
     /// Materialise the lazy nutrient weathering up to `tick` and persist it (an event touched
@@ -956,16 +1024,17 @@ impl VoxelTerrain {
     /// moves on its own — no per-tick sweep.
     fn materialize_nutrient(&mut self, i: usize, tick: u64) {
         let elapsed = (tick - self.state.nutrient_update[i] as u64) as f32 * TICK_LEN;
-        let n = weather(self.state.nutrient[i] as f32 / 255.0, self.nutrient_base_at(i), elapsed);
-        self.state.nutrient[i] = quant_unit(n);
+        let n = weather(self.state.bio[i].nutrient as f32 / 255.0, self.nutrient_base_at(i), elapsed);
+        self.state.bio[i].nutrient = quant_unit(n);
         self.state.nutrient_update[i] = tick as u32;
     }
 
     /// Live biomass at column index `i` and clock `tick`: the stored value (as of its last
     /// update) regrown toward capacity over the elapsed ticks. Pure read — does NOT write back.
     fn current_biomass(&self, i: usize, tick: u64) -> f32 {
-        let elapsed = (tick - self.state.last_update[i] as u64) as f32 * TICK_LEN;
-        regrow(self.state.biomass[i] as f32 / 255.0, self.cap_at(i), elapsed)
+        let c = self.state.bio[i]; // one cache line for last_update+biomass+nutrient (Tier-3)
+        let elapsed = (tick - c.last_update as u64) as f32 * TICK_LEN;
+        regrow(c.biomass as f32 / 255.0, self.cap_at(i), elapsed)
     }
 
     /// Live vegetation biomass in `[0,1]` at a column for clock `tick` (the lazy regrow is
@@ -986,13 +1055,13 @@ impl VoxelTerrain {
         self.materialize_nutrient(i, tick);
         let cur = self.current_biomass(i, tick);
         let taken = amount.clamp(0.0, cur);
-        self.state.biomass[i] = quant_unit(cur - taken);
-        self.state.last_update[i] = tick as u32;
+        self.state.bio[i].biomass = quant_unit(cur - taken);
+        self.state.bio[i].last_update = tick as u32;
         // The grazed plant matter LEAVES the column with the herbivore (carried, to be returned
         // as nutrient where the creature later dies) — the nutrient pool drops accordingly. This
         // is what makes heavily-grazed ground go nutrient-poor (and depend on the death recycle).
         let drained = taken * NUTRIENT_PER_BIOMASS;
-        self.state.nutrient[i] = quant_unit((self.state.nutrient[i] as f32 / 255.0 - drained).max(0.0));
+        self.state.bio[i].nutrient = quant_unit((self.state.bio[i].nutrient as f32 / 255.0 - drained).max(0.0));
         taken
     }
 
@@ -1002,7 +1071,7 @@ impl VoxelTerrain {
     pub fn deposit_nutrient(&mut self, x: usize, y: usize, amount: f32, tick: u64) {
         let i = y * COLS + x;
         self.materialize_nutrient(i, tick);
-        self.state.nutrient[i] = quant_unit((self.state.nutrient[i] as f32 / 255.0 + amount).min(1.0));
+        self.state.bio[i].nutrient = quant_unit((self.state.bio[i].nutrient as f32 / 255.0 + amount).min(1.0));
     }
 
     /// Live nutrient level `[0,1]` at a column (weathered to `tick`, read-only — does not persist,
@@ -1010,7 +1079,7 @@ impl VoxelTerrain {
     pub fn nutrient_at(&self, x: usize, y: usize, tick: u64) -> f32 {
         let i = y * COLS + x;
         let elapsed = (tick - self.state.nutrient_update[i] as u64) as f32 * TICK_LEN;
-        weather(self.state.nutrient[i] as f32 / 255.0, self.nutrient_base_at(i), elapsed)
+        weather(self.state.bio[i].nutrient as f32 / 255.0, self.nutrient_base_at(i), elapsed)
     }
 
     /// Materialise the lazy O2 decay (toward 0) up to `tick` and persist it. f32 store ⇒ exact, no
@@ -1061,7 +1130,7 @@ impl VoxelTerrain {
     /// background (C3). Derived from the biome (sand/snow light, forest/jungle dark, …) so a prey
     /// whose coloration matches the local ground is hard for a predator to spot.
     pub fn ground_tone_at(&self, x: usize, y: usize) -> f32 {
-        match BiomeKind::from_id(self.geo.biome[y * COLS + x]) {
+        match BiomeKind::from_id(self.geo.bio_geo[y * COLS + x].biome) {
             BiomeKind::Snow => 0.95,
             BiomeKind::Beach | BiomeKind::Desert => 0.82,
             BiomeKind::Tundra | BiomeKind::Savanna => 0.6,
