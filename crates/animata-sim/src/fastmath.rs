@@ -55,6 +55,27 @@ pub fn exp(x: f32) -> f32 {
     pow2n * p
 }
 
+/// Kleiber metabolic scale `n^0.75` for an INTEGER biomass `n` (developed cell count, `0..=MAX_CELLS`).
+///
+/// The body's cell count is a small integer (`n_cells ≤ MAX_CELLS = 32`), so the per-creature, per-tick
+/// metabolism term `(n as f32).powf(0.75)` is a libm transcendental evaluated over a tiny fixed domain.
+/// This returns it from a table FILLED BY THAT SAME `powf` at first use, so each entry is the EXACT
+/// bits `powf` would have produced — a pure throughput swap (table lookup vs ~one libm call per
+/// creature), **bit-identical within a profile**: the determinism golden does NOT move. Out-of-range
+/// `n` (never happens on the develop path, kept defensive) falls back to a direct `powf`.
+#[inline]
+pub fn kleiber075(n: u32) -> f32 {
+    use std::sync::OnceLock;
+    static LUT: OnceLock<[f32; crate::genome::MAX_CELLS + 1]> = OnceLock::new();
+    // `black_box(i)` forces a RUNTIME libm `powf` for the table fill. Without it the fixed-size
+    // `from_fn` is const-folded at compile time, and rustc's const `powf` differs from runtime libm
+    // by up to 1 ULP for some inputs — which would silently shift the trajectory the moment a body
+    // of that biomass appeared. Filling from runtime libm makes the table EXACTLY the bits the old
+    // dynamic `(biomass as f32).powf(0.75)` call produced ⇒ truly bit-identical, golden frozen.
+    let lut = LUT.get_or_init(|| std::array::from_fn(|i| (std::hint::black_box(i) as f32).powf(0.75)));
+    lut.get(n as usize).copied().unwrap_or_else(|| (n as f32).powf(0.75))
+}
+
 #[cfg(test)]
 #[path = "fastmath_tests.rs"]
 mod tests;

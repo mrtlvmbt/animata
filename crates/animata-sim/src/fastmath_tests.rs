@@ -40,6 +40,27 @@ fn exp_matches_libm_on_nonpositive_domain() {
     assert_eq!(exp(-200.0), 0.0, "deeply negative exp must underflow to 0");
 }
 
+/// `kleiber075` must be BIT-IDENTICAL to the `powf(0.75)` it replaces over the whole biomass domain
+/// (`0..=MAX_CELLS`) AND for an out-of-range value (the defensive `powf` fallback) — this is a pure
+/// throughput swap, NOT an approximation, so the determinism golden must not move.
+#[test]
+fn kleiber_lut_is_bit_identical_to_powf() {
+    // `black_box` forces a RUNTIME libm `powf` (no const-fold / vectorised codegen), matching the
+    // dynamic call the apply path makes — that is the value the golden was pinned against.
+    for n in 0..=(crate::genome::MAX_CELLS as u32) {
+        let direct = (std::hint::black_box(n) as f32).powf(0.75);
+        assert_eq!(
+            kleiber075(n).to_bits(),
+            direct.to_bits(),
+            "kleiber075({n}) must equal a runtime (n as f32).powf(0.75) bit-for-bit"
+        );
+    }
+    // Out-of-range falls through to a direct powf — still exact.
+    let big = crate::genome::MAX_CELLS as u32 + 7;
+    let direct = (std::hint::black_box(big) as f32).powf(0.75);
+    assert_eq!(kleiber075(big).to_bits(), direct.to_bits());
+}
+
 /// Determinism: the approximations are pure functions — identical bits on repeat calls (the
 /// property the parallel replay depends on).
 #[test]

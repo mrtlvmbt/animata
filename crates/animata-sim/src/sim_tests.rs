@@ -610,6 +610,46 @@ fn pr_d2_probe() {
     }
 }
 
+/// Perf bench (ignored): per-phase tick cost at a SYNTHETIC 200k population. Evolves a real
+/// multicellular population, then `debug_inflate_to(200_000)` (clones the evolved bodies into a
+/// dozen dense clumps — the clustered, high-density layout a real run reaches), then runs the
+/// profiler over a window of ticks and prints each phase's mean/max ms + serial fraction + the
+/// resulting ticks/sec. Pure sim crate, no render. Not a determinism path (inflate is dev-only).
+/// Run: `./scripts/test-bar.sh -p animata-sim --release decide_cost_at_200k -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn decide_cost_at_200k() {
+    let (maxx, maxy) = (COLS as f32 * VOX, ROWS as f32 * VOX);
+    let mut t = world();
+    let mut s = Sim::new(1, &t);
+    // Evolve a real, multicellular population to clone from (cheap, ~3k ticks).
+    for tick in 0..3000 {
+        s.step(&mut t, tick);
+    }
+    let natural = s.population();
+    eprintln!("evolved pop {natural} (cloning these bodies)");
+
+    for target in [70_000usize, 200_000] {
+        s.debug_inflate_to(target, maxx, maxy);
+        // Warm + fill the profiler window: a handful of ticks, timed from `tick` onward.
+        let warm = 8;
+        let measured = 40;
+        for i in 0..(warm + measured) {
+            s.step(&mut t, 3000 + i as u64);
+        }
+        let (serial, parallel, frac) = s.profile_amdahl();
+        let total = serial + parallel;
+        eprintln!("--- pop ~{} (alive {}) ---", target, s.population());
+        for (sp, mean, max) in s.profile_report() {
+            eprintln!("  {:<12} mean {:>8.3} ms   max {:>8.3} ms", sp.label(), mean, max);
+        }
+        eprintln!(
+            "  TOTAL tick  mean {:>8.3} ms  (serial {:.3} + par {:.3}, serial_frac {:.3}) => {:.2} ticks/sec",
+            total, serial, parallel, frac, if total > 0.0 { 1000.0 / total } else { 0.0 }
+        );
+    }
+}
+
 /// Tuning aid (ignored): print the population trajectory for one seed so the energy
 /// constants can be balanced into a food-limited corridor below the cap.
 #[test]
