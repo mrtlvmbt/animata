@@ -2,6 +2,7 @@
 //! `world`/`fields` backends into `sim-core`, runs the fixed-dt loop, and enforces the always-on
 //! energy-conservation invariant (R15 / F8 — active in `--release`, which is what CI runs).
 
+use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
 use sim_core::{EconParams, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView};
 use world::NoiseWorld;
@@ -56,7 +57,8 @@ pub fn build_sim(config: SimConfig) -> Sim {
     let flux_k = flux_k_from_alpha(FLUX_ALPHA_NUM, FLUX_ALPHA_DEN, FLUX_F);
     let field =
         CpuFieldStore::new(econ.world_dim, M_FIELD, caps, REGEN_RATE, flux_k, FLUX_F, SIGNAL_DECAY);
-    Sim::new(config, Box::new(world), Box::new(field))
+    // The integer fixed-point brain (M3) — one shared boxed backend for the whole population (R1).
+    Sim::new(config, Box::new(world), Box::new(field), Box::new(FixedBrain::new()))
 }
 
 /// Golden-replay harness: `(config) → per-tick state hash`, with the always-on guards firing every

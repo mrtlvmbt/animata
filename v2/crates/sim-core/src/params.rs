@@ -27,7 +27,13 @@ pub struct EconParams {
     pub world_dim: i64,
     /// Sim-neighbor grid scale `M` (cells per neighbor bucket) — integer, immutable, checked (R8).
     pub m_sim: i64,
-    /// Metabolism sub-tick period N (R20). Ф0 = 1 (every tick); a system meta-constant, not dynamic.
+    /// Brain (behaviour) period K (R20 / D-Brain-4) — inference runs on ticks where `tick % K == 0`
+    /// (GLOBAL phase, not per-creature-from-birth, F5). K∈4..=6 ⇒ 10–30 Hz at the 64 Hz base. A
+    /// per-system meta-constant, not adaptive (adaptive K/N is M4).
+    pub brain_period: u64,
+    /// Metabolism sub-tick period N (R20). M1 was N=1; M3 generalises to N∈2..=4. On a metabolism tick
+    /// the per-tick cost is charged ×N (a lump for the N ticks it stands in for), so the energy economy
+    /// stays ≈invariant to N and conservation is exact. A meta-constant with a GLOBAL phase, not dynamic.
     pub metab_period: u64,
     /// Conserved excretion per tick (agent→field, exact integer transfer — exercises the conserved
     /// multithreaded scatter / R14). Detritus returned to the resource pool.
@@ -48,7 +54,8 @@ impl Default for EconParams {
             u_max: 220,
             world_dim: 64,
             m_sim: 4,
-            metab_period: 1,
+            brain_period: 4, // K — behaviour at 16 Hz (64/4)
+            metab_period: 2, // N — metabolism at 32 Hz, charged ×2 per tick (economy ≈invariant)
             excrete: 8,
             pheromone: 1.0,
         }

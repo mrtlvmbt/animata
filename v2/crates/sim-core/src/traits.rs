@@ -82,10 +82,61 @@ pub trait FieldStore: Send + Sync {
     fn solve(&mut self) -> i64;
 }
 
-/// Per-creature controller seam. Real neuro-inference is M3; unused in Ф0/M2.
-pub trait Brain: Send + Sync {
-    fn decide(&self, sensors: &[i64], out: &mut [i64]);
+// ── Brain (M3) — fixed topology, evolved weights, INTEGER fixed-point inference. ──────────────────
+// Network shape is a fixed const (D-Brain-1): I inputs → H recurrent hidden → O motor outputs.
+// Per-creature weights are an `int8` vector resident in the genome. Activations/hidden are `FixedI16`
+// (Q8.8). The rescale is an integer SHIFT (`acc >> BRAIN_SHIFT`), NOT a float multiplier (F11/D-Brain-3).
+
+/// Sensor inputs fed to the net (quantized at the Sense→Brain boundary).
+pub const BRAIN_INPUTS: usize = 6;
+/// Recurrent hidden units (the `BrainState`).
+pub const BRAIN_HIDDEN: usize = 8;
+/// Motor outputs (`BrainOutput` → Act).
+pub const BRAIN_OUTPUTS: usize = 2;
+/// Per-creature weight count: W_ih (H·I) + W_hh (H·H, recurrent) + W_ho (O·H).
+pub const BRAIN_WEIGHTS: usize =
+    BRAIN_HIDDEN * BRAIN_INPUTS + BRAIN_HIDDEN * BRAIN_HIDDEN + BRAIN_OUTPUTS * BRAIN_HIDDEN;
+/// Accumulator rescale: `value = acc >> BRAIN_SHIFT`. int8 weight (Q1.7) × FixedI16 input (Q8.8) →
+/// product scale 2^15; shifting by 7 returns Q8.8. Pure-integer ⇒ associative & arch-invariant.
+pub const BRAIN_SHIFT: u32 = 7;
+
+// Weight-vector layout — the SINGLE source of truth shared by the genome (founder/mutation, which
+// write into the flat `[i8; BRAIN_WEIGHTS]`) and the `brain` crate (which reads it during inference),
+// so the two can never drift. Three dense blocks packed in this order: W_ih, W_hh, W_ho.
+
+/// Flat index of `W_ih[j][i]` — input `i` → hidden `j`.
+#[inline]
+pub const fn brain_w_ih(j: usize, i: usize) -> usize {
+    j * BRAIN_INPUTS + i
 }
+/// Flat index of `W_hh[j][k]` — hidden `k` → hidden `j` (the recurrent block).
+#[inline]
+pub const fn brain_w_hh(j: usize, k: usize) -> usize {
+    BRAIN_HIDDEN * BRAIN_INPUTS + j * BRAIN_HIDDEN + k
+}
+/// Flat index of `W_ho[o][j]` — hidden `j` → output `o`.
+#[inline]
+pub const fn brain_w_ho(o: usize, j: usize) -> usize {
+    BRAIN_HIDDEN * BRAIN_INPUTS + BRAIN_HIDDEN * BRAIN_HIDDEN + o * BRAIN_HIDDEN + j
+}
+
+/// Per-creature controller seam (declared as a type since M0, implemented by the `brain` crate at
+/// M3). One `infer` call reads inputs + recurrent `h_old` + the creature's weights, writes the new
+/// hidden `h_new` and the motor `out`. PURE INTEGER — no float anywhere in an implementor.
+pub trait Brain: Send + Sync {
+    fn infer(
+        &self,
+        inputs: &[i16; BRAIN_INPUTS],
+        h_old: &[i16; BRAIN_HIDDEN],
+        weights: &[i8; BRAIN_WEIGHTS],
+        h_new: &mut [i16; BRAIN_HIDDEN],
+        out: &mut [i16; BRAIN_OUTPUTS],
+    );
+}
+
+/// Boxed brain backend, injected by `cli` (keeps R1).
+#[derive(Resource)]
+pub struct BrainRes(pub Box<dyn Brain>);
 
 /// Boxed world backend, injected by `cli` (keeps R1).
 #[derive(Resource)]
