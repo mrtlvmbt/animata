@@ -3,7 +3,8 @@
 # v1's golden, and v2 may track a newer MSRV without bumping v1's 1.96.0 pin.
 [workspace]
 resolver = "2"
-members = ["crates/sim-core", "crates/cli"]
+# M1 adds world/fields/telemetry (F6: introduced when there is something to put in them).
+members = ["crates/sim-core", "crates/cli", "crates/world", "crates/fields", "crates/telemetry"]
 
 [workspace.package]
 edition = "2021"
@@ -14,6 +15,12 @@ license = "MIT OR Apache-2.0"
 # Task-0 (engineering/00, verified 2026-06-24): bevy_ecs 0.19.0, MSRV rust_version = 1.95.0
 # ≤ v2 toolchain 1.96.0. NOT full bevy (that lands only in a future `presentation` crate, out of scope).
 bevy_ecs = { version = "=0.19.0", default-features = false, features = ["std"] }
+# Internal v2 crates. sim-core depends on NONE of these (R1 — pure core); world/fields/telemetry
+# depend on sim-core for the trait + Vec2Fixed types; cli wires the concrete backends in.
+sim-core = { path = "crates/sim-core" }
+world = { path = "crates/world" }
+fields = { path = "crates/fields" }
+telemetry = { path = "crates/telemetry" }
 
 # Profiles live in the v2 workspace root — independent of v1. Determinism is per-PROFILE (release FMA
 # fusing diverges from debug), so the M0 golden is pinned for BOTH; M0 is integer so it is also

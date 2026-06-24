@@ -1,124 +1,97 @@
-//! animata v2 `sim-core` — the deterministic simulation core (M0 walking skeleton).
+//! animata v2 `sim-core` — the deterministic simulation core. **M1: first life (Ф0 economy)** —
+//! the empty M0 stage skeleton is now filled with the minimal closed ecological loop
+//! genome → energy balance → division/death → emergent selection.
 //!
-//! NO biology, fields, brains, or energy here yet. M0 proves the three things doc 13 says "cannot be
-//! retrofitted later": determinism, per-stage instrumentation, and bit-for-bit golden replay — on
-//! dummy entities, while the cost is low.
-//!
-//! Determinism contract held mechanically, not by comment:
-//! * INTEGER ONLY — no `f32`/`f64` in this crate until M1 (the no-float guard test enforces it). M0
-//!   arithmetic is integer ⇒ cross-arch bit-identical ⇒ an x86-only M0 golden is justified by the
-//!   mechanism (F7).
+//! Determinism contract (held mechanically):
+//! * The CONSERVED layer (energy ledger + resource field) is **pure integer fixed-point** — exact
+//!   `== 0` conservation (R13/R15), associative integer merge (R14). The no-float guard test keeps
+//!   `energy.rs`/`genome.rs`/the ledger float-free.
+//! * Float enters only the SPATIAL layer via the `world` heightmap noise (behind a feature), which
+//!   makes the trajectory arch-dependent → the golden is arm64-pinned (`v2_golden_*`, arm64-only CI),
+//!   while the energy invariant + two-run-same-seed (integer, arch-independent) run on both arches.
 //! * One reduction point ([`deterministic_fold`]): collect → sort by `Entity` → fold. Never natural
-//!   query order.
-//! * Core state maps are [`DetMap`] (BTreeMap), never a randomly-hashed std map.
-//! * `Sim::step` is `&mut self` only — no clock, no render, no IO (R1). The fixed-dt loop driver
-//!   lives OUTSIDE the core, in the `cli` crate.
+//!   query order. Core state maps are [`DetMap`]/`BTreeSet`, never a randomly-hashed std map.
+//! * `Sim::step` is `&mut self` only — no clock, no render, no IO (R1). Backends (`world`/`fields`)
+//!   are injected as boxed trait objects, so the core depends on no backend crate.
 
+mod components;
 mod det_map;
+mod energy;
+mod genome;
+mod grid;
 mod hash;
 mod input;
+mod params;
 mod rng;
+mod stages;
 mod traits;
 
+pub use components::{Energy, Intent, Sensors, SpeciesId, Velocity, VelocityNext};
 pub use det_map::DetMap;
-pub use hash::{deterministic_fold, fnv_mix};
+pub use energy::EnergyLedger;
+pub use genome::{isqrt, size_pow_three_quarters, Genome};
+pub use grid::{morton2, NeighborGrid};
+pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
+pub use params::{EconParams, SimConfig};
 pub use rng::{seed_fold, splitmix64};
-pub use traits::{Brain, FieldStore, WorldView};
+pub use traits::{Brain, FieldRes, FieldStore, WorldRes, WorldView};
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::Schedule;
 
-/// Integer 2-vector — the fixed-point spatial domain (`i64`). This is the SAME fixed-point scale
-/// layer M1 reuses for the conserved energy ledger: the float↔fixed boundary is marked from M0, so
-/// the retrofit scale is exercised early (F7). A 32-/64-bit-float position would have made M0 itself
-/// arch-dependent while M0 has no matched-arch CI job — a hole that would only surface, misdiagnosed,
-/// at M1.
+/// Integer 2-vector — the fixed-point spatial domain (`i64`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Vec2Fixed(pub i64, pub i64);
 
-/// The one dummy hot component of M0. DOUBLE-BUFFERED: [`Position`] holds version `t` (read),
-/// [`PositionNext`] holds `t+1` (written by stage 4 Move), and stage 10 Swap copies next→current.
+/// Hot position component, version `t` (read). Double-buffered with [`PositionNext`]; stage 10 Swap.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Position(pub Vec2Fixed);
 
-/// Write-side of the double buffer for [`Position`]. See [`Position`].
+/// Write-side of the [`Position`] double buffer.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct PositionNext(pub Vec2Fixed);
 
-/// Core clock + run seed. `tick` is the only time the core knows — there is no wall clock here.
+/// Core clock + run seed. `tick` is the only time the core knows.
 #[derive(Resource, Debug)]
 pub struct SimClock {
     pub seed: u64,
     pub tick: u64,
 }
 
-/// The tick-stamped input stream (R18). Empty on Phase 0; the carrier of replay from M1+.
+/// Tick-stamped input stream (R18). Empty in Ф0.
 #[derive(Resource, Default)]
 pub struct InputLog {
     pub events: Vec<InputEvent>,
 }
 
-/// Read-only telemetry sink shape (stage 9 Observe). `DetMap` ⇒ deterministic iteration. M0 writes
-/// one dummy metric; real evolution telemetry (Price covariance, diversity) arrives at M1.
+/// Parents that divided this tick (Entity bits) — the reproduction signal for the Price covariance.
+/// `BTreeSet` ⇒ deterministic iteration.
+#[derive(Resource, Default)]
+pub struct ReproEvents {
+    pub parents: std::collections::BTreeSet<u64>,
+}
+
+/// One organism's traits + offspring-this-tick, snapshotted by Observe for the telemetry crate.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TraitSample {
+    pub traits: [i32; 6],
+    pub offspring: u32,
+}
+
+/// Read-only telemetry sink (stage 9). Overwritten each tick. The `telemetry` crate derives Price
+/// covariance / diversity from `samples` — keeping that statistics code OUT of the core (R1).
 #[derive(Resource, Default)]
 pub struct Telemetry {
-    pub metrics: DetMap<&'static str, i64>,
-}
-
-// ── RNG salts (one per stochastic stage; disjoint so streams never alias) ─────────────────────────
-const SALT_MOVE: u64 = 0x4D4F_5645; // "MOVE"
-
-// ── The 11 stages (0–10). Bodies are EMPTY except Move (the one dummy stage), Observe (the sink),
-//    and Swap (the double-buffer swap). Each stage is its own Schedule, so its boundary is a
-//    fork-join barrier and a command-buffer sync point (R11, R12) — true intra-stage parallelism
-//    starts at M2; M0 runs them serially. ─────────────────────────────────────────────────────────
-
-fn stage_spatial_rebuild() {}
-fn stage_sense() {}
-fn stage_brain() {}
-fn stage_act() {}
-
-/// Stage 4 Move — the dummy stage: a deterministic INTEGER position step driven by seeded RNG.
-/// Reads version-`t` [`Position`], writes `t+1` into [`PositionNext`]. No float anywhere.
-fn stage_move(clock: Res<SimClock>, mut q: Query<(Entity, &Position, &mut PositionNext)>) {
-    for (e, pos, mut next) in &mut q {
-        let r = seed_fold(clock.seed, &[SALT_MOVE, e.to_bits(), clock.tick]);
-        // Two disjoint bit-fields → a step in {-1,0,1} per axis. Pure integer.
-        let dx = (r % 3) as i64 - 1;
-        let dy = ((r >> 8) % 3) as i64 - 1;
-        next.0 = Vec2Fixed(pos.0 .0 + dx, pos.0 .1 + dy);
-    }
-}
-
-fn stage_metabolism() {}
-fn stage_interactions() {}
-
-/// Stage 7 BirthDeath — the structural-change sync point (R12). Empty in M0, but it takes `Commands`
-/// and its Schedule applies them at the stage boundary, so the deferred-spawn/despawn path is wired.
-fn stage_birth_death(mut _commands: Commands) {}
-
-fn stage_field_scatter() {}
-
-/// Stage 9 Observe — the read-only telemetry sink. Reads sim state, writes only to [`Telemetry`];
-/// never mutates the simulation (R26 monitoring is read-only).
-fn stage_observe(q: Query<&Position>, mut tel: ResMut<Telemetry>) {
-    let n = q.iter().count() as i64;
-    tel.metrics.insert("entity_count", n);
-}
-
-/// Stage 10 Swap — double-buffer swap: `Position`(t) ← `PositionNext`(t+1).
-fn stage_swap(mut q: Query<(&mut Position, &PositionNext)>) {
-    for (mut pos, next) in &mut q {
-        pos.0 = next.0;
-    }
+    pub population: i64,
+    pub field_total: i64,
+    pub samples: Vec<TraitSample>,
 }
 
 #[cfg(feature = "perf")]
 mod perf {
     use crate::DetMap;
-    /// Per-stage instrumentation (R26): accumulated wall-clock ns and last-tick ns/entity. Timing is
-    /// non-deterministic, so it NEVER feeds the tick or the state hash — only this side report.
+    /// Per-stage instrumentation (R26). Timing is non-deterministic → never feeds the tick or hash.
     #[derive(Default)]
     pub struct PerfReport {
         stages: DetMap<&'static str, (u128, u128)>,
@@ -129,7 +102,6 @@ mod perf {
             e.0 += ns;
             e.1 = ns / entities.max(1);
         }
-        /// `name → (total_ns, last_ns_per_entity)`, in canonical stage order.
         pub fn stages(&self) -> &DetMap<&'static str, (u128, u128)> {
             &self.stages
         }
@@ -138,88 +110,135 @@ mod perf {
 #[cfg(feature = "perf")]
 pub use perf::PerfReport;
 
-/// The deterministic core. Build with [`Sim::new`], drive with [`Sim::step`], read the canonical
-/// state with [`Sim::state_hash`]. The loop driver (accumulator, fixed dt, step cap) is the `cli`
-/// crate's job — the core has no clock.
+/// The deterministic core. Build with [`Sim::new`] (backends injected), drive with [`Sim::step`].
 pub struct Sim {
     world: World,
     stages: Vec<(&'static str, Schedule)>,
-    // Read only by the perf instrumentation (ns/entity); kept always so `new` stays uniform.
-    #[cfg_attr(not(feature = "perf"), allow(dead_code))]
-    n_entities: u64,
     #[cfg(feature = "perf")]
     perf: PerfReport,
 }
 
 impl Sim {
-    /// Spawn `n_entities` dummy entities deterministically (ids `0..n` in order, no despawn in M0 →
-    /// stable `Entity` ids) and build the 11-stage pipeline.
-    pub fn new(seed: u64, n_entities: u64) -> Self {
-        let mut world = World::new();
-        world.insert_resource(SimClock { seed, tick: 0 });
-        world.insert_resource(InputLog::default());
-        world.insert_resource(Telemetry::default());
-        for i in 0..n_entities {
-            let p = Vec2Fixed(i as i64, 0);
-            world.spawn((Position(p), PositionNext(p)));
+    /// Build the world, spawn `n_founders`, wire the 11-stage pipeline. `world`/`field` are the
+    /// injected backends (keeps R1 — `sim-core` names only the traits).
+    pub fn new(config: SimConfig, world: Box<dyn WorldView>, field: Box<dyn FieldStore>) -> Self {
+        let econ = config.econ;
+        // R8: grids are integer and consistent — validated at construction (no save/load until M5,
+        // so this constructor guard is the "checked on load" invariant for now).
+        assert!(econ.m_sim > 0 && econ.world_dim % econ.m_sim == 0, "world_dim % m_sim != 0 (R8)");
+        field.check_meta(field.m_field()).expect("field M_field meta check (R8)");
+
+        let mut w = World::new();
+        w.insert_resource(SimClock { seed: config.seed, tick: 0 });
+        w.insert_resource(InputLog::default());
+        w.insert_resource(Telemetry::default());
+        w.insert_resource(econ);
+        w.insert_resource(NeighborGrid::new(econ.m_sim));
+        w.insert_resource(ReproEvents::default());
+
+        let founder = Genome::founder();
+        for i in 0..config.n_founders {
+            // Deterministic scatter across the domain (co-prime strides → spread, no float).
+            let x = ((i.wrapping_mul(7).wrapping_add(3)) % econ.world_dim as u64) as i64;
+            let z = ((i.wrapping_mul(13).wrapping_add(5)) % econ.world_dim as u64) as i64;
+            let p = Vec2Fixed(x, z);
+            w.spawn((
+                Position(p),
+                PositionNext(p),
+                Velocity::default(),
+                VelocityNext::default(),
+                Energy(config.founder_energy),
+                founder,
+                SpeciesId(0),
+                Sensors::default(),
+                Intent::default(),
+            ));
         }
+
+        let field_total = field.total();
+        let agents_total = config.n_founders as i64 * config.founder_energy;
+        w.insert_resource(EnergyLedger {
+            initial: field_total + agents_total,
+            produced: 0,
+            dissipated: 0,
+            lost: 0,
+        });
+        w.insert_resource(WorldRes(world));
+        w.insert_resource(FieldRes(field));
+
         Self {
-            world,
+            world: w,
             stages: build_stages(),
-            n_entities,
             #[cfg(feature = "perf")]
             perf: PerfReport::default(),
         }
     }
 
-    /// Advance one fixed tick. Runs the 11 stages in fixed order (barrier between each), then bumps
-    /// the tick. No `dt` argument — the tick is the unit; the driver decides how many to run.
+    /// Advance one fixed tick: 11 stages in fixed order (barrier between each), then bump the tick.
     pub fn step(&mut self) {
+        #[cfg(feature = "perf")]
+        let n = self.population() as u128;
         for (_name, sched) in &mut self.stages {
             #[cfg(feature = "perf")]
             let start = std::time::Instant::now();
             sched.run(&mut self.world);
             #[cfg(feature = "perf")]
-            self.perf.record(_name, start.elapsed().as_nanos(), self.n_entities as u128);
+            self.perf.record(_name, start.elapsed().as_nanos(), n);
         }
         self.world.resource_mut::<SimClock>().tick += 1;
     }
 
-    /// Canonical full-ECS state hash (R19) via the one [`deterministic_fold`] reduction point.
+    /// Canonical full-ECS state hash (R19): folds Position + Energy + Genome per entity, sorted by
+    /// Entity, through the single [`deterministic_fold`] point.
     pub fn state_hash(&mut self) -> u64 {
-        let mut q = self.world.query::<(Entity, &Position)>();
-        let items: Vec<(Entity, u64)> =
-            q.iter(&self.world).map(|(e, p)| (e, hash_position(p))).collect();
+        let mut q = self.world.query::<(Entity, &Position, &Energy, &Genome)>();
+        let items: Vec<(Entity, u64)> = q
+            .iter(&self.world)
+            .map(|(e, p, en, g)| {
+                let mut h = fnv_mix(FNV_OFFSET, p.0 .0 as u64);
+                h = fnv_mix(h, p.0 .1 as u64);
+                h = fnv_mix(h, en.0 as u64);
+                (e, g.hash_contribution(h))
+            })
+            .collect();
         deterministic_fold(items)
     }
 
-    /// Current tick.
+    /// Energy-conservation residual (R15) — MUST be 0 every tick. Sums live field + agent energy and
+    /// the ledger buckets.
+    pub fn conservation_residual(&mut self) -> i64 {
+        let field_total = self.world.resource::<FieldRes>().0.total();
+        let mut q = self.world.query::<&Energy>();
+        let agents: i64 = q.iter(&self.world).map(|e| e.0).sum();
+        let ledger = *self.world.resource::<EnergyLedger>();
+        ledger.residual(field_total, agents)
+    }
+
+    /// Current population.
+    pub fn population(&mut self) -> u64 {
+        let mut q = self.world.query::<&Energy>();
+        q.iter(&self.world).count() as u64
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }
 
-    /// Live telemetry sink (for the headless demo / tests).
+    /// Telemetry snapshot (samples for Price covariance, population, field total).
     pub fn telemetry(&self) -> &Telemetry {
         self.world.resource::<Telemetry>()
     }
 
-    /// Per-stage perf report (only with `--features perf`).
     #[cfg(feature = "perf")]
     pub fn perf(&self) -> &PerfReport {
         &self.perf
     }
 }
 
-/// Per-entity hash contribution: fold the integer coordinates. The single sort+fold in
-/// [`deterministic_fold`] then makes the whole-world reduction order-independent.
-fn hash_position(p: &Position) -> u64 {
-    let h = fnv_mix(0xcbf2_9ce4_8422_2325, p.0 .0 as u64);
-    fnv_mix(h, p.0 .1 as u64)
-}
-
-/// Build the 11 stages, each as its own `Schedule`. A separate schedule per stage = an explicit
-/// fork-join barrier between stages and a command-buffer apply point at each boundary.
+/// Build the 11 stages, each its own `Schedule` → explicit fork-join barrier + Commands sync point
+/// at every boundary. Serial within a stage at M1 (true intra-stage parallelism is M2).
 fn build_stages() -> Vec<(&'static str, Schedule)> {
+    use stages::*;
     macro_rules! stage {
         ($name:expr, $sys:expr) => {{
             let mut s = Schedule::default();
@@ -240,49 +259,4 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         stage!("9_observe", stage_observe),
         stage!("10_swap", stage_swap),
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn two_runs_same_seed_match_per_tick() {
-        let mut a = Sim::new(42, 16);
-        let mut b = Sim::new(42, 16);
-        for _ in 0..128 {
-            a.step();
-            b.step();
-            assert_eq!(a.state_hash(), b.state_hash(), "tick {}", a.tick());
-        }
-    }
-
-    #[test]
-    fn different_seed_diverges() {
-        let mut a = Sim::new(1, 16);
-        let mut b = Sim::new(2, 16);
-        for _ in 0..32 {
-            a.step();
-            b.step();
-        }
-        assert_ne!(a.state_hash(), b.state_hash());
-    }
-
-    #[test]
-    fn observe_writes_dummy_metric() {
-        let mut s = Sim::new(7, 10);
-        s.step();
-        assert_eq!(s.telemetry().metrics.get("entity_count"), Some(&10));
-    }
-
-    #[test]
-    fn swap_advances_position() {
-        // After one tick every entity moved by a step in {-1,0,1} per axis from its start.
-        let mut s = Sim::new(7, 4);
-        s.step();
-        let mut q = s.world.query::<&Position>();
-        for p in q.iter(&s.world) {
-            assert!(p.0 .1 >= -1 && p.0 .1 <= 1);
-        }
-    }
 }
