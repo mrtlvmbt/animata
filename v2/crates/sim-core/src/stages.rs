@@ -11,21 +11,6 @@ use bevy_ecs::prelude::*;
 /// RNG salts — disjoint streams.
 const SALT_MUT: u64 = 0x4D55_5400; // "MUT"
 
-/// How strongly the pheromone gradient steers Act relative to the resource gradient. Lets trails
-/// matter where the resource gradient is flat (tie-breaking), without overriding real food.
-const SIGNAL_WEIGHT: f32 = 60.0;
-
-#[inline]
-fn fsign(v: f32) -> i64 {
-    if v > 0.0 {
-        1
-    } else if v < 0.0 {
-        -1
-    } else {
-        0
-    }
-}
-
 // ── Stage 0: SpatialRebuild — rebuild the Morton neighbor grid (R8). ───────────────────────────────
 pub fn stage_spatial_rebuild(mut grid: ResMut<NeighborGrid>, q: Query<(Entity, &Position)>) {
     grid.clear();
@@ -49,19 +34,96 @@ pub fn stage_sense(field: Res<FieldRes>, mut q: Query<(&Position, &Genome, &mut 
     }
 }
 
-// ── Stage 2: Brain — empty in Ф0 (chemotaxis is brain-less; real brains are M3). ───────────────────
-pub fn stage_brain() {}
+/// Act dead-zone on a `FixedI16` (Q8.8) motor output: |out| ≤ this ⇒ no move on that axis (real
+/// 0.0625). Keeps a near-zero brain output from jittering the integer position every Act tick.
+const ACT_DEADZONE: i16 = 16;
 
-// ── Stage 3: Act — chemotaxis: desired velocity = sign(gradient) · move_speed → Intent. ────────────
+/// Clamp an `i64` sensor reading into the `FixedI16` brain-input range (Q8.8). Out-of-range CLAMPS
+/// (never wraps), like the activation LUT — keeps inference inside its proven, deterministic envelope.
+#[inline]
+fn q88_clamp(v: i64) -> i16 {
+    v.clamp(i16::MIN as i64, i16::MAX as i64) as i16
+}
+
+/// Brain level-of-detail (D-Brain-5, SKELETON only). The branch point where a far/inactive creature
+/// would run a baseline controller / thinned inference instead of full inference. The criterion is
+/// computed from DETERMINISTIC SIM STATE (never camera/render — that would be non-deterministic). In
+/// M3 every creature is `Full`; the 4-level sim-LOD is M4. The branch exists so M4 only fills it in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrainLod {
+    Full,
+    #[allow(dead_code)]
+    Baseline,
+}
+
+#[inline]
+fn brain_lod(_energy: i64) -> BrainLod {
+    // M4 will thin inference by a deterministic-state criterion (e.g. energy/age/density tier). M3
+    // always runs full inference so the trajectory is the full-fidelity one.
+    BrainLod::Full
+}
+
+// ── Stage 2: Brain — batched INTEGER inference (M3 / D-Brain-1..4), runs only every K ticks on a
+//    GLOBAL phase (`tick % K == 0`). Reads quantized sensors + recurrent `h_old` + the creature's
+//    evolved weights → writes the recurrent `h_new` and the motor `BrainOutput`, then swaps the
+//    hidden double-buffer. Between Brain ticks `BrainOutput` persists and the hidden state is frozen. ─
+pub fn stage_brain(
+    clock: Res<SimClock>,
+    econ: Res<EconParams>,
+    brain: Res<BrainRes>,
+    mut q: Query<(&Sensors, &Energy, &Genome, &mut BrainState, &mut BrainOutput)>,
+) {
+    if !clock.tick.is_multiple_of(econ.brain_period.max(1)) {
+        return; // off-phase: behaviour holds the last decision (multi-rate, R20). Newborns stay frozen.
+    }
+    for (s, e, g, mut bs, mut bo) in &mut q {
+        // Sense→Brain quantization boundary: pack the integer sensors into the FixedI16 input vector.
+        // Inputs: [grad_x, grad_z, local_resource, energy, bias=1.0(Q8.8), reserved]. The signal field
+        // (f32) is intentionally NOT fed to the integer brain in M3 — it stays observational.
+        let inputs: [i16; BRAIN_INPUTS] = [
+            q88_clamp(s.gradient.0),
+            q88_clamp(s.gradient.1),
+            q88_clamp(s.local_resource),
+            q88_clamp(e.0),
+            256,
+            0,
+        ];
+        match brain_lod(e.0) {
+            BrainLod::Full => {
+                let mut h_new = [0i16; BRAIN_HIDDEN];
+                let mut out = [0i16; BRAIN_OUTPUTS];
+                brain.0.infer(&inputs, &bs.h_old, &g.weights, &mut h_new, &mut out);
+                bs.h_new = h_new;
+                // Double-buffer swap: commit `h_new` → `h_old` for the next Brain tick (per-entity
+                // equivalent of the whole-array pointer swap; happens ONLY on Brain ticks).
+                bs.h_old = bs.h_new;
+                bo.out = out;
+            }
+            BrainLod::Baseline => {
+                // M4: a cheap baseline controller. M3 never reaches here (skeleton).
+                bo.out = [0; BRAIN_OUTPUTS];
+            }
+        }
+    }
+}
+
+// ── Stage 3: Act — apply the brain's motor decision (M3 / D-Brain-4): desired velocity = per-axis
+//    sign(BrainOutput) · move_speed → Intent. Reads `BrainOutput` at the BASE rhythm (every tick), so
+//    the same decision drives motion for the K-1 ticks between Brain ticks. No chemotaxis hard-code. ─
 //    No hidden fitness: moving toward food grants NO energy; it only pays off via actual feeding.
-pub fn stage_act(mut q: Query<(&Sensors, &Genome, &mut Intent)>) {
-    for (s, g, mut intent) in &mut q {
+pub fn stage_act(mut q: Query<(&BrainOutput, &Genome, &mut Intent)>) {
+    for (bo, g, mut intent) in &mut q {
         let sp = g.move_speed as i64;
-        // Climb the combined resource + pheromone gradient. The f32 signal term makes the chosen
-        // direction arch-dependent (→ arm64 golden); position stays integer (sign × move_speed).
-        let cx = s.gradient.0 as f32 + SIGNAL_WEIGHT * s.signal_gradient.0;
-        let cz = s.gradient.1 as f32 + SIGNAL_WEIGHT * s.signal_gradient.1;
-        intent.0 = Vec2Fixed(fsign(cx) * sp, fsign(cz) * sp);
+        let drive = |o: i16| -> i64 {
+            if o > ACT_DEADZONE {
+                sp
+            } else if o < -ACT_DEADZONE {
+                -sp
+            } else {
+                0
+            }
+        };
+        intent.0 = Vec2Fixed(drive(bo.out[0]), drive(bo.out[1]));
     }
 }
 
@@ -92,14 +154,18 @@ pub fn stage_metabolism(
     mut ledger: ResMut<EnergyLedger>,
     mut q: Query<(&Genome, &mut Energy)>,
 ) {
-    if !clock.tick.is_multiple_of(econ.metab_period) {
-        return; // sub-tick period N (meta-constant; Ф0 N=1 so this always runs)
+    let n = econ.metab_period.max(1);
+    if !clock.tick.is_multiple_of(n) {
+        return; // multi-rate metabolism (D-Brain-4): runs every N ticks, GLOBAL phase.
     }
     for (g, mut e) in &mut q {
-        let cost = econ.base_metab
+        // Charge ×N — a lump standing in for the N base ticks since the last metabolism tick, so the
+        // economy stays ≈invariant to N and conservation is exact (R15).
+        let cost = (econ.base_metab
             + econ.k_size_metab * g.metab_units()
             + econ.k_move_cost * g.move_speed as i64
-            + econ.k_sense_cost * g.sense_range as i64;
+            + econ.k_sense_cost * g.sense_range as i64)
+            * n as i64;
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
@@ -156,6 +222,10 @@ pub fn stage_birth_death(
                 genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]));
             let species_c = *species;
             repro.parents.insert(bits);
+            // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
+            // `BrainState` (both `h_old`/`h_new`) and `BrainOutput` — so no prior occupant's hidden
+            // state or motor command can leak through a reused ECS slot, and the newborn stays frozen
+            // (neutral Act) until its first GLOBAL Brain tick. See `newborn_brain` in lib.rs.
             commands.spawn((
                 Position(pos_c.0),
                 PositionNext(pos_c.0),
@@ -166,6 +236,8 @@ pub fn stage_birth_death(
                 species_c,
                 Sensors::default(),
                 Intent::default(),
+                BrainState::zeroed(),
+                BrainOutput::zeroed(),
             ));
         }
     }

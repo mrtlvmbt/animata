@@ -2,7 +2,7 @@
 //! everywhere: mutation is an integer perturbation, the metabolic cost is an integer function of
 //! size, and the genome folds into the deterministic state hash. No float in the genetics layer.
 
-use crate::{fnv_mix, seed_fold};
+use crate::{brain_w_ho, brain_w_ih, fnv_mix, seed_fold, BRAIN_WEIGHTS};
 use bevy_ecs::prelude::Component;
 
 /// Integer square root (floor), Newton's method. Deterministic, arch-independent.
@@ -42,11 +42,26 @@ pub struct Genome {
     pub repro_threshold: i32,
     /// Heritable mutation rate, as a fraction of 256 (probability scale).
     pub mutation_rate: i32,
+    /// Evolved brain weights for the FIXED topology (D-Brain-1) — `int8` Q1.7, packed `W_ih·W_hh·W_ho`
+    /// (layout = the shared [`crate::brain_w_ih`]/`brain_w_hh`/`brain_w_ho` indices). Inherited and
+    /// mutated exactly like the six Ф0 traits; the `brain` crate reads this vector during inference.
+    /// Resident here (genome-SoA in the ECS) so no genome→weights repack happens on a Brain tick.
+    pub weights: [i8; BRAIN_WEIGHTS],
 }
 
 impl Genome {
-    /// The founder phenotype — viable (feeds more than it burns at abundance).
+    /// The founder phenotype — viable (feeds more than it burns at abundance). The founder brain is a
+    /// minimal **resource-chemotaxis reflex** so the M3 population starts behaviourally viable (it
+    /// climbs the resource gradient, as M1's hard-coded Act did) and evolution tunes the net from
+    /// there: hidden 0 ← resource-gradient-x, hidden 1 ← resource-gradient-z, output 0 (vx) ← hidden 0,
+    /// output 1 (vz) ← hidden 1, every other weight zero. Inputs 2..6 (local resource, energy, bias,
+    /// reserved) start with zero weight — emergence wires them in.
     pub fn founder() -> Self {
+        let mut weights = [0i8; BRAIN_WEIGHTS];
+        weights[brain_w_ih(0, 0)] = 127; // hidden 0 ← input 0 (grad x)
+        weights[brain_w_ih(1, 1)] = 127; // hidden 1 ← input 1 (grad z)
+        weights[brain_w_ho(0, 0)] = 127; // output 0 (vx) ← hidden 0
+        weights[brain_w_ho(1, 1)] = 127; // output 1 (vz) ← hidden 1
         Genome {
             metabolism_eff: 200,
             move_speed: 1,
@@ -54,6 +69,7 @@ impl Genome {
             size: 4,
             repro_threshold: 1500,
             mutation_rate: 32,
+            weights,
         }
     }
 
@@ -82,6 +98,15 @@ impl Genome {
                 *slot = (*slot + delta).clamp(lo, hi);
             }
         }
+        // Brain weights mutate the same way — but their RNG draws come LAST (disjoint salt stream), so
+        // the six Ф0 traits above keep their exact historical draw sequence (skill §5.2 hygiene).
+        for (wi, w) in g.weights.iter_mut().enumerate() {
+            let r = seed_fold(stream, &[0x7700_0000 + wi as u64]); // "w" + weight index
+            if (r & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r >> 8) % 3) as i64 - 1; // -1,0,+1
+                *w = (*w as i64 + delta).clamp(-127, 127) as i8;
+            }
+        }
         g
     }
 
@@ -96,6 +121,10 @@ impl Genome {
             self.mutation_rate,
         ] {
             h = fnv_mix(h, v as u64);
+        }
+        // Fold the evolved brain weights too (F9 — a new genome field must enter the determinism lock).
+        for &w in &self.weights {
+            h = fnv_mix(h, w as u64);
         }
         h
     }

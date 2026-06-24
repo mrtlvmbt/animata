@@ -4,7 +4,8 @@
 [workspace]
 resolver = "2"
 # M1 adds world/fields/telemetry (F6: introduced when there is something to put in them).
-members = ["crates/sim-core", "crates/cli", "crates/world", "crates/fields", "crates/telemetry"]
+# M3 adds brain (fixed-point integer neural inference behind the `sim-core::Brain` trait).
+members = ["crates/sim-core", "crates/cli", "crates/world", "crates/fields", "crates/telemetry", "crates/brain"]
 
 [workspace.package]
 edition = "2021"
@@ -24,6 +25,7 @@ sim-core = { path = "crates/sim-core" }
 world = { path = "crates/world" }
 fields = { path = "crates/fields" }
 telemetry = { path = "crates/telemetry" }
+brain = { path = "crates/brain" }
 
 # Profiles live in the v2 workspace root — independent of v1. Determinism is per-PROFILE (release FMA
 # fusing diverges from debug), so the M0 golden is pinned for BOTH; M0 is integer so it is also

@@ -1,19 +1,24 @@
-//! Headless M2 acceptance demo: the conserved resource (fixed-point) and the signal pheromone (f32)
-//! coexist in one tick; prints closed bookkeeping, two-run determinism, the Price covariance, the
+//! Headless M3 acceptance demo: creatures run fixed-point INTEGER recurrent brains (behaviour every K
+//! ticks), metabolism every N ticks, reproduction event-driven — and the whole multi-rate trajectory
+//! replays bit-for-bit. Prints closed bookkeeping, two-run determinism, the Price covariance, the
 //! signal total, and the R14 1-vs-N conserved-field equality.
 
 use cli::{build_sim, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
-use sim_core::MergeStrategy;
+use sim_core::{EconParams, MergeStrategy};
 
 fn main() {
     let seed = 0xA11A_2A11;
     let ticks = 400;
+    let econ = EconParams::default();
 
     // Two-run determinism (within this arch + profile, fixed sim-thread N).
     let a = run(default_config(seed), ticks);
     let b = run(default_config(seed), ticks);
-    println!("animata v2 — M2 fields done right (signal f32 + MT scatter)");
-    println!("seed={seed:#x} ticks={ticks} sim_threads={DEFAULT_THREADS}");
+    println!("animata v2 — M3 brain + multi-rate (integer recurrent inference)");
+    println!(
+        "seed={seed:#x} ticks={ticks} sim_threads={DEFAULT_THREADS} K(brain)={} N(metab)={}",
+        econ.brain_period, econ.metab_period
+    );
     println!("two-run-same-seed identical per tick: {}", a == b);
     // R14: conserved-field hash identical on 1 vs N threads.
     let c1 = run_conserved_hashes(seed, 1, MergeStrategy::Canonical, ticks);

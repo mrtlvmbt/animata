@@ -27,7 +27,9 @@ mod rng;
 mod stages;
 mod traits;
 
-pub use components::{Energy, Intent, Sensors, SpeciesId, Velocity, VelocityNext};
+pub use components::{
+    BrainOutput, BrainState, Energy, Intent, Sensors, SpeciesId, Velocity, VelocityNext,
+};
 pub use det_map::DetMap;
 pub use energy::EnergyLedger;
 pub use genome::{isqrt, size_pow_three_quarters, Genome};
@@ -38,7 +40,9 @@ pub use params::{EconParams, SimConfig};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
-    Brain, Deposit, FieldRes, FieldStore, MergeStrategy, WorldRes, WorldView,
+    brain_w_hh, brain_w_ho, brain_w_ih, Brain, BrainRes, Deposit, FieldRes, FieldStore,
+    MergeStrategy, WorldRes, WorldView, BRAIN_HIDDEN, BRAIN_INPUTS, BRAIN_OUTPUTS, BRAIN_SHIFT,
+    BRAIN_WEIGHTS,
 };
 
 use bevy_ecs::prelude::*;
@@ -125,9 +129,14 @@ pub struct Sim {
 }
 
 impl Sim {
-    /// Build the world, spawn `n_founders`, wire the 11-stage pipeline. `world`/`field` are the
+    /// Build the world, spawn `n_founders`, wire the 11-stage pipeline. `world`/`field`/`brain` are the
     /// injected backends (keeps R1 — `sim-core` names only the traits).
-    pub fn new(config: SimConfig, world: Box<dyn WorldView>, field: Box<dyn FieldStore>) -> Self {
+    pub fn new(
+        config: SimConfig,
+        world: Box<dyn WorldView>,
+        field: Box<dyn FieldStore>,
+        brain: Box<dyn Brain>,
+    ) -> Self {
         let econ = config.econ;
         // R8: grids are integer and consistent — validated at construction (no save/load until M5,
         // so this constructor guard is the "checked on load" invariant for now).
@@ -164,6 +173,9 @@ impl Sim {
                 SpeciesId(0),
                 Sensors::default(),
                 Intent::default(),
+                // Spawn contract (D-Brain-2a): brain buffers start zeroed — same path as a newborn.
+                BrainState::zeroed(),
+                BrainOutput::zeroed(),
             ));
         }
 
@@ -177,6 +189,7 @@ impl Sim {
         });
         w.insert_resource(WorldRes(world));
         w.insert_resource(FieldRes(field));
+        w.insert_resource(BrainRes(brain));
 
         Self {
             world: w,
@@ -200,18 +213,31 @@ impl Sim {
         self.world.resource_mut::<SimClock>().tick += 1;
     }
 
-    /// Canonical golden state hash (R19, arch-bound → arm64): folds Position + Energy + Genome per
-    /// entity (via the single [`deterministic_fold`] point) plus the signal field (f32 bits). The
-    /// conserved field is NOT in here — it has its own [`Sim::conserved_field_hash`] for R14.
+    /// Canonical golden state hash (R19, arch-bound → arm64): folds Position + Energy + Genome (incl.
+    /// the evolved brain weights) + the recurrent `BrainState` (`h_old`/`h_new`) + the motor
+    /// `BrainOutput` per entity (via the single [`deterministic_fold`] point) plus the signal field
+    /// (f32 bits). Folding the recurrent hidden state + motor output is what makes R19 a real lock on
+    /// the brain + multi-rate machinery. The conserved field is NOT here — it has its own
+    /// [`Sim::conserved_field_hash`] for R14. (The K/N phase rides on `SimClock.tick`, which is the
+    /// deterministic step index — identical across runs by construction.)
     pub fn state_hash(&mut self) -> u64 {
-        let mut q = self.world.query::<(Entity, &Position, &Energy, &Genome)>();
+        let mut q = self
+            .world
+            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput)>();
         let items: Vec<(Entity, u64)> = q
             .iter(&self.world)
-            .map(|(e, p, en, g)| {
+            .map(|(e, p, en, g, bs, bo)| {
                 let mut h = fnv_mix(FNV_OFFSET, p.0 .0 as u64);
                 h = fnv_mix(h, p.0 .1 as u64);
                 h = fnv_mix(h, en.0 as u64);
-                (e, g.hash_contribution(h))
+                h = g.hash_contribution(h);
+                for &v in bs.h_old.iter().chain(bs.h_new.iter()) {
+                    h = fnv_mix(h, v as u64);
+                }
+                for &v in &bo.out {
+                    h = fnv_mix(h, v as u64);
+                }
+                (e, h)
             })
             .collect();
         let entities = deterministic_fold(items);
@@ -244,6 +270,17 @@ impl Sim {
         let agents: i64 = q.iter(&self.world).map(|e| e.0).sum();
         let ledger = *self.world.resource::<EnergyLedger>();
         ledger.residual(field_total, agents)
+    }
+
+    /// Read-only per-creature brain snapshot `(entity bits, BrainOutput, BrainState)`, sorted by
+    /// entity — for the spawn-contract / multi-rate tests (never feeds the tick). Lets a test assert a
+    /// newborn born off-phase is frozen (`h = 0`, `out = 0`) until its first global Brain tick.
+    pub fn brain_snapshot(&mut self) -> Vec<(u64, BrainOutput, BrainState)> {
+        let mut q = self.world.query::<(Entity, &BrainOutput, &BrainState)>();
+        let mut v: Vec<(u64, BrainOutput, BrainState)> =
+            q.iter(&self.world).map(|(e, bo, bs)| (e.to_bits(), *bo, *bs)).collect();
+        v.sort_unstable_by_key(|x| x.0);
+        v
     }
 
     /// Current population.

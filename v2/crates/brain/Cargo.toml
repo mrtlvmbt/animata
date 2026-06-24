@@ -1,0 +1,15 @@
+[package]
+name = "brain"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "animata v2 brain — fixed-point INTEGER neural inference (M3)"
+
+[dependencies]
+sim-core.workspace = true
+
+[dev-dependencies]
+# Test-only (never in the inference path): verify the committed LUT by checksum, and prove the batch
+# is thread-count-independent. Neither pulls float into `src/`.
+sha2 = "0.10"
+rayon.workspace = true
