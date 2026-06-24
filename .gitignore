@@ -1,5 +1,7 @@
 # Build artifacts
 /target
+# v2 is a standalone nested workspace — ignore its build dir too
+/v2/target
 
 # OS junk
 .DS_Store

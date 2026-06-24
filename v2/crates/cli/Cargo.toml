@@ -1,0 +1,17 @@
+[package]
+name = "cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "animata v2 headless driver + golden-replay harness (M0)"
+
+[[bin]]
+name = "v2-sim"
+path = "src/main.rs"
+
+[dependencies]
+sim-core = { path = "../sim-core" }
+
+[features]
+# Forward the core's per-stage instrumentation so the headless demo can print timings.
+perf = ["sim-core/perf"]
