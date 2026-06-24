@@ -37,3 +37,6 @@ animata-save.bin
 
 # sim-run.sh fetched artifacts
 /.sim-run/
+
+# ci-report.sh redirect target (local)
+/.ci-report-run.log

@@ -1,61 +1,125 @@
-//! The two-level determinism gate (F5) — mandatory from M0, both levels in the `cli` harness, both
-//! in CI:
+//! The arch+profile-bound golden (R19). M1 introduces float worldgen (`world` heightmap noise →
+//! libm `sin` → arch-divergent, FMA-fused in release), so the trajectory hash is specific to
+//! **arm64 + release** — exactly the arch on which it is pinned (agent A's dev machine = the macos
+//! arm64 CI runner). It therefore runs ONLY on the arm64 CI job (`-E test(v2_golden)`), the x86 job
+//! excludes it (`-E 'not test(v2_golden)'`), and it is skipped in debug (different float fusing).
 //!
-//!   (a) two-run-same-seed  — `run(seed)` twice, `hash_a[t] == hash_b[t] ∀ t`. Catches run-to-run
-//!       NON-DETERMINISM (a forgotten natural-order reduction, a random hasher) that a golden-only
-//!       diff would misdiagnose as "golden broke" (both non-deterministic runs would drift from the
-//!       pin). Arch-independent (integer) → would run on every arch for free.
-//!   (b) drift-vs-golden    — `hash_a[t] == GOLDEN[t] ∀ t`. Catches a trajectory drift.
+//! The integer two-run-same-seed + energy-conservation gates (arch-independent) live in
+//! `determinism.rs` and run on BOTH arches.
 //!
-//! The M0 golden is INTEGER ⇒ identical on x86 and arm64 AND identical in debug and release (proven
-//! by `match debug==release` at pin time). So M0 runs on the single x86 job; the float-arch-bound
-//! `v2_golden_*` namespace + arm64 job arrive with M1.
-//!
-//! Re-pin procedure (single-writer, agent A): if `drift_vs_golden` fails, read the new value from the
-//! assert's `left:`/`right:`, confirm it is an INTENDED trajectory change, and update `GOLDEN`. Never
-//! re-pin to silence an unexplained drift.
+//! Re-pin (single-writer, agent A): on an intended trajectory change, dump a fresh arm64 RELEASE run
+//! and replace `GOLDEN`. Never re-pin to silence an unexplained drift.
 
-use cli::run;
+use cli::{default_config, run};
 
-const GOLDEN_SEED: u64 = 0x0000_0000_a11a_2a11;
-const GOLDEN_ENTITIES: u64 = 32;
-
-/// Per-tick state hash, ticks 0..64, pinned on agent A's machine; debug==release verified at pin.
-const GOLDEN: [u64; 64] = [
-    0xcc0c53d54e440ebe, 0x7d07dd5d69270f57, 0x63834c194cd7caf7, 0x094c1ede159e3a21,
-    0xf2adbe2d65f07fe9, 0x3cbcee7c30fdeb58, 0xfa6372cbb86ecda9, 0x7315489cb5704095,
-    0xe315f40514d0520e, 0xd1e8b7d6065ebfc5, 0x204fc93c20391268, 0xe95b72579165be5c,
-    0x529a52d8474f3234, 0x2b3426b1325b337c, 0x14cc180692f52a9b, 0xb2f8fa8b040b7891,
-    0x82ad492f7456f120, 0x2b7f12a67363603b, 0x1c71935318d8c083, 0xd87d03240b88e308,
-    0x9321f5a6b71c401f, 0x19f47dd5f37d279a, 0xf5d9d3d7cf5c7663, 0x5e4737b992075f97,
-    0xce035f98ee361ecb, 0xa35757cb1c0d39f7, 0x8600e065d69b1089, 0x01fff97a5e6a8667,
-    0x309c4c1170f75b16, 0x0679b5015f1c5e84, 0x6e7a773f74ccb41b, 0xa4c2706e321a4b7c,
-    0xa9f16d70a19492d8, 0xa4f31a6012bf4cc3, 0xfc2f18d3f3553b6a, 0x8cb3c47ebe668748,
-    0xb55953d6430d94f0, 0x8af573e9094b362a, 0x0bc15e19fd5bbb07, 0x1c2b6aba34fe0aa7,
-    0xe4b2914dd9681530, 0x0c72120dc0604c0b, 0x53e9c5757a9fa3f0, 0xfe4e00332e547501,
-    0xd6ca4cdf6e3ad805, 0x4880a8732cb931e1, 0xcc3cd5b1819bcff5, 0x6fe92a77c1e3acbb,
-    0x6d8e43ed06c668d7, 0x4c6361cf60aac6d7, 0x838d9f48d2f66cb7, 0x39c5814ce3e2ee02,
-    0xe152836754b50a11, 0x53de4ccc09c95234, 0x013925d76ee2d9c9, 0x670a8c9fd6d3eecf,
-    0x5046df5a23126259, 0xe4473ca2f804a8ba, 0x5cfcc82246ae5548, 0x71efe00aaf2d6868,
-    0xf85d5f02b6775a34, 0x033293ed1547f350, 0x6d8ec9c60a68a04a, 0x3476f34a85dd7791,
+const GOLDEN: [u64; 384] = [
+    0x5aad08ab9bf627aa, 0x48ae838f72b9fc94, 0x1a03887aa1100c62, 0xd9c70b072179d8db,
+    0x7a09aa46ced84258, 0x7872bc31556b967d, 0x0be617bacccaa710, 0x8fb208f0595c6fc2,
+    0xd24d6068c96fac4c, 0x803526a08361eff5, 0x023b5c94fc0ff8ca, 0x4ea37fbab0627344,
+    0x1cf5f015bed7fb77, 0x51ec1a8ca6622d51, 0xc725b8fb66615763, 0x3d5378459a3f12e8,
+    0xe7d89bfb055d5b34, 0x55c05ba4dbe2b609, 0x1155ffe9574f1176, 0x275882f78e77e89a,
+    0x1a10153d854e1bae, 0x403df266319da9a6, 0x79133020f0b9d31f, 0xb11e1f6059cb98e5,
+    0x32623d182963f55c, 0x7444c0a0dede7caf, 0x7043fd4e10bbfcf4, 0xd82966050216a3f4,
+    0xc93ccef9bf7c69d1, 0x15e83a67bac5cd72, 0x24125c85a027d618, 0xe3585642b446fafe,
+    0xd4a38029caa1691e, 0xcc0acdb8e840960b, 0x525112addd670bbc, 0x92d6e47cddd850dd,
+    0x787da490e3558e0d, 0xfa6b1b6720ab7f2a, 0xdefa5c56d74f07a3, 0xee1f2828003f081b,
+    0x1e79a62a8d07765f, 0xa54e690ed3827fa0, 0x069a74b40993d6b4, 0x84b10c9d2d837ed6,
+    0x32b399a088ece50a, 0xa2064087b8204c1b, 0xa01ea633baf38cb8, 0x3f584ea490e96a5b,
+    0xd56152d42a9844e8, 0x72554a12ae798332, 0x29a8925705e734c6, 0x389e1fa31c202ac8,
+    0xdc958178d8bf7b0a, 0x7d2a0f7ba29a9a28, 0xe3ba5246b0fa78f7, 0xb6b674cd9b333ffd,
+    0x2f78fd2b3124be37, 0x21e4f66968c54628, 0x0d00f6235f89e274, 0x384fa0c1a07d3eaa,
+    0x5fb1af75178286a9, 0x9071a026fd788a4d, 0xc9096aa8bcbcdfef, 0x6d5ad93e6bc16494,
+    0x520ce5151061463a, 0xbfb470ea907a741c, 0xd69b8a529c675fd8, 0x14ed205136d6b537,
+    0xcc20e58cd070b219, 0xc82fe5d94ee014a2, 0x4a540710234473e4, 0x3a7c08110b071873,
+    0xaad8c21d53d90b1b, 0xa7375acf4d2b05de, 0x38ce81ae34fdf1d6, 0x430624b43c183d45,
+    0xf98e98f623b6e2f7, 0x4ef4fc4b834f5e79, 0xe777637c8db3d3ff, 0x6750c0e9924e340c,
+    0x34d0705f1b478885, 0x2d8a528e5dd12733, 0xc097f1dfbac6936c, 0x20f5a41339f8be9b,
+    0xa657b6e09619d4f2, 0x902622f3e7b2e008, 0xc9ff8051fed7c825, 0xa3a0c0175b3d953c,
+    0x4d45946dec63aa5f, 0x2c09838f02c9d63e, 0x099fb7add41019d9, 0x33576a2d5512751f,
+    0x8c3c497034180bb3, 0xa6e259b37693dea3, 0x5f4ee7a8256f20ec, 0x08528b89a299a79c,
+    0x4dd898cb237f07a9, 0x223f870847555d4b, 0x5797649d75351f04, 0x09dc501859cbd2e6,
+    0xda218a141c056cf4, 0x67773870cfe68cfc, 0xb8717a23e7604240, 0x0335625cf8297dab,
+    0x700337915ba6be33, 0xc5e5861fa1cbadc5, 0xda5571fb8eccfd50, 0x3b2051431ce3ec02,
+    0xe937ed3e5acec0e7, 0x4f76e913cee527d5, 0xa05c84566998d20a, 0x7477746c0c0cc493,
+    0xad51ac725465704f, 0x594e07598111314e, 0xc7731441710dfe65, 0xc4aa168fd8d9e179,
+    0x703ed34476853de6, 0xb1a026278e362db2, 0x4cff7d169a4b0b3a, 0x38576a9e969f20fc,
+    0x9a3708eacb534fe6, 0xca2f51a0daa36878, 0xcc98b85b2e725ac2, 0xd4c30d084e063429,
+    0x67c10f1a9162ed28, 0x8653a75986a77aa5, 0xd0c9bc2a138c8640, 0xec26914bc41b9ffb,
+    0x7350755f7ceae4f8, 0x3f127e7ecfd3ead3, 0x6d1ffbd55977af88, 0x6c36051c55376d28,
+    0x4cb2bfc924ac1711, 0x645b85a537645227, 0x0d57f998db5f0645, 0xa2a9657b549f0fda,
+    0x4992a28fd4f172b6, 0x22b3bcfce9e6e9e1, 0x55c9596e624b4173, 0x900aa855f15c7975,
+    0xb3363d1b329b54cb, 0x453ca893b67dde24, 0x4737ae6f2e99d0bf, 0x78386d6dad9e71b8,
+    0xc41f1ac163fc273d, 0x52c069810b5d918f, 0x43b2590d4b6bc818, 0x3f995011e14b650f,
+    0xef54a88017c34fc6, 0xdc1d480b63405cf1, 0x48b628d50c981e36, 0x4ffd3688852ca268,
+    0x5cf129ffee2be062, 0x1104c2e9d6f3d4df, 0x829bbe3180abaf8c, 0x796a6ca67197e188,
+    0xcf5724e863de37fb, 0xe118ce01b00a2947, 0x85b1b8c81d30be88, 0x0e1d173d18d3a7ff,
+    0xa33e7f7e597e81a2, 0x192a530b61787ec4, 0x3f02953f2dd6a8c8, 0x600518dcc24e9a64,
+    0x7fc9e6c833b6b768, 0x606d1eb6f3c4b1eb, 0xbc74ffb690e8beff, 0x3bf7fa2a7ebb7b0e,
+    0x95d4bf437cb994ea, 0xcbafff2be37cf00a, 0xe398031be8a709c4, 0xc4294ae839d03f22,
+    0x9143d3c98b91722b, 0x423b49919fb990f5, 0xc90de65de2ddcaac, 0x9b1f84b4875f7e84,
+    0x6c23fd8eee37cad7, 0x451a51e88b9f7a34, 0x727f0cf7dc45a5c5, 0xc247dda7ffb7283c,
+    0x7d16af2e405832d5, 0x97e0f7925b0af312, 0x01bf11a99765fb91, 0x82741c2f5e1b68ab,
+    0xeaf5cbaaf8b23020, 0xee7ed7db7ca950dc, 0xb20c9034596f7c0c, 0xa7121750c5172b9a,
+    0xb1de7092ea7171a9, 0x9d198d21263fbf38, 0x0c34273d3ad8966a, 0x4575cec17bf6ce65,
+    0x05f5f01b10097036, 0xb4ec41e86143a895, 0xdeafdaec10ff1e10, 0xad8c78f92a6e007b,
+    0xb525a5d9623ac831, 0xb1055f442c74171b, 0xa252c6eda458630c, 0xd630ebc2275c4a7b,
+    0x66f73733b30eb3d5, 0x33bf8cf92e4e6b75, 0x57835b2d7556e75f, 0x476068282236490e,
+    0xd8a2fa2dc36cc527, 0xb18ea35cea9fb203, 0x9878ecfee2400e47, 0xc10a041876865e4e,
+    0x6f041fe1cca6e1a8, 0x6d6255530e594e13, 0x04233e3ee47ea4b4, 0x10b0b4f3bd886e43,
+    0xe776186b75a53ff2, 0x05791f088089df6d, 0x3df872212cc25059, 0xf35dd7eee80acec2,
+    0x315f4aa5913d9daa, 0xa3b6c30a0d9a0040, 0x245ef716ea57113a, 0xaa10f5a3bd89bace,
+    0xa0603d58f4f014ce, 0x125e4c0a47af253b, 0xf216fcc52888b885, 0x5108cb151ee9f131,
+    0xa4879b5a385bbe33, 0xbb98c768e779b638, 0x0b7ea8c40d963203, 0x281645c098387f1e,
+    0xfc971bc076bcd0b9, 0x9fcb7756447b6424, 0xb615338396070928, 0xa32528326ca8bc81,
+    0xc4ac172b9110bc76, 0x91b163f85687782a, 0xb88c29870654b229, 0xf60d9d6cdc9f5540,
+    0x22542b13bd815f8b, 0x5b2b8a2cffe18eef, 0xd6916bf4e182c244, 0xcecf4fb806fd203e,
+    0xeb8c60be67f7c025, 0x28229ef4f4dd5cbf, 0xe1e6657c9e25c8e1, 0xc236ad9f2e4fa81e,
+    0x7fc6c89eab4714ab, 0x9d6629a98953328b, 0xab5e96772f28aae5, 0x0987ef0397d4c43e,
+    0x5c83d83c29614dc7, 0xadad420a992254f7, 0x2b6e85e4f2d54f11, 0x20b81a1fae9d0165,
+    0x81db9aa93f286109, 0xf642577f20ad5013, 0x9fb0adec80c4078a, 0xb58789b5bd4fe674,
+    0x0ffde80367d0616a, 0xdf82526eecc09bb5, 0x0cfc358a7b5234e2, 0x630180d3afa89947,
+    0x72e238b1e19b8dc2, 0xb46c33035104ace4, 0x493826b659f59148, 0x8c4db9cec31d64bd,
+    0xebe3ed09eab5a813, 0xeef0516bfd218fbb, 0xc0f7cfcbe235e87e, 0x66db95355284911e,
+    0xf01ae824ea093369, 0x91c3a3a0cfab56bd, 0x0a370015faf6a6d6, 0x44f9e7b88ab985a9,
+    0x87721667a676b7bb, 0xbd1f72d4e927cd5d, 0x233719b78292d977, 0x74707a0801751e71,
+    0xcfc18de8903f3b60, 0x518f9ebf3e4c0475, 0x4d851634fe1166ba, 0xde88d04f70baf87a,
+    0x9c47785be1d57665, 0x8b7ef7bb151821e4, 0xad66f93b5c01995e, 0x057bea32cb8a6790,
+    0xb9289d9fe2606d49, 0x4b9cc1d340bb969b, 0x15f68ed91a6d6f8b, 0xba94a28fba2ac3c2,
+    0x480cd6c2f04f55fb, 0x90406674318c0e27, 0xf0708b5f2874142c, 0x6bda8954142d9990,
+    0xed23597452750f4e, 0xdf3e6ffa31e7c7a0, 0xc0a42c512cf269a2, 0xc6fdeaad0f17717e,
+    0x1782d2107fa64e29, 0x36dad1ba43d724a3, 0xa8f02779334ed26c, 0x485a1f6f3b5863c4,
+    0x7952df9d6f7a59ba, 0x6c1aefd11e4715e8, 0x291ce17b6f74dd2e, 0xb807a18fb95f25df,
+    0x1984dcb447d53d34, 0xdd3bd47e7ca11317, 0xdc3bf4b576141700, 0x58627b2b058c4b23,
+    0xec63b9f4768ef28c, 0x01dfd26ac775f53f, 0x7a432a0d3589fdd8, 0xe44c382e976a3e47,
+    0x29bb5047c1477e6a, 0xd8b8e7a1495dfc2e, 0x84db5ef22d6825c0, 0xed1846785d782b9a,
+    0xb1fe002013223818, 0x0847b05518c1d4d8, 0xefc5a667a00e0f54, 0x6e9c7211e8901d98,
+    0x8c60896e87d643fd, 0x25b59b0eb5efa140, 0x7763a199517a9ea4, 0xc59f956c74c6f745,
+    0x9429328a02050387, 0xdb20805178514e55, 0xf760527795ab72aa, 0x81d8c2dadaf10d5b,
+    0x92c7773d3e7927fc, 0x688137439208315d, 0x74dbc69218aecb79, 0xde232908a841e571,
+    0xbe75d00c5a5638ed, 0x5bfa5a7c07e34f1a, 0xf0513b0d2db52603, 0xf46b21690ae28c3c,
+    0xb5a25f3b2a792169, 0x0f5f35f936c34e7d, 0xb8c6e7e10350ba1b, 0x7fdfeae6c5062687,
+    0x49e7b477eb4c6f95, 0x46393d7c9ddf8d34, 0xa41858183bb79a67, 0xc71133a49fb41022,
+    0x7fc8fce36dd8ad69, 0xe25ac63c10f433e6, 0xb0d8d6e619012640, 0xf0282034f226f817,
+    0x4f3d6cbde78e2745, 0xd61d391bd122be9a, 0x6bae4306d82eada7, 0xc1a0f5058fc8e14a,
+    0x815f2909c29ae6d6, 0x928786d2545f8d35, 0x75a3cb2e01bfb257, 0x6c76563689ea50c4,
+    0x40330f00a6de50ce, 0x84e38000130d8c5b, 0x48f2bdacc51b16fe, 0x0c397276c0f371c6,
+    0x1169830a368559cf, 0x6ed3cc173c42a5ef, 0x78d004e8f2e1b7e7, 0x6c221339062bc9fa,
+    0x21614ea10682550a, 0x9185e5ba38138f1f, 0xf51fc93f05918482, 0xf96e537e442c46a6,
+    0xc1d515bd18201228, 0xa4b98dde61db69a7, 0x002521544f4e9f76, 0xfa01b8120d7c5e14,
+    0x6141db7cf7ff2669, 0xf042f4587678a938, 0x273bc8505dd91d73, 0x4f4154b3bb36dfcd,
+    0x01eddd31ff687b86, 0x32628ef0259de689, 0xeda1d7a1eeee45ae, 0x2fc676dc64e51a33,
+    0x7d3227346be47c1e, 0x4a005003fda0d8e5, 0x0cad6197113d7891, 0x9a36cdcbea485ace,
 ];
 
-/// (a) two-run-same-seed — run-to-run determinism. Lives OUTSIDE any `v2_golden_*` namespace so that
-/// from M1 it runs on both arches; in M0 it runs on the single x86 job.
-#[test]
-fn v2_two_run_same_seed() {
-    let a = run(GOLDEN_SEED, GOLDEN_ENTITIES, GOLDEN.len() as u64);
-    let b = run(GOLDEN_SEED, GOLDEN_ENTITIES, GOLDEN.len() as u64);
-    for t in 0..GOLDEN.len() {
-        assert_eq!(a[t], b[t], "run-to-run non-determinism at tick {t}");
-    }
-}
-
-/// (b) drift-vs-golden — bit-for-bit replay against the pin (R19).
+/// Drift-vs-golden, bit-for-bit (R19). Skipped in debug (the golden is a release-arch gate); the
+/// arm64 CI job runs it via `cargo nextest --release -E test(v2_golden)`.
 #[test]
 fn v2_golden_drift() {
-    let a = run(GOLDEN_SEED, GOLDEN_ENTITIES, GOLDEN.len() as u64);
+    if cfg!(debug_assertions) {
+        return; // golden is pinned for release; debug float-fusing differs (run via the arm64 release job)
+    }
+    let h = run(default_config(0xA11A_2A11), GOLDEN.len() as u64);
     for t in 0..GOLDEN.len() {
-        assert_eq!(a[t], GOLDEN[t], "golden drift at tick {t} (left=run, right=GOLDEN)");
+        assert_eq!(h[t], GOLDEN[t], "golden drift at tick {t} (left=run, right=GOLDEN)");
     }
 }

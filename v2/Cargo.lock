@@ -248,7 +248,10 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "cli"
 version = "0.1.0"
 dependencies = [
+ "fields",
  "sim-core",
+ "telemetry",
+ "world",
 ]
 
 [[package]]
@@ -341,6 +344,13 @@ dependencies = [
  "serde",
  "serde_core",
  "typeid",
+]
+
+[[package]]
+name = "fields"
+version = "0.1.0"
+dependencies = [
+ "sim-core",
 ]
 
 [[package]]
@@ -672,6 +682,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "telemetry"
+version = "0.1.0"
+dependencies = [
+ "sim-core",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -897,4 +914,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0592e1c9d151f854e6fd382574c3a0855250e1d9b2f99d9281c6e6391af352f1"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "world"
+version = "0.1.0"
+dependencies = [
+ "sim-core",
 ]
