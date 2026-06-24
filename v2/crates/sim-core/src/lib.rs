@@ -22,6 +22,7 @@ mod grid;
 mod hash;
 mod input;
 mod params;
+mod pool;
 mod rng;
 mod stages;
 mod traits;
@@ -34,8 +35,11 @@ pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
 pub use params::{EconParams, SimConfig};
+pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
-pub use traits::{Brain, FieldRes, FieldStore, WorldRes, WorldView};
+pub use traits::{
+    Brain, Deposit, FieldRes, FieldStore, MergeStrategy, WorldRes, WorldView,
+};
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::Schedule;
@@ -85,6 +89,8 @@ pub struct TraitSample {
 pub struct Telemetry {
     pub population: i64,
     pub field_total: i64,
+    /// Signal-field total concentration (R25 metric) — read-only, never feeds the tick.
+    pub signal_total: f32,
     pub samples: Vec<TraitSample>,
 }
 
@@ -135,6 +141,12 @@ impl Sim {
         w.insert_resource(econ);
         w.insert_resource(NeighborGrid::new(econ.m_sim));
         w.insert_resource(ReproEvents::default());
+        // The sim's OWN scatter pool with an explicit N (F5) + the merge strategy.
+        w.insert_resource(SimPool::new(config.sim_threads));
+        w.insert_resource(ScatterParams {
+            threads: config.sim_threads,
+            strategy: config.merge_strategy,
+        });
 
         let founder = Genome::founder();
         for i in 0..config.n_founders {
@@ -155,7 +167,7 @@ impl Sim {
             ));
         }
 
-        let field_total = field.total();
+        let field_total = field.conserved_total();
         let agents_total = config.n_founders as i64 * config.founder_energy;
         w.insert_resource(EnergyLedger {
             initial: field_total + agents_total,
@@ -188,8 +200,9 @@ impl Sim {
         self.world.resource_mut::<SimClock>().tick += 1;
     }
 
-    /// Canonical full-ECS state hash (R19): folds Position + Energy + Genome per entity, sorted by
-    /// Entity, through the single [`deterministic_fold`] point.
+    /// Canonical golden state hash (R19, arch-bound → arm64): folds Position + Energy + Genome per
+    /// entity (via the single [`deterministic_fold`] point) plus the signal field (f32 bits). The
+    /// conserved field is NOT in here — it has its own [`Sim::conserved_field_hash`] for R14.
     pub fn state_hash(&mut self) -> u64 {
         let mut q = self.world.query::<(Entity, &Position, &Energy, &Genome)>();
         let items: Vec<(Entity, u64)> = q
@@ -201,13 +214,32 @@ impl Sim {
                 (e, g.hash_contribution(h))
             })
             .collect();
-        deterministic_fold(items)
+        let entities = deterministic_fold(items);
+        let signal = self.world.resource::<FieldRes>().0.signal_hash();
+        fnv_mix(entities, signal)
     }
 
-    /// Energy-conservation residual (R15) — MUST be 0 every tick. Sums live field + agent energy and
-    /// the ledger buckets.
+    /// Hash of the CONSERVED field only (integer, canonical order). The R14 subject: identical across
+    /// thread counts. Kept SEPARATE from [`Sim::state_hash`] so the float signal can never make the
+    /// 1-vs-N conserved assert flaky.
+    pub fn conserved_field_hash(&self) -> u64 {
+        self.world.resource::<FieldRes>().0.conserved_hash()
+    }
+
+    /// Total signal concentration (serial reduction).
+    pub fn signal_total(&self) -> f32 {
+        self.world.resource::<FieldRes>().0.signal_total()
+    }
+
+    /// NaN/Inf guard on the signal field — every cell finite (always-on in the release harness).
+    pub fn signal_finite(&self) -> bool {
+        self.world.resource::<FieldRes>().0.signal_all_finite()
+    }
+
+    /// Energy-conservation residual (R15) — MUST be 0 every tick. Sums live conserved field + agent
+    /// energy and the ledger buckets. (The signal field is float, NOT in the balance.)
     pub fn conservation_residual(&mut self) -> i64 {
-        let field_total = self.world.resource::<FieldRes>().0.total();
+        let field_total = self.world.resource::<FieldRes>().0.conserved_total();
         let mut q = self.world.query::<&Energy>();
         let agents: i64 = q.iter(&self.world).map(|e| e.0).sum();
         let ledger = *self.world.resource::<EnergyLedger>();

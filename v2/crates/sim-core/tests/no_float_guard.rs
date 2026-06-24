@@ -1,7 +1,12 @@
-//! Static guard (the "grep guard" of the spec): `sim-core/src` must contain NO floating-point types
-//! and NO bare `std` HashMap. This is the MECHANISM that justifies the M0 x86-only golden — the core
-//! is integer ⇒ cross-arch bit-identical. Floats enter only at M1 (behind a feature, with a matched
-//! arm64 golden job); until then this test fails the build if any sneak in.
+//! Static guard (the "grep guard" of the spec). Two invariants, mechanically:
+//!
+//! * **The CONSERVED layer is INTEGER.** `energy.rs` and `genome.rs` (the energy ledger + the
+//!   genetics that price metabolism) must contain NO `f32`/`f64`. This is what keeps energy
+//!   conservation exact and arch-independent (R13/R15). From M2 the SIGNAL path legitimately uses
+//!   f32 (Sense/Act/Deposit/Telemetry), so the whole-crate float ban of M0/M1 is relaxed to these
+//!   conserved-critical modules.
+//! * **No bare `std` HashMap anywhere** in core state (random hasher → non-deterministic iteration).
+//!   Use `DetMap`/`BTreeMap`/`BTreeSet`.
 //!
 //! Comment lines and trailing line-comments are ignored (so prose may discuss "float" / "HashMap"),
 //! and this guard file is skipped. Code-side occurrences fail.
@@ -56,12 +61,37 @@ fn scan(dir: &Path, banned: &[&str], hits: &mut Vec<String>) {
 }
 
 #[test]
-fn sim_core_is_integer_only_and_deterministic_maps() {
+fn conserved_layer_is_integer_and_no_hashmap() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    // Banned in core code: floating-point types and the random-hasher std map. `HashMap` is caught
-    // even when written `std::collections::HashMap` (the `HashMap` token still trips). Use `DetMap`.
-    let banned = ["f32", "f64", "HashMap", "HashSet"];
-    let mut hits = Vec::new();
-    scan(&src, &banned, &mut hits);
-    assert!(hits.is_empty(), "zero-float / no-HashMap guard tripped:\n{}", hits.join("\n"));
+
+    // (1) The conserved-critical modules must be float-free.
+    let mut float_hits = Vec::new();
+    for module in ["energy.rs", "genome.rs"] {
+        scan_file(&src.join(module), &["f32", "f64"], &mut float_hits);
+    }
+    assert!(
+        float_hits.is_empty(),
+        "conserved layer must be integer (no f32/f64 in energy.rs/genome.rs):\n{}",
+        float_hits.join("\n")
+    );
+
+    // (2) No random-hasher std map anywhere in the core.
+    let mut map_hits = Vec::new();
+    scan(&src, &["HashMap", "HashSet"], &mut map_hits);
+    assert!(map_hits.is_empty(), "no bare std HashMap/HashSet in core state:\n{}", map_hits.join("\n"));
+}
+
+fn scan_file(path: &Path, banned: &[&str], hits: &mut Vec<String>) {
+    let src = fs::read_to_string(path).unwrap();
+    for (i, raw) in src.lines().enumerate() {
+        if raw.trim_start().starts_with("//") {
+            continue;
+        }
+        let code = raw.split("//").next().unwrap_or("");
+        for &b in banned {
+            if contains_token(code, b) {
+                hits.push(format!("{}:{}: banned `{}` in `{}`", path.display(), i + 1, b, code.trim()));
+            }
+        }
+    }
 }

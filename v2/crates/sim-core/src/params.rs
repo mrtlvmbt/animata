@@ -1,6 +1,7 @@
 //! Run parameters. `EconParams` are the on-the-shore economy numbers (economy/01); they are a
 //! documented cargo-tunable contract (re-pinning the golden after a change is cheap). All integer.
 
+use crate::MergeStrategy;
 use bevy_ecs::prelude::Resource;
 
 /// Energy/space economy constants (integer `eu`). The energy SCALE is 1 eu = 1 integer unit here;
@@ -28,6 +29,11 @@ pub struct EconParams {
     pub m_sim: i64,
     /// Metabolism sub-tick period N (R20). Ф0 = 1 (every tick); a system meta-constant, not dynamic.
     pub metab_period: u64,
+    /// Conserved excretion per tick (agent→field, exact integer transfer — exercises the conserved
+    /// multithreaded scatter / R14). Detritus returned to the resource pool.
+    pub excrete: i64,
+    /// Signal (pheromone) deposited per agent per tick (f32, NOT in the energy balance).
+    pub pheromone: f32,
 }
 
 impl Default for EconParams {
@@ -43,6 +49,8 @@ impl Default for EconParams {
             world_dim: 64,
             m_sim: 4,
             metab_period: 1,
+            excrete: 8,
+            pheromone: 1.0,
         }
     }
 }
@@ -54,4 +62,9 @@ pub struct SimConfig {
     pub n_founders: u64,
     pub founder_energy: i64,
     pub econ: EconParams,
+    /// Number of sim threads for the scatter pool (F5 — explicit, NOT `num_cpus`/bevy default, so the
+    /// R14 1-vs-N test can run both inside one process).
+    pub sim_threads: usize,
+    /// Scatter merge strategy (`Canonical` in production; `NonAssociative` only for the R14 negative).
+    pub merge_strategy: MergeStrategy,
 }

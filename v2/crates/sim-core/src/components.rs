@@ -25,12 +25,14 @@ pub struct Energy(pub i64);
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Intent(pub Vec2Fixed);
 
-/// Warm sensor cache (read-old): the sampled resource gradient + local amount. Written by Sense,
-/// consumed by Act. Not buffered.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+/// Warm sensor cache (read-old): the sampled CONSERVED resource gradient (integer) + local amount,
+/// and the SIGNAL pheromone gradient (f32). Written by Sense (reads both field classes), consumed by
+/// Act. Not buffered. (Not `Eq` — holds f32.)
+#[derive(Component, Clone, Copy, Debug, Default)]
 pub struct Sensors {
     pub gradient: Vec2Fixed,
     pub local_resource: i64,
+    pub signal_gradient: (f32, f32),
 }
 
 /// Species tag (cold). Inherited by offspring; no speciation logic in Ф0.

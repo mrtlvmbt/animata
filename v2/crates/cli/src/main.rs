@@ -1,18 +1,24 @@
-//! Headless M1 acceptance demo: run the Ф0 economy, print the closed bookkeeping (population, field
-//! total, energy residual), two-run determinism, and the Price covariance of selection.
+//! Headless M2 acceptance demo: the conserved resource (fixed-point) and the signal pheromone (f32)
+//! coexist in one tick; prints closed bookkeeping, two-run determinism, the Price covariance, the
+//! signal total, and the R14 1-vs-N conserved-field equality.
 
-use cli::{build_sim, default_config, run};
+use cli::{build_sim, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
+use sim_core::MergeStrategy;
 
 fn main() {
     let seed = 0xA11A_2A11;
     let ticks = 400;
 
-    // Two-run determinism (within this arch + profile).
+    // Two-run determinism (within this arch + profile, fixed sim-thread N).
     let a = run(default_config(seed), ticks);
     let b = run(default_config(seed), ticks);
-    println!("animata v2 — M1 first life (Ф0 economy)");
-    println!("seed={seed:#x} ticks={ticks}");
+    println!("animata v2 — M2 fields done right (signal f32 + MT scatter)");
+    println!("seed={seed:#x} ticks={ticks} sim_threads={DEFAULT_THREADS}");
     println!("two-run-same-seed identical per tick: {}", a == b);
+    // R14: conserved-field hash identical on 1 vs N threads.
+    let c1 = run_conserved_hashes(seed, 1, MergeStrategy::Canonical, ticks);
+    let cn = run_conserved_hashes(seed, DEFAULT_THREADS, MergeStrategy::Canonical, ticks);
+    println!("R14 conserved hash 1-vs-{DEFAULT_THREADS} identical: {}", c1 == cn);
     println!("final state hash: {:#018x}", a.last().copied().unwrap_or(0));
 
     // Replay the trajectory once more to print the emergence telemetry.
@@ -29,8 +35,9 @@ fn main() {
             let tick = sim.tick();
             let rep = telemetry::compute(&sim.telemetry().samples);
             let field_total = sim.telemetry().field_total;
+            let signal = sim.telemetry().signal_total;
             println!(
-                "  tick {tick:>4}  pop={p:>4}  field={field_total:>8}  resid={resid}  size_mean={:.2}  price(size)={:+.4}",
+                "  tick {tick:>4}  pop={p:>4}  field={field_total:>8}  signal={signal:>8.0}  resid={resid}  size_mean={:.2}  price(size)={:+.4}",
                 rep.means[3], rep.price_cov[3],
             );
         }
