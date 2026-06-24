@@ -1,62 +1,96 @@
-//! Trait boundaries — fixed AS TYPES in `sim-core` (R1: the core depends on NO backend crate; the
-//! concrete `world`/`fields` backends are injected as boxed trait objects by `cli`). The cargo dep
-//! graph therefore guarantees no render/IO/world types leak into the deterministic core.
+//! Trait boundaries — fixed AS TYPES in `sim-core` (R1). Backends (`world`/`fields`) are injected as
+//! boxed trait objects by `cli`. M2 expands `FieldStore` to TWO field classes (doc 14 §1):
+//! conserved (fixed-point integer, in the energy balance, thread-count-independent) and signal (f32,
+//! NOT in the balance, diffuses/decays, deterministic only under a fixed reduction order).
 
 use crate::Vec2Fixed;
 use bevy_ecs::prelude::Resource;
 
-/// Read-mostly query interface to the world (R29). The CPU heightmap backend lives in `world`.
-/// `height`/`biome`/`resource` may be derived from float worldgen noise behind a feature — that is
-/// the float that makes the M1 trajectory arch-dependent (hence the arm64-only golden). The
-/// *conserved* layer (energy + the resource field amounts) stays pure integer regardless.
+/// One agent's scatter contribution for stage 8. Carries the canonical sort key `(morton, entity)`
+/// so `commit_merge` can fold in `(Morton → Entity-id)` order regardless of how threads partitioned.
+#[derive(Clone, Copy, Debug)]
+pub struct Deposit {
+    pub cell: usize,
+    pub morton: u32,
+    pub entity_bits: u64,
+    /// Conserved (integer) contribution — agent→field excretion (exact, in the energy balance).
+    pub conserved: i64,
+    /// Signal (f32) contribution — pheromone deposit (NOT in the balance).
+    pub signal: f32,
+}
+
+/// How `commit_merge` folds the per-thread deposit batches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeStrategy {
+    /// The correct path: flatten → sort by `(morton, entity)` → apply in that single serial order.
+    /// Conserved integer add is associative ⇒ the result is **identical for any thread count** (R14).
+    Canonical,
+    /// A DELIBERATELY BROKEN path for the R14 negative test: folds the N per-thread partial sums with
+    /// a non-associative, count-sensitive combine ⇒ the conserved result DEPENDS on the thread count
+    /// ⇒ the R14 gate goes RED. Proves the gate has teeth (F1). Never used in production.
+    NonAssociative,
+}
+
+/// Read-mostly world query (R29). Float worldgen (heightmap noise) may live behind a feature in the
+/// `world` backend — that float is what makes the trajectory arch-dependent.
 pub trait WorldView: Send + Sync {
     fn is_solid(&self, pos: Vec2Fixed) -> bool;
     fn height(&self, x: i64, z: i64) -> i64;
     fn biome(&self, pos: Vec2Fixed) -> u8;
-    /// Static resource POTENTIAL at a position (the per-cell regeneration cap). The DYNAMIC amount
-    /// lives in [`FieldStore`].
     fn resource(&self, pos: Vec2Fixed) -> i64;
 }
 
-/// The conserved resource field (R13). **Fixed-point integer end-to-end** — every agent↔field
-/// exchange is an exact integer add/sub, so conservation holds by construction and the integer merge
-/// is associative (R14: thread-count independent, though M1 applies serially). No float here, ever.
+/// The field backend — one CONSERVED resource field (fixed-point integer) and one SIGNAL field (f32)
+/// coexisting in a tick (R13). Scatter (stage 8) is multithreaded; the conserved merge is integer-
+/// associative (thread-count-independent, R14), the signal merge is float in a fixed serial order.
 pub trait FieldStore: Send + Sync {
-    /// Voxels per field cell — integer, immutable for the run, checked on load (R8).
+    // ── meta ──────────────────────────────────────────────────────────────────────────────────────
     fn m_field(&self) -> i64;
-    /// Map a world position to a field-cell linear index (integer division, no float rounding).
     fn cell_index(&self, pos: Vec2Fixed) -> usize;
-    /// Current amount in the cell containing `pos`.
-    fn amount_at(&self, pos: Vec2Fixed) -> i64;
-    /// Integer central-difference gradient of the resource over `±range` cells. Drives chemotaxis.
-    fn gradient_at(&self, pos: Vec2Fixed, range: i64) -> (i64, i64);
-    /// Remove up to `amount` from the cell containing `pos`; returns the EXACT amount removed
-    /// (≤ cell content). Sequential calls = first-come, deterministic when ordered by Entity-id.
-    fn take_at(&mut self, pos: Vec2Fixed, amount: i64) -> i64;
-    /// Stage a conserved contribution into the cell (applied to the NEXT tick — R17).
-    fn scatter_at(&mut self, pos: Vec2Fixed, amount: i64);
-    /// Commit staged scatter into the live field (the FieldScatter→next-tick boundary).
-    fn apply_scatter(&mut self);
-    /// Regenerate toward the per-cell cap; returns total injected (the explicit conservation SOURCE).
-    fn regenerate(&mut self) -> i64;
-    /// Conservative integer flux diffusion (§5.1) — Σ field is invariant EXACTLY (no ε).
-    fn diffuse(&mut self);
-    /// Σ of the whole field — for the energy-conservation audit.
-    fn total(&self) -> i64;
-    /// R8 load check: the build-time `M_field` must match the expected value or refuse.
+    /// Morton (Z-order) code of the cell containing `pos` — the primary canonical merge key.
+    fn cell_morton(&self, pos: Vec2Fixed) -> u32;
     fn check_meta(&self, expected_m_field: i64) -> Result<(), String>;
+
+    // ── conserved field (integer, in the energy balance) ────────────────────────────────────────────
+    fn conserved_at(&self, pos: Vec2Fixed) -> i64;
+    fn conserved_gradient(&self, pos: Vec2Fixed, range: i64) -> (i64, i64);
+    /// Remove up to `amount` from the cell; returns the EXACT amount removed.
+    fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64) -> i64;
+    fn conserved_total(&self) -> i64;
+    /// Deterministic hash of the conserved grid (integer, canonical cell order) — the R14 subject.
+    fn conserved_hash(&self) -> u64;
+
+    // ── signal field (f32, NOT in the balance) ──────────────────────────────────────────────────────
+    /// Bilinear sample of the signal field.
+    fn signal_at(&self, pos: Vec2Fixed) -> f32;
+    /// Finite-difference signal gradient (smooth chemotaxis).
+    fn signal_gradient(&self, pos: Vec2Fixed) -> (f32, f32);
+    /// Σ signal — a SERIAL reduction (no parallel float fold, F2). For telemetry.
+    fn signal_total(&self) -> f32;
+    /// Hash of the signal grid (f32 bits) — arch-bound, folded into the golden only.
+    fn signal_hash(&self) -> u64;
+    /// NaN/Inf guard — every signal cell must be finite (always-on in the release harness).
+    fn signal_all_finite(&self) -> bool;
+
+    // ── scatter + between-tick solver (stage 8) ─────────────────────────────────────────────────────
+    /// Merge the per-thread deposit batches into the staging buffers per `strategy`. Conserved =
+    /// integer associative; signal = float in canonical `(morton, entity)` serial order. No
+    /// float-atomic anywhere.
+    fn commit_merge(&mut self, batches: &[Vec<Deposit>], strategy: MergeStrategy);
+    /// Apply staged deposits → grid (the `t+1` snapshot, R17), regenerate the conserved source (returns
+    /// total injected), diffuse the conserved field (integer flux), and blur+decay the signal field.
+    fn solve(&mut self) -> i64;
 }
 
-/// Per-creature controller. Real neuro-inference is M3; the seam exists so the core never hard-codes
-/// a control policy. Unused in M1 (chemotaxis in stage Act is brain-less).
+/// Per-creature controller seam. Real neuro-inference is M3; unused in Ф0/M2.
 pub trait Brain: Send + Sync {
     fn decide(&self, sensors: &[i64], out: &mut [i64]);
 }
 
-/// Boxed world backend, injected by `cli` and stored as an ECS resource (keeps R1).
+/// Boxed world backend, injected by `cli` (keeps R1).
 #[derive(Resource)]
 pub struct WorldRes(pub Box<dyn WorldView>);
 
-/// Boxed conserved-field backend, injected by `cli` and stored as an ECS resource (keeps R1).
+/// Boxed field backend, injected by `cli` (keeps R1).
 #[derive(Resource)]
 pub struct FieldRes(pub Box<dyn FieldStore>);

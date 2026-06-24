@@ -1,52 +1,169 @@
-//! `fields` — CPU `FieldStore` backend for the **conserved** resource field (R13).
+//! `fields` — CPU `FieldStore` backend with TWO field classes (M2, doc 14 §1):
 //!
-//! Fixed-point INTEGER end-to-end: every agent↔field exchange is an exact integer add/sub
-//! (conservation by construction), regeneration is a bounded integer source, and diffusion is the
-//! flux-conserving integer transport of engineering/14 §5.1 (Σ field invariant EXACTLY — no ε). No
-//! float anywhere in this crate.
+//! * **conserved** resource field — fixed-point INTEGER, in the energy balance, exact conservation,
+//!   thread-count-independent (integer-associative merge, R14). Flux diffusion (§5.1) with an explicit
+//!   fixed-point CFL coefficient `k = round(α·2^F)`.
+//! * **signal** field — `f32` pheromone, NOT in the balance, separable-blur + multiplicative decay,
+//!   deterministic only under a fixed serial reduction order (F2 — no parallel float reduction).
+//!
+//! `commit_merge` folds per-thread deposit batches: the `Canonical` strategy (sort by Morton→Entity,
+//! integer sum) is thread-count-independent for the conserved layer; the `NonAssociative` strategy is
+//! the deliberately-broken negative path for the R14 teeth test.
 
-use sim_core::{FieldStore, Vec2Fixed};
+use sim_core::{fnv_mix, morton2, Deposit, FieldStore, MergeStrategy, Vec2Fixed, FNV_OFFSET};
 
-/// CPU resource field on a `grid_w × grid_h` cell grid (`M_field` world-voxels per cell).
-pub struct CpuResourceField {
+/// Compute the fixed-point flux coefficient `k = round(α·2^F)` for `α = α_num/α_den ∈ (0,¼]`.
+/// `round` (NOT `floor`): `floor(α·2^F)` is 0 for small α → a DEAD solver (doc 14 §5.1 / F4).
+pub fn flux_k_from_alpha(alpha_num: i64, alpha_den: i64, f: u32) -> i64 {
+    let scaled = alpha_num << f; // α_num · 2^F
+    (scaled + alpha_den / 2) / alpha_den // round-to-nearest
+}
+
+/// CPU field backend.
+pub struct CpuFieldStore {
     m_field: i64,
     dim: i64,
     grid_w: i64,
     grid_h: i64,
-    grid: Vec<i64>,
-    staging: Vec<i64>,
+    /// Cell indices in Morton order — the canonical diffusion pair-traversal order (doc 14 §5.1).
+    morton_order: Vec<usize>,
+
+    // conserved (integer)
+    conserved: Vec<i64>,
+    conserved_staging: Vec<i64>,
     caps: Vec<i64>,
     regen_rate: i64,
-    /// Diffusion flux divisor exponent: flux = (a−b) >> diffuse_shift. `>=3` satisfies CFL (≤1/4).
-    diffuse_shift: u32,
+    flux_k: i64,
+    flux_f: u32,
+
+    // signal (f32)
+    signal: Vec<f32>,
+    signal_staging: Vec<f32>,
+    signal_tmp: Vec<f32>,
+    decay: f32,
 }
 
-impl CpuResourceField {
-    /// `caps[cell]` is the per-cell regeneration cap (from `WorldView::resource`). Cells are filled to
-    /// half their cap at start (a gentle initial condition).
-    pub fn new(dim: i64, m_field: i64, caps: Vec<i64>, regen_rate: i64, diffuse_shift: u32) -> Self {
+impl CpuFieldStore {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        dim: i64,
+        m_field: i64,
+        caps: Vec<i64>,
+        regen_rate: i64,
+        flux_k: i64,
+        flux_f: u32,
+        decay: f32,
+    ) -> Self {
         let grid_w = dim / m_field;
         let grid_h = dim / m_field;
-        assert_eq!(caps.len(), (grid_w * grid_h) as usize, "caps must cover the grid");
-        let grid: Vec<i64> = caps.iter().map(|c| c / 2).collect();
-        let staging = vec![0i64; caps.len()];
-        CpuResourceField { m_field, dim, grid_w, grid_h, grid, staging, caps, regen_rate, diffuse_shift }
+        let n = (grid_w * grid_h) as usize;
+        assert_eq!(caps.len(), n, "caps must cover the grid");
+        let conserved: Vec<i64> = caps.iter().map(|c| c / 2).collect();
+        let mut morton_order: Vec<usize> = (0..n).collect();
+        morton_order.sort_by_key(|&i| {
+            let cx = (i as i64 % grid_w) as u32;
+            let cz = (i as i64 / grid_w) as u32;
+            morton2(cx, cz)
+        });
+        CpuFieldStore {
+            m_field,
+            dim,
+            grid_w,
+            grid_h,
+            morton_order,
+            conserved,
+            conserved_staging: vec![0; n],
+            caps,
+            regen_rate,
+            flux_k,
+            flux_f,
+            signal: vec![0.0; n],
+            signal_staging: vec![0.0; n],
+            signal_tmp: vec![0.0; n],
+            decay,
+        }
     }
 
     #[inline]
     fn cell_coords(&self, pos: Vec2Fixed) -> (i64, i64) {
-        let x = pos.0.rem_euclid(self.dim) / self.m_field;
-        let z = pos.1.rem_euclid(self.dim) / self.m_field;
-        (x, z)
+        (pos.0.rem_euclid(self.dim) / self.m_field, pos.1.rem_euclid(self.dim) / self.m_field)
     }
 
     #[inline]
     fn idx(&self, cx: i64, cz: i64) -> usize {
         (cz.rem_euclid(self.grid_h) * self.grid_w + cx.rem_euclid(self.grid_w)) as usize
     }
+
+    fn regenerate(&mut self) -> i64 {
+        let mut injected = 0;
+        for (g, cap) in self.conserved.iter_mut().zip(self.caps.iter()) {
+            let inj = self.regen_rate.min((*cap - *g).max(0));
+            *g += inj;
+            injected += inj;
+        }
+        injected
+    }
+
+    /// Integer flux diffusion (doc 14 §5.1). Pairs traversed in Morton order; per pair
+    /// `num=(u_a−u_b)·k`, `flux=num>>F` (arithmetic shift → the un-shifted remainder stays in `a`),
+    /// clamped so neither cell goes negative (`Σ|flux|≤u_a`). Σ conserved EXACTLY.
+    fn diffuse_conserved(&mut self) {
+        for k in 0..self.morton_order.len() {
+            let a = self.morton_order[k];
+            let cx = a as i64 % self.grid_w;
+            let cz = a as i64 / self.grid_w;
+            // right and down neighbours (reflective/no-flux boundary — no wrap).
+            if cx + 1 < self.grid_w {
+                self.exchange(a, self.idx(cx + 1, cz));
+            }
+            if cz + 1 < self.grid_h {
+                self.exchange(a, self.idx(cx, cz + 1));
+            }
+        }
+    }
+
+    #[inline]
+    fn exchange(&mut self, a: usize, b: usize) {
+        let num = (self.conserved[a] - self.conserved[b]) * self.flux_k;
+        let mut flux = num >> self.flux_f; // arithmetic shift; remainder stays in `a`
+        // Local boundedness: outgoing ≤ source content ⇒ no negative cells.
+        if flux > 0 {
+            flux = flux.min(self.conserved[a]);
+        } else if flux < 0 {
+            flux = -((-flux).min(self.conserved[b]));
+        }
+        self.conserved[a] -= flux;
+        self.conserved[b] += flux;
+    }
+
+    /// Separable blur ([1,2,1]/4 ×2) + multiplicative decay — per-cell independent gather (read the
+    /// current version, write the other), so it is deterministic and reduction-free (F2).
+    fn blur_decay_signal(&mut self) {
+        // horizontal pass: signal → tmp
+        for cz in 0..self.grid_h {
+            for cx in 0..self.grid_w {
+                let l = self.signal[self.idx(cx - 1, cz)];
+                let c = self.signal[self.idx(cx, cz)];
+                let r = self.signal[self.idx(cx + 1, cz)];
+                let i = self.idx(cx, cz);
+                self.signal_tmp[i] = 0.25 * l + 0.5 * c + 0.25 * r;
+            }
+        }
+        // vertical pass + decay: tmp → signal
+        let keep = 1.0 - self.decay;
+        for cz in 0..self.grid_h {
+            for cx in 0..self.grid_w {
+                let u = self.signal_tmp[self.idx(cx, cz - 1)];
+                let c = self.signal_tmp[self.idx(cx, cz)];
+                let d = self.signal_tmp[self.idx(cx, cz + 1)];
+                let i = self.idx(cx, cz);
+                self.signal[i] = (0.25 * u + 0.5 * c + 0.25 * d) * keep;
+            }
+        }
+    }
 }
 
-impl FieldStore for CpuResourceField {
+impl FieldStore for CpuFieldStore {
     fn m_field(&self) -> i64 {
         self.m_field
     }
@@ -56,72 +173,9 @@ impl FieldStore for CpuResourceField {
         self.idx(cx, cz)
     }
 
-    fn amount_at(&self, pos: Vec2Fixed) -> i64 {
-        self.grid[self.cell_index(pos)]
-    }
-
-    fn gradient_at(&self, pos: Vec2Fixed, range: i64) -> (i64, i64) {
+    fn cell_morton(&self, pos: Vec2Fixed) -> u32 {
         let (cx, cz) = self.cell_coords(pos);
-        let gx = self.grid[self.idx(cx + range, cz)] - self.grid[self.idx(cx - range, cz)];
-        let gz = self.grid[self.idx(cx, cz + range)] - self.grid[self.idx(cx, cz - range)];
-        (gx, gz)
-    }
-
-    fn take_at(&mut self, pos: Vec2Fixed, amount: i64) -> i64 {
-        let i = self.cell_index(pos);
-        let got = amount.min(self.grid[i]).max(0);
-        self.grid[i] -= got;
-        got
-    }
-
-    fn scatter_at(&mut self, pos: Vec2Fixed, amount: i64) {
-        let i = self.cell_index(pos);
-        self.staging[i] += amount;
-    }
-
-    fn apply_scatter(&mut self) {
-        for (g, s) in self.grid.iter_mut().zip(self.staging.iter_mut()) {
-            *g += *s;
-            *s = 0;
-        }
-    }
-
-    fn regenerate(&mut self) -> i64 {
-        let mut injected = 0;
-        for (g, cap) in self.grid.iter_mut().zip(self.caps.iter()) {
-            let inj = self.regen_rate.min((*cap - *g).max(0));
-            *g += inj;
-            injected += inj;
-        }
-        injected
-    }
-
-    fn diffuse(&mut self) {
-        // Flux-conserving integer transport (engineering/14 §5.1). For each cell, exchange with its
-        // right and down neighbor (reflective/no-flux boundary — no wrap): flux = (a−b) >> shift,
-        // subtract from a, add to b. Pairwise-balanced ⇒ Σ invariant EXACTLY. Row-major canonical
-        // order ⇒ bit-identical replay. Max outgoing per cell ≤ a/4 ⇒ never negative.
-        for cz in 0..self.grid_h {
-            for cx in 0..self.grid_w {
-                let a = self.idx(cx, cz);
-                if cx + 1 < self.grid_w {
-                    let b = self.idx(cx + 1, cz);
-                    let flux = (self.grid[a] - self.grid[b]) >> self.diffuse_shift;
-                    self.grid[a] -= flux;
-                    self.grid[b] += flux;
-                }
-                if cz + 1 < self.grid_h {
-                    let b = self.idx(cx, cz + 1);
-                    let flux = (self.grid[a] - self.grid[b]) >> self.diffuse_shift;
-                    self.grid[a] -= flux;
-                    self.grid[b] += flux;
-                }
-            }
-        }
-    }
-
-    fn total(&self) -> i64 {
-        self.grid.iter().sum()
+        morton2(cx as u32, cz as u32)
     }
 
     fn check_meta(&self, expected_m_field: i64) -> Result<(), String> {
@@ -131,45 +185,191 @@ impl FieldStore for CpuResourceField {
             Err(format!("M_field mismatch: field={} expected={}", self.m_field, expected_m_field))
         }
     }
+
+    // ── conserved ───────────────────────────────────────────────────────────────────────────────
+    fn conserved_at(&self, pos: Vec2Fixed) -> i64 {
+        self.conserved[self.cell_index(pos)]
+    }
+
+    fn conserved_gradient(&self, pos: Vec2Fixed, range: i64) -> (i64, i64) {
+        let (cx, cz) = self.cell_coords(pos);
+        let gx = self.conserved[self.idx(cx + range, cz)] - self.conserved[self.idx(cx - range, cz)];
+        let gz = self.conserved[self.idx(cx, cz + range)] - self.conserved[self.idx(cx, cz - range)];
+        (gx, gz)
+    }
+
+    fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64) -> i64 {
+        let i = self.cell_index(pos);
+        let got = amount.min(self.conserved[i]).max(0);
+        self.conserved[i] -= got;
+        got
+    }
+
+    fn conserved_total(&self) -> i64 {
+        self.conserved.iter().sum()
+    }
+
+    fn conserved_hash(&self) -> u64 {
+        let mut h = FNV_OFFSET;
+        for &v in &self.conserved {
+            h = fnv_mix(h, v as u64);
+        }
+        h
+    }
+
+    // ── signal ──────────────────────────────────────────────────────────────────────────────────
+    fn signal_at(&self, pos: Vec2Fixed) -> f32 {
+        // Bilinear over the 4 surrounding cells (degenerates to nearest for integer positions / M=1).
+        let m = self.m_field as f32;
+        let fx = pos.0.rem_euclid(self.dim) as f32 / m;
+        let fz = pos.1.rem_euclid(self.dim) as f32 / m;
+        let x0 = fx.floor() as i64;
+        let z0 = fz.floor() as i64;
+        let tx = fx - x0 as f32;
+        let tz = fz - z0 as f32;
+        let s00 = self.signal[self.idx(x0, z0)];
+        let s10 = self.signal[self.idx(x0 + 1, z0)];
+        let s01 = self.signal[self.idx(x0, z0 + 1)];
+        let s11 = self.signal[self.idx(x0 + 1, z0 + 1)];
+        let a = s00 + (s10 - s00) * tx;
+        let b = s01 + (s11 - s01) * tx;
+        a + (b - a) * tz
+    }
+
+    fn signal_gradient(&self, pos: Vec2Fixed) -> (f32, f32) {
+        let (cx, cz) = self.cell_coords(pos);
+        let gx = self.signal[self.idx(cx + 1, cz)] - self.signal[self.idx(cx - 1, cz)];
+        let gz = self.signal[self.idx(cx, cz + 1)] - self.signal[self.idx(cx, cz - 1)];
+        (gx, gz)
+    }
+
+    fn signal_total(&self) -> f32 {
+        // SERIAL reduction in cell order (no parallel float fold — F2).
+        let mut s = 0.0f32;
+        for &v in &self.signal {
+            s += v;
+        }
+        s
+    }
+
+    fn signal_hash(&self) -> u64 {
+        let mut h = FNV_OFFSET;
+        for &v in &self.signal {
+            h = fnv_mix(h, v.to_bits() as u64);
+        }
+        h
+    }
+
+    fn signal_all_finite(&self) -> bool {
+        self.signal.iter().all(|v| v.is_finite())
+    }
+
+    // ── scatter + solver ──────────────────────────────────────────────────────────────────────────
+    fn commit_merge(&mut self, batches: &[Vec<Deposit>], strategy: MergeStrategy) {
+        match strategy {
+            MergeStrategy::Canonical => {
+                // Flatten → sort by (Morton, Entity) → apply in that single serial order. The integer
+                // conserved sum is associative ⇒ identical for any thread count (R14); the f32 signal
+                // sum is in this fixed canonical order ⇒ deterministic at fixed N.
+                let mut all: Vec<&Deposit> = batches.iter().flatten().collect();
+                all.sort_by_key(|d| (d.morton, d.entity_bits));
+                for d in all {
+                    self.conserved_staging[d.cell] += d.conserved;
+                    self.signal_staging[d.cell] += d.signal;
+                }
+            }
+            MergeStrategy::NonAssociative => {
+                // NEGATIVE path (R14 teeth): per-batch partial conserved sums, then fold the N partials
+                // with a non-associative, COUNT-sensitive combine. N=1 → the correct sum; N>1 → a
+                // different value ⇒ the 1-vs-N conserved hash differs ⇒ R14 goes RED.
+                let n = self.conserved_staging.len();
+                let partials: Vec<Vec<i64>> = batches
+                    .iter()
+                    .map(|b| {
+                        let mut p = vec![0i64; n];
+                        for d in b {
+                            p[d.cell] += d.conserved;
+                        }
+                        p
+                    })
+                    .collect();
+                for (cell, slot) in self.conserved_staging.iter_mut().enumerate() {
+                    let mut acc = 0i64;
+                    for p in &partials {
+                        acc = acc.rotate_left(1).wrapping_add(p[cell]); // non-associative
+                    }
+                    *slot += acc;
+                }
+                // signal handled canonically (irrelevant to the conserved-only R14 assert).
+                let mut all: Vec<&Deposit> = batches.iter().flatten().collect();
+                all.sort_by_key(|d| (d.morton, d.entity_bits));
+                for d in all {
+                    self.signal_staging[d.cell] += d.signal;
+                }
+            }
+        }
+    }
+
+    fn solve(&mut self) -> i64 {
+        // Apply staged deposits → grid (the t+1 snapshot, R17).
+        for (g, s) in self.conserved.iter_mut().zip(self.conserved_staging.iter_mut()) {
+            *g += *s;
+            *s = 0;
+        }
+        for (g, s) in self.signal.iter_mut().zip(self.signal_staging.iter_mut()) {
+            *g += *s;
+            *s = 0.0;
+        }
+        let injected = self.regenerate();
+        self.diffuse_conserved();
+        self.blur_decay_signal();
+        injected
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn field() -> CpuResourceField {
-        CpuResourceField::new(8, 1, vec![100; 64], 5, 3)
+    fn field(flux_k: i64) -> CpuFieldStore {
+        CpuFieldStore::new(8, 1, vec![100; 64], 5, flux_k, 16, 0.05)
     }
 
     #[test]
-    fn diffuse_conserves_exactly() {
-        let mut f = field();
-        // Perturb one cell.
-        f.scatter_at(Vec2Fixed(3, 3), 500);
-        f.apply_scatter();
-        let before = f.total();
-        for _ in 0..100 {
-            f.diffuse();
-            assert_eq!(f.total(), before, "diffusion must conserve exactly");
+    fn flux_k_uses_round_not_floor() {
+        // α = 1/100000 with F=16: round → 1 (live solver), floor → 0 (dead). round MUST be used (F4).
+        let k_round = flux_k_from_alpha(1, 100_000, 16);
+        let k_floor = (1i64 << 16) / 100_000;
+        assert_eq!(k_round, 1);
+        assert_eq!(k_floor, 0);
+        // α = 1/4 → 16384.
+        assert_eq!(flux_k_from_alpha(1, 4, 16), 16384);
+    }
+
+    #[test]
+    fn diffusion_nonzero_and_conserved_at_both_alpha_edges() {
+        for k in [1, 16384] {
+            let mut f = field(k);
+            // A big spike so even the near-0 α (k=1) transfers ≥1 integer unit.
+            let spike = f.idx(3, 3);
+            f.conserved[spike] += 200_000;
+            let before = f.conserved_total();
+            let snapshot = f.conserved.clone();
+            f.diffuse_conserved();
+            assert_eq!(f.conserved_total(), before, "Σ must be exactly conserved (k={k})");
+            assert_ne!(f.conserved, snapshot, "diffusion must be non-zero (k={k})");
+            assert!(f.conserved.iter().all(|&v| v >= 0), "no negative cells (k={k})");
         }
-        assert!(f.grid.iter().all(|&v| v >= 0), "no negative cells");
     }
 
     #[test]
-    fn take_is_exact() {
-        let mut f = field();
-        let here = f.amount_at(Vec2Fixed(0, 0));
-        assert_eq!(f.take_at(Vec2Fixed(0, 0), 30), 30.min(here));
-        assert_eq!(f.take_at(Vec2Fixed(0, 0), 1_000_000), (here - 30).max(0));
-        assert_eq!(f.amount_at(Vec2Fixed(0, 0)), 0);
-    }
-
-    #[test]
-    fn regenerate_respects_cap_and_reports_source() {
-        let mut f = field();
-        f.take_at(Vec2Fixed(0, 0), 1_000_000); // empty one cell
-        let injected = f.regenerate();
-        assert!(injected > 0);
-        assert!(f.grid.iter().zip(f.caps.iter()).all(|(g, c)| g <= c));
+    fn signal_blur_decay_is_finite_and_shrinks_total() {
+        let mut f = field(16384);
+        let c = f.idx(4, 4);
+        f.signal[c] = 100.0;
+        let t0 = f.signal_total();
+        f.blur_decay_signal();
+        assert!(f.signal_all_finite());
+        assert!(f.signal_total() < t0, "decay must shrink total concentration");
     }
 }

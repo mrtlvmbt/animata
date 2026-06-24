@@ -92,21 +92,20 @@ jobs:
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
 
-  # ── v2 sim (M1 — first life) ─────────────────────────────────────────────────────────────────────
+  # ── v2 sim (M2 — fields done right) ──────────────────────────────────────────────────────────────
   # NEW jobs INSIDE this workflow (F9 — `ci-report.sh:17` hardcodes WORKFLOW="tests.yml" and the run
   # is green iff EVERY job here is green; a separate v2-tests.yml would be invisible = false-green on
   # determinism-critical code). The v1 jobs above are untouched.
   #
-  # M1 turns on the arm64 golden job (F4/F10): float enters via the `world` heightmap noise (libm
-  # `sin` → arch-divergent), so the trajectory hash is arch+profile bound. The CI-gate placement
-  # contract mirrors v1 (`-E` nextest filter):
-  #   * golden tests are named `v2_golden_*` and run ONLY on arm64 (`-E test(v2_golden)`), in release
-  #     (matched arch + profile = the dev pin).
+  # CI-gate placement contract (F9/F10), mirrors v1's `-E` nextest filter:
+  #   * the signal field is f32 → its golden is arch-bound. golden tests are named `v2_golden_*` and
+  #     run ONLY on arm64 (`-E test(v2_golden)`), in release (matched arch+profile = the dev pin).
   #   * the x86 job EXCLUDES them (`-E 'not test(v2_golden)'`) — else x86 reddens on float divergence.
-  #   * two-run-same-seed + energy-conservation (integer, arch-independent) sit OUTSIDE that namespace,
-  #     so they run on BOTH arches (x86 here, and arm64 via its full-suite release run).
+  #   * the R14 1-vs-N CONSERVED test (integer, a RELATIVE comparison) + two-run + energy/NaN-Inf
+  #     guards sit OUTSIDE the `v2_golden_*` namespace → they run on BOTH arches, with a REAL N>1 sim
+  #     thread pool (the sim builds its own pool; the test runner is orthogonal).
   v2-sim-x86:
-    name: v2 sim (M1, x86 — invariants, no golden)
+    name: v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -124,15 +123,16 @@ jobs:
           key: ${{ runner.os }}-cargo-v2-${{ hashFiles('v2/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-v2-
 
-      # Everything EXCEPT the arch-bound golden — the integer invariants (two-run-same-seed, exact
-      # energy conservation, bounded population) + unit tests, in both profiles.
+      # Everything EXCEPT the arch-bound golden — the integer invariants (R14 1-vs-N conserved + its
+      # negative teeth test, two-run-same-seed, exact energy conservation, NaN/Inf, bounded
+      # population) + unit tests, in both profiles. The R14 test spins a real N>1 sim pool here.
       - name: v2 invariants (debug, x86)
         run: cargo nextest run --workspace --locked -E 'not test(v2_golden)'
       - name: v2 invariants (release, x86)
         run: cargo nextest run --workspace --release --locked -E 'not test(v2_golden)'
 
   v2-golden-arm64:
-    name: v2 golden (M1, arm64 matched arch)
+    name: v2 golden (M2, arm64 matched arch)
     runs-on: macos-latest
     defaults:
       run:

@@ -6,9 +6,22 @@ use cli::{build_sim, default_config, run};
 
 const TICKS: u64 = 384;
 
-/// (a) two-run-same-seed: run-to-run determinism within an arch+profile (catches a forgotten
-/// natural-order reduction / random hasher). Integer-and-within-arch-float-deterministic ⇒ both runs
-/// match regardless of arch.
+/// R13: the conserved (fixed-point) and signal (f32) classes are BOTH correct in the SAME tick — the
+/// conserved residual stays exactly 0 while a finite pheromone field accumulates (>0) and decays.
+#[test]
+fn v2_both_field_classes_correct_together() {
+    let mut sim = build_sim(default_config(0xA11A_2A11));
+    for _ in 0..TICKS {
+        sim.step();
+        assert_eq!(sim.conservation_residual(), 0, "conserved leaked at tick {}", sim.tick());
+        assert!(sim.signal_finite(), "signal NaN/Inf at tick {}", sim.tick());
+    }
+    assert!(sim.signal_total() > 0.0, "a pheromone trail (signal field) must exist alongside resource");
+}
+
+/// (a) two-run-same-seed at a FIXED sim-thread count: run-to-run determinism within an arch+profile
+/// (catches a forgotten natural-order reduction / random hasher). Integer-and-within-arch-float-
+/// deterministic ⇒ both runs match regardless of arch.
 #[test]
 fn v2_two_run_same_seed() {
     let a = run(default_config(0xA11A_2A11), TICKS);

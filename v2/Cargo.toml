@@ -15,6 +15,9 @@ license = "MIT OR Apache-2.0"
 # Task-0 (engineering/00, verified 2026-06-24): bevy_ecs 0.19.0, MSRV rust_version = 1.95.0
 # ≤ v2 toolchain 1.96.0. NOT full bevy (that lands only in a future `presentation` crate, out of scope).
 bevy_ecs = { version = "=0.19.0", default-features = false, features = ["std"] }
+# Explicit-N thread pool for the M2 scatter (F5 — own pool, not num_cpus/bevy default). Used ONLY for
+# independent per-thread staging build; NO parallel float reduction goes through it (F2).
+rayon = "1.12"
 # Internal v2 crates. sim-core depends on NONE of these (R1 — pure core); world/fields/telemetry
 # depend on sim-core for the trait + Vec2Fixed types; cli wires the concrete backends in.
 sim-core = { path = "crates/sim-core" }
