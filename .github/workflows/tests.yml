@@ -91,3 +91,40 @@ jobs:
           name: test-report-arm64
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
+
+  # ── v2 sim (M0 walking skeleton) ────────────────────────────────────────────────────────────────
+  # A NEW job INSIDE this workflow (F9 — `ci-report.sh:17` hardcodes WORKFLOW="tests.yml" and the run
+  # is green iff EVERY job here is green; a separate v2-tests.yml would be invisible to the gate =
+  # false-green on determinism-critical code). The v1 jobs above are untouched.
+  #
+  # M0 = ONE x86 job (F4): M0 arithmetic is integer (Position(Vec2Fixed), zero-float guard), so it is
+  # cross-arch bit-identical — no arm64 job is needed. (The arm64 v2-golden job and the `v2_golden_*`
+  # `-E` filter contract arrive with M1's float.) The M0 golden is pinned for BOTH debug and release.
+  # The v2 workspace is standalone (`v2/`, own Cargo.lock/toolchain), so it builds independently.
+  v2-sim-x86:
+    name: v2 sim (M0 skeleton, x86)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            v2/target
+          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('v2/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-v2-
+
+      # Debug profile: two-run-same-seed (run-to-run determinism) + drift-vs-golden + the integer/
+      # no-HashMap guard + unit tests.
+      - name: v2 tests (debug — golden + two-run-same-seed)
+        run: cargo test --workspace --locked
+
+      # Release profile: determinism is per-profile; the M0 golden is pinned for release too
+      # (debug==release proven at pin time since M0 is integer).
+      - name: v2 tests (release — golden, release profile)
+        run: cargo test --workspace --release --locked
