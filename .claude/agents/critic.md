@@ -52,7 +52,11 @@ For every prior finding you rule **`open`**, you MUST ALSO **restate it as a ful
 lost between cold forks (the *amnesia* failure). If you receive a carried finding whose body is marked
 missing, restate it from context — do NOT rule it `withdrawn` merely because its description was thin.
 
-Return a tight digest only — the main thread (the planner) does the fixing.
+Return a tight digest only — the main thread (the planner) does the fixing. **Terse contract (token
+economy):** each finding body is ≤3 lines and leads with the proof `path:line` (or the exact plan line),
+not prose — you are read N× across cold rounds and carried forward as `[PRIOR FINDINGS]`, so every
+padding word is re-billed each round. Cut narration, keep the severity, the ID, the proof, and the
+one-line failure. No preamble, no summary, no restating the plan back.
 
 Заземли критику в РЕАЛЬНЫХ конфаундах animata (Rust-сим жизни на macroquad/rayon):
 
