@@ -101,10 +101,29 @@ pub struct Telemetry {
 #[cfg(feature = "perf")]
 mod perf {
     use crate::DetMap;
+    use bevy_ecs::prelude::Resource;
+
+    /// Deterministic work-counters (R26 / D1a-c): per-entity operation counts on the real hot paths.
+    /// Accumulated monotonically across ticks — never reset, never fed into the tick or state hash.
+    /// Locked in the `work_counter` gate test via `counter ≤ C · N_peak · ticks` (O(N) bound).
+    #[derive(Resource, Default, Clone, Copy, Debug)]
+    pub struct WorkCounters {
+        /// integer-brain `infer` calls (stage 2, runs every K ticks only).
+        pub brain_infer: u64,
+        /// `conserved_take` calls in stage 6 interactions (every entity, every tick).
+        pub field_takes: u64,
+        /// entity iterations in stage 7 birth/death (every entity, every tick).
+        pub birth_death_iters: u64,
+        /// scatter deposits in stage 8 serial gather (every entity, every tick).
+        pub scatter_deposits: u64,
+    }
+
     /// Per-stage instrumentation (R26). Timing is non-deterministic → never feeds the tick or hash.
     #[derive(Default)]
     pub struct PerfReport {
         stages: DetMap<&'static str, (u128, u128)>,
+        /// Snapshot of accumulated work counters at the end of the last `step()`.
+        pub work: WorkCounters,
     }
     impl PerfReport {
         pub fn record(&mut self, name: &'static str, ns: u128, entities: u128) {
@@ -118,7 +137,7 @@ mod perf {
     }
 }
 #[cfg(feature = "perf")]
-pub use perf::PerfReport;
+pub use perf::{PerfReport, WorkCounters};
 
 /// The deterministic core. Build with [`Sim::new`] (backends injected), drive with [`Sim::step`].
 pub struct Sim {
@@ -190,6 +209,8 @@ impl Sim {
         w.insert_resource(WorldRes(world));
         w.insert_resource(FieldRes(field));
         w.insert_resource(BrainRes(brain));
+        #[cfg(feature = "perf")]
+        w.insert_resource(WorkCounters::default());
 
         Self {
             world: w,
@@ -209,6 +230,11 @@ impl Sim {
             sched.run(&mut self.world);
             #[cfg(feature = "perf")]
             self.perf.record(_name, start.elapsed().as_nanos(), n);
+        }
+        // Sync accumulated work counters into PerfReport (monotonic — never reset).
+        #[cfg(feature = "perf")]
+        {
+            self.perf.work = *self.world.resource::<WorkCounters>();
         }
         self.world.resource_mut::<SimClock>().tick += 1;
     }

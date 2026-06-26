@@ -131,6 +131,12 @@ jobs:
       - name: v2 invariants (release, x86)
         run: cargo nextest run --workspace --release --locked -E 'not test(v2_golden)'
 
+      # M4 perf-regression gate (R26 / D1b): work-counter complexity bounds (O(N) tripwire).
+      # Runs ONLY here (x86, release, --features perf). NOT in v2-golden-arm64 (R19 — golden untouched).
+      # Selects only work_counter tests to avoid running the full suite twice under the perf feature.
+      - name: v2 perf gate (release, x86)
+        run: cargo nextest run --workspace --release --locked --features perf -E 'test(work_counter)'
+
   v2-golden-arm64:
     name: v2 golden (M2, arm64 matched arch)
     runs-on: macos-latest
