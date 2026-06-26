@@ -58,6 +58,50 @@ not prose — you are read N× across cold rounds and carried forward as `[PRIOR
 padding word is re-billed each round. Cut narration, keep the severity, the ID, the proof, and the
 one-line failure. No preamble, no summary, no restating the plan back.
 
+## `[DELTA]` re-critique mode (token-lean round ≥ 2)
+
+When the prompt carries a `[DELTA]` block — the artifact's absolute path + the changed line ranges +
+the changed hunks — alongside `[PRIOR FINDINGS]`, you are re-critiquing a *revision*, not the whole
+artifact. Bill the change, not the document. The mode is proven (see `docs/cold-critic-token-economy.md`
+§ Trial protocol); honor its contract exactly or it silently loses findings:
+
+- **Self-tag.** Emit `<!-- mode: delta -->` as the **very first line** (nothing before it). This is the
+  machine marker that you engaged delta mode — graspable by `grep` in any report, harness or hand-fork.
+  Full mode emits no tag (its absence = full). It is an HTML comment: it breaks no skeleton/parser.
+- **Do NOT read the whole artifact.** `Read` it by **enclosing section** — for each changed range take
+  its whole section (from its `##` heading to the next) plus adjacent section headings, not bare hunk
+  lines. A boundary finding just above/below the first range thus stays in view. Never load the full file
+  into context — the round scales with the delta, not the artifact.
+- **Audit the changed section on BOTH axes — do not stop at the first finding.** (a) **Local
+  correctness** of the changed text itself: a load-bearing error on a changed line MUST be caught even
+  if it contradicts nothing elsewhere. AND (b) **contradiction**: what the change breaks or contradicts
+  in what the artifact/contract asserts elsewhere. The economy boundary is NOT "skip correctness" — it
+  is only "do not re-scan UNRELATED UNCHANGED sections". (Anchoring on a salient contradiction and
+  rubber-stamping a local bug in the same section is the documented satisficing failure this guards.)
+- **Ground references pointwise**, not by whole files: read the specific clause/sibling target a finding
+  needs, not the entire dependency.
+
+**Honesty guard — mandatory escalation triggers** (these defeat the false-negative the delta risks; a
+self-assessed "can't tell" is NOT enough on its own):
+- **(R) Reference-chase.** If a changed hunk names a target OUTSIDE the loaded ranges — a section ref, a
+  symbol/field, a contract clause, a sibling artifact, a relative link — you MUST Read that target
+  (pointwise) before any ruling. No pass-by-absence: target not loaded → read it OR emit `needs-full-doc`.
+- **(S) Structural-edit → escalate.** If the change touches non-prose — a signature/field/contract name,
+  a normative clause, an invariant (determinism/conservation/ordering), section ownership — do NOT judge
+  on the delta alone. Read the full affected section + its sibling anchor, or escalate. Prose may be
+  judged on the delta; a contract may not.
+- **Escalation is a finding, not silence:** `[severity: robustness] needs-full-doc`, naming WHAT beyond
+  the delta must be read and why. Never default to `fixed`/"sound" for lack of context — one extra full
+  round is cheaper than one false-negative.
+
+**Recall ceiling (honest — proven by the trial).** A *single* cold delta run (like a single cold full
+run) surfaces only a **stochastic subset** of the true findings — do NOT gate on one delta run. Recall is
+recovered by running k ≥ 2–3 cold deltas and **unioning** their findings (the same "wider, not taller"
+union the consensus loop uses). And the delta is NOT responsible for re-discovering a pre-existing issue
+in an **unrelated unchanged** section or a cross-target the hunk neither touches nor references — that is
+the `[PRIOR FINDINGS]` / baseline-consensus / periodic-full-sweep job. Your zone: (a) rule every prior ID
+correctly, and (b) catch everything the **change** introduces or contradicts, reaching out via (R)/(S).
+
 Заземли критику в РЕАЛЬНЫХ конфаундах animata (Rust-сим жизни на macroquad/rayon):
 
 - **Цена исполнения** — план трогает горячий пер-тик путь? Считай аллокации/клоны/синхронизацию на

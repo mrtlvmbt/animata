@@ -1,0 +1,1 @@
+../../../.claude-dev-kit/plugin/skills/critique-delta/SKILL.md
