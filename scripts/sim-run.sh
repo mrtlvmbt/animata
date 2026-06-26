@@ -2,8 +2,14 @@
 # Диспатчит сценарий sim-run.yml и тянет результат — sim-run-аналог ci-report.sh.
 #   scripts/sim-run.sh <scenario> [k=v ...]
 #   e.g.  scripts/sim-run.sh perf seed=1 ticks=4000 bench_pop=200000
+#         scripts/sim-run.sh v2-perf seed=1 ticks=400 bench_pop=5000  # v2 per-stage breakdown
 #         scripts/sim-run.sh sweep param=photo_rate values=0.5,1,2 seeds=1,2,3 force=true
 #         scripts/sim-run.sh gridsweep param=photo_rate values=0.5,1,2,4 seeds=1,2  # one runner per value
+#
+# perf vs v2-perf: both profile phase-timing, but `perf` runs the V1 headless binary (root workspace)
+# while `v2-perf` builds v2-sim from the v2/ standalone workspace with --features perf (required for
+# the per-stage table) and runs it via --bench-pop N --profile. v2-perf fails loud if the breakdown
+# is missing (guard against a forgotten --features perf).
 #
 # sweep vs gridsweep: same single-param value grid, but `sweep` runs the cells SERIALLY in one job while
 # `gridsweep` fans each value onto its OWN runner (a job matrix) so a wide grid finishes in ~1× per-cell
@@ -21,7 +27,7 @@ VALID_KEYS="scenario seed ticks bench_pop param values seeds force run_nonce"
 
 die() { echo "✗ $*" >&2; exit 2; }
 
-[ $# -ge 1 ] || die "usage: sim-run.sh <scenario> [k=v ...]  (scenario: evo-stats|perf|multiseed|sweep|gridsweep)"
+[ $# -ge 1 ] || die "usage: sim-run.sh <scenario> [k=v ...]  (scenario: evo-stats|perf|v2-perf|multiseed|sweep|gridsweep)"
 SCENARIO="$1"; shift
 
 command -v gh >/dev/null 2>&1 || die "gh CLI не найден"
