@@ -15,7 +15,8 @@ on:
         default: evo-stats
         options:
           - evo-stats   # headless run on one seed → emergent stats + time-series metrics.csv
-          - perf        # phase-timing breakdown (optionally at a forced high population)
+          - perf        # V1 phase-timing breakdown (optionally at a forced high population)
+          - v2-perf     # V2 phase-timing breakdown — builds v2-sim --features perf, requires bench_pop
           - multiseed   # the same run across seeds 1..5 → cross-seed emergence (fragility probe)
           - sweep       # vary one Params field across a value grid (× seeds) SERIALLY in one job → CSV
           - gridsweep   # same grid as sweep but FANNED across a job matrix (one runner per value) → parallel
@@ -26,7 +27,7 @@ on:
         description: "Ticks to run"
         default: "8000"
       bench_pop:
-        description: "perf only — pre-stuff N founders to time step() at scale (e.g. 200000); blank = natural"
+        description: "perf / v2-perf — pre-stuff N founders to time step() at scale (e.g. 5000); blank = natural pop"
         default: ""
       param:
         description: "sweep / gridsweep — Params field to vary (e.g. photo_rate, toxin_lethality)"
@@ -64,16 +65,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            v2/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build headless
+      # Build the V1 headless binary (all scenarios except v2-perf).
+      - name: Build headless (V1)
+        if: inputs.scenario != 'v2-perf'
         run: cargo build -p animata-sim --bin headless --release
+
+      # Build the V2 binary with the perf feature (v2-perf only). v2/ is a STANDALONE workspace;
+      # `cargo build -p cli` from the root workspace fails — must cd into v2/.
+      - name: Build v2-sim --features perf (V2)
+        if: inputs.scenario == 'v2-perf'
+        run: cd v2 && cargo build --bin v2-sim --release --features perf
 
       - name: Run scenario
         run: |
           set -euo pipefail
           BIN=target/release/headless
+          V2BIN=v2/target/release/v2-sim
           mkdir -p sim-out
           SUM=sim-out/summary.txt
           case "${{ inputs.scenario }}" in
@@ -86,6 +97,21 @@ jobs:
               else
                 "$BIN" "${{ inputs.seed }}" "${{ inputs.ticks }}" --profile | tee "$SUM"
               fi
+              ;;
+            v2-perf)
+              # Run the v2 bench scenario: v2-sim [seed [ticks]] [--bench-pop N] --profile
+              # seed / ticks as positional args, bench_pop optional (blank → natural founders).
+              BP="${{ inputs.bench_pop }}"
+              if [ -n "$BP" ]; then
+                "$V2BIN" "${{ inputs.seed }}" "${{ inputs.ticks }}" --bench-pop "$BP" --profile 2>&1 | tee "$SUM"
+              else
+                "$V2BIN" "${{ inputs.seed }}" "${{ inputs.ticks }}" --profile 2>&1 | tee "$SUM"
+              fi
+              # Guard: the per-stage table only appears when built with --features perf.
+              # If that flag was forgotten, --profile prints only a stderr warning and exits 0 —
+              # a silent empty result would look green. Fail loud instead.
+              grep -q 'ns/ent' "$SUM" \
+                || { echo "FAIL: per-stage breakdown absent from output (--features perf missing?)" | tee -a "$SUM"; exit 1; }
               ;;
             multiseed)
               : > "$SUM"
