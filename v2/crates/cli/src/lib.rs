@@ -61,6 +61,20 @@ pub fn build_sim(config: SimConfig) -> Sim {
     Sim::new(config, Box::new(world), Box::new(field), Box::new(FixedBrain::new()))
 }
 
+/// Perf-gate bench scenario config: `world_dim=128` (4× area vs default 64×64) supports a large
+/// sustained population so an O(N²) regression provably breaches the per-entity work bounds (D1a/F8).
+/// `n_founders` pre-populates the world — the ecosystem is resource-rich enough that no mass starvation
+/// occurs on tick 1 (128×128 cells, same per-cell regen, carrying capacity ≈400+ creatures).
+pub fn bench_config(seed: u64, n_founders: u64) -> SimConfig {
+    let econ = EconParams { world_dim: 128, ..EconParams::default() };
+    SimConfig { seed, n_founders, founder_energy: 1200, econ, sim_threads: DEFAULT_THREADS, merge_strategy: MergeStrategy::Canonical }
+}
+
+/// Build a sim on the perf-gate bench scale (world_dim=128, `n_founders` pre-populated).
+pub fn build_sim_bench(seed: u64, n_founders: u64) -> Sim {
+    build_sim(bench_config(seed, n_founders))
+}
+
 /// Golden-replay harness: `(config) → per-tick state hash`, with the always-on guards firing every
 /// tick (active in `--release`, F8): exact energy conservation (R15) AND the signal NaN/Inf guard.
 pub fn run(config: SimConfig, ticks: u64) -> Vec<u64> {
@@ -124,5 +138,28 @@ mod tests {
         let mut sim = build_sim(default_config(1));
         let mut d = LoopDriver::default();
         assert_eq!(d.advance(10_000_000, &mut sim), 8);
+    }
+
+    /// R27 guard: the fixed `dt` is NEVER scaled by a time-multiplier in the v2 headless core.
+    /// The only valid tempo controls are `EconParams::brain_period` (K) and `metab_period` (N) —
+    /// both are integer divisors of the tick counter. Max-speed headless is the default (no vsync).
+    /// A time-scale multiplier would violate determinism and break the R20 multi-rate contract.
+    #[test]
+    fn v2_r27_dt_is_not_timescaled() {
+        // dt is the canonical fixed step: 1/64 s = 15625 µs. It must never be scaled.
+        const EXPECTED_DT_MICROS: u64 = 1_000_000 / 64; // 15625
+        assert_eq!(
+            DT_MICROS, EXPECTED_DT_MICROS,
+            "R27: DT_MICROS must be the exact canonical 1/64 s fixed step, never time-scaled"
+        );
+        // LoopDriver caps at max_steps_per_frame (8) regardless of how large the accumulated time is.
+        // That cap is the only acceleration mechanism — it is NOT a dt-scaling bypass.
+        let mut sim = build_sim(default_config(42));
+        let mut d = LoopDriver::default();
+        let steps = d.advance(10_000_000, &mut sim); // 10 s of accumulated time → still capped at 8
+        assert_eq!(
+            steps, 8,
+            "R27: LoopDriver caps at max_steps_per_frame, never at a scaled dt"
+        );
     }
 }

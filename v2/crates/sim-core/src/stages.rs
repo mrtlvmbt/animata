@@ -7,6 +7,8 @@
 
 use crate::*;
 use bevy_ecs::prelude::*;
+#[cfg(feature = "perf")]
+use crate::WorkCounters;
 
 /// RNG salts — disjoint streams.
 const SALT_MUT: u64 = 0x4D55_5400; // "MUT"
@@ -72,11 +74,14 @@ pub fn stage_brain(
     econ: Res<EconParams>,
     brain: Res<BrainRes>,
     mut q: Query<(&Sensors, &Energy, &Genome, &mut BrainState, &mut BrainOutput)>,
+    #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     if !clock.tick.is_multiple_of(econ.brain_period.max(1)) {
         return; // off-phase: behaviour holds the last decision (multi-rate, R20). Newborns stay frozen.
     }
     for (s, e, g, mut bs, mut bo) in &mut q {
+        #[cfg(feature = "perf")]
+        { wc.brain_infer += 1; }
         // Sense→Brain quantization boundary: pack the integer sensors into the FixedI16 input vector.
         // Inputs: [grad_x, grad_z, local_resource, energy, bias=1.0(Q8.8), reserved]. The signal field
         // (f32) is intentionally NOT fed to the integer brain in M3 — it stays observational.
@@ -180,10 +185,13 @@ pub fn stage_interactions(
     mut field: ResMut<FieldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut q: Query<(Entity, &Position, &Genome, &mut Energy)>,
+    #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
     for (_, e) in ents {
+        #[cfg(feature = "perf")]
+        { wc.field_takes += 1; }
         let (_, pos, g, mut energy) = q.get_mut(e).expect("entity present");
         let got = field.0.conserved_take(pos.0, econ.u_max); // exact integer removal
         let gained = got * g.metabolism_eff as i64 / 256;
@@ -201,11 +209,14 @@ pub fn stage_birth_death(
     mut repro: ResMut<ReproEvents>,
     mut commands: Commands,
     mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId)>,
+    #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     repro.parents.clear();
     let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
     for (bits, e) in ents {
+        #[cfg(feature = "perf")]
+        { wc.birth_death_iters += 1; }
         let (_, pos, mut energy, genome, species) = q.get_mut(e).expect("entity present");
         if energy.0 <= 0 {
             // Death (starvation): energy is exactly 0 → nothing to recycle, conservation intact.
@@ -254,13 +265,17 @@ pub fn stage_field_scatter(
     mut field: ResMut<FieldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut q: Query<(Entity, &Position, &mut Energy)>,
+    #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     // 1. Serial gather (Entity-id order): excrete conserved `w` (agent→field, Δtotal=0, NOT
     //    dissipated) and tag a pheromone deposit. Reducing energy mutates the component → serial.
+    // Counter in serial loop only — avoids per-entity atomic in the parallel merge below (D1c).
     let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
     let mut deposits: Vec<Deposit> = Vec::with_capacity(ents.len());
     for (bits, e) in ents {
+        #[cfg(feature = "perf")]
+        { wc.scatter_deposits += 1; }
         let (_, pos, mut energy) = q.get_mut(e).expect("entity present");
         let w = econ.excrete.min(energy.0.max(0));
         energy.0 -= w;
