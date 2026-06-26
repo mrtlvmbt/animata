@@ -14,7 +14,7 @@
 //! (`EconParams::brain_period` / `metab_period`) are the ONLY per-system rate dials.
 //! A time-scale multiplier on `dt` would violate determinism and is not part of the v2 core.
 
-use cli::{bench_config, build_sim, build_sim_bench, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
+use cli::{bench_config, build_sim, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
 use sim_core::{EconParams, MergeStrategy};
 
 fn main() {
@@ -43,26 +43,64 @@ fn parse_args(args: &[&str]) -> (u64, u64, Option<u64>, bool, Option<u64>) {
         match args[i] {
             "--bench-pop" => {
                 i += 1;
-                bench_pop = Some(args[i].parse().expect("--bench-pop requires a number"));
+                if i >= args.len() {
+                    eprintln!("error: --bench-pop requires a value (positive integer)");
+                    std::process::exit(1);
+                }
+                let n: u64 = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("error: --bench-pop value must be a positive integer, got {:?}", args[i]);
+                    std::process::exit(1);
+                });
+                if n == 0 {
+                    eprintln!("error: --bench-pop must be ≥ 1");
+                    std::process::exit(1);
+                }
+                bench_pop = Some(n);
             }
             "--profile" => { do_profile = true; }
             "--timelapse" => {
                 i += 1;
-                timelapse = Some(args[i].parse().expect("--timelapse requires a number"));
+                if i >= args.len() {
+                    eprintln!("error: --timelapse requires a value (positive integer interval)");
+                    std::process::exit(1);
+                }
+                let interval: u64 = args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("error: --timelapse value must be a positive integer, got {:?}", args[i]);
+                    std::process::exit(1);
+                });
+                if interval == 0 {
+                    eprintln!("error: --timelapse interval must be ≥ 1 (0 would cause a divide-by-zero)");
+                    std::process::exit(1);
+                }
+                timelapse = Some(interval);
             }
             arg if !arg.starts_with('-') => {
                 match positional {
                     0 => {
                         seed = arg.parse()
                             .or_else(|_| u64::from_str_radix(arg.trim_start_matches("0x"), 16))
-                            .unwrap_or_else(|_| panic!("invalid seed: {arg}"));
+                            .unwrap_or_else(|_| {
+                                eprintln!("error: invalid seed {:?} (expected decimal or 0x hex)", arg);
+                                std::process::exit(1);
+                            });
                     }
-                    1 => { ticks = arg.parse().unwrap_or_else(|_| panic!("invalid ticks: {arg}")); }
-                    _ => panic!("unexpected positional argument: {arg}"),
+                    1 => {
+                        ticks = arg.parse().unwrap_or_else(|_| {
+                            eprintln!("error: invalid ticks {:?} (expected positive integer)", arg);
+                            std::process::exit(1);
+                        });
+                    }
+                    _ => {
+                        eprintln!("error: unexpected positional argument {:?}", arg);
+                        std::process::exit(1);
+                    }
                 }
                 positional += 1;
             }
-            arg => panic!("unknown argument: {arg}"),
+            arg => {
+                eprintln!("error: unknown argument {:?}", arg);
+                std::process::exit(1);
+            }
         }
         i += 1;
     }
@@ -156,18 +194,21 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
 /// Bench scenario: world_dim=128, `n_pop` founders, `ticks` ticks.
 /// Prints per-stage perf summary when `--features perf`; exits cleanly.
 fn run_bench(seed: u64, n_pop: u64, ticks: u64, do_profile: bool) {
-    let cfg = bench_config(seed, n_pop);
+    let cfg = bench_config(seed, n_pop); // build once; reuse for both print and sim (F4)
     println!(
         "animata v2 bench — seed={seed:#x} n_founders={n_pop} ticks={ticks} world_dim={}",
         cfg.econ.world_dim
     );
-    let mut sim = build_sim_bench(seed, n_pop);
+    let mut sim = build_sim(cfg);
     let mut peak_pop = 0u64;
+    let mut min_pop = u64::MAX;
     for _ in 0..ticks {
         sim.step();
-        peak_pop = peak_pop.max(sim.population());
+        let p = sim.population();
+        peak_pop = peak_pop.max(p);
+        min_pop = min_pop.min(p);
     }
-    println!("peak_population={peak_pop}");
+    println!("peak_population={peak_pop}  min_population={min_pop}");
 
     if do_profile {
         #[cfg(feature = "perf")]
@@ -186,4 +227,5 @@ fn run_bench(seed: u64, n_pop: u64, ticks: u64, do_profile: bool) {
         eprintln!("warning: --profile requires --features perf");
     }
     assert!(peak_pop > 0, "population went extinct in bench scenario");
+    assert!(min_pop > 0, "population collapsed to zero during bench scenario");
 }
