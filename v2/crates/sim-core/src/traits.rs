@@ -52,12 +52,15 @@ pub trait FieldStore: Send + Sync {
     fn check_meta(&self, expected_m_field: i64) -> Result<(), String>;
 
     // ── conserved field (integer, in the energy balance) ────────────────────────────────────────────
-    fn conserved_at(&self, pos: Vec2Fixed) -> i64;
-    fn conserved_gradient(&self, pos: Vec2Fixed, range: i64) -> (i64, i64);
+    fn conserved_at(&self, pos: Vec2Fixed, layer: usize) -> i64;
+    fn conserved_gradient(&self, pos: Vec2Fixed, range: i64, layer: usize) -> (i64, i64);
     /// Remove up to `amount` from the cell; returns the EXACT amount removed.
-    fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64) -> i64;
-    fn conserved_total(&self) -> i64;
+    fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64, layer: usize) -> i64;
+    fn conserved_total(&self, layer: usize) -> i64;
+    /// Sum of `conserved_total` across ALL layers (the energy-balance quantity).
+    fn conserved_total_all(&self) -> i64;
     /// Deterministic hash of the conserved grid (integer, canonical cell order) — the R14 subject.
+    /// At L=1 the fold is byte-identical to the pre-A1 flat fold (no layer index mixed in).
     fn conserved_hash(&self) -> u64;
 
     // ── signal field (f32, NOT in the balance) ──────────────────────────────────────────────────────

@@ -27,16 +27,17 @@ pub struct CpuFieldStore {
     grid_h: i64,
     /// Cell indices in Morton order — the canonical diffusion pair-traversal order (doc 14 §5.1).
     morton_order: Vec<usize>,
+    n_layers: usize,
 
-    // conserved (integer)
-    conserved: Vec<i64>,
-    conserved_staging: Vec<i64>,
-    caps: Vec<i64>,
-    regen_rate: i64,
-    flux_k: i64,
+    // conserved (integer); outer index = layer, inner index = cell
+    conserved: Vec<Vec<i64>>,
+    conserved_staging: Vec<Vec<i64>>,
+    caps: Vec<Vec<i64>>,
+    regen_rates: Vec<i64>,
+    flux_ks: Vec<i64>,
     flux_f: u32,
 
-    // signal (f32)
+    // signal (f32) — unchanged; single layer
     signal: Vec<f32>,
     signal_staging: Vec<f32>,
     signal_tmp: Vec<f32>,
@@ -58,7 +59,7 @@ impl CpuFieldStore {
         let grid_h = dim / m_field;
         let n = (grid_w * grid_h) as usize;
         assert_eq!(caps.len(), n, "caps must cover the grid");
-        let conserved: Vec<i64> = caps.iter().map(|c| c / 2).collect();
+        let conserved_l0: Vec<i64> = caps.iter().map(|c| c / 2).collect();
         let mut morton_order: Vec<usize> = (0..n).collect();
         morton_order.sort_by_key(|&i| {
             let cx = (i as i64 % grid_w) as u32;
@@ -71,11 +72,12 @@ impl CpuFieldStore {
             grid_w,
             grid_h,
             morton_order,
-            conserved,
-            conserved_staging: vec![0; n],
-            caps,
-            regen_rate,
-            flux_k,
+            n_layers: 1,
+            conserved: vec![conserved_l0],
+            conserved_staging: vec![vec![0; n]],
+            caps: vec![caps],
+            regen_rates: vec![regen_rate],
+            flux_ks: vec![flux_k],
             flux_f,
             signal: vec![0.0; n],
             signal_staging: vec![0.0; n],
@@ -106,10 +108,12 @@ impl CpuFieldStore {
 
     fn regenerate(&mut self) -> i64 {
         let mut injected = 0;
-        for (g, cap) in self.conserved.iter_mut().zip(self.caps.iter()) {
-            let inj = self.regen_rate.min((*cap - *g).max(0));
-            *g += inj;
-            injected += inj;
+        for layer in 0..self.n_layers {
+            for (g, cap) in self.conserved[layer].iter_mut().zip(self.caps[layer].iter()) {
+                let inj = self.regen_rates[layer].min((*cap - *g).max(0));
+                *g += inj;
+                injected += inj;
+            }
         }
         injected
     }
@@ -118,32 +122,36 @@ impl CpuFieldStore {
     /// `num=(u_a−u_b)·k`, `flux=num>>F` (arithmetic shift → the un-shifted remainder stays in `a`),
     /// clamped so neither cell goes negative (`Σ|flux|≤u_a`). Σ conserved EXACTLY.
     fn diffuse_conserved(&mut self) {
-        for k in 0..self.morton_order.len() {
-            let a = self.morton_order[k];
-            let cx = a as i64 % self.grid_w;
-            let cz = a as i64 / self.grid_w;
-            // right and down neighbours (reflective/no-flux boundary — no wrap).
-            if cx + 1 < self.grid_w {
-                self.exchange(a, self.idx(cx + 1, cz));
-            }
-            if cz + 1 < self.grid_h {
-                self.exchange(a, self.idx(cx, cz + 1));
+        for layer in 0..self.n_layers {
+            for k in 0..self.morton_order.len() {
+                let a = self.morton_order[k];
+                let cx = a as i64 % self.grid_w;
+                let cz = a as i64 / self.grid_w;
+                // right and down neighbours (reflective/no-flux boundary — no wrap).
+                if cx + 1 < self.grid_w {
+                    let b = self.idx(cx + 1, cz);
+                    self.exchange_layer(layer, a, b);
+                }
+                if cz + 1 < self.grid_h {
+                    let b = self.idx(cx, cz + 1);
+                    self.exchange_layer(layer, a, b);
+                }
             }
         }
     }
 
     #[inline]
-    fn exchange(&mut self, a: usize, b: usize) {
-        let num = (self.conserved[a] - self.conserved[b]) * self.flux_k;
+    fn exchange_layer(&mut self, layer: usize, a: usize, b: usize) {
+        let num = (self.conserved[layer][a] - self.conserved[layer][b]) * self.flux_ks[layer];
         let mut flux = num >> self.flux_f; // arithmetic shift; remainder stays in `a`
         // Local boundedness: outgoing ≤ source content ⇒ no negative cells.
         if flux > 0 {
-            flux = flux.min(self.conserved[a]);
+            flux = flux.min(self.conserved[layer][a]);
         } else if flux < 0 {
-            flux = -((-flux).min(self.conserved[b]));
+            flux = -((-flux).min(self.conserved[layer][b]));
         }
-        self.conserved[a] -= flux;
-        self.conserved[b] += flux;
+        self.conserved[layer][a] -= flux;
+        self.conserved[layer][b] += flux;
     }
 
     /// Separable blur ([1,2,1]/4 ×2) + multiplicative decay — per-cell independent gather (read the
@@ -197,37 +205,45 @@ impl FieldStore for CpuFieldStore {
     }
 
     // ── conserved ───────────────────────────────────────────────────────────────────────────────
-    fn conserved_at(&self, pos: Vec2Fixed) -> i64 {
-        self.conserved[self.cell_index(pos)]
+    fn conserved_at(&self, pos: Vec2Fixed, layer: usize) -> i64 {
+        self.conserved[layer][self.cell_index(pos)]
     }
 
-    fn conserved_gradient(&self, pos: Vec2Fixed, range: i64) -> (i64, i64) {
+    fn conserved_gradient(&self, pos: Vec2Fixed, range: i64, layer: usize) -> (i64, i64) {
         let (cx, cz) = self.cell_coords(pos);
         // No-flux boundary (M1/F5): clamp neighbours to edge cell instead of toroidal wrap.
         // Matches diffuse_conserved (which already guards cx+1 < grid_w) so chemotaxis and
         // transport use the same boundary convention.
-        let gx = self.conserved[self.idx_nf(cx + range, cz)]
-            - self.conserved[self.idx_nf(cx - range, cz)];
-        let gz = self.conserved[self.idx_nf(cx, cz + range)]
-            - self.conserved[self.idx_nf(cx, cz - range)];
+        let gx = self.conserved[layer][self.idx_nf(cx + range, cz)]
+            - self.conserved[layer][self.idx_nf(cx - range, cz)];
+        let gz = self.conserved[layer][self.idx_nf(cx, cz + range)]
+            - self.conserved[layer][self.idx_nf(cx, cz - range)];
         (gx, gz)
     }
 
-    fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64) -> i64 {
+    fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64, layer: usize) -> i64 {
         let i = self.cell_index(pos);
-        let got = amount.min(self.conserved[i]).max(0);
-        self.conserved[i] -= got;
+        let got = amount.min(self.conserved[layer][i]).max(0);
+        self.conserved[layer][i] -= got;
         got
     }
 
-    fn conserved_total(&self) -> i64 {
-        self.conserved.iter().sum()
+    fn conserved_total(&self, layer: usize) -> i64 {
+        self.conserved[layer].iter().sum()
+    }
+
+    fn conserved_total_all(&self) -> i64 {
+        self.conserved.iter().flat_map(|l| l.iter()).sum()
     }
 
     fn conserved_hash(&self) -> u64 {
+        // At L=1: folds self.conserved[0] identically to the pre-A1 flat fold — no layer index
+        // or separator mixed in. At L>1: appends each subsequent layer's cells in order.
         let mut h = FNV_OFFSET;
-        for &v in &self.conserved {
-            h = fnv_mix(h, v as u64);
+        for layer_data in &self.conserved {
+            for &v in layer_data {
+                h = fnv_mix(h, v as u64);
+            }
         }
         h
     }
@@ -265,10 +281,11 @@ impl FieldStore for CpuFieldStore {
                 // Flatten → sort by (Morton, Entity) → apply in that single serial order. The integer
                 // conserved sum is associative ⇒ identical for any thread count (R14); the f32 signal
                 // sum is in this fixed canonical order ⇒ deterministic at fixed N.
+                // A-1: all deposits route to layer 0 (A-2 adds per-deposit layer routing).
                 let mut all: Vec<&Deposit> = batches.iter().flatten().collect();
                 all.sort_by_key(|d| (d.morton, d.entity_bits));
                 for d in all {
-                    self.conserved_staging[d.cell] += d.conserved;
+                    self.conserved_staging[0][d.cell] += d.conserved;
                     self.signal_staging[d.cell] += d.signal;
                 }
             }
@@ -276,7 +293,8 @@ impl FieldStore for CpuFieldStore {
                 // NEGATIVE path (R14 teeth): per-batch partial conserved sums, then fold the N partials
                 // with a non-associative, COUNT-sensitive combine. N=1 → the correct sum; N>1 → a
                 // different value ⇒ the 1-vs-N conserved hash differs ⇒ R14 goes RED.
-                let n = self.conserved_staging.len();
+                // A-1: targets layer 0 staging.
+                let n = self.conserved_staging[0].len();
                 let partials: Vec<Vec<i64>> = batches
                     .iter()
                     .map(|b| {
@@ -287,7 +305,7 @@ impl FieldStore for CpuFieldStore {
                         p
                     })
                     .collect();
-                for (cell, slot) in self.conserved_staging.iter_mut().enumerate() {
+                for (cell, slot) in self.conserved_staging[0].iter_mut().enumerate() {
                     let mut acc = 0i64;
                     for p in &partials {
                         acc = acc.rotate_left(1).wrapping_add(p[cell]); // non-associative
@@ -305,10 +323,12 @@ impl FieldStore for CpuFieldStore {
     }
 
     fn solve(&mut self) -> i64 {
-        // Apply staged deposits → grid (the t+1 snapshot, R17).
-        for (g, s) in self.conserved.iter_mut().zip(self.conserved_staging.iter_mut()) {
-            *g += *s;
-            *s = 0;
+        // Apply staged deposits → grid (the t+1 snapshot, R17) for each layer.
+        for layer in 0..self.n_layers {
+            for (g, s) in self.conserved[layer].iter_mut().zip(self.conserved_staging[layer].iter_mut()) {
+                *g += *s;
+                *s = 0;
+            }
         }
         for (g, s) in self.signal.iter_mut().zip(self.signal_staging.iter_mut()) {
             *g += *s;
@@ -346,13 +366,13 @@ mod tests {
             let mut f = field(k);
             // A big spike so even the near-0 α (k=1) transfers ≥1 integer unit.
             let spike = f.idx(3, 3);
-            f.conserved[spike] += 200_000;
-            let before = f.conserved_total();
-            let snapshot = f.conserved.clone();
+            f.conserved[0][spike] += 200_000;
+            let before = f.conserved_total(0);
+            let snapshot = f.conserved[0].clone();
             f.diffuse_conserved();
-            assert_eq!(f.conserved_total(), before, "Σ must be exactly conserved (k={k})");
-            assert_ne!(f.conserved, snapshot, "diffusion must be non-zero (k={k})");
-            assert!(f.conserved.iter().all(|&v| v >= 0), "no negative cells (k={k})");
+            assert_eq!(f.conserved_total(0), before, "Σ must be exactly conserved (k={k})");
+            assert_ne!(f.conserved[0], snapshot, "diffusion must be non-zero (k={k})");
+            assert!(f.conserved[0].iter().all(|&v| v >= 0), "no negative cells (k={k})");
         }
     }
 

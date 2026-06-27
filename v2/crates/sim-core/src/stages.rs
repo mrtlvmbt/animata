@@ -23,9 +23,9 @@ const SALT_MUT: u64 = 0x4D55_5400; // "MUT"
 pub fn stage_sense(field: Res<FieldRes>, mut q: Query<(&Position, &Genome, &mut Sensors)>) {
     for (pos, g, mut s) in &mut q {
         let range = g.sense_range.max(1) as i64;
-        let (gx, gz) = field.0.conserved_gradient(pos.0, range);
+        let (gx, gz) = field.0.conserved_gradient(pos.0, range, 0);
         s.gradient = Vec2Fixed(gx, gz);
-        s.local_resource = field.0.conserved_at(pos.0);
+        s.local_resource = field.0.conserved_at(pos.0, 0);
     }
 }
 
@@ -186,7 +186,7 @@ pub fn stage_interactions(
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
         let (_, pos, g, mut energy) = q.get_mut(e).expect("entity present");
-        let got = field.0.conserved_take(pos.0, econ.u_max); // exact integer removal
+        let got = field.0.conserved_take(pos.0, econ.u_max, 0); // exact integer removal
         let gained = got * g.metabolism_eff as i64 / 256;
         let lost = got - gained; // conversion inefficiency → heat
         energy.0 += gained;
@@ -332,7 +332,7 @@ pub fn stage_observe(
         });
     }
     tel.population = ents.len() as i64;
-    tel.field_total = field.0.conserved_total();
+    tel.field_total = field.0.conserved_total_all();
     // Signal-field metric (R25) — serial total concentration; never feeds the tick.
     tel.signal_total = field.0.signal_total();
 }
