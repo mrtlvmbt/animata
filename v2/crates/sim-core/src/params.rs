@@ -4,6 +4,23 @@
 use crate::MergeStrategy;
 use bevy_ecs::prelude::Resource;
 
+/// Per-layer field construction parameters carried by `SimConfig`.
+/// `build_sim` reads the first `n_layers` entries; unused slots are ignored and may be zeroed.
+///
+/// Layer 0 always uses world-noise-derived per-cell caps (`WorldView::resource`).
+/// Layers 1+ use `flat_cap` unless `world_cap_mult > 0`, in which case caps = world·mult.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LayerSpec {
+    pub regen_rate: i64,
+    pub flux_alpha_num: i64,
+    pub flux_alpha_den: i64,
+    /// Per-cell cap for layers 1+. `0` → empty start (initial mass = cap/2 = 0).
+    /// Ignored for layer 0 (which always uses world-noise caps).
+    pub flat_cap: i64,
+    /// If > 0, use world-derived cap × this multiplier for layers 1+ (overrides `flat_cap`).
+    pub world_cap_mult: i64,
+}
+
 /// Energy/space economy constants (integer `eu`). The energy SCALE is 1 eu = 1 integer unit here;
 /// raising it (a documented cargo parameter) only rescales the ledger — conservation is unaffected.
 #[derive(Resource, Clone, Copy, Debug)]
@@ -85,6 +102,9 @@ pub struct SimConfig {
     pub sim_threads: usize,
     /// Scatter merge strategy (`Canonical` in production; `NonAssociative` only for the R14 negative).
     pub merge_strategy: MergeStrategy,
-    /// Number of conserved layers (default 1). Set to 3 for the L=3 nutrient/organics scenario (A-4).
+    /// Number of conserved layers. Default 2 (substrate + organics); bench uses 1; L=3 test uses 3.
     pub n_layers: usize,
+    /// Per-layer field parameters. Only the first `n_layers` entries are used by `build_sim`.
+    /// Unused slots may be zeroed (`LayerSpec::default()`).
+    pub layer_specs: [LayerSpec; 4],
 }
