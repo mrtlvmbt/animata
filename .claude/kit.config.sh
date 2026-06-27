@@ -74,7 +74,7 @@ KIT_CRITIC_MODEL_FALLBACK='opus'
 KIT_PLANNER_MODEL='opus'
 # Platform/toolchain limits the critic holds every plan against (the [TARGET SYSTEM CONSTRAINTS] block
 # bin/kit-critic feeds it). Make this YOUR real environment contract.
-KIT_CRITIC_CONSTRAINTS='Bash 3.2+; macOS BSD + Linux GNU; Python stdlib only; zero new binaries'
+KIT_CRITIC_CONSTRAINTS='animata Rust workspace (animata-sim lib + animata render bin). Fixed-timestep, seeded sim: bit-exact DETERMINISM is a hard invariant, locked by a per-arch golden state_checksum (golden-arm64 on macos); any plan touching sim state must keep the checksum reproducible or explicitly re-pin the golden. Authoritative test gate = cloud CI (ci-report.sh exit 0), which covers animata-sim ONLY — the render bin is verified locally (clippy + in-app), never in CI. Heavy or new runs (perf, sweeps, multi-seed, long headless) dispatch to the cloud via sim-run.sh, never the dev machine. Lanes sim|infra|render with single-writer ownership; golden-touch changes need an explicit re-pin step. Every plan maps to its ТЗ acceptance criteria.'
 # plan-consensus-guard (PreToolUse ExitPlanMode): WARNs (never blocks) if no fresh consensus marker.
 KIT_PLAN_CONSENSUS_DISABLED=0
 KIT_PLAN_CONSENSUS_TTL_MIN=30
