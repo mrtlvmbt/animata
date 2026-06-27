@@ -14,7 +14,7 @@
 //! (`EconParams::brain_period` / `metab_period`) are the ONLY per-system rate dials.
 //! A time-scale multiplier on `dt` would violate determinism and is not part of the v2 core.
 
-use cli::{bench_config, build_sim, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
+use cli::{bench_config, build_sim, config_with, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
 use sim_core::{EconParams, MergeStrategy};
 
 fn main() {
@@ -119,8 +119,8 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
         econ.brain_period, econ.metab_period
     );
     println!("two-run-same-seed identical per tick: {}", a == b);
-    let c1 = run_conserved_hashes(seed, 1, MergeStrategy::Canonical, ticks);
-    let cn = run_conserved_hashes(seed, DEFAULT_THREADS, MergeStrategy::Canonical, ticks);
+    let c1 = run_conserved_hashes(config_with(seed, 1, MergeStrategy::Canonical), ticks);
+    let cn = run_conserved_hashes(config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical), ticks);
     println!("R14 conserved hash 1-vs-{DEFAULT_THREADS} identical: {}", c1 == cn);
     println!("final state hash: {:#018x}", a.last().copied().unwrap_or(0));
 

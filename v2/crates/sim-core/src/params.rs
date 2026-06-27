@@ -85,4 +85,6 @@ pub struct SimConfig {
     pub sim_threads: usize,
     /// Scatter merge strategy (`Canonical` in production; `NonAssociative` only for the R14 negative).
     pub merge_strategy: MergeStrategy,
+    /// Number of conserved layers (default 1). Set to 3 for the L=3 nutrient/organics scenario (A-4).
+    pub n_layers: usize,
 }
