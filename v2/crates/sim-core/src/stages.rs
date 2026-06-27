@@ -285,6 +285,7 @@ pub fn stage_field_scatter(
             cell: field.0.cell_index(pos.0),
             morton: field.0.cell_morton(pos.0),
             entity_bits: bits,
+            layer: 0, // A-2: all agents target layer 0; genome-driven choice is slice B
             conserved: w,
             signal: econ.pheromone,
         });

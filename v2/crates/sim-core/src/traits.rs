@@ -6,13 +6,17 @@
 use crate::Vec2Fixed;
 use bevy_ecs::prelude::Resource;
 
-/// One agent's scatter contribution for stage 8. Carries the canonical sort key `(morton, entity)`
-/// so `commit_merge` can fold in `(Morton → Entity-id)` order regardless of how threads partitioned.
+/// One agent's scatter contribution for stage 8. Carries the canonical sort key
+/// `(layer, morton, entity)` so `commit_merge` can fold in that order regardless of how threads
+/// partitioned. `layer` routes the conserved amount to the correct staging slice; signal is always
+/// flat (no per-layer signal in slice A).
 #[derive(Clone, Copy, Debug)]
 pub struct Deposit {
     pub cell: usize,
     pub morton: u32,
     pub entity_bits: u64,
+    /// Target conserved layer. At L=1 always 0. A-4 introduces genome-driven layer choice.
+    pub layer: usize,
     /// Conserved (integer) contribution — agent→field excretion (exact, in the energy balance).
     pub conserved: i64,
     /// Signal (f32) contribution — pheromone deposit (NOT in the balance).
