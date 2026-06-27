@@ -40,3 +40,6 @@ animata-save.bin
 
 # ci-report.sh redirect target (local)
 /.ci-report-run.log
+
+# transient plan-consensus round snapshots (delta baselines)
+.claude/plans/.consensus/
