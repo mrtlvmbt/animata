@@ -1,6 +1,23 @@
 ---
 name: animata-ui
-description: The operating manual for the animata in-app GUI (crates/animata/src/ui) — the egui "naturalist's dashboard" HUD over the macroquad 3D world. Invoke at the START of any work touching the HUD: panels/flyouts, vitals/transport/rail/minimap/toast, the creature inspector, theme tokens, fonts/icons, hand-painted widgets, world-anchored overlays, or pixel-matching a mockup. Encodes the egui-0.31 + egui_macroquad gotchas (integer geometry, premultiplied alpha, alpha weakening, frame ordering), the UiState/SimMetrics/UiActions/HudCache seam, and the verify-in-app / mockup-diff procedures so you don't rediscover them. Read it before editing UI code, not after the panel looks wrong.
+description: >
+  Operating manual for the animata in-app GUI (crates/animata/src/ui) — the egui "naturalist's
+  dashboard" HUD over the macroquad 3D world. Load at the START of any HUD work: panels/flyouts,
+  vitals/transport/rail/minimap/toast, creature inspector, theme tokens, fonts/icons, hand-painted
+  widgets, world-anchored overlays, mockup pixel-match. Holds the egui-0.31 + egui_macroquad gotchas
+  (integer geometry, premultiplied alpha, alpha weakening, frame ordering), the
+  UiState/SimMetrics/UiActions/HudCache seam, the verify-in-app / mockup-diff procedures. Read before
+  editing UI code, not after the panel looks wrong.
+triggers:
+  - "HUD"
+  - "egui"
+  - "UI panel / flyout"
+  - "creature inspector"
+  - "minimap / transport / vitals"
+  - "theme tokens"
+  - "macroquad overlay"
+  - "mockup pixel-match"
+  - "animata-ui"
 ---
 
 # animata-ui — the HUD operating manual

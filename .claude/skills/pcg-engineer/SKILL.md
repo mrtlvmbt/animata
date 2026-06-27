@@ -2,11 +2,20 @@
 name: pcg-engineer
 description: >
   PCG expert for games: terrain (fBm, erosion, biomes, rivers), dungeons (BSP, WFC, cellular automata),
-  textures (noise synthesis, Wang tiles, reaction-diffusion, tiling), environment decoration (Poisson scatter,
-  L-systems, city generation), and runtime pipelines (chunk streaming, seeding, engine integration).
-  Use for algorithm selection, architecture decisions, debugging generation artifacts, and performance.
-  Trigger on: dungeon/map/terrain generation, noise functions, WFC, procedural textures/materials,
-  foliage scatter, city/road gen, biome systems, PCG seeding, Unity/Unreal/Godot PCG integration.
+  textures (noise synthesis, Wang tiles, reaction-diffusion, tiling), environment scatter (Poisson,
+  L-systems, city gen), runtime pipelines (chunk streaming, seeding, engine integration). Use for
+  algorithm choice, architecture, debugging generation artifacts, performance.
+triggers:
+  - "terrain generation"
+  - "dungeon/map generation"
+  - "noise functions"
+  - "WFC"
+  - "procedural textures"
+  - "foliage scatter"
+  - "city/road gen"
+  - "biome systems"
+  - "PCG seeding"
+  - "engine PCG integration"
 ---
 
 # PCG Engineer Skill
