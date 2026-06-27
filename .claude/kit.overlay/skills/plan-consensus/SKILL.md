@@ -10,38 +10,34 @@
 
 Plans under consensus live at **`.claude/plans/<name>.md`** (e.g. `.claude/plans/substrate.md`). Model
 and constraints come from `.claude/kit.config.sh` (`KIT_CRITIC_MODEL=opus`, `KIT_PLANNER_MODEL=opus`,
-`KIT_CRITIC_CONSTRAINTS`). The launcher is the kit's **`.claude-dev-kit/bin/kit-critic`** (subscription
-session, $0) — NOT `pm/bin/code-review` (that is the separate PR-vs-ТЗ gate run by `code-critic` after a
-PR exists; this loop runs on the *plan*, before any code).
+`KIT_CRITIC_CONSTRAINTS` = the animata sim-determinism / lane / golden / ТЗ envelope). The launcher is the
+kit's **`.claude-dev-kit/bin/kit-critic`** (subscription session, $0) — NOT `pm/bin/code-review` (that is
+the separate PR-vs-ТЗ gate run by `code-critic` after a PR exists; this loop runs on the *plan*, before
+any code).
 
-**Round snapshots = the delta baseline.** A plan has no commit of its own mid-loop, so keep each
-critiqued round's text as an explicit baseline file under `.claude/plans/.consensus/` (gitignored,
-transient). Snapshot the plan *right after* each round's critique, so the baseline is exactly the text
-that was critiqued.
+**The delta baseline is automatic — you keep no snapshot files.** `kit-critic` snapshots each critiqued
+plan itself (under `.claude/.consensus`, gitignored), keyed by the plan's path, so round ≥2 re-critiques
+only the DELTA with no `cp` and no `--delta` flag. Just call the same command each round:
 
-    mkdir -p .claude/plans/.consensus
-
-**Round 1 — full cold critique** (you need the baseline):
+**Round 1 — full cold critique** (no snapshot yet → whole plan):
 
     .claude-dev-kit/bin/kit-critic .claude/plans/<name>.md
-    cp .claude/plans/<name>.md .claude/plans/.consensus/<name>.r1.md      # snapshot what was critiqued
 
 Resolve every finding (Fix or Accept), editing `.claude/plans/<name>.md`. Then machine-derive the carry:
 
     python3 .claude-dev-kit/lib/critic-prior.py .claude/.critic-report.md > .claude/.critic-prior.md
 
-**Round ≥2 — feed the DELTA, not the whole plan** (see the `critique-delta` skill for the contract):
+**Round ≥2 — same command, auto-deltas** (a snapshot now exists → only the changed ranges + hunks go to
+the critic, which Reads the enclosing sections itself):
 
-    .claude-dev-kit/bin/kit-critic --delta .claude/plans/.consensus/<name>.r$((N-1)).md \
-        .claude/plans/<name>.md .claude/.critic-prior.md
-    cp .claude/plans/<name>.md .claude/plans/.consensus/<name>.r$N.md     # re-anchor for the next round
+    .claude-dev-kit/bin/kit-critic .claude/plans/<name>.md .claude/.critic-prior.md
 
-`--delta` diffs the prior-round snapshot against the current plan and sends the critic only the changed
-ranges + hunks (it Reads the enclosing sections itself), while still writing the program-attested
-`.plan-consensus` marker and keeping the opus fallback. If the plan is identical to the snapshot there is
-no change to validate ⇒ `kit-critic` exits 0 (you are already at the fixpoint). The report always lands
-at `.claude/.critic-report.md`. For a recall-sensitive plan, run k≥2 deltas and union their findings.
+The launcher diffs the prior snapshot against the current plan, sends the critic the path+ranges+hunks
+(not the body), re-snapshots for the next round, and still writes the program-attested `.plan-consensus`
+marker + keeps the opus fallback. If the plan is identical to the snapshot there is no change to validate
+⇒ it exits 0 (you are already at the fixpoint). The report always lands at `.claude/.critic-report.md`.
 
-NOTE: `KIT_CRITIC_CONSTRAINTS` in `.claude/kit.config.sh` currently holds the generic kit default — set it
-to the animata-pm plan envelope (sim determinism / lane ownership / golden-touch / ТЗ acceptance) when a
-plan's survival depends on those, so the cold critic stress-tests against the real constraints.
+Force a whole-plan **sweep** round (the delta is a cheap first pass, not a full replacement — keep a
+periodic sweep for orthogonal bugs the change never reasons about) with `--full`; disable auto-delta for a
+run with `KIT_CRITIC_AUTODELTA=0`. For a recall-sensitive plan, run k≥2 deltas and union their findings
+(see the `critique-delta` skill).
