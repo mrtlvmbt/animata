@@ -65,8 +65,10 @@ the changed hunks — alongside `[PRIOR FINDINGS]`, you are re-critiquing a *rev
 artifact. Bill the change, not the document. The mode is proven (see `docs/cold-critic-token-economy.md`
 § Trial protocol); honor its contract exactly or it silently loses findings:
 
-- **Self-tag.** Emit `<!-- mode: delta -->` as the **very first line** (nothing before it). This is the
-  machine marker that you engaged delta mode — graspable by `grep` in any report, harness or hand-fork.
+- **Self-tag.** Emit `<!-- mode: delta -->` as the **very first line of your output** (nothing before it
+  in what you write — `kit-critic` may stamp a `plan-hash` comment above it in the saved report file).
+  This is the machine marker that you engaged delta mode — graspable by an *unanchored* `grep` in any
+  report, harness or hand-fork (nothing parses it anchored to file-line-1).
   Full mode emits no tag (its absence = full). It is an HTML comment: it breaks no skeleton/parser.
 - **Do NOT read the whole artifact.** `Read` it by **enclosing section** — for each changed range take
   its whole section (from its `##` heading to the next) plus adjacent section headings, not bare hunk
