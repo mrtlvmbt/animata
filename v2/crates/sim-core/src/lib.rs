@@ -28,7 +28,8 @@ mod stages;
 mod traits;
 
 pub use components::{
-    BrainOutput, BrainState, Energy, Intent, Sensors, SpeciesId, Velocity, VelocityNext,
+    BrainOutput, BrainState, Energy, Intent, PendingSpeciation, Sensors, SpeciesId, Velocity,
+    VelocityNext,
 };
 pub use det_map::DetMap;
 pub use energy::EnergyLedger;
@@ -88,9 +89,9 @@ pub struct TraitSample {
 }
 
 /// Speciation state (M5/criterion 2). Tracks the founder genome of each species and the
-/// parent-child species tree. Updated by `stage_birth_death`; never enters `state_hash`
-/// (SpeciesId is an observational label — not a behavioural driver; see `state_hash` doc).
-#[derive(Resource)]
+/// parent-child species tree. Stored on `Sim` (NOT as an ECS Resource) so that inserting it
+/// does not allocate a bevy entity, which would shift the fresh-entity counter and break the
+/// deterministic golden (entity ids feed `deterministic_fold` via `e.to_bits()`).
 pub struct SpeciationState {
     /// Founder genome of each species, keyed by SpeciesId. Grows monotonically — no GC of
     /// extinct entries, so `parent_of` references stay valid. Bounded by total divisions.
@@ -172,6 +173,9 @@ pub use perf::{PerfReport, WorkCounters};
 pub struct Sim {
     world: World,
     stages: Vec<(&'static str, Schedule)>,
+    /// Speciation state lives here (NOT in the ECS world) to avoid allocating an extra bevy entity,
+    /// which would shift the fresh-entity counter and break the golden (see SpeciationState doc).
+    speciation: SpeciationState,
     #[cfg(feature = "perf")]
     perf: PerfReport,
 }
@@ -242,17 +246,18 @@ impl Sim {
         w.insert_resource(WorldRes(world));
         w.insert_resource(FieldRes(field));
         w.insert_resource(BrainRes(brain));
-        // Speciation state (M5): pre-seed S0 with the founder genome so stage_birth_death can
-        // look up the reference genome for the root species on the very first division.
-        let mut spec_init = SpeciationState::default();
-        spec_init.refs.insert(SpeciesId(0), founder);
-        w.insert_resource(spec_init);
         #[cfg(feature = "perf")]
         w.insert_resource(WorkCounters::default());
+
+        // SpeciationState lives on the Sim struct (NOT in the ECS world) to avoid allocating an
+        // extra bevy entity that would shift the fresh-entity counter and break the golden.
+        let mut speciation = SpeciationState::default();
+        speciation.refs.insert(SpeciesId(0), founder);
 
         Self {
             world: w,
             stages: build_stages(),
+            speciation,
             #[cfg(feature = "perf")]
             perf: PerfReport::default(),
         }
@@ -274,6 +279,9 @@ impl Sim {
         {
             self.perf.work = *self.world.resource::<WorkCounters>();
         }
+        // M5: assign final SpeciesId to newly-born entities (marked with PendingSpeciation by
+        // stage_birth_death). Runs after all stages so children are live in the world.
+        self.process_pending_speciation();
         self.world.resource_mut::<SimClock>().tick += 1;
     }
 
@@ -392,8 +400,7 @@ impl Sim {
         let mut q = self.world.query::<&SpeciesId>();
         let mut ids: Vec<u32> = q.iter(&self.world).map(|s| s.0).collect();
         ids.sort_unstable();
-        let spec = self.world.resource::<SpeciationState>();
-        let next_id = spec.next_id;
+        let next_id = self.speciation.next_id;
         let mut h = FNV_OFFSET;
         for id in ids {
             h = fnv_mix(h, id as u64);
@@ -403,7 +410,7 @@ impl Sim {
 
     /// Read-only access to the speciation state (for CI separation-gate assertions).
     pub fn speciation_state(&self) -> &SpeciationState {
-        self.world.resource::<SpeciationState>()
+        &self.speciation
     }
 
     /// Economy parameters (for CI threshold assertions).
@@ -414,6 +421,65 @@ impl Sim {
     #[cfg(feature = "perf")]
     pub fn perf(&self) -> &PerfReport {
         &self.perf
+    }
+
+    /// Assign final SpeciesId to entities born this tick (marked `PendingSpeciation`).
+    /// Runs after all stages so children are fully live in the world. Processes in entity-id
+    /// order (matching stage_birth_death's iteration order) for a deterministic next_id sequence.
+    fn process_pending_speciation(&mut self) {
+        use bevy_ecs::query::With;
+
+        let threshold = self.world.resource::<EconParams>().speciation_threshold;
+
+        // Collect pending (newly born) entities — sort by entity id for determinism.
+        let pending: Vec<(Entity, Genome, SpeciesId)> = {
+            let mut q = self
+                .world
+                .query_filtered::<(Entity, &Genome, &SpeciesId), With<PendingSpeciation>>();
+            let mut v: Vec<(Entity, Genome, SpeciesId)> =
+                q.iter(&self.world).map(|(e, g, s)| (e, *g, *s)).collect();
+            v.sort_unstable_by_key(|(e, _, _)| e.to_bits());
+            v
+        };
+
+        // Determine final SpeciesId for each child — may found a new species.
+        let mut updates: Vec<(Entity, SpeciesId)> = Vec::with_capacity(pending.len());
+        for (e, genome, parent_species) in pending {
+            let parent_ref =
+                self.speciation.refs.get(&parent_species).copied().unwrap_or(genome);
+            let d = genome.brain_weight_l1(&parent_ref);
+            let species_c = if d > threshold {
+                let new_id = SpeciesId(self.speciation.next_id);
+                self.speciation.next_id += 1;
+                self.speciation.refs.insert(new_id, genome);
+                self.speciation.parent_of.insert(new_id, parent_species);
+                new_id
+            } else {
+                parent_species
+            };
+            updates.push((e, species_c));
+        }
+
+        // Apply: update SpeciesId, remove marker.
+        for (e, species_c) in updates {
+            let mut em = self.world.entity_mut(e);
+            em.insert(species_c);
+            em.remove::<PendingSpeciation>();
+        }
+
+        // Recompute live species census (reflects extinctions + new births this tick).
+        let census: std::collections::BTreeMap<u32, u32> = {
+            let mut q = self.world.query::<&SpeciesId>();
+            let mut map = std::collections::BTreeMap::new();
+            for s in q.iter(&self.world) {
+                *map.entry(s.0).or_insert(0) += 1;
+            }
+            map
+        };
+        let species_count = census.len() as u64;
+        let mut tel = self.world.resource_mut::<Telemetry>();
+        tel.species_count = species_count;
+        tel.species_census = census.into_iter().collect();
     }
 }
 
