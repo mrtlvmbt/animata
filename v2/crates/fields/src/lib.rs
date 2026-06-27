@@ -278,43 +278,46 @@ impl FieldStore for CpuFieldStore {
     fn commit_merge(&mut self, batches: &[Vec<Deposit>], strategy: MergeStrategy) {
         match strategy {
             MergeStrategy::Canonical => {
-                // Flatten → sort by (Morton, Entity) → apply in that single serial order. The integer
-                // conserved sum is associative ⇒ identical for any thread count (R14); the f32 signal
-                // sum is in this fixed canonical order ⇒ deterministic at fixed N.
-                // A-1: all deposits route to layer 0 (A-2 adds per-deposit layer routing).
+                // Flatten → sort by (layer, Morton, Entity) → apply in that single serial order.
+                // Integer conserved sum is associative ⇒ identical for any thread/layer count (R14).
+                // Signal stays flat (single buffer keyed by cell — no per-layer signal in slice A).
                 let mut all: Vec<&Deposit> = batches.iter().flatten().collect();
-                all.sort_by_key(|d| (d.morton, d.entity_bits));
+                all.sort_by_key(|d| (d.layer, d.morton, d.entity_bits));
                 for d in all {
-                    self.conserved_staging[0][d.cell] += d.conserved;
-                    self.signal_staging[d.cell] += d.signal;
+                    debug_assert!(d.layer < self.n_layers, "deposit layer {} >= n_layers {}", d.layer, self.n_layers);
+                    self.conserved_staging[d.layer][d.cell] += d.conserved;
+                    self.signal_staging[d.cell] += d.signal; // signal is NOT layered in slice A
                 }
             }
             MergeStrategy::NonAssociative => {
-                // NEGATIVE path (R14 teeth): per-batch partial conserved sums, then fold the N partials
-                // with a non-associative, COUNT-sensitive combine. N=1 → the correct sum; N>1 → a
-                // different value ⇒ the 1-vs-N conserved hash differs ⇒ R14 goes RED.
-                // A-1: targets layer 0 staging.
+                // NEGATIVE path (R14 teeth): per-batch, per-layer partial conserved sums, then fold the
+                // N partials with a non-associative, COUNT-sensitive combine. N=1 → the correct sum;
+                // N>1 → a different value ⇒ the 1-vs-N conserved hash differs ⇒ R14 goes RED.
                 let n = self.conserved_staging[0].len();
-                let partials: Vec<Vec<i64>> = batches
-                    .iter()
-                    .map(|b| {
-                        let mut p = vec![0i64; n];
-                        for d in b {
-                            p[d.cell] += d.conserved;
+                for layer in 0..self.n_layers {
+                    let partials: Vec<Vec<i64>> = batches
+                        .iter()
+                        .map(|b| {
+                            let mut p = vec![0i64; n];
+                            for d in b {
+                                if d.layer == layer {
+                                    p[d.cell] += d.conserved;
+                                }
+                            }
+                            p
+                        })
+                        .collect();
+                    for (cell, slot) in self.conserved_staging[layer].iter_mut().enumerate() {
+                        let mut acc = 0i64;
+                        for p in &partials {
+                            acc = acc.rotate_left(1).wrapping_add(p[cell]); // non-associative
                         }
-                        p
-                    })
-                    .collect();
-                for (cell, slot) in self.conserved_staging[0].iter_mut().enumerate() {
-                    let mut acc = 0i64;
-                    for p in &partials {
-                        acc = acc.rotate_left(1).wrapping_add(p[cell]); // non-associative
+                        *slot += acc;
                     }
-                    *slot += acc;
                 }
                 // signal handled canonically (irrelevant to the conserved-only R14 assert).
                 let mut all: Vec<&Deposit> = batches.iter().flatten().collect();
-                all.sort_by_key(|d| (d.morton, d.entity_bits));
+                all.sort_by_key(|d| (d.layer, d.morton, d.entity_bits));
                 for d in all {
                     self.signal_staging[d.cell] += d.signal;
                 }
