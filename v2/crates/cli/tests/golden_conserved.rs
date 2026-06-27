@@ -16,8 +16,7 @@
 //! **Re-pin** (single-writer, agent A): only on an INTENDED conserved-field change; read the new
 //! left/right from `.ci-report/failed.log` (the arm64 job). Never re-pin to silence drift.
 
-use cli::{run_conserved_hashes, DEFAULT_THREADS};
-use sim_core::MergeStrategy;
+use cli::{default_config, l3_config, run_conserved_hashes};
 
 // A-0 pin: conserved-field hash per tick, default SimConfig (seed 0xA11A_2A11, L=1 scalar).
 // Captured on arm64 + Rust 1.96.0 (matches the CI `v2-golden-arm64` job arch + toolchain).
@@ -127,16 +126,32 @@ fn v2_golden_conserved() {
     if cfg!(debug_assertions) {
         return; // pinned for release; float-fusing differs in debug (arm64 release CI job)
     }
-    let h = run_conserved_hashes(
-        0xA11A_2A11,
-        DEFAULT_THREADS,
-        MergeStrategy::Canonical,
-        GOLDEN_CONSERVED.len() as u64,
-    );
+    let h = run_conserved_hashes(default_config(0xA11A_2A11), GOLDEN_CONSERVED.len() as u64);
     for t in 0..GOLDEN_CONSERVED.len() {
         assert_eq!(
             h[t], GOLDEN_CONSERVED[t],
             "conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED)"
+        );
+    }
+}
+
+// A-4 pin: L=3 conserved-field hash (all 3 layers folded in layer-major order). Arch-bound: layer 0
+// caps come from NoiseWorld f64 sin (FMA-divergent). Captured on arm64 + Rust 1.96.0.
+// Re-pin only on an INTENDED L=3 field change; read left: from .ci-report/failed.log (arm64 job).
+const GOLDEN_CONSERVED_L3: [u64; 384] = [0; 384]; // placeholder — replaced by arm64 CI left: values
+
+/// L=3 conserved-field golden pin (A-4). Arm64 + release only. Separate constant from L=1 so the
+/// default config guard (`v2_golden_conserved`) is never touched by L=3 changes.
+#[test]
+fn v2_golden_conserved_l3() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let h = run_conserved_hashes(l3_config(0xA11A_2A11), GOLDEN_CONSERVED_L3.len() as u64);
+    for t in 0..GOLDEN_CONSERVED_L3.len() {
+        assert_eq!(
+            h[t], GOLDEN_CONSERVED_L3[t],
+            "L=3 conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED_L3)"
         );
     }
 }
