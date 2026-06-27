@@ -61,10 +61,9 @@ pub trait FieldStore: Send + Sync {
     fn conserved_hash(&self) -> u64;
 
     // ── signal field (f32, NOT in the balance) ──────────────────────────────────────────────────────
-    /// Bilinear sample of the signal field.
-    fn signal_at(&self, pos: Vec2Fixed) -> f32;
-    /// Finite-difference signal gradient (smooth chemotaxis).
-    fn signal_gradient(&self, pos: Vec2Fixed) -> (f32, f32);
+    // `signal_at` (bilinear sample) removed (M2/F3): had no real consumer in the tick loop.
+    // `signal_gradient` removed (M3/F3): the integer brain never read it; dead per-tick f32 work.
+    // Both may be re-added when a real consumer lands; the data (signal grid) is still maintained.
     /// Σ signal — a SERIAL reduction (no parallel float fold, F2). For telemetry.
     fn signal_total(&self) -> f32;
     /// Hash of the signal grid (f32 bits) — arch-bound, folded into the golden only.

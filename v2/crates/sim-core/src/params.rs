@@ -40,6 +40,10 @@ pub struct EconParams {
     pub excrete: i64,
     /// Signal (pheromone) deposited per agent per tick (f32, NOT in the energy balance).
     pub pheromone: f32,
+    /// Field cell size `M_field` (world cells per field bucket, ≥ 1). This is the INDEPENDENT
+    /// expected value for the `check_meta(R8)` load-check in `Sim::new` — passing `field.m_field()`
+    /// would compare the field to itself (a tautology); this provides the external reference (M1/F1).
+    pub m_field: i64,
 }
 
 impl Default for EconParams {
@@ -58,6 +62,7 @@ impl Default for EconParams {
             metab_period: 2, // N — metabolism at 32 Hz, charged ×2 per tick (economy ≈invariant)
             excrete: 8,
             pheromone: 1.0,
+            m_field: 1, // one field cell per world cell (the CLI default / doc 14 §1)
         }
     }
 }

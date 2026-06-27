@@ -1,5 +1,9 @@
 //! Exact integer energy conservation (R15, F3). Every `eu` lives in exactly one bucket; every stage
 //! moves `eu` between buckets with exact integer add/sub. The audited TOTAL is therefore invariant:
+// Guard: no float arithmetic in the conserved layer (M0/F2). Complements the token-grep in
+// no_float_guard.rs: `float_arithmetic` catches operations on inferred-float types that the grep
+// misses (e.g. `let x = 1.5; x + 1.0` where no `f32`/`f64` keyword appears).
+#![deny(clippy::float_arithmetic)]
 //!
 //! ```text
 //! TOTAL = Σ(field) + Σ(agent energy) + dissipated + lost − produced  ==  initial   (∀ tick)

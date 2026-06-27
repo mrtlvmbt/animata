@@ -107,3 +107,26 @@ fn v2_multirate_recurrent_replays_identical() {
     let b = run(default_config(SEED), TICKS);
     assert_eq!(a, b, "multi-rate + recurrent-brain trajectory is not bit-for-bit reproducible");
 }
+
+/// Founder-reflex / population-health gate (M3/F4): the chemotaxis founder brain must keep the
+/// population alive AND produce at least one non-neutral motor decision within 200 ticks on a fixed
+/// seed. Fails CI on: (a) population collapse → all-starvation / mass-freeze, (b) frozen-reflex
+/// regression → brain always outputs zero (deadzone swallows all signals). Guards the ACT_DEADZONE=16
+/// tuning and the two-tanh-squash depth of the founder weights against future regressions.
+#[test]
+fn v2_founder_pop_health_gate() {
+    const POP_TICKS: u64 = 200;
+    let mut sim = build_sim(default_config(SEED));
+    let mut min_pop = u64::MAX;
+    let mut any_active = false;
+    for _ in 0..POP_TICKS {
+        sim.step();
+        let p = sim.population();
+        min_pop = min_pop.min(p);
+        if !any_active && sim.brain_snapshot().iter().any(|(_, bo, _)| !out_is_neutral(&bo.out)) {
+            any_active = true;
+        }
+    }
+    assert!(min_pop > 0, "founder population collapsed to zero in {POP_TICKS} ticks (mass-freeze risk)");
+    assert!(any_active, "no creature produced a non-neutral action in {POP_TICKS} ticks (frozen-reflex regression)");
+}

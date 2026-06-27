@@ -160,14 +160,18 @@ impl Sim {
         // R8: grids are integer and consistent — validated at construction (no save/load until M5,
         // so this constructor guard is the "checked on load" invariant for now).
         assert!(econ.m_sim > 0 && econ.world_dim % econ.m_sim == 0, "world_dim % m_sim != 0 (R8)");
-        field.check_meta(field.m_field()).expect("field M_field meta check (R8)");
+        // Pass econ.m_field (the INDEPENDENT expected value) — not field.m_field() (which would
+        // compare the field to itself, a tautology that can never fail). Fix for M1/F1.
+        field.check_meta(econ.m_field).expect("field M_field meta check (R8)");
 
         let mut w = World::new();
         w.insert_resource(SimClock { seed: config.seed, tick: 0 });
         w.insert_resource(InputLog::default());
         w.insert_resource(Telemetry::default());
         w.insert_resource(econ);
-        w.insert_resource(NeighborGrid::new(econ.m_sim));
+        // NeighborGrid is intentionally NOT inserted here (M1/F2): it was rebuilt every tick by
+        // stage_spatial_rebuild but never queried by any stage → dead per-tick work. Removed until
+        // a real neighbour-coupled consumer lands (M4+ nearest-neighbour interactions).
         w.insert_resource(ReproEvents::default());
         // The sim's OWN scatter pool with an explicit N (F5) + the merge strategy.
         w.insert_resource(SimPool::new(config.sim_threads));
@@ -241,28 +245,29 @@ impl Sim {
 
     /// Canonical golden state hash (R19, arch-bound → arm64): folds Position + Energy + Genome (incl.
     /// the evolved brain weights) + the recurrent `BrainState` (`h_old`/`h_new`) + the motor
-    /// `BrainOutput` per entity (via the single [`deterministic_fold`] point) plus the signal field
-    /// (f32 bits). Folding the recurrent hidden state + motor output is what makes R19 a real lock on
-    /// the brain + multi-rate machinery. The conserved field is NOT here — it has its own
-    /// [`Sim::conserved_field_hash`] for R14. (The K/N phase rides on `SimClock.tick`, which is the
-    /// deterministic step index — identical across runs by construction.)
+    /// `BrainOutput` + the current `Velocity` per entity (via the single [`deterministic_fold`] point)
+    /// plus the signal field (f32 bits). Folding `Velocity` closes the M1/F6 gap: two states differing
+    /// only in velocity now hash differently. The conserved field is NOT here — it has its own
+    /// [`Sim::conserved_field_hash`] for R14.
     pub fn state_hash(&mut self) -> u64 {
         let mut q = self
             .world
-            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput)>();
+            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput, &Velocity)>();
         let items: Vec<(Entity, u64)> = q
             .iter(&self.world)
-            .map(|(e, p, en, g, bs, bo)| {
+            .map(|(e, p, en, g, bs, bo, v)| {
                 let mut h = fnv_mix(FNV_OFFSET, p.0 .0 as u64);
                 h = fnv_mix(h, p.0 .1 as u64);
                 h = fnv_mix(h, en.0 as u64);
                 h = g.hash_contribution(h);
-                for &v in bs.h_old.iter().chain(bs.h_new.iter()) {
-                    h = fnv_mix(h, v as u64);
+                for &iv in bs.h_old.iter().chain(bs.h_new.iter()) {
+                    h = fnv_mix(h, iv as u64);
                 }
-                for &v in &bo.out {
-                    h = fnv_mix(h, v as u64);
+                for &iv in &bo.out {
+                    h = fnv_mix(h, iv as u64);
                 }
+                h = fnv_mix(h, v.0 .0 as u64);
+                h = fnv_mix(h, v.0 .1 as u64);
                 (e, h)
             })
             .collect();
@@ -342,7 +347,6 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         }};
     }
     vec![
-        stage!("0_spatial_rebuild", stage_spatial_rebuild),
         stage!("1_sense", stage_sense),
         stage!("2_brain", stage_brain),
         stage!("3_act", stage_act),

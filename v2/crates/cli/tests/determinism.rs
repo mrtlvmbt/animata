@@ -3,6 +3,7 @@
 //! `run()` every tick, so simply running these exercises R15 always-on in release (F8).
 
 use cli::{build_sim, default_config, run};
+use telemetry::compute;
 
 const TICKS: u64 = 384;
 
@@ -65,4 +66,25 @@ fn v2_seed_changes_trajectory() {
     let a = run(default_config(1), 64);
     let b = run(default_config(2), 64);
     assert_ne!(a, b);
+}
+
+/// Ф0 emergence gate (M1/F4): the Price equation covariance cov(trait, offspring) is non-zero for
+/// at least one trait after a fixed-seed run — directional selection IS operating. This gate fails
+/// CI if a change silently kills selection pressure (e.g. a frozen reflex that never divides).
+/// Uses f64 arithmetic from the telemetry crate; the assertion is `!= 0.0` (not an exact value),
+/// so it is robust to arch-specific float rounding on both CI jobs.
+#[test]
+fn v2_phi0_selection_is_active() {
+    let mut sim = build_sim(default_config(0xA11A_2A11));
+    for _ in 0..TICKS {
+        sim.step();
+    }
+    let rep = compute(sim.telemetry().samples.as_slice());
+    assert!(rep.population > 0, "population went extinct — selection gate can't be checked");
+    let any_nonzero = rep.price_cov.iter().any(|&c| c != 0.0);
+    assert!(
+        any_nonzero,
+        "all Price covariances are zero — selection is not operating: {:?}",
+        rep.price_cov
+    );
 }
