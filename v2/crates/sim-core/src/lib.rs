@@ -235,7 +235,7 @@ impl Sim {
             ));
         }
 
-        let field_total = field.conserved_total();
+        let field_total = field.conserved_total_all();
         let agents_total = config.n_founders as i64 * config.founder_energy;
         w.insert_resource(EnergyLedger {
             initial: field_total + agents_total,
@@ -343,7 +343,7 @@ impl Sim {
     /// Energy-conservation residual (R15) — MUST be 0 every tick. Sums live conserved field + agent
     /// energy and the ledger buckets. (The signal field is float, NOT in the balance.)
     pub fn conservation_residual(&mut self) -> i64 {
-        let field_total = self.world.resource::<FieldRes>().0.conserved_total();
+        let field_total = self.world.resource::<FieldRes>().0.conserved_total_all();
         let mut q = self.world.query::<&Energy>();
         let agents: i64 = q.iter(&self.world).map(|e| e.0).sum();
         let ledger = *self.world.resource::<EnergyLedger>();
