@@ -94,6 +94,16 @@ impl CpuFieldStore {
         (cz.rem_euclid(self.grid_h) * self.grid_w + cx.rem_euclid(self.grid_w)) as usize
     }
 
+    /// No-flux (reflective) index: clamps out-of-range coordinates to the boundary cell instead of
+    /// wrapping. Used by gradient sampling to match the diffusion boundary (M1/F5): both use the
+    /// same no-flux convention so chemotaxis and transport agree at the domain edge.
+    #[inline]
+    fn idx_nf(&self, cx: i64, cz: i64) -> usize {
+        let cx = cx.clamp(0, self.grid_w - 1);
+        let cz = cz.clamp(0, self.grid_h - 1);
+        (cz * self.grid_w + cx) as usize
+    }
+
     fn regenerate(&mut self) -> i64 {
         let mut injected = 0;
         for (g, cap) in self.conserved.iter_mut().zip(self.caps.iter()) {
@@ -193,8 +203,13 @@ impl FieldStore for CpuFieldStore {
 
     fn conserved_gradient(&self, pos: Vec2Fixed, range: i64) -> (i64, i64) {
         let (cx, cz) = self.cell_coords(pos);
-        let gx = self.conserved[self.idx(cx + range, cz)] - self.conserved[self.idx(cx - range, cz)];
-        let gz = self.conserved[self.idx(cx, cz + range)] - self.conserved[self.idx(cx, cz - range)];
+        // No-flux boundary (M1/F5): clamp neighbours to edge cell instead of toroidal wrap.
+        // Matches diffuse_conserved (which already guards cx+1 < grid_w) so chemotaxis and
+        // transport use the same boundary convention.
+        let gx = self.conserved[self.idx_nf(cx + range, cz)]
+            - self.conserved[self.idx_nf(cx - range, cz)];
+        let gz = self.conserved[self.idx_nf(cx, cz + range)]
+            - self.conserved[self.idx_nf(cx, cz - range)];
         (gx, gz)
     }
 
@@ -218,30 +233,9 @@ impl FieldStore for CpuFieldStore {
     }
 
     // ── signal ──────────────────────────────────────────────────────────────────────────────────
-    fn signal_at(&self, pos: Vec2Fixed) -> f32 {
-        // Bilinear over the 4 surrounding cells (degenerates to nearest for integer positions / M=1).
-        let m = self.m_field as f32;
-        let fx = pos.0.rem_euclid(self.dim) as f32 / m;
-        let fz = pos.1.rem_euclid(self.dim) as f32 / m;
-        let x0 = fx.floor() as i64;
-        let z0 = fz.floor() as i64;
-        let tx = fx - x0 as f32;
-        let tz = fz - z0 as f32;
-        let s00 = self.signal[self.idx(x0, z0)];
-        let s10 = self.signal[self.idx(x0 + 1, z0)];
-        let s01 = self.signal[self.idx(x0, z0 + 1)];
-        let s11 = self.signal[self.idx(x0 + 1, z0 + 1)];
-        let a = s00 + (s10 - s00) * tx;
-        let b = s01 + (s11 - s01) * tx;
-        a + (b - a) * tz
-    }
-
-    fn signal_gradient(&self, pos: Vec2Fixed) -> (f32, f32) {
-        let (cx, cz) = self.cell_coords(pos);
-        let gx = self.signal[self.idx(cx + 1, cz)] - self.signal[self.idx(cx - 1, cz)];
-        let gz = self.signal[self.idx(cx, cz + 1)] - self.signal[self.idx(cx, cz - 1)];
-        (gx, gz)
-    }
+    // signal_at (bilinear sample) removed — M2/F3: no consumer in the tick loop.
+    // signal_gradient removed — M3/F3: dead per-tick f32 compute (integer brain never read it).
+    // Both may return when a real consumer lands; the underlying signal grid is still maintained.
 
     fn signal_total(&self) -> f32 {
         // SERIAL reduction in cell order (no parallel float fold — F2).

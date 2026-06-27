@@ -1,6 +1,10 @@
 //! Direct-encoded Ф0 genome (D3) — **6 integer traits**, no GRN/morphogenesis (Phase 2). Integer
 //! everywhere: mutation is an integer perturbation, the metabolic cost is an integer function of
 //! size, and the genome folds into the deterministic state hash. No float in the genetics layer.
+// Guard: no float arithmetic in the conserved layer (M0/F2). Complements the token-grep in
+// no_float_guard.rs: `float_arithmetic` catches operations on inferred-float types that the grep
+// misses (e.g. `let x = 1.5; x + 1.0` where no `f32`/`f64` keyword appears).
+#![deny(clippy::float_arithmetic)]
 
 use crate::{brain_w_ho, brain_w_ih, fnv_mix, seed_fold, BRAIN_WEIGHTS};
 use bevy_ecs::prelude::Component;

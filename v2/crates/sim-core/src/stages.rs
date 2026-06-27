@@ -13,26 +13,19 @@ use crate::WorkCounters;
 /// RNG salts — disjoint streams.
 const SALT_MUT: u64 = 0x4D55_5400; // "MUT"
 
-// ── Stage 0: SpatialRebuild — rebuild the Morton neighbor grid (R8). ───────────────────────────────
-pub fn stage_spatial_rebuild(mut grid: ResMut<NeighborGrid>, q: Query<(Entity, &Position)>) {
-    grid.clear();
-    let mut ents: Vec<(u64, Entity, Vec2Fixed)> =
-        q.iter().map(|(e, p)| (e.to_bits(), e, p.0)).collect();
-    ents.sort_unstable_by_key(|x| x.0);
-    for (_, e, p) in ents {
-        grid.insert(p, e);
-    }
-}
+// Stage 0 (SpatialRebuild) REMOVED (M1/F2): the NeighborGrid was rebuilt every tick but never
+// queried by any stage — dead per-tick work. Removed until a real neighbour-coupled consumer lands.
 
-// ── Stage 1: Sense — read BOTH field classes (version t): conserved resource gradient (integer) +
-//    signal pheromone gradient (f32). Both deterministically influence selection (R19). ─────────────
+// ── Stage 1: Sense — read the conserved resource field (version t): integer gradient + local amount.
+//    Signal pheromone gradient is intentionally NOT fed to the integer brain in M3 (see stage_brain);
+//    the dead per-tick compute was removed (M3/F3). Signal still contributes to state_hash via
+//    signal_hash(), keeping the golden arm64-pinned. ───────────────────────────────────────────────
 pub fn stage_sense(field: Res<FieldRes>, mut q: Query<(&Position, &Genome, &mut Sensors)>) {
     for (pos, g, mut s) in &mut q {
         let range = g.sense_range.max(1) as i64;
         let (gx, gz) = field.0.conserved_gradient(pos.0, range);
         s.gradient = Vec2Fixed(gx, gz);
         s.local_resource = field.0.conserved_at(pos.0);
-        s.signal_gradient = field.0.signal_gradient(pos.0);
     }
 }
 
@@ -236,7 +229,13 @@ pub fn stage_birth_death(
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
             // `BrainState` (both `h_old`/`h_new`) and `BrainOutput` — so no prior occupant's hidden
             // state or motor command can leak through a reused ECS slot, and the newborn stays frozen
-            // (neutral Act) until its first GLOBAL Brain tick. See `newborn_brain` in lib.rs.
+            // (neutral Act) until its first GLOBAL Brain tick.
+            //
+            // Slot-stability invariant (M3/F2): Bevy ECS stores all components of one entity as a
+            // single archetype table row. A spawn or despawn moves the ENTIRE row atomically — there
+            // is no partial migration where BrainState moves but BrainOutput does not. All per-slot
+            // buffers are therefore always in sync; the "forgot to move h_new" class of bug cannot
+            // occur. The zeroing here covers the initial allocation, not partial row-updates.
             commands.spawn((
                 Position(pos_c.0),
                 PositionNext(pos_c.0),

@@ -25,17 +25,18 @@ pub struct Energy(pub i64);
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Intent(pub Vec2Fixed);
 
-/// Warm sensor cache (read-old): the sampled CONSERVED resource gradient (integer) + local amount,
-/// and the SIGNAL pheromone gradient (f32). Written by Sense (reads both field classes), consumed by
-/// Act. Not buffered. (Not `Eq` — holds f32.)
-#[derive(Component, Clone, Copy, Debug, Default)]
+/// Warm sensor cache (read-old): the sampled CONSERVED resource gradient (integer) + local amount.
+/// Written by Sense (stage 1), consumed by Brain (stage 2). Not double-buffered.
+/// `signal_gradient` was removed (M3/F3): the signal field is intentionally not fed to the integer
+/// brain in M3; the dead per-tick f32 compute was eliminated. Signal still contributes to
+/// `state_hash` via `signal_hash()` (observational). Now pure-integer → derives `Eq`.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sensors {
     pub gradient: Vec2Fixed,
     pub local_resource: i64,
-    pub signal_gradient: (f32, f32),
 }
 
-/// Species tag (cold). Inherited by offspring; no speciation logic in Ф0.
+/// Species tag (cold). Inherited by offspring; speciation check in stage_birth_death.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct SpeciesId(pub u32);
 
