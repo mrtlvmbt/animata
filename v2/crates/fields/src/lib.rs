@@ -86,6 +86,58 @@ impl CpuFieldStore {
         }
     }
 
+    /// Multi-layer constructor for `L > 1`. `caps_per_layer[i]` is the per-cell cap for layer `i`;
+    /// all layers share the same grid. Each layer has its own `regen_rates[i]` and `flux_ks[i]`;
+    /// `flux_f` is shared. A-4 uses this to build the L=3 scenario.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_layered(
+        dim: i64,
+        m_field: i64,
+        caps_per_layer: Vec<Vec<i64>>,
+        regen_rates: Vec<i64>,
+        flux_ks: Vec<i64>,
+        flux_f: u32,
+        decay: f32,
+    ) -> Self {
+        let n_layers = caps_per_layer.len();
+        assert!(n_layers >= 1, "must have at least one layer");
+        let grid_w = dim / m_field;
+        let grid_h = dim / m_field;
+        let n = (grid_w * grid_h) as usize;
+        for (i, caps) in caps_per_layer.iter().enumerate() {
+            assert_eq!(caps.len(), n, "layer {i} caps must cover the grid");
+        }
+        assert_eq!(regen_rates.len(), n_layers, "one regen_rate per layer");
+        assert_eq!(flux_ks.len(), n_layers, "one flux_k per layer");
+        let conserved: Vec<Vec<i64>> = caps_per_layer.iter()
+            .map(|caps| caps.iter().map(|c| c / 2).collect())
+            .collect();
+        let mut morton_order: Vec<usize> = (0..n).collect();
+        morton_order.sort_by_key(|&i| {
+            let cx = (i as i64 % grid_w) as u32;
+            let cz = (i as i64 / grid_w) as u32;
+            morton2(cx, cz)
+        });
+        CpuFieldStore {
+            m_field,
+            dim,
+            grid_w,
+            grid_h,
+            morton_order,
+            n_layers,
+            conserved,
+            conserved_staging: (0..n_layers).map(|_| vec![0; n]).collect(),
+            caps: caps_per_layer,
+            regen_rates,
+            flux_ks,
+            flux_f,
+            signal: vec![0.0; n],
+            signal_staging: vec![0.0; n],
+            signal_tmp: vec![0.0; n],
+            decay,
+        }
+    }
+
     #[inline]
     fn cell_coords(&self, pos: Vec2Fixed) -> (i64, i64) {
         (pos.0.rem_euclid(self.dim) / self.m_field, pos.1.rem_euclid(self.dim) / self.m_field)
@@ -388,5 +440,28 @@ mod tests {
         f.blur_decay_signal();
         assert!(f.signal_all_finite());
         assert!(f.signal_total() < t0, "decay must shrink total concentration");
+    }
+
+    // A-3 (R15): ledger conservation across all layers. 3-layer store, caps=60 → start=30
+    // per cell, 4×4 grid (16 cells). correct initial = 3×16×30 = 1440; layer-0-only = 480.
+    // No agents, no ticks — tests the counting invariant only.
+    #[test]
+    fn ledger_r15_sums_all_layers() {
+        let caps = vec![60i64; 16];
+        let f = CpuFieldStore::new_layered(
+            4, 1,
+            vec![caps.clone(), caps.clone(), caps.clone()],
+            vec![1, 1, 1],
+            vec![0, 0, 0], // no diffusion needed for this counting test
+            16,
+            0.0,
+        );
+        let initial_all = f.conserved_total_all();
+        let initial_l0 = f.conserved_total(0);
+        // R15: initial_all − current_all == 0 (no ticks, state unchanged)
+        assert_eq!(initial_all - f.conserved_total_all(), 0, "conserved_total_all gives R15 == 0");
+        // Teeth: layer-0-only under-counts → residual ≠ 0
+        assert_ne!(initial_l0 - f.conserved_total_all(), 0, "layer-0-only under-counts R15 (teeth)");
+        assert!(initial_l0 < initial_all, "layer-0 total < all-layers total at L=3");
     }
 }
