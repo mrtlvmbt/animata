@@ -464,4 +464,39 @@ mod tests {
         assert_ne!(initial_l0 - f.conserved_total_all(), 0, "layer-0-only under-counts R15 (teeth)");
         assert!(initial_l0 < initial_all, "layer-0 total < all-layers total at L=3");
     }
+
+    // A-5: closed-form per-layer regen growth. With uniform start (= caps/2) and per-cell headroom
+    // cap/2 > K·regen[l] (no saturation), diffusion of a uniform field moves zero net mass, so
+    // conserved_total(l) grows by EXACTLY K · n · regen[l] over K solve ticks.
+    // Reds on: inert layer (regen=0) → Δ=0; shared global regen → per-layer Δ doesn't match each
+    // regen[l]; saturation → equality breaks. No agents, no noise → integer-only, x86.
+    #[test]
+    fn per_layer_regen_growth_exact() {
+        const K: i64 = 10;
+        const N: usize = 16; // 4×4 grid
+        let regen = [5i64, 3, 1]; // distinct, all > 0
+        // caps = 200 → start = 100; after K ticks max cell = 100 + K*regen[l] ≤ 150 < 200 (no sat.)
+        let caps = vec![200i64; N];
+        let flux_k = flux_k_from_alpha(1, 8, 16); // live solver; uniform field → zero net diffusion
+        let mut f = CpuFieldStore::new_layered(
+            4, 1,
+            vec![caps.clone(), caps.clone(), caps.clone()],
+            regen.to_vec(),
+            vec![flux_k, flux_k, flux_k],
+            16,
+            0.0,
+        );
+        let before = [f.conserved_total(0), f.conserved_total(1), f.conserved_total(2)];
+        for _ in 0..K {
+            f.solve();
+        }
+        for l in 0..3 {
+            let expected_delta = K * N as i64 * regen[l];
+            assert_eq!(
+                f.conserved_total(l) - before[l],
+                expected_delta,
+                "layer {l}: expected delta K*n*regen={expected_delta}",
+            );
+        }
+    }
 }
