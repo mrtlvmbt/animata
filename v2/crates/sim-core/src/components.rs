@@ -37,7 +37,7 @@ pub struct Sensors {
 }
 
 /// Species tag (cold). Inherited by offspring; speciation check in stage_birth_death.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct SpeciesId(pub u32);
 
 /// Recurrent hidden state of the brain (M3 / D-Brain-2) — a per-entity **double buffer** of the

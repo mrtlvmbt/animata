@@ -200,6 +200,7 @@ pub fn stage_birth_death(
     clock: Res<SimClock>,
     mut ledger: ResMut<EnergyLedger>,
     mut repro: ResMut<ReproEvents>,
+    mut spec: ResMut<SpeciationState>,
     mut commands: Commands,
     mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId)>,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
@@ -224,7 +225,19 @@ pub fn stage_birth_death(
             let pos_c = *pos;
             let child_genome =
                 genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]));
-            let species_c = *species;
+            // M5/criterion 2: assign child to parent species or found a new species.
+            // `brain_weight_l1` lives in genome.rs (protected by its float guard) — not here.
+            let parent_ref = spec.refs.get(species).copied().unwrap_or(child_genome);
+            let d = child_genome.brain_weight_l1(&parent_ref);
+            let species_c = if d > econ.speciation_threshold {
+                let new_id = SpeciesId(spec.next_id);
+                spec.next_id += 1;
+                spec.refs.insert(new_id, child_genome);
+                spec.parent_of.insert(new_id, *species);
+                new_id
+            } else {
+                *species
+            };
             repro.parents.insert(bits);
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
             // `BrainState` (both `h_old`/`h_new`) and `BrainOutput` — so no prior occupant's hidden
@@ -309,12 +322,16 @@ pub fn stage_observe(
     field: Res<FieldRes>,
     repro: Res<ReproEvents>,
     mut tel: ResMut<Telemetry>,
-    q: Query<(Entity, &Genome)>,
+    q: Query<(Entity, &Genome, &SpeciesId)>,
 ) {
     tel.samples.clear();
-    let mut ents: Vec<(u64, Genome)> = q.iter().map(|(e, g)| (e.to_bits(), *g)).collect();
+    let mut ents: Vec<(u64, Genome, u32)> =
+        q.iter().map(|(e, g, s)| (e.to_bits(), *g, s.0)).collect();
     ents.sort_unstable_by_key(|x| x.0);
-    for (bits, g) in &ents {
+
+    // Species census (M5/criterion 3) — computed in sorted entity order for determinism.
+    let mut census: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for (bits, g, sid) in &ents {
         let offspring = u32::from(repro.parents.contains(bits));
         tel.samples.push(TraitSample {
             traits: [
@@ -327,8 +344,11 @@ pub fn stage_observe(
             ],
             offspring,
         });
+        *census.entry(*sid).or_insert(0) += 1;
     }
     tel.population = ents.len() as i64;
+    tel.species_count = census.len() as u64;
+    tel.species_census = census.into_iter().collect(); // already sorted by key (BTreeMap)
     tel.field_total = field.0.conserved_total();
     // Signal-field metric (R25) — serial total concentration; never feeds the tick.
     tel.signal_total = field.0.signal_total();

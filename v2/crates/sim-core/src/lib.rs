@@ -87,6 +87,30 @@ pub struct TraitSample {
     pub offspring: u32,
 }
 
+/// Speciation state (M5/criterion 2). Tracks the founder genome of each species and the
+/// parent-child species tree. Updated by `stage_birth_death`; never enters `state_hash`
+/// (SpeciesId is an observational label — not a behavioural driver; see `state_hash` doc).
+#[derive(Resource)]
+pub struct SpeciationState {
+    /// Founder genome of each species, keyed by SpeciesId. Grows monotonically — no GC of
+    /// extinct entries, so `parent_of` references stay valid. Bounded by total divisions.
+    pub refs: DetMap<SpeciesId, Genome>,
+    /// Parent species of each non-root species (needed for the 5a separation gate in tests).
+    pub parent_of: DetMap<SpeciesId, SpeciesId>,
+    /// Monotone allocator: the next SpeciesId to hand out. Species 0 is the root (all founders).
+    pub next_id: u32,
+}
+
+impl Default for SpeciationState {
+    fn default() -> Self {
+        SpeciationState {
+            refs: DetMap::default(),
+            parent_of: DetMap::default(),
+            next_id: 1,
+        }
+    }
+}
+
 /// Read-only telemetry sink (stage 9). Overwritten each tick. The `telemetry` crate derives Price
 /// covariance / diversity from `samples` — keeping that statistics code OUT of the core (R1).
 #[derive(Resource, Default)]
@@ -96,6 +120,11 @@ pub struct Telemetry {
     /// Signal-field total concentration (R25 metric) — read-only, never feeds the tick.
     pub signal_total: f32,
     pub samples: Vec<TraitSample>,
+    /// Live species count (label-based, from stage_observe). Integer → safe for CI assertions.
+    pub species_count: u64,
+    /// Per-species live member count: `(species_id, count)` sorted by id. Observational; use
+    /// for Shannon/Simpson diversity in the CLI (never fed to the tick or state hash).
+    pub species_census: Vec<(u32, u32)>,
 }
 
 #[cfg(feature = "perf")]
@@ -213,6 +242,11 @@ impl Sim {
         w.insert_resource(WorldRes(world));
         w.insert_resource(FieldRes(field));
         w.insert_resource(BrainRes(brain));
+        // Speciation state (M5): pre-seed S0 with the founder genome so stage_birth_death can
+        // look up the reference genome for the root species on the very first division.
+        let mut spec_init = SpeciationState::default();
+        spec_init.refs.insert(SpeciesId(0), founder);
+        w.insert_resource(spec_init);
         #[cfg(feature = "perf")]
         w.insert_resource(WorkCounters::default());
 
@@ -249,6 +283,11 @@ impl Sim {
     /// plus the signal field (f32 bits). Folding `Velocity` closes the M1/F6 gap: two states differing
     /// only in velocity now hash differently. The conserved field is NOT here — it has its own
     /// [`Sim::conserved_field_hash`] for R14.
+    ///
+    /// **SpeciesId is intentionally excluded** (M5/criterion 4/F7): it is a deterministic observational
+    /// label, not a behavioural or energy-state driver. Including it would make the golden depend on
+    /// label allocation order without adding physical information. The separate [`Sim::species_hash`]
+    /// covers the SpeciesId layer in the two-run-identical CI check.
     pub fn state_hash(&mut self) -> u64 {
         let mut q = self
             .world
@@ -320,13 +359,56 @@ impl Sim {
         q.iter(&self.world).count() as u64
     }
 
+    /// (min_l1, max_l1) L1 brain-weight distance from a reference weight vector across all living
+    /// creatures. Probe/calibration helper — not used in the deterministic tick loop or state hash.
+    pub fn weight_l1_stats(&mut self, reference: &[i8; BRAIN_WEIGHTS]) -> (i64, i64) {
+        let mut q = self.world.query::<&Genome>();
+        let mut min_l1 = i64::MAX;
+        let mut max_l1 = 0i64;
+        for g in q.iter(&self.world) {
+            let l1: i64 = g.weights.iter().zip(reference.iter())
+                .map(|(a, b)| (*a as i64 - *b as i64).abs())
+                .sum();
+            min_l1 = min_l1.min(l1);
+            max_l1 = max_l1.max(l1);
+        }
+        if min_l1 == i64::MAX { (0, 0) } else { (min_l1, max_l1) }
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }
 
-    /// Telemetry snapshot (samples for Price covariance, population, field total).
+    /// Telemetry snapshot (samples for Price covariance, population, field total, species census).
     pub fn telemetry(&self) -> &Telemetry {
         self.world.resource::<Telemetry>()
+    }
+
+    /// Hash of the live species assignment: fold of sorted live SpeciesId values plus the
+    /// monotone `next_id` allocator state. Deterministic and integer-only. Included in the
+    /// two-run-identical CI check (M5/criterion 4). Must be called AFTER a step that produces
+    /// live SpeciesId diversity (i.e., at a tick where species_count > 1 is expected).
+    pub fn species_hash(&mut self) -> u64 {
+        let mut q = self.world.query::<&SpeciesId>();
+        let mut ids: Vec<u32> = q.iter(&self.world).map(|s| s.0).collect();
+        ids.sort_unstable();
+        let spec = self.world.resource::<SpeciationState>();
+        let next_id = spec.next_id;
+        let mut h = FNV_OFFSET;
+        for id in ids {
+            h = fnv_mix(h, id as u64);
+        }
+        fnv_mix(h, next_id as u64)
+    }
+
+    /// Read-only access to the speciation state (for CI separation-gate assertions).
+    pub fn speciation_state(&self) -> &SpeciationState {
+        self.world.resource::<SpeciationState>()
+    }
+
+    /// Economy parameters (for CI threshold assertions).
+    pub fn econ(&self) -> &EconParams {
+        self.world.resource::<EconParams>()
     }
 
     #[cfg(feature = "perf")]
