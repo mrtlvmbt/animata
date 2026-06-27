@@ -1,6 +1,24 @@
 ---
 name: animata-sim
-description: The operating manual for the animata evolution simulation (crates/animata-sim). Invoke at the START of ANY work touching the sim — development/GRN, genome, selection pressures, metrics, save/load, determinism, the golden checksum, acceptance corridors, performance/benchmarking, or the morphogenesis program. Encodes the determinism contract, the exact re-pin / output-capture / review procedures, and the hard-won fragility lessons so you don't rediscover them. Depth lives in reference/ (the KB) — when you spawn a fork-agent (bug-hunt/subsystem-reviewer/critic) on sim work, pass it the relevant reference/*.md. Use it before editing sim code, not after a test breaks.
+description: >
+  Operating manual for the animata evolution sim (crates/animata-sim). Load at the START of any sim
+  work — GRN/genome, selection pressures, metrics, save/load, determinism + the golden checksum,
+  acceptance corridors, perf/benchmarking, morphogenesis. Holds the determinism contract, the
+  re-pin/capture/review procedures, the fragility lessons. Depth in reference/*.md — pass the relevant
+  one to any fork-agent (a cold fork can't see this skill). Read before editing sim code, not after a
+  test breaks.
+triggers:
+  - "sim work"
+  - "animata-sim"
+  - "determinism"
+  - "golden checksum"
+  - "genome / GRN"
+  - "selection pressure"
+  - "acceptance corridor"
+  - "morphogenesis"
+  - "re-pin golden"
+  - "save/load determinism"
+  - "sim benchmark"
 ---
 
 # animata-sim — the simulation operating manual

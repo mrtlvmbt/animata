@@ -1,6 +1,19 @@
 ---
 name: research-knowledge-base
-description: Build and accumulate a rigorous, verified theory/research knowledge base of markdown docs (optionally to feed downstream coder agents). Use when the user wants to research a domain deeply, decompose a big topic into a structured doc set, write design/research docs that must be trustworthy, run citation/web verification, take docs through cold-critic-to-consensus review, build live "calculate-on-shore" models, or organize a multi-track documentation tree with indexes. Triggers on: "research this", "build a knowledge base", "decompose into docs", "doc per aspect", "critique to consensus", "verify the citations / web research", "feed coder agents".
+description: >
+  Build a rigorous, verified research/theory knowledge base of markdown docs (optionally to feed coder
+  agents). Use to research a domain deeply, decompose a big topic into a structured doc set, write
+  trustworthy design/research docs, run citation/web verification, take docs through
+  cold-critic-to-consensus review, build live "calculate-on-shore" models, organize a multi-track doc
+  tree with indexes.
+triggers:
+  - "research this"
+  - "build a knowledge base"
+  - "decompose into docs"
+  - "doc per aspect"
+  - "critique to consensus"
+  - "verify citations / web research"
+  - "feed coder agents"
 ---
 
 # Research & Knowledge-Base Accumulation

@@ -1,39 +1,28 @@
 ---
 name: terrain-geomorph
 description: >
-  Deep geophysical terrain generation: heightmap synthesis from noise (fBm, ridged, domain
-  warp, hypsometry, contour/topographic maps), plate-tectonics simulation (continental/oceanic
-  crust, subduction, collision, orogeny, hotspots), erosion (droplet + pipe-model/shallow-water
-  hydraulic, thermal, fluvial stream-power landscape evolution), river networks (D8/D∞ flow
-  routing, priority-flood depression filling, drainage accumulation, Strahler order, meander
-  migration, oxbow lakes), and 3D voxel terrain (density fields, marching cubes, dual contouring,
-  surface nets, transvoxel LOD, caves/overhangs). Use for algorithm selection, the geomorphic
-  "why", parameter tuning, debugging artifacts (flat lakes, terraced erosion, plate seams,
-  non-manifold voxel meshes), and performance.
+  Deep geophysical terrain generation: heightmap synthesis (fBm, ridged, domain warp, hypsometry,
+  contour maps), plate tectonics (continental/oceanic crust, subduction, collision, orogeny, hotspots),
+  erosion (droplet + pipe-model hydraulic, thermal, fluvial stream-power), river networks (D8/D-inf
+  routing, priority-flood depression fill, drainage accumulation, Strahler order, meander migration,
+  oxbow lakes), 3D voxel terrain (density fields, marching cubes, dual contouring, surface nets,
+  transvoxel LOD, caves/overhangs). Use for algorithm choice, the geomorphic "why", parameter tuning,
+  debugging artifacts (flat lakes, terraced erosion, plate seams, non-manifold meshes), performance.
 triggers:
   - "plate tectonics"
-  - "tectonic uplift"
-  - "orogeny"
-  - "mountain range generation"
-  - "hydraulic erosion"
-  - "thermal erosion"
-  - "droplet erosion"
+  - "orogeny / mountain range"
+  - "hydraulic / thermal / droplet erosion"
   - "stream power law"
   - "landscape evolution model"
-  - "river network generation"
-  - "drainage basin"
-  - "meander"
-  - "oxbow lake"
+  - "river network / drainage basin"
+  - "meander / oxbow lake"
   - "depression filling"
-  - "flow accumulation"
-  - "D8 flow routing"
-  - "topographic map generation"
-  - "contour lines"
+  - "flow accumulation / D8 routing"
+  - "topographic / contour map"
   - "heightmap noise terrain"
   - "voxel terrain"
-  - "marching cubes"
-  - "dual contouring"
-  - "caves overhangs terrain"
+  - "marching cubes / dual contouring"
+  - "caves / overhangs terrain"
 ---
 
 # Terrain Geomorphology Skill

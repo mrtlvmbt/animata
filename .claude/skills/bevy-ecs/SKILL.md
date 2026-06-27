@@ -1,12 +1,20 @@
 ---
 name: bevy-ecs
 description: >
-  Expert-level Bevy 0.15 ECS reference. Use this skill for ANY question
-  involving Bevy APIs: plugins, systems, components, resources, queries, commands, events,
-  states, schedules, system ordering, run conditions, exclusive systems, or Local<T>.
-  Trigger on: how do I add a system, why is my query empty, how to read a resource,
-  how to send/receive events, how to gate a system on AppState, ordering between systems,
-  Commands vs World, init_resource vs insert_resource, Startup vs OnEnter, or any Bevy API question.
+  Bevy 0.15 ECS reference. Use for ANY Bevy API question: plugins, systems, components, resources,
+  queries, commands, events, states, schedules, system ordering, run conditions, exclusive systems,
+  Local<T>.
+triggers:
+  - "add a system"
+  - "empty query"
+  - "read a resource"
+  - "send/receive events"
+  - "gate system on AppState"
+  - "system ordering"
+  - "Commands vs World"
+  - "init_resource vs insert_resource"
+  - "Startup vs OnEnter"
+  - "Bevy API"
 ---
 
 # Bevy 0.15 ECS Reference
