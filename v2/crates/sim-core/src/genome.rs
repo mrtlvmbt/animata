@@ -114,6 +114,14 @@ impl Genome {
         g
     }
 
+    /// Brain-weight L1 genetic distance — the speciation metric (M5/criterion 2).
+    /// Protected by the `deny(float_arithmetic)` guard on this file. Integer, arch-independent.
+    pub fn brain_weight_l1(&self, other: &Genome) -> i64 {
+        self.weights.iter().zip(other.weights.iter())
+            .map(|(a, b)| (*a as i64 - *b as i64).abs())
+            .sum()
+    }
+
     /// Fold all six traits into the per-entity state-hash contribution.
     pub fn hash_contribution(&self, mut h: u64) -> u64 {
         for v in [

@@ -37,8 +37,14 @@ pub struct Sensors {
 }
 
 /// Species tag (cold). Inherited by offspring; speciation check in stage_birth_death.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct SpeciesId(pub u32);
+
+/// Marker placed on every newly born entity by stage_birth_death. Consumed and removed by
+/// `Sim::process_pending_speciation()` (runs after all stages) which computes the L1
+/// brain-weight distance and finalises the SpeciesId. Never enters state_hash.
+#[derive(Component, Default)]
+pub struct PendingSpeciation;
 
 /// Recurrent hidden state of the brain (M3 / D-Brain-2) — a per-entity **double buffer** of the
 /// `H = BRAIN_HIDDEN` hidden units (`FixedI16` Q8.8). All recurrent edges read `h_old` and write

@@ -44,6 +44,11 @@ pub struct EconParams {
     /// expected value for the `check_meta(R8)` load-check in `Sim::new` — passing `field.m_field()`
     /// would compare the field to itself (a tautology); this provides the external reference (M1/F1).
     pub m_field: i64,
+    /// Genetic distance threshold for speciation (M5/criterion 2): a child whose L1 brain-weight
+    /// distance from its parent species' founder genome exceeds this value founds a new species.
+    /// Integer. Calibrated via probe (issue #130): max_L1≈180–242 at tick 8000, T=80 gives
+    /// ≈7.5 divisions per speciation at the observed mutation cadence (avg ≈10.7 L1/division).
+    pub speciation_threshold: i64,
 }
 
 impl Default for EconParams {
@@ -63,6 +68,7 @@ impl Default for EconParams {
             excrete: 8,
             pheromone: 1.0,
             m_field: 1, // one field cell per world cell (the CLI default / doc 14 §1)
+            speciation_threshold: 80,
         }
     }
 }

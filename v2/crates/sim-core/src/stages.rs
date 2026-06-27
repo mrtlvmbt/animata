@@ -248,6 +248,9 @@ pub fn stage_birth_death(
                 Intent::default(),
                 BrainState::zeroed(),
                 BrainOutput::zeroed(),
+                // M5: marks child for speciation check in Sim::process_pending_speciation()
+                // (post-stage, outside the ECS system so SpeciationState stays off the world).
+                PendingSpeciation,
             ));
         }
     }

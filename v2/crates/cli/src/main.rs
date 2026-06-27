@@ -134,7 +134,7 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
             "tick,population,\
              metabolism_eff_mean,move_speed_mean,sense_range_mean,size_mean,repro_threshold_mean,mutation_rate_mean,\
              metabolism_eff_price,move_speed_price,sense_range_price,size_price,repro_threshold_price,mutation_rate_price,\
-             diversity,field_total,signal_total"
+             diversity,field_total,signal_total,species_count"
         );
     }
 
@@ -150,15 +150,17 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
         };
         if emit {
             let tick = sim.tick();
-            let rep = telemetry::compute(&sim.telemetry().samples);
-            let field_total = sim.telemetry().field_total;
-            let signal = sim.telemetry().signal_total;
+            let tele = sim.telemetry();
+            let rep = telemetry::compute(&tele.samples);
+            let field_total = tele.field_total;
+            let signal = tele.signal_total;
+            let species_count = tele.species_count;
             if timelapse_interval.is_some() {
                 // CSV row — parseable, arch-observational (signal_total is f32 → arch-bound).
                 let m = &rep.means;
                 let pc = &rep.price_cov;
                 println!(
-                    "{tick},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:.6},{field_total},{signal:.4}",
+                    "{tick},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:.6},{field_total},{signal:.4},{species_count}",
                     rep.population,
                     m[0], m[1], m[2], m[3], m[4], m[5],
                     pc[0], pc[1], pc[2], pc[3], pc[4], pc[5],
