@@ -41,5 +41,5 @@ animata-save.bin
 # ci-report.sh redirect target (local)
 /.ci-report-run.log
 
-# transient plan-consensus round snapshots (delta baselines)
-.claude/plans/.consensus/
+# kit-critic launcher-managed plan snapshots (auto-delta baselines) — transient, machine-local
+.claude/.consensus/
