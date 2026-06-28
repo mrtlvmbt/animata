@@ -81,6 +81,9 @@ pub fn l3_config(seed: u64) -> SimConfig {
 /// Layers 1+ use `config.layer_specs[l].flat_cap` (0 = empty start) or `world_cap_mult × world`.
 /// Handles any `n_layers ≥ 1` from `config.layer_specs`; no fixed-L branches.
 pub fn build_sim(config: SimConfig) -> Sim {
+    // B-2: sync econ.n_layers = config.n_layers so stage_birth_death can clamp layer-trait mutations.
+    let mut config = config;
+    config.econ.n_layers = config.n_layers;
     let econ = config.econ;
     let world = NoiseWorld::new(econ.world_dim, HMAX, RESOURCE_BASE, config.seed ^ WORLD_SALT);
     let grid_w = econ.world_dim / M_FIELD;

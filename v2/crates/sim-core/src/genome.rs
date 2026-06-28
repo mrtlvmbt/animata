@@ -31,7 +31,8 @@ pub fn size_pow_three_quarters(size: i32) -> i64 {
     isqrt(isqrt(s * s * s))
 }
 
-/// The six Ф0 traits (research/13 §2). Ranges are clamped on mutation; all integer.
+/// The six Ф0 traits + two B-2 layer-targeting traits (research/13 §2). Ranges are clamped on
+/// mutation; all integer.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Genome {
     /// Resource→energy conversion efficiency, as a fraction of 256 (0..=256).
@@ -46,6 +47,11 @@ pub struct Genome {
     pub repro_threshold: i32,
     /// Heritable mutation rate, as a fraction of 256 (probability scale).
     pub mutation_rate: i32,
+    /// Conserved layer to eat from and sense (0..=n_layers-1). Founder eats layer 0 (substrate).
+    pub uptake_layer: i32,
+    /// Conserved layer to excrete to (0..=n_layers-1). Founder excretes to layer 1 at L≥2 (seeds
+    /// cross-feeding gradient); at L=1 this is 0 (closed mono-layer loop, no out-of-bounds).
+    pub excrete_layer: i32,
     /// Evolved brain weights for the FIXED topology (D-Brain-1) — `int8` Q1.7, packed `W_ih·W_hh·W_ho`
     /// (layout = the shared [`crate::brain_w_ih`]/`brain_w_hh`/`brain_w_ho` indices). Inherited and
     /// mutated exactly like the six Ф0 traits; the `brain` crate reads this vector during inference.
@@ -60,7 +66,10 @@ impl Genome {
     /// there: hidden 0 ← resource-gradient-x, hidden 1 ← resource-gradient-z, output 0 (vx) ← hidden 0,
     /// output 1 (vz) ← hidden 1, every other weight zero. Inputs 2..6 (local resource, energy, bias,
     /// reserved) start with zero weight — emergence wires them in.
-    pub fn founder() -> Self {
+    /// The founder phenotype (config-derived for B-2). `n_layers` determines `excrete_layer`:
+    /// at L=1 excretes to layer 0 (closed loop, bench-safe); at L≥2 excretes to layer 1
+    /// (seeds the producer half of the cross-feeding gradient).
+    pub fn founder(n_layers: usize) -> Self {
         let mut weights = [0i8; BRAIN_WEIGHTS];
         weights[brain_w_ih(0, 0)] = 127; // hidden 0 ← input 0 (grad x)
         weights[brain_w_ih(1, 1)] = 127; // hidden 1 ← input 1 (grad z)
@@ -73,6 +82,8 @@ impl Genome {
             size: 4,
             repro_threshold: 1500,
             mutation_rate: 32,
+            uptake_layer: 0,
+            excrete_layer: (n_layers.saturating_sub(1)).min(1) as i32,
             weights,
         }
     }
@@ -84,15 +95,20 @@ impl Genome {
 
     /// Deterministic mutated clone. `stream` is a per-birth seeded value; each trait draws a disjoint
     /// integer perturbation in `{-1,0,+1}` gated by `mutation_rate`, then is clamped to range.
-    pub fn mutate(&self, stream: u64) -> Genome {
+    /// `n_layers` clamps layer traits to `0..=n_layers-1` — must equal the field's actual layer
+    /// count (guaranteed by `build_sim` setting `econ.n_layers = config.n_layers`).
+    pub fn mutate(&self, stream: u64, n_layers: usize) -> Genome {
         let mut g = *self;
-        let traits: [(&mut i32, i32, i32); 6] = [
+        let max_layer = n_layers.saturating_sub(1) as i32;
+        let traits: [(&mut i32, i32, i32); 8] = [
             (&mut g.metabolism_eff, 0, 256),
             (&mut g.move_speed, 0, 8),
             (&mut g.sense_range, 0, 8),
             (&mut g.size, 1, 32),
             (&mut g.repro_threshold, 200, 5000),
             (&mut g.mutation_rate, 0, 256),
+            (&mut g.uptake_layer, 0, max_layer),
+            (&mut g.excrete_layer, 0, max_layer),
         ];
         for (i, (slot, lo, hi)) in traits.into_iter().enumerate() {
             let r = seed_fold(stream, &[0x6D75_7400 + i as u64]); // "mut" + trait index
@@ -131,6 +147,8 @@ impl Genome {
             self.size,
             self.repro_threshold,
             self.mutation_rate,
+            self.uptake_layer,
+            self.excrete_layer,
         ] {
             h = fnv_mix(h, v as u64);
         }
@@ -163,12 +181,20 @@ mod tests {
 
     #[test]
     fn mutation_is_deterministic_and_clamped() {
-        let g = Genome::founder();
-        assert_eq!(g.mutate(123), g.mutate(123));
+        let g = Genome::founder(2);
+        assert_eq!(g.mutate(123, 2), g.mutate(123, 2));
         for s in 0..200u64 {
-            let m = g.mutate(s);
+            let m = g.mutate(s, 2);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
+            assert!((0..=1).contains(&m.uptake_layer));
+            assert!((0..=1).contains(&m.excrete_layer));
         }
+        // L=1 bench path: layers clamped to 0.
+        let g1 = Genome::founder(1);
+        assert_eq!(g1.excrete_layer, 0);
+        let m1 = g1.mutate(0, 1);
+        assert_eq!(m1.uptake_layer, 0);
+        assert_eq!(m1.excrete_layer, 0);
     }
 }

@@ -133,7 +133,9 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
         println!(
             "tick,population,\
              metabolism_eff_mean,move_speed_mean,sense_range_mean,size_mean,repro_threshold_mean,mutation_rate_mean,\
+             uptake_layer_mean,excrete_layer_mean,\
              metabolism_eff_price,move_speed_price,sense_range_price,size_price,repro_threshold_price,mutation_rate_price,\
+             uptake_layer_price,excrete_layer_price,\
              diversity,field_total,signal_total,species_count"
         );
     }
@@ -160,10 +162,10 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
                 let m = &rep.means;
                 let pc = &rep.price_cov;
                 println!(
-                    "{tick},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:.6},{field_total},{signal:.4},{species_count}",
+                    "{tick},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:.6},{field_total},{signal:.4},{species_count}",
                     rep.population,
-                    m[0], m[1], m[2], m[3], m[4], m[5],
-                    pc[0], pc[1], pc[2], pc[3], pc[4], pc[5],
+                    m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
+                    pc[0], pc[1], pc[2], pc[3], pc[4], pc[5], pc[6], pc[7],
                     rep.diversity
                 );
             } else {
