@@ -76,11 +76,11 @@ fn v2_population_is_bounded() {
 /// Bounds are arch-independent: integer-economy-dominated growth in this early window.
 #[test]
 fn v2_population_corridor_b3() {
-    // C-slice (issue #167): d0=0.001/tick can kill 1-3 founders before first division (tick≈3-5).
-    // Measured: min_pop=39 at tick=5 (seed=0xA11A_2A11, arm64+x86). FLOOR lowered 40→30 to bracket
-    // d0 attrition without masking actual near-extinction. max_pop probe confirms ≤160 still holds
-    // (d0 thins population but recycle raises substrate; net effect on early max_pop is negligible).
-    const FLOOR: u64 = 30;  // 40 founders − expected ≤10 d0 kills before first division
+    // C-slice (issue #167): d0=0.001/tick creates Bernoulli mortality in the initial 40-founder cohort.
+    // Expected kills before first division (≈5 ticks): 40×5×0.001 = 0.2; σ = √(200×0.001×0.999) ≈ 0.447.
+    // 3σ upper bound ≈ 1.5 kills. Measured: 1 kill (min_pop=39 at tick=5, seed=0xA11A_2A11, arm64+x86).
+    // FLOOR=30 = 40−10: P(≥10 kills in 200 trials, p=0.001) < 10^{-19} → ~5σ+ headroom across all seeds.
+    const FLOOR: u64 = 30;  // 40 founders − 10 (5σ+ headroom on d0 Bernoulli mortality)
     const CEIL: u64  = 160; // N̄_max(≤160) still valid: recycle raises plateau but not above B-3 CEIL
     let mut sim = build_sim(default_config(0xA11A_2A11));
     let mut min_pop = u64::MAX;
