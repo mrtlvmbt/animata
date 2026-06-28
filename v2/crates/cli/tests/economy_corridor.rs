@@ -1,60 +1,63 @@
 //! B-4 economy corridor gate (issue #157): long-horizon L=2 production run must land in the
-//! measured spatial equilibrium band (range assert, NOT a golden — arch-independent, x86 CI job).
+//! measured spatial equilibrium band (range assert, NOT a golden — arch-independent, both CI jobs).
 //!
-//! Two-phase population dynamics (B-3 on main, seed=0xa11a2a11):
-//!   Phase 1 — pre-speciation equilibrium  [t≈1 850 – t≈11 932]
-//!     pop-bloom at t≈1 850 (layer-1 consumers appear); single-species plateau N̄≈662–669, R̄≈65.
-//!   Phase 2 — multi-species expansion  [t≥11 932]
-//!     K first ≥ 3 at tick 11 932; K(16000)=378, pop=4103 (speciation gate calibration).
+//! IMPORTANT: default_config uses world_dim=64 (4 096 cells). The v2-perf sim-run scenario uses
+//! world_dim=128 — a 4× larger world with different dynamics. This test runs default_config, NOT
+//! the perf scenario. Calibrate exclusively from `build_sim(default_config(S))` runs.
 //!
-//! This corridor tests Phase-1 (pre-speciation economy): TICKS=4 000 is firmly in the
-//! single-species equilibrium — 2 150 ticks post-bloom, 7 900 ticks before speciation onset.
-//! The bounds are arch-independent because Phase-1 dynamics are identical in perf and non-perf
-//! modes (speciation has not started yet, so the feature gate has no observable effect).
+//! Population dynamics (default_config, seed=0xa11a2a11, B-3 on main):
+//!   pre-speciation plateau  [t=40 founders → t≈11 932 speciation onset]:
+//!     N̄(t=4000) = 122 (arm64 + x86 probe; integer-dominated, arch-independent).
+//!     R̄(t=4000) = 379 (field=3 109 683 / n_layers=2 / n_cells=4096; field still accumulating).
+//!   post-speciation equilibrium  [t≥11 932]:
+//!     K first ≥ 3 at tick 11 932 → K(16000)=378, pop=4103, R̄=23 (speciation gate calibration).
 //!
-//! Calibration source: x86 CI sim-run v2-perf (seed=0xa11a2a11, ticks=20000, B-3 main,
-//! run #28320700397):  t=4 000: pop=662, field=536295, R̄=65  (perf≡non-perf at t<11 932).
+//! This corridor tests the PRE-SPECIATION plateau (t=4 000): population must be bounded and
+//! alive, substrate R̄ must be in the measured accumulation band. Catches economy regressions
+//! that collapse population before the speciation bloom can start.
 //!
-//! Mean-field reference (economy/01 §5): N*≈172, R*≈21.9 at P=100.
-//! Spatial N̄=662 ≈ 3.9×N*, R̄=65 ≈ 3.0×R* — cross-feeding and clustering raise capacity.
-//! Mean-field numbers are recorded for cross-check only; corridor bounds are x86 spatial values.
+//! Calibration: b4_calibration_probe_4000 (arm64 local + x86 CI branch probe):
+//!   pop=122, field=3 109 683, R̄=379 (world_dim=64, n_cells=4096).
+//! Band: ±30% of measured plateau (generous, tightenable once stable across more seeds).
+//!
+//! Mean-field reference (economy/01 §5): N*≈172, R*≈21.9 at P=100 (chemostat, single-layer).
+//! Not used for calibration; recorded for cross-check only.
 
 use cli::{build_sim, default_config};
 
 /// Baked seed — same as the speciation gate; both measure the same trajectory.
 const S: u64 = 0xA11A_2A11;
 
-/// Horizon: post-bloom, pre-speciation equilibrium (Phase 1).
-/// Bloom at t≈1 850; speciation onset t≈11 932; TICKS=4 000 is solidly in the plateau.
-/// Faster than the 16 000-tick speciation gate — no new large CI-time block added.
+/// Horizon: pre-speciation plateau. Speciation onset t≈11 932; t=4 000 is well inside the
+/// stable pre-bloom regime. Test runs in seconds (vs 16 000-tick speciation gate).
 const TICKS: u64 = 4_000;
 
-/// Population floor: N̄(x86, t=TICKS) × 0.75 = 662 × 0.75 ≈ 496 → 500.
-/// Below this → near-extinction or economy collapse before carrying capacity is reached.
-const POP_FLOOR: u64 = 500;
+/// Population floor: N̄(t=TICKS) × 0.70 = 122 × 0.70 ≈ 85.
+/// Below this → near-extinction or economy collapse before the speciation bloom can start.
+const POP_FLOOR: u64 = 85;
 
-/// Population ceiling: N̄(x86, t=TICKS) × 1.25 = 662 × 1.25 ≈ 827 → 825.
-/// Above this → runaway growth regression; single-species phase must be bounded by R.
-const POP_CEIL: u64 = 825;
+/// Population ceiling: N̄(t=TICKS) × 1.31 = 122 × 1.31 ≈ 160.
+/// Above this → early bloom regression; pre-speciation plateau must stay bounded.
+/// Matches B-3 corridor CEIL=160 (same plateau, different horizon).
+const POP_CEIL: u64 = 160;
 
-/// R̄ floor: R̄(x86, t=TICKS) × 0.75 = 65 × 0.75 ≈ 48.
-/// field_total below n_layers×n_cells×R_FLOOR → substrate nearly depleted (Km regression).
-const R_FLOOR: i64 = 48;
+/// R̄ floor: R̄(t=TICKS) × 0.70 = 379 × 0.70 ≈ 265.
+/// field_total below n_layers×n_cells×R_FLOOR → substrate severely depleted (Km regression).
+const R_FLOOR: i64 = 265;
 
-/// R̄ ceiling: R̄(x86, t=TICKS) × 1.25 = 65 × 1.25 ≈ 81 → 82.
-/// field_total above n_layers×n_cells×R_CEIL → economy not consuming resource.
-const R_CEIL: i64 = 82;
+/// R̄ ceiling: R̄(t=TICKS) × 1.30 = 379 × 1.30 ≈ 492 → 495.
+/// field_total above this → no resource consumption detected (economy stalled).
+const R_CEIL: i64 = 495;
 
 /// Phase-1 L=2 economy corridor (B-4 / issue #157).
 ///
-/// Asserts that the L=2 production economy (B-0 generalized build_sim, B-1 Monod uptake,
-/// B-2 per-genome metabolic profile + cross-feeding, B-3 proportional rationing) reaches the
-/// measured single-species equilibrium: population bounded and non-extinct, substrate R̄ in
-/// the measured band. Catches Km drift, regressions that collapse or explode the population,
-/// or substrate depletion before the cross-feeding ecosystem has time to stabilise.
+/// Asserts the L=2 production economy (B-0 generalized build_sim, B-1 Monod uptake,
+/// B-2 per-genome metabolic profile + cross-feeding, B-3 proportional rationing) holds its
+/// pre-speciation plateau: population alive and bounded, substrate R̄ in the measured band.
+/// Catches Km drift or regressions that collapse or explode the population before speciation.
 ///
-/// Range assert (no golden constant) → arch-independent, runs on the x86 CI job.
-/// No arm64 golden re-pin produced by this PR.
+/// Range assert (no golden constant) → arch-independent, runs on BOTH CI jobs (x86 corridors
+/// and arm64 golden workspace). No arm64 golden re-pin required.
 #[test]
 fn phase1_economy_corridor() {
     // Skip in debug — 4 000 ticks benefits from release optimisation.
@@ -77,27 +80,27 @@ fn phase1_economy_corridor() {
     let n_cells = world_dim * world_dim;
     let r_bar = field_total / n_layers / n_cells;
 
-    // Population corridor (x86 Phase-1 equilibrium, seed S, t=TICKS, B-3 main, run #28320700397).
+    // Population corridor (measured pre-speciation plateau, seed S, t=TICKS, B-3 main, arm64+x86).
     assert!(
         pop >= POP_FLOOR,
-        "population {pop} < floor {POP_FLOOR} at t={TICKS} — near-extinction or pre-equilibrium \
-         collapse (measured N̄=662 at t={TICKS} x86; mean-field N*≈172 for sanity reference)"
+        "population {pop} < floor {POP_FLOOR} at t={TICKS} — extinction or collapse before speciation \
+         (measured N̄=122 at t={TICKS}; founders=40; mean-field N*≈172 for sanity reference)"
     );
     assert!(
         pop <= POP_CEIL,
-        "population {pop} > ceiling {POP_CEIL} at t={TICKS} — runaway growth regression \
-         (single-species phase bounded by R; measured N̄=662 at calibration)"
+        "population {pop} > ceiling {POP_CEIL} at t={TICKS} — early-bloom regression \
+         (pre-speciation plateau bounded; measured N̄=122; speciation onset expected t≈11 932)"
     );
 
-    // Resource corridor (spatial R̄=65 at calibration; mean-field R*≈21.9 for sanity reference).
+    // Resource corridor (pre-bloom accumulation phase; R̄ drops to ≈23 post-speciation at t=16000).
     assert!(
         r_bar >= R_FLOOR,
-        "R̄={r_bar} < floor {R_FLOOR} at t={TICKS} — substrate depleted below minimum \
-         (field_total={field_total}, n_layers={n_layers}, n_cells={n_cells}; measured R̄=65)"
+        "R̄={r_bar} < floor {R_FLOOR} at t={TICKS} — substrate severely depleted in pre-bloom phase \
+         (field_total={field_total}, n_layers={n_layers}, n_cells={n_cells}; measured R̄=379)"
     );
     assert!(
         r_bar <= R_CEIL,
-        "R̄={r_bar} > ceiling {R_CEIL} at t={TICKS} — resource not consumed (economy broken?) \
-         (field_total={field_total}; measured R̄=65 at calibration, run #28320700397)"
+        "R̄={r_bar} > ceiling {R_CEIL} at t={TICKS} — no resource consumed (economy stalled?) \
+         (field_total={field_total}; measured R̄=379 at calibration, world_dim=64)"
     );
 }
