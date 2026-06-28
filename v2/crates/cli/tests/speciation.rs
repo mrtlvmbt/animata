@@ -14,9 +14,18 @@ use sim_core::SpeciesId;
 /// Baked seed: proven to yield ≥ K species at L_CI (issue #130 criterion 6).
 const S: u64 = 0xA11A_2A11;
 /// Plateau length: proven for seed S in the calibration probe.
-/// B-3 note: the cross-feeding explosion (layer-1 saturation triggers layer-1-consumer bloom)
-/// occurs at t≈12 000 with this seed. L_CI=8000 predates this and gave K≥3 under B-2 serial
-/// uptake; B-3 proportional rationing shifts the bloom later — re-calibrated to 16 000.
+///
+/// B-3 rationing suppresses the serial-uptake first-mover advantage at deficit cells, which
+/// throttles the pre-bloom population plateau at N≈132 (vs ≈2 000 under B-2) and delays the
+/// cross-feeding bloom. Measured on x86 CI (run #28319765198, seed=0xa11a2a11, B-3):
+///   K(8000) = 1  [population plateaus at ≈132, no diversity yet]
+///   K first ≥ 3 at tick 11 932  [bloom onset: layer-1-uptake mutants establish new niche]
+///   K(16000) = 378, pop = 4103  [full post-bloom diversity]
+///
+/// L_CI=16 000 is required — K<3 through tick 11 931 so L_CI=8 000 (original) would always
+/// fail under B-3. Delayed-but-present speciation is an accepted dynamics shift: proportional
+/// rationing favors energy equity over first-mover hoarding, so the consumer bloom that drove
+/// early speciation under serial uptake must now wait for genetic adaptation (uptake_layer→1).
 const L_CI: u64 = 16_000;
 /// Minimum live species required at L_CI (criterion 5c).
 const K: u64 = 3;

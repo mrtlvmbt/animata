@@ -23,32 +23,6 @@ fn b3_ration_conserves() {
     }
 }
 
-/// TEMPORARY CALIBRATION PROBE — delete after reading x86 CI measurements.
-/// Runs 16 000 ticks and panics with: K@8000, K@16000, and the first tick where K≥3.
-/// Used to satisfy F2 data requirement (PM review). Intentional panic — not a permanent test.
-#[test]
-fn b3_bloom_calibration_probe_delete_me() {
-    if cfg!(debug_assertions) { return; } // heavy — release only
-    let mut sim = build_sim(default_config(0xA11A_2A11));
-    let mut k_at_8000 = 0u64;
-    let mut k_at_16000 = 0u64;
-    let mut first_k3_tick: Option<u64> = None;
-    for t in 1u64..=16_000 {
-        sim.step();
-        let k = sim.telemetry().species_count;
-        if t == 8_000  { k_at_8000  = k; }
-        if t == 16_000 { k_at_16000 = k; }
-        if k >= 3 && first_k3_tick.is_none() {
-            first_k3_tick = Some(t);
-        }
-    }
-    panic!(
-        "B-3 x86 calibration data (SEED=0xa11a2a11): \
-         K@8000={k_at_8000}  K@16000={k_at_16000}  K_first≥3_tick={first_k3_tick:?}  \
-         pop@end={}", sim.population()
-    );
-}
-
 /// `ration_order_independent` (B-3 / R10/R14): with proportional rationing the per-cell grants
 /// depend only on Σ demand and R_cell — both Σ-associative — so a 1-thread vs 4-thread sim
 /// produces IDENTICAL state hashes (R14 invariant holds after the algorithm change).

@@ -61,17 +61,23 @@ fn v2_population_is_bounded() {
 }
 
 /// B-3 / F7 calibration corridor: population must remain in the measured equilibrium band at
-/// TICKS=384 (early-growth phase, before the t≈3 000 cross-feeding explosion). Tighter than the
-/// coarse 0..100 000 bound — catching Km drift or an economy regression that kills growth.
+/// TICKS=384 (early-growth phase, before the cross-feeding bloom). Catches Km drift or an economy
+/// regression that kills growth.
 ///
-/// Bounds are arch-independent: the early-growth population (t≤384) is dominated by the integer
-/// economy (uptake, metabolism, division cost), not the float-noise world caps. Measured on x86 CI
-/// after B-3 land: floor 40 (founders ≥ 40, any lower means near-immediate extinction), ceiling
-/// 500 (the cross-feeding explosion doesn't begin until t≈3 000 on either arch).
+/// Bounds from x86 CI measurement (seed=0xa11a2a11, run #28319581988, B-3, t≤400):
+///   N̄_max = 122, N̄_min = 40 (founders).  FLOOR=40, CEIL=160 (N̄_max × 1.31).
+/// At t≤384, N≈80–122 on a 64×64=4096-cell grid → average 0.02–0.03 agents/cell → deficit
+/// events are extremely rare → B-3 proportional rationing barely fires; dynamics ≈ B-1/B-2.
+///
+/// Km regime verified: field_total/2/4096 ≈ 73 at t=350 → R̄≈73 ≈ km=74 (Monod linear regime,
+/// R̄/km≈0.99). If km drifts to ≪ R̄, uptake saturates and the corridor would widen; if km ≫ R̄,
+/// agents starve and min_pop collapses below FLOOR. Either failure signals a km recalibration.
+///
+/// Bounds are arch-independent: integer-economy-dominated growth in this early window.
 #[test]
 fn v2_population_corridor_b3() {
-    const FLOOR: u64 = 40;  // minimum viable: population cannot fall below founder count
-    const CEIL: u64  = 500; // pre-explosion ceiling: at t≤384 the bloom hasn't fired yet
+    const FLOOR: u64 = 40;  // founding count — any lower indicates near-immediate extinction
+    const CEIL: u64  = 160; // N̄_max(122) × 1.31 — early bloom would breach this
     let mut sim = build_sim(default_config(0xA11A_2A11));
     let mut min_pop = u64::MAX;
     let mut max_pop = 0u64;
