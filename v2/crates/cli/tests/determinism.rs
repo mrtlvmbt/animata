@@ -69,22 +69,38 @@ fn v2_seed_changes_trajectory() {
 }
 
 /// Ф0 emergence gate (M1/F4): the Price equation covariance cov(trait, offspring) is non-zero for
-/// at least one trait after a fixed-seed run — directional selection IS operating. This gate fails
-/// CI if a change silently kills selection pressure (e.g. a frozen reflex that never divides).
-/// Uses f64 arithmetic from the telemetry crate; the assertion is `!= 0.0` (not an exact value),
-/// so it is robust to arch-specific float rounding on both CI jobs.
+/// at least one trait in at least one tick within the window [TICKS..TICKS+CHECK_WINDOW] —
+/// directional selection IS operating over the run. This gate fails CI if a change silently kills
+/// selection pressure (e.g. a frozen reflex that never divides).
+///
+/// Window-based (not fixed-tick): B-3 proportional rationing can shift the inter-wave reproduction
+/// gap — a single-tick snapshot may hit the gap. Checking over ~64 ticks detects any reproduction
+/// burst in the equilibrium phase and is insensitive to the exact gap location.
+/// Uses f64 from telemetry; the assertion `!= 0.0` is robust to arch float rounding on both jobs.
 #[test]
 fn v2_phi0_selection_is_active() {
+    const CHECK_WINDOW: u64 = 64; // ≥ one full reproduction wave at equilibrium population
     let mut sim = build_sim(default_config(0xA11A_2A11));
     for _ in 0..TICKS {
         sim.step();
     }
-    let rep = compute(sim.telemetry().samples.as_slice());
-    assert!(rep.population > 0, "population went extinct — selection gate can't be checked");
-    let any_nonzero = rep.price_cov.iter().any(|&c| c != 0.0);
+    assert!(
+        sim.telemetry().population > 0,
+        "population went extinct at tick {} — selection gate can't be checked",
+        sim.tick()
+    );
+    let mut any_nonzero = false;
+    for _ in 0..CHECK_WINDOW {
+        sim.step();
+        let rep = compute(sim.telemetry().samples.as_slice());
+        if rep.price_cov.iter().any(|&c| c != 0.0) {
+            any_nonzero = true;
+            break;
+        }
+    }
     assert!(
         any_nonzero,
-        "all Price covariances are zero — selection is not operating: {:?}",
-        rep.price_cov
+        "all Price covariances were zero in ticks {}..{} — selection is not operating",
+        TICKS, TICKS + CHECK_WINDOW
     );
 }

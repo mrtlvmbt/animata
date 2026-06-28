@@ -182,9 +182,12 @@ pub fn monod_demand(u_max: i64, km: i64, r: i64) -> i64 {
     (u_max * r) / (r + km)
 }
 
-// ── Stage 6: Interactions — feed: take from the field cell, convert at metabolism_eff. ─────────────
-//    Ordered by Entity-id so contested cells resolve deterministically; integer transfer is exact.
-//    Uptake follows Monod kinetics: U(R) = u_max·R/(R+km) — resource-limited, not flat-capped (B-1).
+// ── Stage 6: Interactions — feed: proportional deficit rationing (B-3). ─────────────────────────
+//    At a deficit cell (Σ demand > R_cell) each agent's grant is `U_i·R_cell / Σ U_j` (integer
+//    truncating). Non-deficit cells grant each agent its full Monod demand.
+//    Algorithm — ONE gather pass (no double archetype lookup), then sort by (cell×4+layer, entity)
+//    so same-(cell,layer) contestants are contiguous. Two cheap walks (Σ then grant) followed by one
+//    get_mut apply loop.  Order-independent: Σ is associative; grants depend only on cell totals.
 pub fn stage_interactions(
     econ: Res<EconParams>,
     mut field: ResMut<FieldRes>,
@@ -192,18 +195,76 @@ pub fn stage_interactions(
     mut q: Query<(Entity, &Position, &Genome, &mut Energy)>,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
-    let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _)| (e.to_bits(), e)).collect();
-    ents.sort_unstable_by_key(|x| x.0);
-    for (_, e) in ents {
+    // 1. Gather: one read per entity (Monod demand). No `conserved_take` yet.
+    //    Sort key = cell_index * 4 + layer (B-2: layer ∈ 0..4); secondary = entity_bits.
+    struct Contestant {
+        cell_layer: usize, // cell_index * 4 + layer — the group key (B-2: layer ∈ 0..4)
+        entity_bits: u64,
+        entity: Entity,
+        pos: Vec2Fixed,
+        layer: usize,
+        demand: i64,
+    }
+    let mut contestants: Vec<Contestant> = q.iter().map(|(e, pos, g, _)| {
+        let layer = g.uptake_layer as usize;
+        let r = field.0.conserved_at(pos.0, layer);
+        let demand = monod_demand(econ.u_max, econ.km, r);
+        let cell = field.0.cell_index(pos.0);
+        Contestant {
+            cell_layer: cell * 4 + layer,
+            entity_bits: e.to_bits(),
+            entity: e,
+            pos: pos.0,
+            layer,
+            demand,
+        }
+    }).collect();
+    // Stable order: primary = cell_layer (groups contestants), secondary = entity_bits (tie-break).
+    contestants.sort_unstable_by(|a, b| {
+        a.cell_layer.cmp(&b.cell_layer).then_with(|| a.entity_bits.cmp(&b.entity_bits))
+    });
+
+    // 2. Two-pass over sorted cell-layer runs: Σ demand, then proportional grant.
+    //    Grants are computed here; applied to Energy in the get_mut loop below.
+    let n = contestants.len();
+    let mut grants: Vec<i64> = vec![0; n];
+    let mut run_start = 0;
+    while run_start < n {
+        // Find end of this cell-layer run.
+        let run_cl = contestants[run_start].cell_layer;
+        let mut run_end = run_start + 1;
+        while run_end < n && contestants[run_end].cell_layer == run_cl {
+            run_end += 1;
+        }
+        // Snapshot R_cell once for this run (all contestants share the same cell+layer).
+        let r_cell = field.0.conserved_at(contestants[run_start].pos, contestants[run_start].layer);
+        // Σ demand over this run.
+        let sigma: i64 = contestants[run_start..run_end].iter().map(|c| c.demand).sum();
+        if sigma <= r_cell {
+            // No deficit: each agent gets its full Monod demand.
+            for i in run_start..run_end {
+                grants[i] = contestants[i].demand;
+            }
+        } else if r_cell == 0 {
+            // Empty cell: no grants (all zeros already).
+        } else {
+            // Deficit: proportional ration — ⌊U_i · R_cell / Σ⌋.
+            for i in run_start..run_end {
+                grants[i] = contestants[i].demand * r_cell / sigma;
+            }
+        }
+        run_start = run_end;
+    }
+
+    // 3. Apply grants: ONE get_mut per entity (no second archetype scan).
+    //    `conserved_take` is called for the GRANT amount (may be < demand at deficit cells).
+    for (i, c) in contestants.iter().enumerate() {
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
-        let (_, pos, g, mut energy) = q.get_mut(e).expect("entity present");
-        let layer = g.uptake_layer as usize; // B-2: eat from genome-chosen layer
-        let r = field.0.conserved_at(pos.0, layer);
-        let demand = monod_demand(econ.u_max, econ.km, r); // Monod: U(R) = u_max·R/(R+km)
-        let got = field.0.conserved_take(pos.0, demand, layer); // exact integer removal
+        let (_, _, g, mut energy) = q.get_mut(c.entity).expect("entity present");
+        let got = field.0.conserved_take(c.pos, grants[i], c.layer);
         let gained = got * g.metabolism_eff as i64 / 256;
-        let lost = got - gained; // conversion inefficiency → heat
+        let lost = got - gained;
         energy.0 += gained;
         ledger.dissipated += lost;
     }
