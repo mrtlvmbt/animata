@@ -83,13 +83,13 @@ impl Default for EconParams {
             k_size_metab: 1,
             k_move_cost: 1,
             k_sense_cost: 1,
-            km: 50,   // calibrated: iter1 km=50→R̄=114→km₁=263; km₁ → zombie(pop=40); km=50 retained (B-1)
-            u_max: 20,  // scaled from economy/01 U_max=2.0 × (e_cell 10× factor); B-1 calibration
+            km: 74,   // calibrated: km=50→R̄=32.2→km₁=74→R̄=32.2→fixed (B-1)
+            u_max: 220, // Monod asymptote — realized U(R̄) < u_max; km tunes the shape (B-1)
             world_dim: 64,
             m_sim: 4,
             brain_period: 4, // K — behaviour at 16 Hz (64/4)
             metab_period: 2, // N — metabolism at 32 Hz, charged ×2 per tick (economy ≈invariant)
-            excrete: 2,  // reduced with u_max (8→2) to keep excrete < U_max; B-1 calibration
+            excrete: 8,
             pheromone: 1.0,
             m_field: 1, // one field cell per world cell (the CLI default / doc 14 §1)
             speciation_threshold: 80,

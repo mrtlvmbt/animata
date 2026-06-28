@@ -175,7 +175,7 @@ pub fn stage_metabolism(
 ///
 /// Requires `km > 0` — at `km=0` and `R=0`, the denominator is zero (integer divide panic).
 /// The product `u_max·R` cannot overflow i64: v2 field cells are capped at `≈RESOURCE_BASE+HMAX≈136`,
-/// `u_max` is calibrated ≤50, so `u_max·R ≤ 50·136 = 6_800` — headroom to i64_max is >10^15 (safe).
+/// `u_max≤220`, so `u_max·R ≤ 220·136 = 29_920` — headroom to i64_max is ~3×10^14 (safe).
 pub fn monod_demand(u_max: i64, km: i64, r: i64) -> i64 {
     debug_assert!(km > 0, "km must be > 0: at R=0 the denominator r+km = km must be ≥ 1");
     (u_max * r) / (r + km)
