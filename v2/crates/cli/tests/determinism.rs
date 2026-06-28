@@ -60,6 +60,43 @@ fn v2_population_is_bounded() {
     assert!(max < 100_000, "population exploded ({max})");
 }
 
+/// B-3 / F7 calibration corridor: population must remain in the measured equilibrium band at
+/// TICKS=384 (early-growth phase, before the cross-feeding bloom). Catches Km drift or an economy
+/// regression that kills growth.
+///
+/// Bounds from x86 CI measurement (seed=0xa11a2a11, run #28319581988, B-3, t≤400):
+///   N̄_max = 122, N̄_min = 40 (founders).  FLOOR=40, CEIL=160 (N̄_max × 1.31).
+/// At t≤384, N≈80–122 on a 64×64=4096-cell grid → average 0.02–0.03 agents/cell → deficit
+/// events are extremely rare → B-3 proportional rationing barely fires; dynamics ≈ B-1/B-2.
+///
+/// Km regime verified: field_total/2/4096 ≈ 73 at t=350 → R̄≈73 ≈ km=74 (Monod linear regime,
+/// R̄/km≈0.99). If km drifts to ≪ R̄, uptake saturates and the corridor would widen; if km ≫ R̄,
+/// agents starve and min_pop collapses below FLOOR. Either failure signals a km recalibration.
+///
+/// Bounds are arch-independent: integer-economy-dominated growth in this early window.
+#[test]
+fn v2_population_corridor_b3() {
+    const FLOOR: u64 = 40;  // founding count — any lower indicates near-immediate extinction
+    const CEIL: u64  = 160; // N̄_max(122) × 1.31 — early bloom would breach this
+    let mut sim = build_sim(default_config(0xA11A_2A11));
+    let mut min_pop = u64::MAX;
+    let mut max_pop = 0u64;
+    for _ in 0..TICKS {
+        sim.step();
+        let p = sim.population();
+        min_pop = min_pop.min(p);
+        max_pop = max_pop.max(p);
+    }
+    assert!(
+        min_pop >= FLOOR,
+        "population fell below {FLOOR} (near-extinction) at t≤{TICKS} — km may have drifted out of calibrated regime"
+    );
+    assert!(
+        max_pop <= CEIL,
+        "population reached {max_pop} (>{CEIL}) before t≤{TICKS} — B-3 economy has unexpected early bloom"
+    );
+}
+
 /// Different seed ⇒ different trajectory (sanity: the seed actually drives the run).
 #[test]
 fn v2_seed_changes_trajectory() {
@@ -69,22 +106,38 @@ fn v2_seed_changes_trajectory() {
 }
 
 /// Ф0 emergence gate (M1/F4): the Price equation covariance cov(trait, offspring) is non-zero for
-/// at least one trait after a fixed-seed run — directional selection IS operating. This gate fails
-/// CI if a change silently kills selection pressure (e.g. a frozen reflex that never divides).
-/// Uses f64 arithmetic from the telemetry crate; the assertion is `!= 0.0` (not an exact value),
-/// so it is robust to arch-specific float rounding on both CI jobs.
+/// at least one trait in at least one tick within the window [TICKS..TICKS+CHECK_WINDOW] —
+/// directional selection IS operating over the run. This gate fails CI if a change silently kills
+/// selection pressure (e.g. a frozen reflex that never divides).
+///
+/// Window-based (not fixed-tick): B-3 proportional rationing can shift the inter-wave reproduction
+/// gap — a single-tick snapshot may hit the gap. Checking over ~64 ticks detects any reproduction
+/// burst in the equilibrium phase and is insensitive to the exact gap location.
+/// Uses f64 from telemetry; the assertion `!= 0.0` is robust to arch float rounding on both jobs.
 #[test]
 fn v2_phi0_selection_is_active() {
+    const CHECK_WINDOW: u64 = 64; // ≥ one full reproduction wave at equilibrium population
     let mut sim = build_sim(default_config(0xA11A_2A11));
     for _ in 0..TICKS {
         sim.step();
     }
-    let rep = compute(sim.telemetry().samples.as_slice());
-    assert!(rep.population > 0, "population went extinct — selection gate can't be checked");
-    let any_nonzero = rep.price_cov.iter().any(|&c| c != 0.0);
+    assert!(
+        sim.telemetry().population > 0,
+        "population went extinct at tick {} — selection gate can't be checked",
+        sim.tick()
+    );
+    let mut any_nonzero = false;
+    for _ in 0..CHECK_WINDOW {
+        sim.step();
+        let rep = compute(sim.telemetry().samples.as_slice());
+        if rep.price_cov.iter().any(|&c| c != 0.0) {
+            any_nonzero = true;
+            break;
+        }
+    }
     assert!(
         any_nonzero,
-        "all Price covariances are zero — selection is not operating: {:?}",
-        rep.price_cov
+        "all Price covariances were zero in ticks {}..{} — selection is not operating",
+        TICKS, TICKS + CHECK_WINDOW
     );
 }
