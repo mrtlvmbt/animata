@@ -4,6 +4,19 @@
 use crate::MergeStrategy;
 use bevy_ecs::prelude::Resource;
 
+// ── C-slice death-recycling constants ────────────────────────────────────────────────────────────
+
+/// Bit-mask for the `d0` background-death RNG draw. `D0_MASK = 2^20 − 1`.
+/// Kill condition: `(r & D0_MASK) < d0_scaled` — probability = d0_scaled / (D0_MASK+1).
+/// At `d0_scaled=1049`: kill-prob ≈ 1049/1048576 ≈ 0.001/tick (mean lifetime ≈ 1000 ticks).
+/// Pure integer compare — no float in the decision path (R13).
+pub const D0_MASK: u64 = 0xF_FFFF; // 2^20 − 1 = 1_048_575
+
+/// Denominator for the `recycle` fixed-point fraction. `recycle = recycle_num / RECYCLE_DEN`.
+/// `RECYCLE_DEN = 256` (same scale as `metabolism_eff`) — single integer multiply + shift.
+/// Valid range: `recycle_num ∈ [0, RECYCLE_DEN]`.
+pub const RECYCLE_DEN: i64 = 256;
+
 /// Per-layer field construction parameters carried by `SimConfig`.
 /// `build_sim` reads the first `n_layers` entries; unused slots are ignored and may be zeroed.
 ///
@@ -76,6 +89,18 @@ pub struct EconParams {
     /// stages (e.g. `stage_birth_death` needs it to clamp layer-trait mutations). Kept in sync by
     /// `build_sim` (`config.econ.n_layers = config.n_layers`). Default 2 (L=2 production).
     pub n_layers: usize,
+
+    // ── C-slice: background death + abiotic recycling (economy/01 §3) ────────────────────────────
+    /// Background death hazard (C-1). Integer probability over `D0_MASK` (see constant above).
+    /// `d0_scaled = round(d0 × (D0_MASK+1))`. Default: `round(0.001 × 1_048_576) = 1049`.
+    /// Mean lifetime ≈ 1_048_576 / 1049 ≈ 999.6 ticks ≈ 1000 ticks (economy/01 §3).
+    /// Set to 0 to disable background death. Re-pins the arm64 golden when changed.
+    pub d0_scaled: u64,
+    /// Recycle fraction numerator (C-2). `recycle = recycle_num / RECYCLE_DEN`.
+    /// Default `recycle_num = 77` → `recycle ≈ 77/256 ≈ 0.301` (economy/01 §3: recycle = 0.3).
+    /// On every death: `recycled = recycle_num · E / RECYCLE_DEN` (truncating) → substrate layer 0;
+    /// `E − recycled` → `ledger.lost`. Truncation remainder lands in `lost`, never created.
+    pub recycle_num: i64,
 }
 
 impl Default for EconParams {
@@ -98,6 +123,8 @@ impl Default for EconParams {
             m_field: 1, // one field cell per world cell (the CLI default / doc 14 §1)
             speciation_threshold: 80,
             n_layers: 2,
+            d0_scaled: 1049, // round(0.001 × 1_048_576); mean lifetime ≈ 1000 ticks (economy/01)
+            recycle_num: 77,  // round(0.3 × 256) = 76.8 → 77; recycle ≈ 30.1% (economy/01 §3)
         }
     }
 }
