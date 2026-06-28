@@ -60,6 +60,37 @@ fn v2_population_is_bounded() {
     assert!(max < 100_000, "population exploded ({max})");
 }
 
+/// B-3 / F7 calibration corridor: population must remain in the measured equilibrium band at
+/// TICKS=384 (early-growth phase, before the t≈3 000 cross-feeding explosion). Tighter than the
+/// coarse 0..100 000 bound — catching Km drift or an economy regression that kills growth.
+///
+/// Bounds are arch-independent: the early-growth population (t≤384) is dominated by the integer
+/// economy (uptake, metabolism, division cost), not the float-noise world caps. Measured on x86 CI
+/// after B-3 land: floor 40 (founders ≥ 40, any lower means near-immediate extinction), ceiling
+/// 500 (the cross-feeding explosion doesn't begin until t≈3 000 on either arch).
+#[test]
+fn v2_population_corridor_b3() {
+    const FLOOR: u64 = 40;  // minimum viable: population cannot fall below founder count
+    const CEIL: u64  = 500; // pre-explosion ceiling: at t≤384 the bloom hasn't fired yet
+    let mut sim = build_sim(default_config(0xA11A_2A11));
+    let mut min_pop = u64::MAX;
+    let mut max_pop = 0u64;
+    for _ in 0..TICKS {
+        sim.step();
+        let p = sim.population();
+        min_pop = min_pop.min(p);
+        max_pop = max_pop.max(p);
+    }
+    assert!(
+        min_pop >= FLOOR,
+        "population fell below {FLOOR} (near-extinction) at t≤{TICKS} — km may have drifted out of calibrated regime"
+    );
+    assert!(
+        max_pop <= CEIL,
+        "population reached {max_pop} (>{CEIL}) before t≤{TICKS} — B-3 economy has unexpected early bloom"
+    );
+}
+
 /// Different seed ⇒ different trajectory (sanity: the seed actually drives the run).
 #[test]
 fn v2_seed_changes_trajectory() {
