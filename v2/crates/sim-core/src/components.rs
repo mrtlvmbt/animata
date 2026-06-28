@@ -25,22 +25,17 @@ pub struct Energy(pub i64);
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Intent(pub Vec2Fixed);
 
-/// Warm sensor cache (read-old): the sampled CONSERVED resource gradient (integer) + local amount +
-/// the cached effective sensing expression. Written by Sense (stage 1), consumed by Brain (stage 2)
-/// and Metabolism (stage 5). Not double-buffered.
+/// Warm sensor cache (read-old): the sampled CONSERVED resource gradient (integer) + local amount.
+/// Written by Sense (stage 1), consumed by Brain (stage 2). Not double-buffered.
 /// `signal_gradient` was removed (M3/F3): the signal field is intentionally not fed to the integer
 /// brain in M3. Now pure-integer → derives `Eq`.
 ///
-/// `effort` is derived state (= `Genome::sense_range_eff(local_resource)`) — re-computed each
-/// Sense tick, NOT itself hashed (F9 covers the genome fields that produce it, not the cache).
+/// D-slice: the expressed uptake layer is NOT cached here — it is computed FRESH each tick in
+/// `stage_interactions` from the post-move field snapshot (doc50 §3, no cross-stage cache).
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Sensors {
     pub gradient: Vec2Fixed,
     pub local_resource: i64,
-    /// Cached effective sensing expression for this tick (D-slice GRN seed).
-    /// Written once in `stage_sense`, read by BOTH `stage_sense` (gradient radius) AND
-    /// `stage_metabolism` (sense cost) — single computation, two reads, cost and benefit coupled.
-    pub effort: i32,
 }
 
 /// Species tag (cold). Inherited by offspring; speciation check in stage_birth_death.

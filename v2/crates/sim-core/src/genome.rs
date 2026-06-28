@@ -40,8 +40,7 @@ pub struct Genome {
     pub metabolism_eff: i32,
     /// Cells moved per tick (movement is metabolically priced).
     pub move_speed: i32,
-    /// Gradient-sensing radius in cells (sensing is priced). Raw trait; BOTH consumers use the
-    /// regulated expression `sense_range_eff` (cached in `Sensors.effort`) instead of this directly.
+    /// Gradient-sensing radius in cells (sensing is priced, cost = k_sense_cost × sense_range).
     pub sense_range: i32,
     /// Body size → metabolism ∝ size^(3/4).
     pub size: i32,
@@ -59,14 +58,20 @@ pub struct Genome {
     /// mutated exactly like the eight Ф0 traits; the `brain` crate reads this vector during inference.
     /// Resident here (genome-SoA in the ECS) so no genome→weights repack happens on a Brain tick.
     pub weights: [i8; BRAIN_WEIGHTS],
-    // ── D-slice: evolvable regulatory gene (GRN seed, issue #169) ───────────────────────────────
-    /// Substrate setpoint S₀ for `sense_range` regulation (D-slice). Founder ≈ R̄=79 (Slice-C median);
-    /// range `0..=256` brackets the real layer-0 field distribution so both regulation directions
-    /// are viable (reg is born dead if `sign(local − setpoint)` is constant over the real field).
+    // ── D-slice: evolvable metabolic-gene expression rule (GRN seed, issue #169) ────────────────
+    /// Threshold for expression switching (D-slice). The rule reads the local layer-0 field value
+    /// at the contestant's post-move position and compares it to this setpoint to decide whether
+    /// to switch from the cold `uptake_layer` to the other layer this tick.
+    /// Calibrated to the x86 layer-0 median at occupied cells (probe §5 calibration):
+    ///   probe seeds: A11A2A11 median≈37, 1234_5678 median≈41 → midpoint 39 → founder=39.
+    /// Range `0..=256` — evolvable; evolution can refine the threshold.
     pub reg_setpoint: i32,
-    /// Signed regulatory slope for `sense_range` (D-slice). Founder = 0 (regulation OFF).
-    /// Sign is EVOLVABLE — the population discovers the beneficial direction (§8 pitfall guard).
-    /// Range `[−reg_gain_max, +reg_gain_max]` (default ±4): gentle steps on `sense_range` (0..=8).
+    /// Expression polarity (D-slice). Explicit disabled encoding (F7 — no sign(0) ambiguity):
+    ///   0  → INERT (founder / regulation OFF): expressed_layer == cold uptake_layer always.
+    ///   >0 → switch when local_lr ≥ reg_setpoint (express the other layer in RICH patches).
+    ///   <0 → switch when local_lr <  reg_setpoint (express the other layer in DEPLETED patches).
+    /// Sign and magnitude are EVOLVABLE — the population discovers direction and intensity.
+    /// Range `[−reg_gain_max, +reg_gain_max]` (default ±4). Set reg_gain_max=0 to lock OFF.
     pub reg_gain: i32,
 }
 
@@ -96,10 +101,11 @@ impl Genome {
             uptake_layer: 0,
             excrete_layer: (n_layers.saturating_sub(1)).min(1) as i32,
             weights,
-            // D-slice: regulation OFF at founding — evolution discovers the beneficial direction.
-            // reg_setpoint ≈ R̄=79 (Slice-C plateau median) so the setpoint sits inside the field
-            // distribution, keeping both sign(local − setpoint) directions viable.
-            reg_setpoint: 80,
+            // D-slice: expression rule INERT at founding (reg_gain=0 explicit disabled encoding,
+            // F7). Evolution discovers direction and threshold. reg_setpoint=39 calibrated to
+            // x86 layer-0 median at occupied cells (CI probe: A11A2A11≈37, 1234_5678≈41 →
+            // midpoint 39), so both switch-directions are viable at the real field distribution.
+            reg_setpoint: 39,
             reg_gain: 0,
         }
     }
@@ -109,20 +115,35 @@ impl Genome {
         size_pow_three_quarters(self.size)
     }
 
-    /// Regulated effective sensing expression (D-slice / GRN seed, issue #169).
+    /// Expressed uptake layer for this tick (D-slice / GRN seed, issue #169).
     ///
-    /// `eff = (sense_range + reg_gain · sign(local_resource − reg_setpoint)).clamp(0, 8)`
+    /// Decides which conserved layer this agent actually draws from, given the local layer-0
+    /// field value at its current position. Computed ONCE per tick in `stage_interactions`
+    /// (stage 6) at the single `Contestant.layer` site — the result is TRANSIENT/DERIVED and is
+    /// NOT hashed or cached between stages (doc50 §3 discipline).
     ///
-    /// Pure integer: `signum` of an `i64` difference yields −1, 0, or +1 — no float, no division
-    /// (R13). Clamped to the same `0..=8` range as `sense_range`. At `reg_gain = 0` (the founder):
-    /// `eff == sense_range` for ALL `local_resource` — behaviourally inert (§8 pitfall guard).
+    /// Explicit disabled encoding (F7 — no sign(0) ambiguity):
+    ///   `reg_gain == 0` → INERT: always returns cold `uptake_layer` (founder path).
+    ///   `reg_gain  > 0` → switch to other layer when `local_lr >= reg_setpoint`.
+    ///   `reg_gain  < 0` → switch to other layer when `local_lr <  reg_setpoint`.
     ///
-    /// Called ONCE per tick in `stage_sense` and cached in `Sensors.effort`. Both consumers
-    /// (gradient radius in `stage_sense` and sense cost in `stage_metabolism`) read the cached
-    /// value — single computation, two reads, cost and benefit cannot diverge.
-    pub fn sense_range_eff(&self, local_resource: i64) -> i32 {
-        let s = local_resource.saturating_sub(self.reg_setpoint as i64).signum() as i32;
-        (self.sense_range + self.reg_gain * s).clamp(0, 8)
+    /// "Other layer" for L=2: `(uptake_layer + 1) % n_layers` (0↔1). Safe for any L ≥ 2.
+    /// At L < 2: returns cold `uptake_layer` (no switching possible, guard).
+    /// Pure integer — no float, no RNG (R13). Order-independent (each agent reads its own cell).
+    pub fn expressed_layer(&self, local_lr: i64, n_layers: usize) -> usize {
+        if self.reg_gain == 0 || n_layers < 2 {
+            return self.uptake_layer as usize;
+        }
+        let switch = if self.reg_gain > 0 {
+            local_lr >= self.reg_setpoint as i64
+        } else {
+            local_lr < self.reg_setpoint as i64
+        };
+        if switch {
+            (self.uptake_layer as usize + 1) % n_layers
+        } else {
+            self.uptake_layer as usize
+        }
     }
 
     /// Deterministic mutated clone. `stream` is a per-birth seeded value; each trait draws a disjoint

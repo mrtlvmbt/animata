@@ -104,8 +104,9 @@ pub struct EconParams {
 
     // ── D-slice: evolvable expression regulation (GRN seed, issue #169) ─────────────────────────
     /// Mutation clamp upper bound for `reg_gain` (D-slice). Signed range is `[−reg_gain_max, +reg_gain_max]`.
-    /// Default 4 (plastic ON). Set to 0 to lock `reg_gain ≡ 0` (plastic OFF — the A/B control line).
-    /// Small range keeps one mutation a gentle `sense_range` step (not rail-to-rail) — a selectable seed.
+    /// Default 4 (plastic ON — regulation free to evolve). Set to 0 to lock `reg_gain ≡ 0`
+    /// (plastic OFF — the A/B control line in the selective-value experiment).
+    /// The polarity (sign) encodes the switching direction; ±4 allows 4 mutations to flip direction.
     pub reg_gain_max: i32,
 }
 

@@ -448,6 +448,60 @@ impl Sim {
         if lo == i32::MAX { (0, 0) } else { (lo, hi) }
     }
 
+    /// (min, median, max) of `Sensors.local_resource` (cold uptake_layer value) across all agents.
+    /// Used to calibrate `reg_setpoint`: the x86 median gives the value that splits occupied cells
+    /// 50/50 above/below, keeping both switch directions viable. Returns (0, 0, 0) if empty.
+    pub fn local_resource_stats(&mut self) -> (i64, i64, i64) {
+        let mut q = self.world.query::<&Sensors>();
+        let mut vals: Vec<i64> = q.iter(&self.world).map(|s| s.local_resource).collect();
+        if vals.is_empty() { return (0, 0, 0); }
+        vals.sort_unstable();
+        let n = vals.len();
+        (vals[0], vals[n / 2], vals[n - 1])
+    }
+
+    /// At occupied cells, compare layer-0 vs layer-1 local values (D-slice false-negative guard).
+    /// Returns `(favor_l0, equal, favor_l1)` counts. Heterogeneity precondition: `favor_l0` and
+    /// `favor_l1` each ≥ 30% of their sum before trusting the A/B gate. Returns (0,0,0) if L<2.
+    pub fn layer_dominance_at_occupied(&mut self) -> (u64, u64, u64) {
+        if self.world.resource::<EconParams>().n_layers < 2 {
+            return (0, 0, 0);
+        }
+        let positions: Vec<Vec2Fixed> = {
+            let mut q = self.world.query::<&Position>();
+            q.iter(&self.world).map(|p| p.0).collect()
+        };
+        if positions.is_empty() { return (0, 0, 0); }
+        let field = self.world.resource::<FieldRes>();
+        let (mut l0, mut eq_, mut l1) = (0u64, 0u64, 0u64);
+        for pos in &positions {
+            let v0 = field.0.conserved_at(*pos, 0);
+            let v1 = field.0.conserved_at(*pos, 1);
+            match v0.cmp(&v1) {
+                std::cmp::Ordering::Greater => l0 += 1,
+                std::cmp::Ordering::Equal   => eq_ += 1,
+                std::cmp::Ordering::Less    => l1 += 1,
+            }
+        }
+        (l0, eq_, l1)
+    }
+
+    /// Among living agents, count those currently SWITCHING (expressed_layer ≠ cold uptake_layer).
+    /// Anti-degenerate check: switching must occur in both directions at equilibrium.
+    /// Uses `Sensors.local_resource` as the layer-0 signal (same cell, same stage-1 snapshot).
+    /// Returns `(on_cold_layer, switched)`. Returns (0,0) if L<2.
+    pub fn switching_counts(&mut self) -> (u64, u64) {
+        let n_layers = self.world.resource::<EconParams>().n_layers;
+        if n_layers < 2 { return (0, 0); }
+        let mut q = self.world.query::<(&Genome, &Sensors)>();
+        let (mut cold, mut switched) = (0u64, 0u64);
+        for (g, s) in q.iter(&self.world) {
+            let expressed = g.expressed_layer(s.local_resource, n_layers);
+            if expressed == g.uptake_layer as usize { cold += 1; } else { switched += 1; }
+        }
+        (cold, switched)
+    }
+
     #[cfg(feature = "perf")]
     pub fn perf(&self) -> &PerfReport {
         &self.perf

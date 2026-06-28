@@ -6,32 +6,28 @@
 //! the perf scenario. Calibrate exclusively from `build_sim(default_config(S))` runs.
 //!
 //! Population dynamics (default_config, seed=0xa11a2a11, **B-3+C+D** on feat/v2-sim-169-d-grn-seed):
-//!   D-slice adds: evolvable sensing regulation (`reg_gain`, `reg_setpoint`). Agents that evolve
-//!   negative `reg_gain` sense farther in low-substrate patches (lr < setpoint ≈ 80), improving
-//!   spatial foraging (preferential patch selection → higher effective uptake per agent). Result:
-//!   the equilibrium population RISES and the equilibrium substrate FALLS compared to C-slice alone.
+//!   D-slice PIVOT (2026-06-28, issue #169): regulated target changed from sense_range to
+//!   EXPRESSED UPTAKE LAYER (substrate switching). Agents evolve a threshold rule:
+//!   when local layer-0 < reg_setpoint (or > reg_setpoint, direction evolvable), switch to layer-1.
+//!   The expressed layer is computed in stage_interactions (stage 6) from the cold uptake_layer's
+//!   local field value — transient, derived, never hashed/cached (doc50 §3).
 //!
-//!   Analytic carrying capacity (economy/01 §5, field balance: production = net field drain):
+//!   Analytic carrying capacity BASELINE (economy/01 §5, same mean-field as C-slice):
 //!     P          = regen_rate × n_cells = 6 × 4096 = 24 576 eu/tick
 //!     excrete    = 8 eu/tick per agent (conserved agent→field return)
 //!     recycle·d0·e_cell = (77/256)×(1049/1048576)×1000 ≈ 0.301 eu/tick per agent
-//!     N*_D       = P / (U(R*_D) − excrete − recycle·d0·e_cell)
+//!   N*_C = 24576/(U(R*_C) − 8 − 0.301) ≈ 234 at R*_C≈79 (C-slice baseline).
 //!
-//!   D-slice equilibrium substrate R*_D: regulation-improved foraging depletes substrate further
-//!   than C-slice. At N*_D≈302 the field balance gives:
-//!     U(R*_D) = P/N*_D + excrete + recycle·d0·e_cell = 24576/302 + 8 + 0.301 ≈ 89.8 eu/tick
-//!     R*_D = U⁻¹(89.8) = 89.8×km/(u_max − 89.8) = 89.8×74/(220−89.8) ≈ 6655/130 ≈ 51
-//!     N*_D = 24 576 / (89.8 − 8 − 0.301) = 24 576 / 81.5 ≈ 302
+//!   D-slice uptake-layer switching effect: agents can access BOTH layers when local conditions
+//!   favor switching → higher effective per-agent uptake → potentially higher N* (or similar).
+//!   Direction and magnitude are EMPIRICAL — calibration probe pending. Analytic prediction for
+//!   the corridor: N*_D in the same order as N*_C≈234 (switching is a second-order foraging
+//!   improvement over a balanced field). Band is PRE-CALIBRATION PLACEHOLDER (doc54 §2):
+//!   N*_D ≈ 234 ± 50% → [117, 351]; will be tightened after x86 equilibrium measurement.
 //!
-//!   C-slice calibration anchor (now subsumed by D): N*_C at R*_C=79 = 24576/(113.6−8−0.301) ≈ 234,
-//!   measured 233 (within rounding). D-slice shifts equilibrium to R*_D≈51, N*_D≈302: regulation
-//!   increases foraging efficiency → larger population depletes substrate further (R* falls from 79
-//!   to 51). At t=4000 the system is near the D-slice equilibrium (pop=300 ≈ N*_D=302, within 1%).
-//!
-//!   Measured at t=4000 (arm64 + x86, both seeds=0xA11A_2A11; integer-dominated, arch-stable):
-//!     N̄ = 300, R̄ = 77 (approaching R*_D=51; reg_gain evolved to [−2,+2]).
-//!
-//! Band: analytic N*_D ≈ 302 ± 30% → [211, 392]. Measured 300 ∈ [211, 392] ✓ (99% of N*_D).
+//! Band (PLACEHOLDER — pre-calibration, will be tightened after CI probe):
+//!   pop: [100, 500] — catches extinction or runaway bloom before calibration numbers arrive.
+//!   R̄:  [10, 150]  — catches total substrate collapse or stalled consumption.
 
 use cli::{build_sim, default_config};
 
@@ -41,21 +37,18 @@ const S: u64 = 0xA11A_2A11;
 /// Horizon: pre-speciation plateau.
 const TICKS: u64 = 4_000;
 
-/// Population floor: analytic N*_D × 0.70 = 302 × 0.70 ≈ 211.
-/// Below this → near-extinction or economy collapse (D-slice raises equilibrium from C-slice's N*_C≈234).
-const POP_FLOOR: u64 = 211;
+/// Population floor: pre-calibration placeholder (catches extinction). Will be tightened after
+/// x86 equilibrium measurement with D-pivot (uptake-layer switching) mechanism.
+const POP_FLOOR: u64 = 100;
 
-/// Population ceiling: analytic N*_D × 1.30 = 302 × 1.30 ≈ 392.
-/// Measured 300 lands inside [211, 392] (within 1% of N*_D=302 — system near D-slice equilibrium).
-const POP_CEIL: u64 = 392;
+/// Population ceiling: pre-calibration placeholder (catches runaway bloom).
+const POP_CEIL: u64 = 500;
 
-/// R̄ floor: R̄_D(t=TICKS) × 0.70 = 77 × 0.70 ≈ 53.
-/// field_total below n_layers×n_cells×R_FLOOR → substrate severely depleted.
-const R_FLOOR: i64 = 53;
+/// R̄ floor: pre-calibration placeholder (catches total substrate collapse).
+const R_FLOOR: i64 = 10;
 
-/// R̄ ceiling: R̄_D(t=TICKS) × 1.30 = 77 × 1.30 ≈ 100.
-/// Above this → population too low to deplete substrate (economy stalled or too few agents).
-const R_CEIL: i64 = 100;
+/// R̄ ceiling: pre-calibration placeholder (catches zero consumption / stalled economy).
+const R_CEIL: i64 = 150;
 
 /// Phase-1 L=2 economy corridor (B-4 / issue #157).
 ///
@@ -88,28 +81,28 @@ fn phase1_economy_corridor() {
     let n_cells = world_dim * world_dim;
     let r_bar = field_total / n_layers / n_cells;
 
-    // Population corridor anchored to analytic N*_D≈302 (D-slice equilibrium at R*_D≈51).
-    // ±30% band: [211, 392]. Measured N̄=300 (arm64+x86) is 99% of N*_D — near equilibrium.
+    // Population corridor: D-pivot (uptake-layer switching) — pre-calibration placeholder band.
+    // Will be tightened to ±30% of measured N*_D after CI probe returns x86 equilibrium values.
     assert!(
         pop >= POP_FLOOR,
         "population {pop} < floor {POP_FLOOR} at t={TICKS} — extinction or economy collapse \
-         (D-slice: N*_D≈302 at R*_D≈51; regulation-enhanced foraging; P=24576 eu/tick)"
+         (D-pivot: uptake-layer switching, N*_baseline≈234; pre-calibration band; P=24576 eu/tick)"
     );
     assert!(
         pop <= POP_CEIL,
         "population {pop} > ceiling {POP_CEIL} at t={TICKS} — unexpected bloom \
-         (D-slice: N*_D≈302 at R*_D≈51; band ±30%; measured N̄=300 at t=4000)"
+         (D-pivot: uptake-layer switching; pre-calibration placeholder band)"
     );
 
-    // Resource corridor (D-slice equilibrium R*_D≈51; at t=4000 R̄=77 approaching R*_D from above).
+    // Resource corridor: pre-calibration placeholder, catches severe depletion or stalled economy.
     assert!(
         r_bar >= R_FLOOR,
         "R̄={r_bar} < floor {R_FLOOR} at t={TICKS} — substrate severely depleted \
-         (D-slice: R̄_D=77 arm64 at t={TICKS}; field_total={field_total}, n_layers={n_layers}, n_cells={n_cells})"
+         (D-pivot; field_total={field_total}, n_layers={n_layers}, n_cells={n_cells})"
     );
     assert!(
         r_bar <= R_CEIL,
         "R̄={r_bar} > ceiling {R_CEIL} at t={TICKS} — resource not consumed (economy stalled?) \
-         (D-slice: R̄_D=77 arm64; field_total={field_total}; world_dim=64, n_cells={n_cells})"
+         (D-pivot; field_total={field_total}; world_dim=64, n_cells={n_cells})"
     );
 }
