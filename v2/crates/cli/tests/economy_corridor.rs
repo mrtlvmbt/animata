@@ -5,49 +5,48 @@
 //! world_dim=128 — a 4× larger world with different dynamics. This test runs default_config, NOT
 //! the perf scenario. Calibrate exclusively from `build_sim(default_config(S))` runs.
 //!
-//! Population dynamics (default_config, seed=0xa11a2a11, B-3 on main):
-//!   pre-speciation plateau  [t=40 founders → t≈11 932 speciation onset]:
-//!     N̄(t=4000) = 122 (arm64 + x86 probe; integer-dominated, arch-independent).
-//!     R̄(t=4000) = 379 (field=3 109 683 / n_layers=2 / n_cells=4096; field still accumulating).
-//!   post-speciation equilibrium  [t≥11 932]:
-//!     K first ≥ 3 at tick 11 932 → K(16000)=378, pop=4103, R̄=23 (speciation gate calibration).
+//! Population dynamics (default_config, seed=0xa11a2a11, **B-3+C** on feat/v2-sim-167-c-death-recycle):
+//!   C-slice adds: d0=0.001/tick background death, recycle≈30% of body energy → layer 0.
 //!
-//! This corridor tests the PRE-SPECIATION plateau (t=4 000): population must be bounded and
-//! alive, substrate R̄ must be in the measured accumulation band. Catches economy regressions
-//! that collapse population before the speciation bloom can start.
+//!   Analytic carrying capacity at measured R̄=79 (economy/01 §5, mean-field):
+//!     P          = regen_rate × n_cells = 6 × 4096 = 24 576 eu/tick
+//!     U(R̄=79)   = u_max × R̄/(R̄+km) = 220×79/(79+74) = 17 380/153 ≈ 113.6 eu/tick per agent
+//!     recycle·d0·e_cell = (77/256)×(1049/1048576)×1000 ≈ 0.301 eu/tick per agent
+//!     N*_C       = P / (U(R̄) − recycle·d0·e_cell) = 24 576/(113.6−0.301) ≈ 24 576/113.3 ≈ 217
 //!
-//! Calibration: b4_calibration_probe_4000 (arm64 local + x86 CI branch probe):
-//!   pop=122, field=3 109 683, R̄=379 (world_dim=64, n_cells=4096).
-//! Band: ±30% of measured plateau (generous, tightenable once stable across more seeds).
+//!   B-3 baseline (no C-slice, R̄=379): N*_B3 = 24 576/(220×379/(379+74)) ≈ 24 576/184 ≈ 134.
+//!   C-slice +91% jump (122→233): recycle returns substrate → higher effective production → equilibrium
+//!   shifts from R̄=379 (N*≈134) to R̄=79 (N*≈217). Measured 233 is ~7% above analytic 217 because
+//!   field is still accumulating (sub-ceiling cells present; consistent with pre-bloom transient).
 //!
-//! Mean-field reference (economy/01 §5): N*≈172, R*≈21.9 at P=100 (chemostat, single-layer).
-//! Not used for calibration; recorded for cross-check only.
+//!   Measured at t=4000 (arm64 + x86, both seeds=0xA11A_2A11; integer-dominated, arch-stable):
+//!     N̄ = 233, R̄ = 79 (field=651 263 / n_layers=2 / n_cells=4096).
+//!
+//! Band: analytic N*_C ≈ 217 ± 30% → [152, 282]. Measured 233 ∈ [152, 282] ✓.
 
 use cli::{build_sim, default_config};
 
 /// Baked seed — same as the speciation gate; both measure the same trajectory.
 const S: u64 = 0xA11A_2A11;
 
-/// Horizon: pre-speciation plateau. Speciation onset t≈11 932; t=4 000 is well inside the
-/// stable pre-bloom regime. Test runs in seconds (vs 16 000-tick speciation gate).
+/// Horizon: pre-speciation plateau.
 const TICKS: u64 = 4_000;
 
-/// Population floor: N̄(t=TICKS) × 0.70 = 122 × 0.70 ≈ 85.
+/// Population floor: analytic N*_C × 0.70 = 217 × 0.70 ≈ 152.
 /// Below this → near-extinction or economy collapse before the speciation bloom can start.
-const POP_FLOOR: u64 = 85;
+const POP_FLOOR: u64 = 152;
 
-/// Population ceiling: N̄(t=TICKS) × 1.31 = 122 × 1.31 ≈ 160.
-/// Above this → early bloom regression; pre-speciation plateau must stay bounded.
-/// Matches B-3 corridor CEIL=160 (same plateau, different horizon).
-const POP_CEIL: u64 = 160;
+/// Population ceiling: analytic N*_C × 1.30 = 217 × 1.30 ≈ 282.
+/// Measured 233 lands inside [152, 282] (field still accumulating; 7% above N*_C is expected).
+const POP_CEIL: u64 = 282;
 
-/// R̄ floor: R̄(t=TICKS) × 0.70 = 379 × 0.70 ≈ 265.
-/// field_total below n_layers×n_cells×R_FLOOR → substrate severely depleted (Km regression).
-const R_FLOOR: i64 = 265;
+/// R̄ floor: R̄(t=TICKS) × 0.70 = 79 × 0.70 ≈ 55.
+/// field_total below n_layers×n_cells×R_FLOOR → substrate severely depleted.
+const R_FLOOR: i64 = 55;
 
-/// R̄ ceiling: R̄(t=TICKS) × 1.30 = 379 × 1.30 ≈ 492 → 495.
-/// field_total above this → no resource consumption detected (economy stalled).
-const R_CEIL: i64 = 495;
+/// R̄ ceiling: R̄(t=TICKS) × 1.30 = 79 × 1.30 ≈ 103.
+/// Above this → population too low to deplete substrate (economy stalled or too few agents).
+const R_CEIL: i64 = 103;
 
 /// Phase-1 L=2 economy corridor (B-4 / issue #157).
 ///
@@ -80,27 +79,29 @@ fn phase1_economy_corridor() {
     let n_cells = world_dim * world_dim;
     let r_bar = field_total / n_layers / n_cells;
 
-    // Population corridor (measured pre-speciation plateau, seed S, t=TICKS, B-3 main, arm64+x86).
+    // Population corridor anchored to analytic N*_C≈217 (at measured R̄=79, C-slice economy).
+    // ±30% band: [152, 282]. Measured N̄=233 (arm64+x86) is ~7% above N*_C — expected (pre-bloom).
     assert!(
         pop >= POP_FLOOR,
-        "population {pop} < floor {POP_FLOOR} at t={TICKS} — extinction or collapse before speciation \
-         (measured N̄=122 at t={TICKS}; founders=40; mean-field N*≈172 for sanity reference)"
+        "population {pop} < floor {POP_FLOOR} at t={TICKS} — extinction or economy collapse \
+         (analytic N*_C≈217 at R̄=79; d0≈0.001, recycle≈0.30; P=24576 eu/tick)"
     );
     assert!(
         pop <= POP_CEIL,
-        "population {pop} > ceiling {POP_CEIL} at t={TICKS} — early-bloom regression \
-         (pre-speciation plateau bounded; measured N̄=122; speciation onset expected t≈11 932)"
+        "population {pop} > ceiling {POP_CEIL} at t={TICKS} — unexpected early bloom or recycle runaway \
+         (analytic N*_C≈217 at R̄=79; band ±30%; measured N̄=233 at t=4000)"
     );
 
-    // Resource corridor (pre-bloom accumulation phase; R̄ drops to ≈23 post-speciation at t=16000).
+    // Resource corridor (pre-bloom phase; field depleted faster with higher pop under C-slice).
+    // R̄ drops from 79 → ≈23 post-speciation. At t=4000 expect R̄ near calibrated 79.
     assert!(
         r_bar >= R_FLOOR,
-        "R̄={r_bar} < floor {R_FLOOR} at t={TICKS} — substrate severely depleted in pre-bloom phase \
-         (field_total={field_total}, n_layers={n_layers}, n_cells={n_cells}; measured R̄=379)"
+        "R̄={r_bar} < floor {R_FLOOR} at t={TICKS} — substrate severely depleted \
+         (C-slice: R̄=79 arm64 at t={TICKS}; field_total={field_total}, n_layers={n_layers}, n_cells={n_cells})"
     );
     assert!(
         r_bar <= R_CEIL,
-        "R̄={r_bar} > ceiling {R_CEIL} at t={TICKS} — no resource consumed (economy stalled?) \
-         (field_total={field_total}; measured R̄=379 at calibration, world_dim=64)"
+        "R̄={r_bar} > ceiling {R_CEIL} at t={TICKS} — resource not consumed (economy stalled?) \
+         (C-slice: R̄=79 arm64; field_total={field_total}; world_dim=64, n_cells={n_cells})"
     );
 }

@@ -60,6 +60,14 @@ pub trait FieldStore: Send + Sync {
     fn conserved_gradient(&self, pos: Vec2Fixed, range: i64, layer: usize) -> (i64, i64);
     /// Remove up to `amount` from the cell; returns the EXACT amount removed.
     fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64, layer: usize) -> i64;
+    /// Add `amount` to the STAGING buffer at `cell` on `layer` (C-2 recycle deposit).
+    /// Staged: becomes live at the next `solve()` call (the tick boundary, post-stage-8).
+    /// Conservation note: the deposit is invisible to `conserved_total_all()` until solve() —
+    /// conservation holds only at the tick boundary (post-stage-8), not mid-tick. This is the
+    /// same staging invariant as the stage-8 excreta scatter (`commit_merge` → `solve`).
+    /// Must be called from the SERIAL sorted-bits loop in stage-7 for determinism.
+    /// `debug_assert!(layer < n_layers)`.
+    fn deposit_conserved(&mut self, cell: usize, amount: i64, layer: usize);
     fn conserved_total(&self, layer: usize) -> i64;
     /// Sum of `conserved_total` across ALL layers (the energy-balance quantity).
     fn conserved_total_all(&self) -> i64;

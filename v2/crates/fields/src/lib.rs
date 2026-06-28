@@ -280,6 +280,11 @@ impl FieldStore for CpuFieldStore {
         got
     }
 
+    fn deposit_conserved(&mut self, cell: usize, amount: i64, layer: usize) {
+        debug_assert!(layer < self.n_layers, "deposit layer {} >= n_layers {}", layer, self.n_layers);
+        self.conserved_staging[layer][cell] += amount;
+    }
+
     fn conserved_total(&self, layer: usize) -> i64 {
         self.conserved[layer].iter().sum()
     }

@@ -10,8 +10,9 @@ use bevy_ecs::prelude::*;
 #[cfg(feature = "perf")]
 use crate::WorkCounters;
 
-/// RNG salts — disjoint streams.
-const SALT_MUT: u64 = 0x4D55_5400; // "MUT"
+/// RNG salts — disjoint streams, each must differ so draws are uncorrelated (R14).
+const SALT_MUT: u64   = 0x4D55_5400; // "MUT\0"
+const SALT_DEATH: u64 = 0x4445_4100; // "DEA\0" — C-1 background-death draw, MUST ≠ SALT_MUT
 
 // Stage 0 (SpatialRebuild) REMOVED (M1/F2): the NeighborGrid was rebuilt every tick but never
 // queried by any stage — dead per-tick work. Removed until a real neighbour-coupled consumer lands.
@@ -275,11 +276,13 @@ pub fn stage_birth_death(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
     mut ledger: ResMut<EnergyLedger>,
+    mut field: ResMut<FieldRes>,  // C-2: receive recycled body energy → substrate (layer 0)
     mut repro: ResMut<ReproEvents>,
     mut commands: Commands,
     mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId)>,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
+    use crate::params::{D0_MASK, RECYCLE_DEN};
     repro.parents.clear();
     let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
@@ -287,8 +290,38 @@ pub fn stage_birth_death(
         #[cfg(feature = "perf")]
         { wc.birth_death_iters += 1; }
         let (_, pos, mut energy, genome, species) = q.get_mut(e).expect("entity present");
+
+        // ── C-1: background death (d0) — FIRST check, before starvation and division. ──────────
+        // A d0-killed agent does not also divide this tick; the counter-RNG draw is pure per-
+        // (entity, tick) so the kill-set is thread-invariant and replay-invariant (R14).
+        // SALT_DEATH ≠ SALT_MUT → death and mutation draws are uncorrelated streams.
+        if econ.d0_scaled > 0 {
+            let r = seed_fold(clock.seed, &[SALT_DEATH, bits, clock.tick]);
+            if (r & D0_MASK) < econ.d0_scaled {
+                // C-2: recycle split — agent holds full body energy (E > 0); the material case.
+                // recycled → substrate layer 0 (abiotic return, distinct from excreta on layer 1).
+                // lost_here → ledger.lost (first real source for this bucket).
+                // Conservation: agents_total −E; field_staging +recycled (live in next solve());
+                //   ledger.lost +(E−recycled); residual unchanged (verified at tick boundary).
+                let e_body = energy.0;
+                let recycled = econ.recycle_num * e_body / RECYCLE_DEN; // truncating — remainder → lost
+                let lost_here = e_body - recycled; // = E − ⌊recycle·E⌋; every eu in exactly one bucket
+                if recycled > 0 {
+                    let cell = field.0.cell_index(pos.0);
+                    field.0.deposit_conserved(cell, recycled, 0); // layer 0 = substrate
+                }
+                ledger.lost += lost_here;
+                commands.entity(e).despawn();
+                continue;
+            }
+        }
+
         if energy.0 <= 0 {
-            // Death (starvation): energy is exactly 0 → nothing to recycle, conservation intact.
+            // Death (starvation): metabolism clamps energy ≥ 0 (stages.rs stage_metabolism), so
+            // energy.0 = 0 exactly here. Recycle split: floor(recycle_num × 0 / RECYCLE_DEN) = 0.
+            // ledger.lost += 0 is a no-op; no field deposit; conservation intact (as before C).
+            let recycled = econ.recycle_num * energy.0 / RECYCLE_DEN; // = 0
+            ledger.lost += energy.0 - recycled;                        // = 0
             commands.entity(e).despawn();
             continue;
         }

@@ -37,7 +37,7 @@ pub use genome::{isqrt, size_pow_three_quarters, Genome};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
-pub use params::{EconParams, LayerSpec, SimConfig};
+pub use params::{EconParams, LayerSpec, SimConfig, D0_MASK, RECYCLE_DEN};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
@@ -339,6 +339,12 @@ impl Sim {
     /// 1-vs-N conserved assert flaky.
     pub fn conserved_field_hash(&self) -> u64 {
         self.world.resource::<FieldRes>().0.conserved_hash()
+    }
+
+    /// Total conserved-field energy on a single layer (C tests, not fed to state hash).
+    /// Panics if `layer >= n_layers`.
+    pub fn field_layer_total(&self, layer: usize) -> i64 {
+        self.world.resource::<FieldRes>().0.conserved_total(layer)
     }
 
     /// Total signal concentration (serial reduction).
