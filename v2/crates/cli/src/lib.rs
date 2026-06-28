@@ -44,6 +44,11 @@ const L1_NUTRIENT_SPEC: LayerSpec = LayerSpec {
 const L2_ORGANICS_SPEC: LayerSpec = LayerSpec {
     regen_rate: 1, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 60, world_cap_mult: 0,
 };
+// Layer 2 (C′-1 detritus): regen=0, ZERO diffusion — detritus stays where it falls; the only
+// meaningful nutrient-return path is biotic (a reducer), making the reducer niche real (C′-2/3).
+const L2_DETRITUS_SPEC: LayerSpec = LayerSpec {
+    regen_rate: 0, flux_alpha_num: 0, flux_alpha_den: 1, flat_cap: 0, world_cap_mult: 0,
+};
 
 /// Default production config (L=2): layer 0 = substrate, layer 1 = organics/excreta (empty start).
 pub fn default_config(seed: u64) -> SimConfig {
@@ -62,6 +67,24 @@ pub fn config_with(seed: u64, sim_threads: usize, merge_strategy: MergeStrategy)
         merge_strategy,
         n_layers: 2,
         layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
+    }
+}
+
+/// C′-1 biotic-recycle config (L=3): layer0=substrate, layer1=excreta-organics, layer2=detritus.
+/// `detritus_layer=Some(2)`, `detritus_frac=1.0` (full-replace, bootstrap): ALL recycled body
+/// energy → detritus on death (no abiotic shortcut). Biotic return: reducer evolves uptake_layer=2
+/// + excrete_layer=0 via existing B-2 mutation machinery — niche is emergent, not coded (C′-2/3).
+/// Detritus layer: regen=0, zero diffusion → only biotic reduction returns nutrients.
+pub fn cprime_config(seed: u64) -> SimConfig {
+    SimConfig {
+        n_layers: 3,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L2_DETRITUS_SPEC, LayerSpec::default()],
+        econ: EconParams {
+            detritus_layer: Some(2),
+            detritus_frac_num: 256, // RECYCLE_DEN = 256 → frac=1.0 full-replace (bootstrap)
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
     }
 }
 
