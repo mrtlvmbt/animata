@@ -94,6 +94,14 @@ KIT_JUDGE_MODEL_FALLBACK='opus'
 # this static value is the weaker fallback. Mirror of KIT_PLANNER_MODEL.
 KIT_AUTHOR_MODEL='opus'
 
+# ── Context meter (kit-context-meter) ──────────────────────────────────────────
+# This PM session runs on the 1M-token window, so the hook's 200k default would read ~90% at ~180k
+# (really ~18%) and cry "/compact NOW" falsely — observed live (181867/200000). Pin the real window so
+# occupancy is honest. The meter then stays quiet below KIT_CTX_WARN_PCT; manual /compact discipline at
+# ~200k is unaffected. Set back to 200000 (or unset) only if this clone ever runs the 200k window.
+KIT_CTX_LIMIT=1000000
+KIT_CTX_WARN_PCT=55
+
 # ── Kit sub-repo location (kit-readonly-guard) ─────────────────────────────────
 # Path (relative to project root) of the consumed kit submodule. The guard hook blocks Edit/Write
 # into it — project changes go in the overlay / this config, not the kit. install.sh sets this.
