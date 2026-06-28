@@ -16,6 +16,7 @@
 
 use cli::{bench_config, build_sim, config_with, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
 use sim_core::{EconParams, MergeStrategy};
+use telemetry::{compute_with_census, guild_csv_header, guild_csv_row};
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -129,6 +130,8 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
     let mut pop_max = 0u64;
 
     // Timelapse CSV header (emitted once before the loop).
+    // Guild columns are generated from Guild::ALL — the same source as the data row — so the
+    // column count cannot drift if guilds are added in the future.
     if timelapse_interval.is_some() {
         println!(
             "tick,population,\
@@ -136,7 +139,9 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
              uptake_layer_mean,excrete_layer_mean,\
              metabolism_eff_price,move_speed_price,sense_range_price,size_price,repro_threshold_price,mutation_rate_price,\
              uptake_layer_price,excrete_layer_price,\
-             diversity,field_total,signal_total,species_count"
+             trait_var_diversity,field_total,signal_total,species_count,\
+             {guild_hdr},shannon,simpson",
+            guild_hdr = guild_csv_header(),
         );
     }
 
@@ -153,20 +158,24 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
         if emit {
             let tick = sim.tick();
             let tele = sim.telemetry();
-            let rep = telemetry::compute(&tele.samples);
+            let rep = compute_with_census(&tele.samples, &tele.species_census);
             let field_total = tele.field_total;
             let signal = tele.signal_total;
             let species_count = tele.species_count;
             if timelapse_interval.is_some() {
                 // CSV row — parseable, arch-observational (signal_total is f32 → arch-bound).
+                // Guild columns come from guild_csv_row (same Guild::ALL source as the header).
                 let m = &rep.means;
                 let pc = &rep.price_cov;
+                let guilds = guild_csv_row(&rep);
                 println!(
-                    "{tick},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:.6},{field_total},{signal:.4},{species_count}",
+                    "{tick},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:+.6},{:.6},{field_total},{signal:.4},{species_count},{guilds},{:.6},{:.6}",
                     rep.population,
                     m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7],
                     pc[0], pc[1], pc[2], pc[3], pc[4], pc[5], pc[6], pc[7],
-                    rep.diversity
+                    rep.diversity,
+                    rep.shannon,
+                    rep.simpson,
                 );
             } else {
                 let resid = sim.conservation_residual();
