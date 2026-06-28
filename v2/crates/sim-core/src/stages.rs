@@ -171,8 +171,19 @@ pub fn stage_metabolism(
     }
 }
 
+/// Monod saturating uptake demand: `U(R) = (u_max·R) / (R+km)`, integer, truncating toward zero.
+///
+/// Requires `km > 0` — at `km=0` and `R=0`, the denominator is zero (integer divide panic).
+/// The product `u_max·R` cannot overflow i64: v2 field cells are capped at `≈RESOURCE_BASE+HMAX≈136`,
+/// `u_max≤220`, so `u_max·R ≤ 220·136 = 29_920` — headroom to i64_max is ~3×10^14 (safe).
+pub fn monod_demand(u_max: i64, km: i64, r: i64) -> i64 {
+    debug_assert!(km > 0, "km must be > 0: at R=0 the denominator r+km = km must be ≥ 1");
+    (u_max * r) / (r + km)
+}
+
 // ── Stage 6: Interactions — feed: take from the field cell, convert at metabolism_eff. ─────────────
 //    Ordered by Entity-id so contested cells resolve deterministically; integer transfer is exact.
+//    Uptake follows Monod kinetics: U(R) = u_max·R/(R+km) — resource-limited, not flat-capped (B-1).
 pub fn stage_interactions(
     econ: Res<EconParams>,
     mut field: ResMut<FieldRes>,
@@ -186,7 +197,9 @@ pub fn stage_interactions(
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
         let (_, pos, g, mut energy) = q.get_mut(e).expect("entity present");
-        let got = field.0.conserved_take(pos.0, econ.u_max, 0); // exact integer removal
+        let r = field.0.conserved_at(pos.0, 0);
+        let demand = monod_demand(econ.u_max, econ.km, r); // Monod: U(R) = u_max·R/(R+km)
+        let got = field.0.conserved_take(pos.0, demand, 0); // exact integer removal
         let gained = got * g.metabolism_eff as i64 / 256;
         let lost = got - gained; // conversion inefficiency → heat
         energy.0 += gained;
@@ -343,5 +356,36 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
     for (mut p, pn, mut v, vn) in &mut q {
         p.0 = pn.0;
         v.0 = vn.0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::monod_demand;
+
+    /// Monod shape invariants (R13 / B-1). Arch-independent: pure integer arithmetic, no floats.
+    #[test]
+    fn monod_saturates() {
+        let u_max = 220i64;
+        let km = 50i64;
+
+        // U(0) = 0
+        assert_eq!(monod_demand(u_max, km, 0), 0, "U(0) must be 0");
+
+        // U(R) monotonic non-decreasing in R
+        let samples: Vec<i64> = (0..=1000).step_by(10).map(|r| monod_demand(u_max, km, r)).collect();
+        for w in samples.windows(2) {
+            assert!(w[0] <= w[1], "monod must be monotone: U({}) = {} > U(...) = {}", w[0], w[0], w[1]);
+        }
+
+        // U(R) → u_max as R ≫ Km (at R=1000×Km, at least 99.9% of u_max, i.e. ≥ u_max - 1)
+        let r_large = km * 1000;
+        let u_large = monod_demand(u_max, km, r_large);
+        assert!(u_large >= u_max - 1, "U at R=1000·Km must be ≥ u_max-1 ({u_max}-1); got {u_large}");
+
+        // U(Km) ≈ u_max/2 (within integer truncation, so ≥ u_max/2 - 1)
+        let u_half = monod_demand(u_max, km, km);
+        assert!(u_half >= u_max / 2 - 1 && u_half <= u_max / 2 + 1,
+            "U(Km) must be within 1 of u_max/2={}: got {u_half}", u_max / 2);
     }
 }

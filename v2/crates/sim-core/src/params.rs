@@ -38,7 +38,13 @@ pub struct EconParams {
     pub k_move_cost: i64,
     /// Sensing cost per `sense_range` unit per tick.
     pub k_sense_cost: i64,
-    /// Max resource a cell can feed one agent per tick (Interactions).
+    /// Monod half-saturation constant for substrate uptake (economy/01 §2). Uptake demand is
+    /// `U(R) = u_max·R / (R+km)` (integer, truncating). Must be `> 0` (km=0 → 0/0 at R=0).
+    /// Calibrated from the measured spatial equilibrium field value R̄: `km ≈ 2.3·R̄`
+    /// (oligotrophic linear regime — economy/01 §2). Arch-dependent trajectory → fitted to
+    /// the x86 runner (CI arch: ubuntu, the corridor measurement arch).
+    pub km: i64,
+    /// Asymptotic per-tick uptake capacity (the Monod U_max). At R≫Km, uptake → u_max.
     pub u_max: i64,
     /// Square world side length, in cells.
     pub world_dim: i64,
@@ -77,7 +83,8 @@ impl Default for EconParams {
             k_size_metab: 1,
             k_move_cost: 1,
             k_sense_cost: 1,
-            u_max: 220,
+            km: 74,   // calibrated: km=50→R̄=32.2→km₁=74→R̄=32.2→fixed (B-1)
+            u_max: 220, // Monod asymptote — realized U(R̄) < u_max; km tunes the shape (B-1)
             world_dim: 64,
             m_sim: 4,
             brain_period: 4, // K — behaviour at 16 Hz (64/4)
