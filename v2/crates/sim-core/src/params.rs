@@ -72,6 +72,10 @@ pub struct EconParams {
     /// Integer. Calibrated via probe (issue #130): max_L1≈180–242 at tick 8000, T=80 gives
     /// ≈7.5 divisions per speciation at the observed mutation cadence (avg ≈10.7 L1/division).
     pub speciation_threshold: i64,
+    /// Active conserved-layer count — mirrors `SimConfig::n_layers` so it is reachable in ECS
+    /// stages (e.g. `stage_birth_death` needs it to clamp layer-trait mutations). Kept in sync by
+    /// `build_sim` (`config.econ.n_layers = config.n_layers`). Default 2 (L=2 production).
+    pub n_layers: usize,
 }
 
 impl Default for EconParams {
@@ -93,6 +97,7 @@ impl Default for EconParams {
             pheromone: 1.0,
             m_field: 1, // one field cell per world cell (the CLI default / doc 14 §1)
             speciation_threshold: 80,
+            n_layers: 2,
         }
     }
 }

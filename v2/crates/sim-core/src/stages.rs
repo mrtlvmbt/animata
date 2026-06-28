@@ -23,9 +23,10 @@ const SALT_MUT: u64 = 0x4D55_5400; // "MUT"
 pub fn stage_sense(field: Res<FieldRes>, mut q: Query<(&Position, &Genome, &mut Sensors)>) {
     for (pos, g, mut s) in &mut q {
         let range = g.sense_range.max(1) as i64;
-        let (gx, gz) = field.0.conserved_gradient(pos.0, range, 0);
+        let layer = g.uptake_layer as usize; // B-2: sense the layer the agent eats from
+        let (gx, gz) = field.0.conserved_gradient(pos.0, range, layer);
         s.gradient = Vec2Fixed(gx, gz);
-        s.local_resource = field.0.conserved_at(pos.0, 0);
+        s.local_resource = field.0.conserved_at(pos.0, layer);
     }
 }
 
@@ -197,9 +198,10 @@ pub fn stage_interactions(
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
         let (_, pos, g, mut energy) = q.get_mut(e).expect("entity present");
-        let r = field.0.conserved_at(pos.0, 0);
+        let layer = g.uptake_layer as usize; // B-2: eat from genome-chosen layer
+        let r = field.0.conserved_at(pos.0, layer);
         let demand = monod_demand(econ.u_max, econ.km, r); // Monod: U(R) = u_max·R/(R+km)
-        let got = field.0.conserved_take(pos.0, demand, 0); // exact integer removal
+        let got = field.0.conserved_take(pos.0, demand, layer); // exact integer removal
         let gained = got * g.metabolism_eff as i64 / 256;
         let lost = got - gained; // conversion inefficiency → heat
         energy.0 += gained;
@@ -236,7 +238,7 @@ pub fn stage_birth_death(
             ledger.dissipated += econ.c_div;
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]));
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers);
             let species_c = *species;
             repro.parents.insert(bits);
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
@@ -279,26 +281,26 @@ pub fn stage_field_scatter(
     sp: Res<ScatterParams>,
     mut field: ResMut<FieldRes>,
     mut ledger: ResMut<EnergyLedger>,
-    mut q: Query<(Entity, &Position, &mut Energy)>,
+    mut q: Query<(Entity, &Position, &Genome, &mut Energy)>, // B-2: &Genome for excrete_layer
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     // 1. Serial gather (Entity-id order): excrete conserved `w` (agent→field, Δtotal=0, NOT
     //    dissipated) and tag a pheromone deposit. Reducing energy mutates the component → serial.
     // Counter in serial loop only — avoids per-entity atomic in the parallel merge below (D1c).
-    let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _)| (e.to_bits(), e)).collect();
+    let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
     let mut deposits: Vec<Deposit> = Vec::with_capacity(ents.len());
     for (bits, e) in ents {
         #[cfg(feature = "perf")]
         { wc.scatter_deposits += 1; }
-        let (_, pos, mut energy) = q.get_mut(e).expect("entity present");
+        let (_, pos, g, mut energy) = q.get_mut(e).expect("entity present");
         let w = econ.excrete.min(energy.0.max(0));
         energy.0 -= w;
         deposits.push(Deposit {
             cell: field.0.cell_index(pos.0),
             morton: field.0.cell_morton(pos.0),
             entity_bits: bits,
-            layer: 0, // A-2: all agents target layer 0; genome-driven choice is slice B
+            layer: g.excrete_layer as usize, // B-2: genome-driven excrete layer
             conserved: w,
             signal: econ.pheromone,
         });
@@ -341,6 +343,8 @@ pub fn stage_observe(
                 g.size,
                 g.repro_threshold,
                 g.mutation_rate,
+                g.uptake_layer,   // B-2 slot 6: observable via Price covariance
+                g.excrete_layer,  // B-2 slot 7
             ],
             offspring,
         });

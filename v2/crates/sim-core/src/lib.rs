@@ -82,9 +82,12 @@ pub struct ReproEvents {
 }
 
 /// One organism's traits + offspring-this-tick, snapshotted by Observe for the telemetry crate.
+/// Slots 0–5: six Ф0 traits (metabolism_eff, move_speed, sense_range, size, repro_threshold,
+/// mutation_rate). Slots 6–7: B-2 layer traits (uptake_layer, excrete_layer) — extended so that
+/// layer-targeting selection is observable through the Price covariance path.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TraitSample {
-    pub traits: [i32; 6],
+    pub traits: [i32; 8],
     pub offspring: u32,
 }
 
@@ -213,7 +216,15 @@ impl Sim {
             strategy: config.merge_strategy,
         });
 
-        let founder = Genome::founder();
+        // B-2 layer-count guard: the genome clamp uses econ.n_layers; the field must match.
+        // build_sim sets econ.n_layers = config.n_layers — this catches any direct Sim::new callers.
+        debug_assert_eq!(
+            econ.n_layers, config.n_layers,
+            "econ.n_layers ({}) != config.n_layers ({}): set econ.n_layers = config.n_layers before \
+             calling Sim::new (build_sim does this automatically)",
+            econ.n_layers, config.n_layers,
+        );
+        let founder = Genome::founder(config.n_layers);
         for i in 0..config.n_founders {
             // Deterministic scatter across the domain (co-prime strides → spread, no float).
             let x = ((i.wrapping_mul(7).wrapping_add(3)) % econ.world_dim as u64) as i64;
