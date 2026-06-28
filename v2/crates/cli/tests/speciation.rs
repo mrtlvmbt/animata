@@ -14,7 +14,10 @@ use sim_core::SpeciesId;
 /// Baked seed: proven to yield ≥ K species at L_CI (issue #130 criterion 6).
 const S: u64 = 0xA11A_2A11;
 /// Plateau length: proven for seed S in the calibration probe.
-const L_CI: u64 = 8000;
+/// B-3 note: the cross-feeding explosion (layer-1 saturation triggers layer-1-consumer bloom)
+/// occurs at t≈12 000 with this seed. L_CI=8000 predates this and gave K≥3 under B-2 serial
+/// uptake; B-3 proportional rationing shifts the bloom later — re-calibrated to 16 000.
+const L_CI: u64 = 16_000;
 /// Minimum live species required at L_CI (criterion 5c).
 const K: u64 = 3;
 
