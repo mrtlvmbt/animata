@@ -101,6 +101,12 @@ pub struct EconParams {
     /// On every death: `recycled = recycle_num · E / RECYCLE_DEN` (truncating) → substrate layer 0;
     /// `E − recycled` → `ledger.lost`. Truncation remainder lands in `lost`, never created.
     pub recycle_num: i64,
+
+    // ── D-slice: evolvable expression regulation (GRN seed, issue #169) ─────────────────────────
+    /// Mutation clamp upper bound for `reg_gain` (D-slice). Signed range is `[−reg_gain_max, +reg_gain_max]`.
+    /// Default 4 (plastic ON). Set to 0 to lock `reg_gain ≡ 0` (plastic OFF — the A/B control line).
+    /// Small range keeps one mutation a gentle `sense_range` step (not rail-to-rail) — a selectable seed.
+    pub reg_gain_max: i32,
 }
 
 impl Default for EconParams {
@@ -125,6 +131,7 @@ impl Default for EconParams {
             n_layers: 2,
             d0_scaled: 1049, // round(0.001 × 1_048_576); mean lifetime ≈ 1000 ticks (economy/01)
             recycle_num: 77,  // round(0.3 × 256) = 76.8 → 77; recycle ≈ 30.1% (economy/01 §3)
+            reg_gain_max: 4,  // D: signed range [−4,+4] — gentle steps on sense_range (0..=8)
         }
     }
 }

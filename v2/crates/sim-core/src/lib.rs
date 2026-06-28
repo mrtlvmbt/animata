@@ -435,6 +435,19 @@ impl Sim {
         self.world.resource::<EconParams>()
     }
 
+    /// (min, max) `reg_gain` across all living agents (D-slice diagnostic — not in state hash).
+    /// Used by `reg_r14_r15_active` to confirm regulation was active during the run.
+    /// Returns (0, 0) if population is empty.
+    pub fn reg_gain_range(&mut self) -> (i32, i32) {
+        let mut q = self.world.query::<&Genome>();
+        let (mut lo, mut hi) = (i32::MAX, i32::MIN);
+        for g in q.iter(&self.world) {
+            lo = lo.min(g.reg_gain);
+            hi = hi.max(g.reg_gain);
+        }
+        if lo == i32::MAX { (0, 0) } else { (lo, hi) }
+    }
+
     #[cfg(feature = "perf")]
     pub fn perf(&self) -> &PerfReport {
         &self.perf

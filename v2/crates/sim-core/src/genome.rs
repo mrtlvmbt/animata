@@ -1,6 +1,7 @@
-//! Direct-encoded Ф0 genome (D3) — **6 integer traits**, no GRN/morphogenesis (Phase 2). Integer
-//! everywhere: mutation is an integer perturbation, the metabolic cost is an integer function of
-//! size, and the genome folds into the deterministic state hash. No float in the genetics layer.
+//! Direct-encoded Ф0 genome — **8 integer traits + 2 evolvable regulatory fields** (D-slice/GRN seed,
+//! issue #169). No GRN W-matrix/morphogenesis (Phase 2). Integer everywhere: mutation is an integer
+//! perturbation, the metabolic cost is a pure-integer function, and the genome folds into the
+//! deterministic state hash. No float in the genetics layer (enforced by the lint below).
 // Guard: no float arithmetic in the conserved layer (M0/F2). Complements the token-grep in
 // no_float_guard.rs: `float_arithmetic` catches operations on inferred-float types that the grep
 // misses (e.g. `let x = 1.5; x + 1.0` where no `f32`/`f64` keyword appears).
@@ -31,15 +32,16 @@ pub fn size_pow_three_quarters(size: i32) -> i64 {
     isqrt(isqrt(s * s * s))
 }
 
-/// The six Ф0 traits + two B-2 layer-targeting traits (research/13 §2). Ranges are clamped on
-/// mutation; all integer.
+/// The eight Ф0 traits + two B-2 layer-targeting traits + two D-slice regulatory fields (GRN seed).
+/// Ranges are clamped on mutation; all integer.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Genome {
     /// Resource→energy conversion efficiency, as a fraction of 256 (0..=256).
     pub metabolism_eff: i32,
     /// Cells moved per tick (movement is metabolically priced).
     pub move_speed: i32,
-    /// Gradient-sensing radius in cells (sensing is priced).
+    /// Gradient-sensing radius in cells (sensing is priced). Raw trait; BOTH consumers use the
+    /// regulated expression `sense_range_eff` (cached in `Sensors.effort`) instead of this directly.
     pub sense_range: i32,
     /// Body size → metabolism ∝ size^(3/4).
     pub size: i32,
@@ -54,9 +56,18 @@ pub struct Genome {
     pub excrete_layer: i32,
     /// Evolved brain weights for the FIXED topology (D-Brain-1) — `int8` Q1.7, packed `W_ih·W_hh·W_ho`
     /// (layout = the shared [`crate::brain_w_ih`]/`brain_w_hh`/`brain_w_ho` indices). Inherited and
-    /// mutated exactly like the six Ф0 traits; the `brain` crate reads this vector during inference.
+    /// mutated exactly like the eight Ф0 traits; the `brain` crate reads this vector during inference.
     /// Resident here (genome-SoA in the ECS) so no genome→weights repack happens on a Brain tick.
     pub weights: [i8; BRAIN_WEIGHTS],
+    // ── D-slice: evolvable regulatory gene (GRN seed, issue #169) ───────────────────────────────
+    /// Substrate setpoint S₀ for `sense_range` regulation (D-slice). Founder ≈ R̄=79 (Slice-C median);
+    /// range `0..=256` brackets the real layer-0 field distribution so both regulation directions
+    /// are viable (reg is born dead if `sign(local − setpoint)` is constant over the real field).
+    pub reg_setpoint: i32,
+    /// Signed regulatory slope for `sense_range` (D-slice). Founder = 0 (regulation OFF).
+    /// Sign is EVOLVABLE — the population discovers the beneficial direction (§8 pitfall guard).
+    /// Range `[−reg_gain_max, +reg_gain_max]` (default ±4): gentle steps on `sense_range` (0..=8).
+    pub reg_gain: i32,
 }
 
 impl Genome {
@@ -85,6 +96,11 @@ impl Genome {
             uptake_layer: 0,
             excrete_layer: (n_layers.saturating_sub(1)).min(1) as i32,
             weights,
+            // D-slice: regulation OFF at founding — evolution discovers the beneficial direction.
+            // reg_setpoint ≈ R̄=79 (Slice-C plateau median) so the setpoint sits inside the field
+            // distribution, keeping both sign(local − setpoint) directions viable.
+            reg_setpoint: 80,
+            reg_gain: 0,
         }
     }
 
@@ -93,11 +109,29 @@ impl Genome {
         size_pow_three_quarters(self.size)
     }
 
+    /// Regulated effective sensing expression (D-slice / GRN seed, issue #169).
+    ///
+    /// `eff = (sense_range + reg_gain · sign(local_resource − reg_setpoint)).clamp(0, 8)`
+    ///
+    /// Pure integer: `signum` of an `i64` difference yields −1, 0, or +1 — no float, no division
+    /// (R13). Clamped to the same `0..=8` range as `sense_range`. At `reg_gain = 0` (the founder):
+    /// `eff == sense_range` for ALL `local_resource` — behaviourally inert (§8 pitfall guard).
+    ///
+    /// Called ONCE per tick in `stage_sense` and cached in `Sensors.effort`. Both consumers
+    /// (gradient radius in `stage_sense` and sense cost in `stage_metabolism`) read the cached
+    /// value — single computation, two reads, cost and benefit cannot diverge.
+    pub fn sense_range_eff(&self, local_resource: i64) -> i32 {
+        let s = local_resource.saturating_sub(self.reg_setpoint as i64).signum() as i32;
+        (self.sense_range + self.reg_gain * s).clamp(0, 8)
+    }
+
     /// Deterministic mutated clone. `stream` is a per-birth seeded value; each trait draws a disjoint
     /// integer perturbation in `{-1,0,+1}` gated by `mutation_rate`, then is clamped to range.
     /// `n_layers` clamps layer traits to `0..=n_layers-1` — must equal the field's actual layer
     /// count (guaranteed by `build_sim` setting `econ.n_layers = config.n_layers`).
-    pub fn mutate(&self, stream: u64, n_layers: usize) -> Genome {
+    /// `reg_gain_max` clamps `reg_gain` to `[−reg_gain_max, +reg_gain_max]`; set to 0 to lock
+    /// regulation OFF (the A/B control line in the selective-value experiment).
+    pub fn mutate(&self, stream: u64, n_layers: usize, reg_gain_max: i32) -> Genome {
         let mut g = *self;
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -118,13 +152,28 @@ impl Genome {
                 *slot = (*slot + delta).clamp(lo, hi);
             }
         }
-        // Brain weights mutate the same way — but their RNG draws come LAST (disjoint salt stream), so
-        // the six Ф0 traits above keep their exact historical draw sequence (skill §5.2 hygiene).
+        // Brain weights mutate the same way — their RNG draws come AFTER the 8 Ф0 traits
+        // (disjoint salt stream), keeping the existing 8-trait salt sequence byte-identical (§5.2).
         for (wi, w) in g.weights.iter_mut().enumerate() {
             let r = seed_fold(stream, &[0x7700_0000 + wi as u64]); // "w" + weight index
             if (r & 0xFF) < self.mutation_rate as u64 {
                 let delta = ((r >> 8) % 3) as i64 - 1; // -1,0,+1
                 *w = (*w as i64 + delta).clamp(-127, 127) as i8;
+            }
+        }
+        // D-slice: reg fields mutate LAST — after brain weights — with disjoint "reg\0" salts
+        // (0x7265_6700 + i). Keeps the 8-trait and brain-weight salt sequences byte-identical;
+        // the only trajectory change from D is through these two new fields (§5.2 stream hygiene).
+        let reg_lo = -reg_gain_max;
+        let reg_traits: [(&mut i32, i32, i32); 2] = [
+            (&mut g.reg_setpoint, 0, 256),
+            (&mut g.reg_gain, reg_lo, reg_gain_max),
+        ];
+        for (i, (slot, lo, hi)) in reg_traits.into_iter().enumerate() {
+            let r = seed_fold(stream, &[0x7265_6700 + i as u64]); // "reg\0" + index
+            if (r & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r >> 8) % 3) as i32 - 1;
+                *slot = (*slot + delta).clamp(lo, hi);
             }
         }
         g
@@ -156,6 +205,10 @@ impl Genome {
         for &w in &self.weights {
             h = fnv_mix(h, w as u64);
         }
+        // D-slice: reg fields must be in the hash — a field outside the lock silently decouples
+        // mutation from state, making the trajectory irreproducible across saves (F9).
+        h = fnv_mix(h, self.reg_setpoint as u64);
+        h = fnv_mix(h, self.reg_gain as u64);
         h
     }
 }
@@ -182,18 +235,20 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2), g.mutate(123, 2));
+        assert_eq!(g.mutate(123, 2, 4), g.mutate(123, 2, 4));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2);
+            let m = g.mutate(s, 2, 4);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
             assert!((0..=1).contains(&m.excrete_layer));
+            assert!((-4..=4).contains(&m.reg_gain), "reg_gain {} OOB", m.reg_gain);
+            assert!((0..=256).contains(&m.reg_setpoint), "reg_setpoint {} OOB", m.reg_setpoint);
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1);
+        let m1 = g1.mutate(0, 1, 4);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }

@@ -23,11 +23,16 @@ const SALT_DEATH: u64 = 0x4445_4100; // "DEA\0" — C-1 background-death draw, M
 //    signal_hash(), keeping the golden arm64-pinned. ───────────────────────────────────────────────
 pub fn stage_sense(field: Res<FieldRes>, mut q: Query<(&Position, &Genome, &mut Sensors)>) {
     for (pos, g, mut s) in &mut q {
-        let range = g.sense_range.max(1) as i64;
         let layer = g.uptake_layer as usize; // B-2: sense the layer the agent eats from
+        // D: read local_resource FIRST — sense_range_eff depends on it.
+        s.local_resource = field.0.conserved_at(pos.0, layer);
+        // D: compute regulated expression once; cache in s.effort for stage_metabolism (two reads,
+        // one write — cost and benefit read the same value, cannot diverge).
+        let eff = g.sense_range_eff(s.local_resource);
+        s.effort = eff;
+        let range = eff.max(1) as i64; // D: regulated sensing radius, not raw sense_range
         let (gx, gz) = field.0.conserved_gradient(pos.0, range, layer);
         s.gradient = Vec2Fixed(gx, gz);
-        s.local_resource = field.0.conserved_at(pos.0, layer);
     }
 }
 
@@ -152,19 +157,21 @@ pub fn stage_metabolism(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
     mut ledger: ResMut<EnergyLedger>,
-    mut q: Query<(&Genome, &mut Energy)>,
+    mut q: Query<(&Genome, &mut Energy, &Sensors)>,
 ) {
     let n = econ.metab_period.max(1);
     if !clock.tick.is_multiple_of(n) {
         return; // multi-rate metabolism (D-Brain-4): runs every N ticks, GLOBAL phase.
     }
-    for (g, mut e) in &mut q {
+    for (g, mut e, s) in &mut q {
         // Charge ×N — a lump standing in for the N base ticks since the last metabolism tick, so the
         // economy stays ≈invariant to N and conservation is exact (R15).
+        // D: s.effort is the regulated sense expression cached in stage_sense — same value used for
+        // the gradient radius. Cost and benefit read the identical cached value: no free lunch.
         let cost = (econ.base_metab
             + econ.k_size_metab * g.metab_units()
             + econ.k_move_cost * g.move_speed as i64
-            + econ.k_sense_cost * g.sense_range as i64)
+            + econ.k_sense_cost * s.effort as i64)
             * n as i64;
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
@@ -332,7 +339,7 @@ pub fn stage_birth_death(
             ledger.dissipated += econ.c_div;
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers);
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers, econ.reg_gain_max);
             let species_c = *species;
             repro.parents.insert(bits);
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
