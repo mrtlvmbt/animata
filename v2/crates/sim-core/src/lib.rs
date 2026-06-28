@@ -37,7 +37,7 @@ pub use genome::{isqrt, size_pow_three_quarters, Genome};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
-pub use params::{EconParams, SimConfig};
+pub use params::{EconParams, LayerSpec, SimConfig};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
