@@ -33,7 +33,7 @@ pub use components::{
 };
 pub use det_map::DetMap;
 pub use energy::EnergyLedger;
-pub use genome::{isqrt, size_pow_three_quarters, Genome};
+pub use genome::{isqrt, size_pow_three_quarters, Genome, Phenotype};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
@@ -295,6 +295,8 @@ impl Sim {
             // change EnergyLedger.initial: quota=0 contributes nothing to the conserved sum.
             // Non-dprime configs do NOT spawn MineralQuota → their archetype is unchanged →
             // byte-identical goldens (no extra entity column, no hash perturbation).
+            // E-1: decode the founder genome once at birth; Ф0 always returns Some.
+            let founder_phenotype = founder.decode().expect("Ф0 founder decode must succeed");
             if has_mineral {
                 w.spawn((
                     Position(p),
@@ -303,6 +305,7 @@ impl Sim {
                     VelocityNext::default(),
                     Energy(config.founder_energy),
                     founder,
+                    founder_phenotype, // E-1: cached cold phenotype
                     SpeciesId(0),
                     Sensors::default(),
                     Intent::default(),
@@ -318,6 +321,7 @@ impl Sim {
                     VelocityNext::default(),
                     Energy(config.founder_energy),
                     founder,
+                    founder_phenotype, // E-1: cached cold phenotype
                     SpeciesId(0),
                     Sensors::default(),
                     Intent::default(),
@@ -621,4 +625,172 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         stage!("9_observe", stage_observe),
         stage!("10_swap", stage_swap),
     ]
+}
+
+// ── E-1 decode-gate integration test ──────────────────────────────────────────────────────────────
+// Stub backends live here so sim-core has no dev-dep on cli/fields/world (they all dep on sim-core).
+#[cfg(test)]
+mod e1_gate_tests {
+    use super::*;
+    use crate::traits::{
+        Brain, Deposit, FieldStore, MergeStrategy, WorldView,
+        BRAIN_HIDDEN, BRAIN_INPUTS, BRAIN_OUTPUTS, BRAIN_WEIGHTS,
+    };
+    use crate::params::{EconParams, LayerSpec, SimConfig};
+
+    const WORLD_DIM: i64 = 64;
+    const N_CELLS: usize = (WORLD_DIM * WORLD_DIM) as usize;
+    const SEED_E1: u64 = 0x_E1_5EED;
+
+    // ── Minimal stub WorldView — no solid terrain, uniform resource reading. ─────────────────
+    struct StubWorld;
+    impl WorldView for StubWorld {
+        fn is_solid(&self, _p: Vec2Fixed) -> bool { false }
+        fn height(&self, _x: i64, _z: i64) -> i64 { 0 }
+        fn biome(&self, _p: Vec2Fixed) -> u8 { 0 }
+        fn resource(&self, _p: Vec2Fixed) -> i64 { 100 }
+    }
+
+    // ── Minimal stub Brain — outputs zeros (entities stay put). ─────────────────────────────
+    struct StubBrain;
+    impl Brain for StubBrain {
+        fn infer(
+            &self, _in: &[i16; BRAIN_INPUTS], _hold: &[i16; BRAIN_HIDDEN],
+            _w: &[i8; BRAIN_WEIGHTS], hnew: &mut [i16; BRAIN_HIDDEN], out: &mut [i16; BRAIN_OUTPUTS],
+        ) {
+            hnew.iter_mut().for_each(|x| *x = 0);
+            out.iter_mut().for_each(|x| *x = 0);
+        }
+    }
+
+    // ── Minimal stub FieldStore — two layers, all cells start at `initial` eu. ──────────────
+    // Conservation is NOT tracked (deposit_conserved is a no-op) — this is intentional: the
+    // test checks entity count, not ledger residuals. Energy conservation is tested elsewhere.
+    struct StubField {
+        layers: Vec<Vec<i64>>, // [layer][cell]
+    }
+    impl StubField {
+        fn new(n_layers: usize, initial: i64) -> Self {
+            Self { layers: vec![vec![initial; N_CELLS]; n_layers] }
+        }
+        fn cell(&self, pos: Vec2Fixed) -> usize {
+            let x = (pos.0.rem_euclid(WORLD_DIM)) as usize;
+            let z = (pos.1.rem_euclid(WORLD_DIM)) as usize;
+            x + z * WORLD_DIM as usize
+        }
+    }
+    impl FieldStore for StubField {
+        fn m_field(&self) -> i64 { 1 }
+        fn cell_index(&self, pos: Vec2Fixed) -> usize { self.cell(pos) }
+        fn cell_morton(&self, _p: Vec2Fixed) -> u32 { 0 }
+        fn check_meta(&self, m: i64) -> Result<(), String> {
+            if m == 1 { Ok(()) } else { Err(format!("expected m=1, got {m}")) }
+        }
+        fn conserved_at(&self, pos: Vec2Fixed, layer: usize) -> i64 {
+            let c = self.cell(pos);
+            self.layers.get(layer).and_then(|l| l.get(c)).copied().unwrap_or(0)
+        }
+        fn conserved_gradient(&self, _p: Vec2Fixed, _r: i64, _l: usize) -> (i64, i64) { (0, 0) }
+        fn conserved_take(&mut self, pos: Vec2Fixed, amount: i64, layer: usize) -> i64 {
+            let c = self.cell(pos);
+            if let Some(l) = self.layers.get_mut(layer) {
+                if let Some(v) = l.get_mut(c) {
+                    let taken = (*v).min(amount);
+                    *v -= taken;
+                    return taken;
+                }
+            }
+            0
+        }
+        fn deposit_conserved(&mut self, _c: usize, _a: i64, _l: usize) {}
+        fn conserved_total(&self, layer: usize) -> i64 {
+            self.layers.get(layer).map(|l| l.iter().sum()).unwrap_or(0)
+        }
+        fn conserved_total_all(&self) -> i64 { self.layers.iter().flat_map(|l| l.iter()).sum() }
+        fn conserved_hash(&self) -> u64 { 0 }
+        fn signal_total(&self) -> f32 { 0.0 }
+        fn signal_hash(&self) -> u64 { 0 }
+        fn signal_all_finite(&self) -> bool { true }
+        fn commit_merge(&mut self, _b: &[Vec<Deposit>], _s: MergeStrategy) {}
+        fn solve(&mut self) -> i64 { 0 }
+    }
+
+    /// Build a minimal Sim where founders reproduce on tick 1:
+    /// `founder_energy=2000 > e_cell+c_div=1100`, `repro_threshold=1000`.
+    fn make_quick_repro_sim(seed: u64, n_founders: u64) -> Sim {
+        let config = SimConfig {
+            seed,
+            n_founders,
+            // 2000 >> e_cell+c_div=1100 and >> genome.repro_threshold=1500 →
+            // after tick-0 metabolism (~12 eu cost), founders still have 1988 eu ≥ 1500 → reproduce.
+            founder_energy: 2000,
+            // n_layers=2 must equal econ.n_layers (debug_assert in Sim::new).
+            n_layers: 2,
+            econ: EconParams {
+                n_layers: 2,      // explicit — must match SimConfig::n_layers
+                n_energy_layers: 2,
+                ..EconParams::default()
+            },
+            sim_threads: 1,
+            merge_strategy: MergeStrategy::Canonical,
+            layer_specs: [
+                LayerSpec { regen_rate: 6, flux_alpha_num: 1, flux_alpha_den: 8,
+                            flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4,
+                            flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec::default(),
+                LayerSpec::default(),
+            ],
+        };
+        Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
+    }
+
+    /// Control: normal sim (force_decode_none=false everywhere) grows after 1 tick.
+    /// Proves the test config actually triggers reproduction — the test is not vacuous.
+    #[test]
+    fn control_quick_repro_grows() {
+        let mut sim = make_quick_repro_sim(SEED_E1, 8);
+        let initial = sim.population();
+        sim.step();
+        let after = sim.population();
+        assert!(
+            after > initial,
+            "control: population must grow when decode() returns Some; initial={initial} after={after}"
+        );
+    }
+
+    /// E-1 None-gate end-to-end: when `force_decode_none=true` on all founder genomes,
+    /// `child_genome.decode()` in `stage_birth_death` returns `None`, the `let Some(...) else
+    /// { continue; }` gate fires at BOTH spawn sites, and no entity is ever materialized.
+    /// Population can only decrease (deaths) or stay at initial — never grow.
+    ///
+    /// This exercises THE REAL BirthDeath code path (not a separate wrapper function):
+    /// - `stage_birth_death` calls `child_genome.decode()` (the production function, unchanged)
+    /// - `force_decode_none=true` makes that same `decode()` return `None`
+    /// - `mutate()` copies `*self` → children inherit the flag → lineage stays stillborn
+    #[test]
+    fn e1_none_gate_suppresses_births_end_to_end() {
+        let mut sim = make_quick_repro_sim(SEED_E1, 8);
+        let initial = sim.population();
+
+        // Poison all founders: force_decode_none propagates to children via mutate()'s `*self` copy.
+        // Direct world access is safe here (same module as Sim).
+        {
+            let mut q = sim.world.query::<&mut genome::Genome>();
+            for mut g in q.iter_mut(&mut sim.world) {
+                g.force_decode_none = true;
+            }
+        }
+
+        sim.step();
+        let after = sim.population();
+
+        assert!(
+            after <= initial,
+            "E-1 None-gate: population must NOT grow when decode() returns None for all children; \
+             initial={initial} after={after} — births occurred despite gate → gate not wired at \
+             one or both child spawn sites (stages.rs mineral:{} / non-mineral:{})",
+            "stages.rs:~642", "stages.rs:~660"
+        );
+    }
 }

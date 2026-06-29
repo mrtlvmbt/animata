@@ -277,7 +277,10 @@ pub fn stage_interactions(
     mut field: ResMut<FieldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut tel: ResMut<Telemetry>,
-    mut q: Query<(Entity, &Position, &Genome, &mut Energy)>,
+    // E-1: Phenotype is REQUIRED (not Option) — a missed spawn site = entity invisible here
+    // = the entity skips energy intake = population changes = golden moves. The required query
+    // is the detection mechanism for F2-missed-spawn-site bugs.
+    mut q: Query<(Entity, &Position, &Genome, &Phenotype, &mut Energy)>,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     // D′-1: compute L(t) once for this tick (pure function, non-rival — same value for every cell).
@@ -294,8 +297,11 @@ pub fn stage_interactions(
         layer: usize,
         demand: i64,
     }
-    let mut contestants: Vec<Contestant> = q.iter().map(|(e, pos, g, _)| {
-        let layer = g.uptake_layer as usize;
+    let mut contestants: Vec<Contestant> = q.iter().map(|(e, pos, _g, ph, _)| {
+        // E-1: read uptake_layer from the cached Phenotype (live consumer of the decode seam).
+        // For Ф0: ph.uptake_layer == g.uptake_layer always (1:1 projection). This read proves
+        // the seam is live — the field routes through Phenotype, not directly from Genome.
+        let layer = ph.uptake_layer as usize;
         // D′-1 defensive assertion: uptake_layer must index a conserved stock layer (NOT the light
         // field). Photo energy routes through photo_gain, never through uptake_layer.
         debug_assert!(
@@ -363,7 +369,7 @@ pub fn stage_interactions(
     for (i, c) in contestants.iter().enumerate() {
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
-        let (_, _, g, mut energy) = q.get_mut(c.entity).expect("entity present");
+        let (_, _, g, _ph, mut energy) = q.get_mut(c.entity).expect("entity present");
         let got = field.0.conserved_take(c.pos, grants[i], c.layer);
         let gained = got * g.metabolism_eff as i64 / 256;
         let lost = got - gained;
@@ -610,6 +616,11 @@ pub fn stage_birth_death(
                 genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max);
             let species_c = *species;
             repro.parents.insert(bits);
+
+            // E-1: decode-seam gate. Ф0 always returns Some — the None arm is plumbing for E-4
+            // (viability filtering). Test-only injection point: pass None to verify skip path.
+            let Some(child_phenotype) = child_genome.decode() else { continue; };
+
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
             // `BrainState` (both `h_old`/`h_new`) and `BrainOutput` — so no prior occupant's hidden
             // state or motor command can leak through a reused ECS slot, and the newborn stays frozen
@@ -628,6 +639,7 @@ pub fn stage_birth_death(
                     VelocityNext::default(),
                     Energy(econ.e_cell),
                     child_genome,
+                    child_phenotype, // E-1: cached cold phenotype (decode seam)
                     species_c,
                     Sensors::default(),
                     Intent::default(),
@@ -645,6 +657,7 @@ pub fn stage_birth_death(
                     VelocityNext::default(),
                     Energy(econ.e_cell),
                     child_genome,
+                    child_phenotype, // E-1: cached cold phenotype (decode seam)
                     species_c,
                     Sensors::default(),
                     Intent::default(),
