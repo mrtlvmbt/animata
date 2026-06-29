@@ -121,6 +121,38 @@ pub struct EconParams {
     /// photo code path is never entered → `default_config`/`l3_config`/`cprime_config` trajectories
     /// remain byte-identical (the isolation gate; un-re-pinned existing goldens ARE the test).
     pub light: Option<LightSpec>,
+
+    // ── D′-2a: photo-machinery expression cost ────────────────────────────────────────────────────
+    /// Photo-machinery expression cost numerator (D′-2a). Per-tick rate:
+    /// `r = (photo_cost_num · photo_gain) / photo_cost_den` eu/tick.
+    ///
+    /// Charged EVERY tick (day AND night) whenever `photo_gain > 0` — the constitutive cell pays
+    /// around the clock. That asymmetry (pays at night with zero income) is the lever D′-2b exploits.
+    ///
+    /// To avoid premature integer truncation at small `photo_gain`, the per-event charge is computed
+    /// as `(photo_cost_num · photo_gain · n) / photo_cost_den` (n = `metab_period`), which delays
+    /// the division. This scales linearly with n → R20 N-invariance holds.
+    ///
+    /// Calibration: `photo_cost_num=1`, `photo_cost_den=8` targets ≈17% of day photo income at
+    /// the effective threshold (`photo_gain=4`, n=2): charge = (1·4·2)/8 = 1 eu/event,
+    /// day income = 4·100/130·2 = 6 eu/event → 16.7%.
+    ///
+    /// This is within the model band [0%, 27%] from `phase1_photocost_model.py` (band ∈ [0, 0.75]
+    /// eu/tick against model day income 2.77 eu/tick = 27% max). The suggested den∈[15,22] from
+    /// the issue (§acceptance) assumed cells evolve to gain≥8, but empirically post-sweep
+    /// (tick 5000) photo_gain concentrates at 2-7 under weak selection. DEN=8 (threshold=4) is
+    /// calibrated to engage as soon as the photo sweep occurs (gain≥4 reachable within ~1000 ticks
+    /// post-sweep), while the 17% fraction is close to the issue's 15% upper guide value.
+    ///
+    /// Fraction at threshold scales as `130 / (gain_threshold × 100 × 2)`:
+    ///   threshold=4 → 130/800 = 16.3%  ← DEN=8, n=2 (chosen)
+    ///   threshold=7 → 130/1400 = 9.3%  ← DEN=14 (issue suggestion; inert in 8000-tick window)
+    ///
+    /// Inert for non-dprime configs: `photo_gain ≡ 0` (mutation gate in `genome.rs` ensures this
+    /// when `light: None`) → cost is 0 for all non-dprime trajectories → byte-identical goldens.
+    pub photo_cost_num: i64,
+    /// Photo-machinery expression cost denominator (D′-2a). Must be > 0. See `photo_cost_num`.
+    pub photo_cost_den: i64,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -183,6 +215,11 @@ impl Default for EconParams {
             detritus_layer: None,    // C′-1: None → byte-identical Slice-C behavior (→ layer 0)
             detritus_frac_num: RECYCLE_DEN, // = 256; dormant (only active when detritus_layer is Some)
             light: None,             // D′-1: None → light economy inert, photo_gain stays 0
+            // D′-2a: photo-machinery cost. Applies only when photo_gain > 0 (non-dprime configs
+            // have photo_gain ≡ 0 → cost is inert → byte-identical isolation from existing goldens).
+            // Calibrated at ≈9% of day income at threshold gain (NUM=1, DEN=16, n=2 → gain≥8).
+            photo_cost_num: 1,
+            photo_cost_den: 8,
         }
     }
 }
