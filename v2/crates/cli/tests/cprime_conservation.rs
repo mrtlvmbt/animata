@@ -45,3 +45,23 @@ fn cprime_r14_thread_count_independent() {
         );
     }
 }
+
+/// F1 hardening (C′-2): the death→detritus path must be NON-VACUOUSLY exercised.
+/// Detritus layer (2) accumulates ONLY from agent deaths (regen=0, frac=1.0). Any accumulated
+/// detritus proves ≥1 death fired the d0 gate and deposited to layer 2 — not a vacuous pass.
+#[test]
+fn cprime_f1_death_path_exercised() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut sim = build_sim(cprime_config(SEED));
+    for _ in 0..TICKS {
+        sim.step();
+    }
+    let detritus_total = sim.field_layer_total(2); // layer 2 = detritus
+    assert!(
+        detritus_total > 0,
+        "detritus layer total = {detritus_total} after {TICKS} ticks — \
+         zero deaths occurred, death→detritus path was never taken (vacuous pass)"
+    );
+}

@@ -158,7 +158,7 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
         if emit {
             let tick = sim.tick();
             let tele = sim.telemetry();
-            let rep = compute_with_census(&tele.samples, &tele.species_census);
+            let rep = compute_with_census(&tele.samples, &tele.species_census, sim.econ().detritus_layer);
             let field_total = tele.field_total;
             let signal = tele.signal_total;
             let species_count = tele.species_count;

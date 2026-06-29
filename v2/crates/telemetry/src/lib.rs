@@ -36,10 +36,17 @@ impl Guild {
         [Guild::Producer, Guild::Consumer, Guild::Reducer, Guild::Phototroph];
 
     /// Classify an organism by its metabolic guild. Uses `uptake_layer` (trait slot 6) as the
-    /// primary discriminant (the cross-feeding split that B-2 introduced).
-    pub const fn classify(s: &TraitSample) -> Guild {
+    /// primary discriminant. `detritus_layer` enables the Reducer class (C′-2): an organism
+    /// with `uptake_layer == detritus_layer` is a Reducer regardless of the layer value. Pass
+    /// `None` for configs without a detritus layer — preserves the original Producer/Consumer
+    /// split byte-identically (`default_config`, `l3_config`).
+    pub const fn classify(s: &TraitSample, detritus_layer: Option<usize>) -> Guild {
+        if let Some(dl) = detritus_layer {
+            if s.traits[6] as usize == dl {
+                return Guild::Reducer;
+            }
+        }
         if s.traits[6] == 0 { Guild::Producer } else { Guild::Consumer }
-        // Reducer / Phototroph: no organisms arrive until C′/D′.
     }
 
     /// Lowercase ASCII name, used in CSV column headers.
@@ -83,7 +90,13 @@ pub struct Report {
 ///
 /// `species_census` is `Telemetry.species_census` from `sim-core` (`Vec<(species_id, count)>`).
 /// Pass an empty slice when no census is available — Shannon/Simpson will then be 0.0.
-pub fn compute_with_census(samples: &[TraitSample], species_census: &[(u32, u32)]) -> Report {
+/// `detritus_layer` enables Reducer classification (C′-2): pass `econ.detritus_layer` from the
+/// running sim. Pass `None` for configs without a detritus layer — preserves existing behaviour.
+pub fn compute_with_census(
+    samples: &[TraitSample],
+    species_census: &[(u32, u32)],
+    detritus_layer: Option<usize>,
+) -> Report {
     let n = samples.len();
     let nf = n as f64;
 
@@ -124,7 +137,7 @@ pub fn compute_with_census(samples: &[TraitSample], species_census: &[(u32, u32)
     let mut guild_pop = [0usize; 4];
     let mut guild_trait_sum = [[0f64; 8]; 4];
     for s in samples {
-        let g = Guild::classify(s) as usize;
+        let g = Guild::classify(s, detritus_layer) as usize;
         guild_pop[g] += 1;
         for (t, v) in guild_trait_sum[g].iter_mut().enumerate() {
             *v += s.traits[t] as f64;
@@ -147,8 +160,9 @@ pub fn compute_with_census(samples: &[TraitSample], species_census: &[(u32, u32)
 }
 
 /// Backward-compatible shim: compute without a species census. Shannon/Simpson will be 0.0.
+/// Passes `detritus_layer=None` — correct for all non-cprime configs (`default_config`, etc.).
 pub fn compute(samples: &[TraitSample]) -> Report {
-    compute_with_census(samples, &[])
+    compute_with_census(samples, &[], None)
 }
 
 /// Shannon H and Simpson (1 − Σ p_i²) from per-species counts.
@@ -197,19 +211,33 @@ mod tests {
     #[test]
     fn classifier_layer_0_is_producer() {
         let sample = s([200, 1, 1, 2, 1500, 32, 0, 1], 0);
-        assert_eq!(Guild::classify(&sample), Guild::Producer);
+        assert_eq!(Guild::classify(&sample, None), Guild::Producer);
     }
 
     #[test]
     fn classifier_layer_1_is_consumer() {
         let sample = s([200, 1, 1, 2, 1500, 32, 1, 0], 0);
-        assert_eq!(Guild::classify(&sample), Guild::Consumer);
+        assert_eq!(Guild::classify(&sample, None), Guild::Consumer);
     }
 
     #[test]
     fn classifier_higher_layer_is_consumer() {
         let sample = s([200, 1, 1, 2, 1500, 32, 3, 1], 0);
-        assert_eq!(Guild::classify(&sample), Guild::Consumer);
+        assert_eq!(Guild::classify(&sample, None), Guild::Consumer);
+    }
+
+    #[test]
+    fn classifier_reducer_when_detritus_layer_matches() {
+        // C′-2: uptake_layer == detritus_layer → Reducer (regardless of layer value).
+        let reducer = s([200, 1, 1, 2, 1500, 32, 2, 0], 0); // uptake_layer=2 = detritus_layer
+        assert_eq!(Guild::classify(&reducer, Some(2)), Guild::Reducer);
+        // Other layers stay Producer/Consumer.
+        let producer = s([200, 1, 1, 2, 1500, 32, 0, 1], 0);
+        assert_eq!(Guild::classify(&producer, Some(2)), Guild::Producer);
+        let consumer = s([200, 1, 1, 2, 1500, 32, 1, 0], 0);
+        assert_eq!(Guild::classify(&consumer, Some(2)), Guild::Consumer);
+        // detritus_layer=None: layer 2 is Consumer (old behaviour preserved).
+        assert_eq!(Guild::classify(&reducer, None), Guild::Consumer);
     }
 
     // ── Guild census ─────────────────────────────────────────────────────────────────────────────
@@ -221,7 +249,7 @@ mod tests {
             s([200, 1, 1, 2, 1500, 32, 0, 1], 1), // producer
             s([200, 1, 1, 2, 1500, 32, 1, 0], 0), // consumer
         ];
-        let rep = compute_with_census(&samples, &[]);
+        let rep = compute_with_census(&samples, &[], None);
         let sum: usize = rep.guild_pop.iter().sum();
         assert_eq!(sum, rep.population, "guild_pop must sum to population");
         assert_eq!(rep.guild_pop[Guild::Producer as usize], 2);
@@ -232,7 +260,7 @@ mod tests {
 
     #[test]
     fn guild_census_empty_pop_is_defined() {
-        let rep = compute_with_census(&[], &[]);
+        let rep = compute_with_census(&[], &[], None);
         assert_eq!(rep.guild_pop, [0; 4]);
         assert_eq!(rep.guild_means, [[0.0; 8]; 4]);
         assert_eq!(rep.population, 0);
