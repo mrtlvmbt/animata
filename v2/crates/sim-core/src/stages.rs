@@ -149,10 +149,9 @@ pub fn stage_move(
 
 // ── Stage 5: Metabolism — base + size^¾ + move + sense cost, fixed-point ledger, N=1 (R20). ────────
 //
-// D′-2a: photo-machinery expression cost added here. Per-tick rate r = (NUM·photo_gain)/DEN;
-// charged every metab event (day AND night — NOT gated on L(t)). Placement: conceptually inside
-// the (base + size + move + sense + r)·n bracket; computed as (NUM·gain·n)/DEN to delay the integer
-// division and avoid truncating to 0 at small gain. This scales linearly with n → R20 holds.
+// D′-2a: photo-machinery expression cost added here. Per-tick rate r = (NUM·expressed)/DEN;
+// D′-2b: expressed = expressed_capacity(g, L(t)) — 0 at night when reg_gain>0 → cost skipped.
+// Placement: inside the maintenance bracket; computed as (NUM·eff·n)/DEN. Scales linearly → R20.
 pub fn stage_metabolism(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
@@ -165,6 +164,11 @@ pub fn stage_metabolism(
         return; // multi-rate metabolism (D-Brain-4): runs every N ticks, GLOBAL phase.
     }
     debug_assert!(econ.photo_cost_den > 0, "photo_cost_den must be > 0");
+    // D′-2b: expressed capacity gates the cost. Night-downregulated cell (reg_gain>0, L=0) has
+    // expressed_capacity=0 → photo_cost=0 (the selective saving). Non-dprime: photo_gain≡0 →
+    // expressed_capacity=0 → cost=0, byte-identical isolation. When light=None: l_now=0 but
+    // photo_gain=0 for all non-dprime genomes → early exit 0 in expressed_capacity anyway.
+    let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
     let mut photo_cost_this_event: i64 = 0;
     for (g, mut e) in &mut q {
         // Charge ×N — a lump standing in for the N base ticks since the last metabolism tick, so the
@@ -174,12 +178,13 @@ pub fn stage_metabolism(
             + econ.k_move_cost * g.move_speed as i64
             + econ.k_sense_cost * g.sense_range as i64)
             * n as i64;
-        // D′-2a: photo-machinery expression cost. Constitutive: paid day AND night (NOT gated on
-        // L(t)). Inert when photo_gain == 0 (all non-dprime genomes → byte-identical isolation).
-        // Charge per event = (NUM · gain · n) / DEN (delayed division avoids truncation at low gain).
-        // Threshold: at NUM=1, DEN=8, n=2 → gain ≥ 4 for non-zero charge (≈ 16.7% of day income).
-        let photo_cost = if g.photo_gain > 0 {
-            (econ.photo_cost_num * g.photo_gain as i64 * n as i64) / econ.photo_cost_den
+        // D′-2a/2b: photo-machinery expression cost on the EXPRESSED capacity.
+        // expressed_capacity returns 0 at night for regulated cells → cost skipped (the D′-2b lever).
+        // Charge per event = (NUM · eff · n) / DEN (delayed division avoids truncation at low eff).
+        // Threshold: at NUM=1, DEN=8, n=2 → eff ≥ 4 for non-zero charge (≈ 16.7% of day income).
+        let eff = expressed_capacity(g, l_now);
+        let photo_cost = if eff > 0 {
+            (econ.photo_cost_num * eff as i64 * n as i64) / econ.photo_cost_den
         } else {
             0
         };
@@ -219,6 +224,37 @@ pub fn photo_demand(photo_gain: i32, km_photo: i64, l: i64) -> i64 {
     }
     debug_assert!(km_photo > 0, "km_photo must be > 0");
     (photo_gain as i64 * l) / (l + km_photo)
+}
+
+/// Photo-expression capacity after GRN regulation (D′-2b), pure function of genome + current L(t).
+///
+/// At founder gain (`reg_gain == 0`): constitutive — returns full `photo_gain` regardless of `l`,
+/// byte-identical to D′-2a (no behavioural change until evolution discovers a non-zero gain).
+///
+/// At non-zero gain: binary threshold on `L(t)` vs `reg_setpoint`:
+///   `reg_gain > 0` → express by DAY  (`l ≥ reg_setpoint` → `photo_gain`; else 0).
+///   `reg_gain < 0` → express by NIGHT (`l <  reg_setpoint` → `photo_gain`; else 0).
+///
+/// **Encoding (declared, F3 — binary threshold).** Only `sign(reg_gain)` determines the output;
+/// the magnitude is dead weight on the expression function. The trait is 3-state: neg/0/pos.
+/// `reg_gain_max` clamps evolvable range and locks regulation OFF at `reg_gain_max = 0`.
+/// D′-2c must account for this: the constitutive control line is `reg_gain_max = 0`.
+///
+/// **Night income is 0 regardless** (`l = 0` → `photo_demand` returns 0 anyway). The ONLY
+/// observable signature of regulation is the SAVED COST at night: a night-downregulated cell
+/// (`reg_gain > 0`, `l = 0`) has `expressed_capacity = 0` → `photo_cost = 0`.
+/// `photo_produced` does NOT distinguish regulated from constitutive; only `photo_cost_total` does.
+///
+/// Pure, integer, no RNG — deterministic given genome + global `L(t)` (R14).
+pub fn expressed_capacity(g: &crate::Genome, l: i64) -> i32 {
+    if g.photo_gain == 0 { return 0; }
+    if g.reg_gain == 0 { return g.photo_gain; }
+    let express = if g.reg_gain > 0 {
+        l >= g.reg_setpoint as i64
+    } else {
+        l < g.reg_setpoint as i64
+    };
+    if express { g.photo_gain } else { 0 }
 }
 
 // ── Stage 6: Interactions — feed: proportional deficit rationing (B-3). ─────────────────────────
@@ -324,10 +360,11 @@ pub fn stage_interactions(
         let lost = got - gained;
         energy.0 += gained;
         ledger.dissipated += lost;
-        // D′-1: additive photo energy (non-rival — each cell independently absorbs light).
-        // U_photo_i = photo_gain_i · L(t) / (km_photo + L(t)), integer truncating.
+        // D′-1/D′-2b: additive photo energy on the EXPRESSED capacity.
+        // Night-downregulated cells have expressed_capacity=0 → photo_demand returns 0 (also because
+        // L=0 at night, so the saving is in COST not income — see expressed_capacity doc).
         if let Some(km) = km_photo {
-            let photo = photo_demand(g.photo_gain, km, l_now);
+            let photo = photo_demand(expressed_capacity(g, l_now), km, l_now);
             energy.0 += photo;
             photo_total += photo;
         }
@@ -414,7 +451,7 @@ pub fn stage_birth_death(
             ledger.dissipated += econ.c_div;
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers, econ.light.is_some());
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers, econ.light.is_some(), econ.reg_gain_max);
             let species_c = *species;
             repro.parents.insert(bits);
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
