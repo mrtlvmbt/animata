@@ -4,7 +4,7 @@
 
 use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
-use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, RECYCLE_DEN};
+use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
 use world::NoiseWorld;
 
 /// Fixed timestep dt = 1/64 s, integer microseconds (the loop driver does no float).
@@ -330,10 +330,22 @@ pub fn apply_overrides(econ: &mut EconParams, sets: &[(String, String)]) -> Resu
                 econ.metab_period = v;
             }
             "d0_scaled" => {
-                econ.d0_scaled = p::<u64>(key, val)?;
+                let v = p::<u64>(key, val)?;
+                if v > D0_MASK {
+                    return Err(format!(
+                        "error: --set d0_scaled={v}: must be ≤ D0_MASK ({D0_MASK}); \
+                         d0_scaled > D0_MASK makes kill condition always true → instant extinction"
+                    ));
+                }
+                econ.d0_scaled = v;
             }
             "pheromone" => {
                 let v = p::<f32>(key, val)?;
+                if !v.is_finite() {
+                    return Err(format!(
+                        "error: --set pheromone={v}: must be finite (NaN/inf poison the signal field)"
+                    ));
+                }
                 if v < 0.0 {
                     return Err(format!("error: --set pheromone={v}: must be ≥ 0.0"));
                 }
@@ -505,6 +517,50 @@ mod tests {
         let r4 = apply_overrides(&mut econ, &[("nonexistent".to_string(), "1".to_string())]);
         assert!(r4.is_err(), "unknown key must return Err");
         assert!(r4.unwrap_err().starts_with("error:"));
+    }
+
+    /// GAP-1: d0_scaled > D0_MASK must be rejected before the sim runs.
+    /// d0_scaled > D0_MASK makes `(r & D0_MASK) < d0_scaled` always true → 100% kill every tick.
+    #[test]
+    fn d0_scaled_above_mask_is_error() {
+        let mut econ = EconParams::default();
+        let over = (D0_MASK + 1).to_string();
+        let r = apply_overrides(&mut econ, &[("d0_scaled".to_string(), over.clone())]);
+        assert!(r.is_err(), "d0_scaled={} (> D0_MASK={}) must return Err", over, D0_MASK);
+        let msg = r.unwrap_err();
+        assert!(msg.starts_with("error:"), "error message must start with 'error:': {msg}");
+        assert!(msg.contains("D0_MASK"), "error must mention D0_MASK: {msg}");
+
+        // D0_MASK itself is valid (boundary)
+        let r_ok = apply_overrides(&mut econ, &[("d0_scaled".to_string(), D0_MASK.to_string())]);
+        assert!(r_ok.is_ok(), "d0_scaled=D0_MASK ({}) must be accepted", D0_MASK);
+        assert_eq!(econ.d0_scaled, D0_MASK);
+    }
+
+    /// GAP-2: pheromone=NaN and pheromone=inf must be rejected before the sim runs.
+    /// f32::from_str parses "NaN"/"inf" successfully; a NaN in the signal field poisons telemetry.
+    #[test]
+    fn pheromone_nan_inf_is_error() {
+        let mut econ = EconParams::default();
+
+        let r_nan = apply_overrides(&mut econ, &[("pheromone".to_string(), "NaN".to_string())]);
+        assert!(r_nan.is_err(), "pheromone=NaN must return Err");
+        let msg_nan = r_nan.unwrap_err();
+        assert!(msg_nan.starts_with("error:"), "error must start with 'error:': {msg_nan}");
+        assert!(msg_nan.contains("finite"), "error must mention 'finite': {msg_nan}");
+
+        let r_inf = apply_overrides(&mut econ, &[("pheromone".to_string(), "inf".to_string())]);
+        assert!(r_inf.is_err(), "pheromone=inf must return Err");
+        assert!(r_inf.unwrap_err().starts_with("error:"));
+
+        let r_neg_inf =
+            apply_overrides(&mut econ, &[("pheromone".to_string(), "-inf".to_string())]);
+        assert!(r_neg_inf.is_err(), "pheromone=-inf must return Err");
+        assert!(r_neg_inf.unwrap_err().starts_with("error:"));
+
+        // 0.0 is valid (turns off pheromone)
+        let r_ok = apply_overrides(&mut econ, &[("pheromone".to_string(), "0.0".to_string())]);
+        assert!(r_ok.is_ok(), "pheromone=0.0 must be accepted");
     }
 
     // ── Existing tests ────────────────────────────────────────────────────────────────────────────
