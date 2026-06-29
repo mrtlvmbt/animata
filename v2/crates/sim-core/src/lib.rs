@@ -33,7 +33,7 @@ pub use components::{
 };
 pub use det_map::DetMap;
 pub use energy::EnergyLedger;
-pub use genome::{isqrt, size_pow_three_quarters, Genome};
+pub use genome::{isqrt, size_pow_three_quarters, Genome, Phenotype};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
@@ -295,6 +295,8 @@ impl Sim {
             // change EnergyLedger.initial: quota=0 contributes nothing to the conserved sum.
             // Non-dprime configs do NOT spawn MineralQuota → their archetype is unchanged →
             // byte-identical goldens (no extra entity column, no hash perturbation).
+            // E-1: decode the founder genome once at birth; Ф0 always returns Some.
+            let founder_phenotype = founder.decode().expect("Ф0 founder decode must succeed");
             if has_mineral {
                 w.spawn((
                     Position(p),
@@ -303,6 +305,7 @@ impl Sim {
                     VelocityNext::default(),
                     Energy(config.founder_energy),
                     founder,
+                    founder_phenotype, // E-1: cached cold phenotype
                     SpeciesId(0),
                     Sensors::default(),
                     Intent::default(),
@@ -318,6 +321,7 @@ impl Sim {
                     VelocityNext::default(),
                     Energy(config.founder_energy),
                     founder,
+                    founder_phenotype, // E-1: cached cold phenotype
                     SpeciesId(0),
                     Sensors::default(),
                     Intent::default(),

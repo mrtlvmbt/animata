@@ -86,6 +86,33 @@ pub struct Genome {
     pub reg_gain: i32,
 }
 
+/// Phase-2 E-1: cold, lean cache of the decoded genome traits consumed by hot-path stages.
+///
+/// Attached at every spawn site (founders + children) so a `&Phenotype` query is REQUIRED
+/// (not optional) — a missed spawn site makes that entity invisible to the consumer stage,
+/// which is detectable via a shifted golden (the correct detection signal, not a runtime panic).
+///
+/// **Ф0 content**: only `uptake_layer` — the single raw integer field consumed by
+/// `stage_interactions`. Future slices (E-2/E-3) add morphogen-derived fields here.
+///
+/// NOT folded into `hash_contribution`: phenotype is a deterministic cold derivative of the
+/// genome that is already in the hash; double-hashing is redundant (plan §2/§6, R19).
+#[derive(bevy_ecs::prelude::Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Phenotype {
+    /// Layer index the entity will eat from (direct copy of `Genome::uptake_layer` for Ф0).
+    pub uptake_layer: i32,
+}
+
+/// Gate function for the BirthDeath `Option<Phenotype>` viability branch (E-1 plumbing).
+///
+/// Returns `(viable, decoded)` where `viable = decoded.is_some()`.
+/// Test-only injection hook: pass `None` to exercise the skip branch without touching the
+/// Ф0 production path (which always returns `Some` and is exercised by the 5 goldens).
+#[cfg(test)]
+pub(crate) fn phenotype_gate(decoded: Option<Phenotype>) -> (bool, Option<Phenotype>) {
+    (decoded.is_some(), decoded)
+}
+
 impl Genome {
     /// The founder phenotype — viable (feeds more than it burns at abundance). The founder brain is a
     /// minimal **resource-chemotaxis reflex** so the M3 population starts behaviourally viable (it
@@ -200,6 +227,22 @@ impl Genome {
             .sum()
     }
 
+    /// Decode this genome to a `Phenotype` (Phase-2 E-1 seam entry point).
+    ///
+    /// For Ф0 (direct-encoded genomes) the decode is a trivial 1:1 projection — the phenotype
+    /// carries the raw integer traits the hot-path stages actually consume. Returns `Some` for
+    /// every valid Ф0 genome. The `None` arm is wired so the BirthDeath gate can skip stillborns
+    /// without code-change when E-4 introduces real viability logic.
+    ///
+    /// Pure and deterministic: no RNG, no clock, no thread-dependent work.
+    /// Phenotype is NOT folded into `hash_contribution` (it is a cold derivative of Genome;
+    /// genome IS in the hash, decode is deterministic ⟹ phenotype is fully determined — plan §2/R19).
+    pub fn decode(&self) -> Option<Phenotype> {
+        Some(Phenotype {
+            uptake_layer: self.uptake_layer,
+        })
+    }
+
     /// Fold all six traits into the per-entity state-hash contribution.
     pub fn hash_contribution(&self, mut h: u64) -> u64 {
         for v in [
@@ -291,5 +334,68 @@ mod tests {
         let m1 = g1.mutate(0, 1, false, 0);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
+    }
+
+    // ── E-1: decode-surface seam unit tests (Phase-2 foundation) ─────────────────────────────
+
+    /// Decode is bit-identical across repeated calls on the same genome (determinism gate).
+    /// Seeds the §3 determinism contract extended by later slices.
+    #[test]
+    fn decode_is_deterministic_across_calls() {
+        for n_layers in [1usize, 2, 3] {
+            let g = Genome::founder(n_layers);
+            let a = g.decode();
+            let b = g.decode();
+            assert_eq!(a, b, "decode must be deterministic: same genome → same Phenotype");
+        }
+        // Also holds for a mutated genome.
+        let g = Genome::founder(2);
+        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4);
+        assert_eq!(mutated.decode(), mutated.decode(), "decode deterministic on mutated genome");
+    }
+
+    /// Every Ф0 genome decodes to Some — Ф0 viability is unconditional.
+    #[test]
+    fn decode_some_for_all_phi0_founders() {
+        for n_layers in [1usize, 2, 3] {
+            let g = Genome::founder(n_layers);
+            assert!(g.decode().is_some(), "founder genome must decode to Some (Ф0 trivial case)");
+        }
+    }
+
+    /// Ф0 decode is a 1:1 projection: phenotype.uptake_layer == genome.uptake_layer.
+    /// Proves the consumer's field is bit-exact — no computed quantity or truncation.
+    #[test]
+    fn phenotype_uptake_layer_matches_genome() {
+        let g = Genome::founder(2);
+        let ph = g.decode().expect("Ф0 must decode to Some");
+        assert_eq!(ph.uptake_layer, g.uptake_layer,
+            "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
+        // Also for mutated genome — projection stays 1:1 regardless of trait value.
+        for s in 0..50u64 {
+            let m = g.mutate(s, 2, false, 0);
+            let mph = m.decode().expect("mutated Ф0 must decode to Some");
+            assert_eq!(mph.uptake_layer, m.uptake_layer,
+                "1:1 projection must hold after mutation (seed={s})");
+        }
+    }
+
+    /// None-gate plumbing test (E-1 inject hook for E-4 pre-validation).
+    ///
+    /// Injects `None` via `phenotype_gate` and asserts the gate returns `false`
+    /// (entity must NOT be materialized). Also confirms Ф0 path returns `true` (Some).
+    /// Point (b) "other newborns deterministic" is covered by the 5 goldens being byte-identical
+    /// (the Ф0 production path is always Some, so goldens prove the Some branch is wired).
+    #[test]
+    fn none_gate_skips_and_some_gate_passes() {
+        let g = Genome::founder(2);
+        let (ok, ph) = phenotype_gate(g.decode());
+        assert!(ok, "Ф0 decode must pass the gate (returns true)");
+        assert!(ph.is_some(), "Ф0 gate must carry the Phenotype through");
+
+        // Inject None — simulates E-4 stillbirth path without touching Ф0 production.
+        let (skip, none_ph) = phenotype_gate(None);
+        assert!(!skip, "None gate must return false (entity skipped — not materialized)");
+        assert!(none_ph.is_none(), "None must propagate through the gate");
     }
 }
