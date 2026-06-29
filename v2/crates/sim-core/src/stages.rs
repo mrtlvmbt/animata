@@ -168,6 +168,11 @@ pub fn stage_metabolism(
     // expressed_capacity=0 → photo_cost=0 (the selective saving). Non-dprime: photo_gain≡0 →
     // expressed_capacity=0 → cost=0, byte-identical isolation. When light=None: l_now=0 but
     // photo_gain=0 for all non-dprime genomes → early exit 0 in expressed_capacity anyway.
+    //
+    // R20 alignment invariant (enforced by Sim::new hard assert): day_ticks and period_ticks are
+    // exact multiples of metab_period → every n-tick lump window is wholly within one phase →
+    // l_now sampled once at the metab tick is representative of the entire lump. The (eff·n)/den
+    // lump is N-invariant only under this alignment; Sim::new rejects configs that violate it.
     let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
     let mut photo_cost_this_event: i64 = 0;
     for (g, mut e) in &mut q {

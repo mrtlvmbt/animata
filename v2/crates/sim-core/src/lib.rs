@@ -209,6 +209,26 @@ impl Sim {
         // Pass econ.m_field (the INDEPENDENT expected value) — not field.m_field() (which would
         // compare the field to itself, a tautology that can never fail). Fix for M1/F1.
         field.check_meta(econ.m_field).expect("field M_field meta check (R8)");
+        // D′-2b R20 alignment guard: when a light field is present, day-night phase boundaries
+        // MUST align with the metabolism period so every n-tick metab window falls wholly within
+        // one phase. `stage_metabolism` samples L(t) ONCE at the start of each n-tick lump and
+        // charges (eff·n)/den — this is R20-invariant ONLY when L(t) is constant across the window.
+        // If a window straddles a day↔night boundary, eff is unrepresentative of the full period
+        // and the cost is deterministic-but-wrong (trajectory-corrupting). Hard assert (not
+        // debug_assert): CI runs --release; a debug_assert would be invisible in the green gate.
+        // dprime_config satisfies: day_ticks=50, period_ticks=100, metab_period=2 → 50%2=0, 100%2=0.
+        if let Some(ls) = econ.light {
+            let n = econ.metab_period.max(1);
+            assert!(
+                ls.day_ticks % n == 0 && ls.period_ticks % n == 0,
+                "R20 alignment violated: light phase boundaries must align with \
+                 metab_period={n} so every n-tick cost window is wholly within one phase. \
+                 day_ticks={dt} % {n} = {dr}, period_ticks={pt} % {n} = {pr}. \
+                 Fix: ensure day_ticks and period_ticks are exact multiples of metab_period.",
+                dt = ls.day_ticks, dr = ls.day_ticks % n,
+                pt = ls.period_ticks, pr = ls.period_ticks % n,
+            );
+        }
 
         let mut w = World::new();
         w.insert_resource(SimClock { seed: config.seed, tick: 0 });

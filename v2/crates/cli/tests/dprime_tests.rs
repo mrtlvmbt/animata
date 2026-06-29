@@ -291,6 +291,27 @@ fn dprime_d2a_viability_reband() {
 //     - reg_gain=0 (founder) → expressed_capacity = photo_gain unconditionally (D′-2a path).
 //   So until reg_gain mutates non-zero, every dprime cell behaves identically to D′-2a.
 
+/// R20 alignment guard: a misaligned light config (metab window straddles day↔night boundary)
+/// must panic at `Sim::new` construction. Hard assert fires in release too (not debug_assert).
+///
+/// Config: period_ticks=3, day_ticks=1, metab_period=2 → day_ticks(1) % 2 = 1 ≠ 0 → misaligned.
+/// A metab window at ticks [0,1] spans both phases (day=0, night=1).
+#[test]
+#[should_panic(expected = "R20 alignment violated")]
+fn dprime_d2b_r20_alignment_guard_fires() {
+    use cli::default_config;
+    use sim_core::{EconParams, LightSpec, SimConfig};
+    let bad = SimConfig {
+        econ: EconParams {
+            light: Some(LightSpec { l_max: 100, period_ticks: 3, day_ticks: 1, km_photo: 30 }),
+            metab_period: 2,
+            ..EconParams::default()
+        },
+        ..default_config(1)
+    };
+    build_sim(bad); // must panic with R20 alignment message
+}
+
 /// (g) Regulation-active pure-fn tooth (D′-2b).
 ///
 /// DETERMINISTIC — a unit test on `expressed_capacity` with hand-constructed genomes.
