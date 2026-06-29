@@ -139,6 +139,17 @@ pub struct Telemetry {
     /// (photo_gain ≡ 0 there → cost inert). Checked by the non-inertness tooth (must be > 0 after
     /// ≥6000 ticks on dprime seed 0xA11A_2A11 where photo sweeps). Observational only.
     pub photo_cost_total: i64,
+
+    // ── D′-2c: reg-activity telemetry ────────────────────────────────────────────────────────────
+    /// D′-2c: count of live agents with `reg_gain ≠ 0` (regulation ACTIVE) this tick.
+    /// Computed in stage_observe from all live genomes. Divide by `population` to get the fraction.
+    /// 0 for non-dprime configs (reg_gain stays 0 there — has_light=false blocks mutation).
+    /// Observational only — never fed to tick or state hash. No golden is re-pinned.
+    pub reg_active_count: i64,
+    /// D′-2c: count of live agents with `reg_gain > 0` (day-phase expression gate active).
+    /// A sub-count of `reg_active_count`; agents with `reg_gain < 0` are night-phase regulators.
+    /// Observational only — never fed to tick or state hash.
+    pub reg_active_day_count: i64,
 }
 
 #[cfg(feature = "perf")]
