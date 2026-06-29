@@ -52,6 +52,13 @@ pub struct Genome {
     /// Conserved layer to excrete to (0..=n_layers-1). Founder excretes to layer 1 at L≥2 (seeds
     /// cross-feeding gradient); at L=1 this is 0 (closed mono-layer loop, no out-of-bounds).
     pub excrete_layer: i32,
+    /// **Test-only injection flag** for the E-1/E-4 decode-gate plumbing (never set in Ф0 production).
+    /// When `true`, `decode()` returns `None` — exercises the skip path in `stage_birth_death` without
+    /// introducing a real viability filter (that is E-4). The flag is heritable: `mutate()` copies
+    /// `*self`, so children of a poisoned parent also carry it, making the entire lineage stillborn.
+    /// `#[cfg(test)]` → zero cost, zero size, zero impact outside test builds.
+    #[cfg(test)]
+    pub(crate) force_decode_none: bool,
     /// Evolved brain weights for the FIXED topology (D-Brain-1) — `int8` Q1.7, packed `W_ih·W_hh·W_ho`
     /// (layout = the shared [`crate::brain_w_ih`]/`brain_w_hh`/`brain_w_ho` indices). Inherited and
     /// mutated exactly like the six Ф0 traits; the `brain` crate reads this vector during inference.
@@ -103,15 +110,6 @@ pub struct Phenotype {
     pub uptake_layer: i32,
 }
 
-/// Gate function for the BirthDeath `Option<Phenotype>` viability branch (E-1 plumbing).
-///
-/// Returns `(viable, decoded)` where `viable = decoded.is_some()`.
-/// Test-only injection hook: pass `None` to exercise the skip branch without touching the
-/// Ф0 production path (which always returns `Some` and is exercised by the 5 goldens).
-#[cfg(test)]
-pub(crate) fn phenotype_gate(decoded: Option<Phenotype>) -> (bool, Option<Phenotype>) {
-    (decoded.is_some(), decoded)
-}
 
 impl Genome {
     /// The founder phenotype — viable (feeds more than it burns at abundance). The founder brain is a
@@ -145,6 +143,9 @@ impl Genome {
             // are equidistant from the founder; evolution discovers direction (F7 — no hardcode).
             reg_setpoint: 50,
             reg_gain: 0,
+            // Test-only E-1/E-4 injection flag — always false in production.
+            #[cfg(test)]
+            force_decode_none: false,
         }
     }
 
@@ -238,6 +239,12 @@ impl Genome {
     /// Phenotype is NOT folded into `hash_contribution` (it is a cold derivative of Genome;
     /// genome IS in the hash, decode is deterministic ⟹ phenotype is fully determined — plan §2/R19).
     pub fn decode(&self) -> Option<Phenotype> {
+        // E-1/E-4 test injection: when force_decode_none=true, the gate fires the skip path.
+        // In Ф0 production this branch is compiled OUT entirely (#[cfg(test)]).
+        #[cfg(test)]
+        if self.force_decode_none {
+            return None;
+        }
         Some(Phenotype {
             uptake_layer: self.uptake_layer,
         })
@@ -380,22 +387,45 @@ mod tests {
         }
     }
 
-    /// None-gate plumbing test (E-1 inject hook for E-4 pre-validation).
+    /// None-gate wiring test: proves the REAL `Genome::decode()` — the function called by
+    /// `stage_birth_death` at `let Some(child_phenotype) = child_genome.decode() else { continue; }`
+    /// — returns `None` when the E-4 injection flag is set, and `Some` otherwise.
     ///
-    /// Injects `None` via `phenotype_gate` and asserts the gate returns `false`
-    /// (entity must NOT be materialized). Also confirms Ф0 path returns `true` (Some).
-    /// Point (b) "other newborns deterministic" is covered by the 5 goldens being byte-identical
-    /// (the Ф0 production path is always Some, so goldens prove the Some branch is wired).
+    /// This is NOT a tautology on `Option::is_some()`: it injects `force_decode_none=true`
+    /// into the SAME `decode()` that production calls; the prior `phenotype_gate` wrapper
+    /// was a separate function NOT wired to production (critic finding F1). Removed.
+    ///
+    /// Point (a) — non-materialization: the `let Some(...) else { continue }` in stage_birth_death
+    /// fires `continue`, skipping BOTH mineral and non-mineral spawn sites. The integration test
+    /// `e1_none_gate_suppresses_births` (cli/tests/e1_gate_test.rs) proves this end-to-end.
+    ///
+    /// Point (b) — other newborns deterministic: 5 goldens byte-identical (force_decode_none is
+    /// always `false` in Ф0; `#[cfg(test)]` compiles the branch out in release, and even in test
+    /// builds the false branch is a no-op that leaves decode() deterministic for all normal genomes).
     #[test]
-    fn none_gate_skips_and_some_gate_passes() {
+    fn none_gate_calls_real_decode_and_skips() {
+        // Normal genome (force_decode_none=false): decode() returns Some → gate passes.
         let g = Genome::founder(2);
-        let (ok, ph) = phenotype_gate(g.decode());
-        assert!(ok, "Ф0 decode must pass the gate (returns true)");
-        assert!(ph.is_some(), "Ф0 gate must carry the Phenotype through");
+        assert!(!g.force_decode_none, "founder must have force_decode_none=false");
+        assert!(g.decode().is_some(), "Ф0 genome must decode to Some (gate passes)");
 
-        // Inject None — simulates E-4 stillbirth path without touching Ф0 production.
-        let (skip, none_ph) = phenotype_gate(None);
-        assert!(!skip, "None gate must return false (entity skipped — not materialized)");
-        assert!(none_ph.is_none(), "None must propagate through the gate");
+        // E-4 injection: set force_decode_none=true → THE SAME decode() returns None.
+        // This is the identical function stage_birth_death calls on child_genome.
+        let mut stillborn = Genome::founder(2);
+        stillborn.force_decode_none = true;
+        assert!(stillborn.decode().is_none(),
+            "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
+
+        // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
+        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0);
+        assert!(mutated_child.force_decode_none,
+            "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
+        assert!(mutated_child.decode().is_none(),
+            "inherited flag: child decode() also returns None (lineage-level stillbirth)");
+
+        // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
+        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0);
+        assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
+        assert!(normal_child.decode().is_some(), "normal child decode() must return Some");
     }
 }
