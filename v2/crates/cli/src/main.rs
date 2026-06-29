@@ -1,6 +1,6 @@
 //! Headless CLI driver — M4 perf foundation.
 //!
-//! Usage: `v2-sim [seed [ticks]] [--bench-pop N] [--profile] [--timelapse <interval>]`
+//! Usage: `v2-sim [seed [ticks]] [--bench-pop N] [--profile] [--timelapse <interval>] [--set KEY=VALUE ...]`
 //!
 //! * No flags → default demo (two-run determinism, R14, per-50-tick telemetry).
 //! * `seed ticks` positional → override the defaults (seed as decimal or 0x hex).
@@ -8,36 +8,53 @@
 //! * `--profile`     → print per-stage wall-clock ns (requires `--features perf`).
 //! * `--timelapse I` → emit telemetry as parseable CSV every I ticks instead of
 //!   the default human-readable per-50-tick summary.
+//! * `--set KEY=VALUE` → override one EconParams calibration knob before the run.
+//!   Repeatable (each `--set` overrides one field). Validated before any sim runs;
+//!   invalid keys or out-of-range values exit with `error:` and code 1.
+//!   Whitelisted knobs: km, u_max, base_metab, c_div, e_cell, k_size_metab, k_move_cost,
+//!   k_sense_cost, excrete, recycle_num, speciation_threshold, brain_period, metab_period,
+//!   d0_scaled, pheromone. Structural fields (n_layers, world_dim, …) are rejected.
 //!
 //! **R27**: `dt` is fixed at `DT_MICROS` (1/64 s). Time-acceleration in headless mode means
 //! running ticks as fast as the CPU allows (no vsync). The multi-rate K/N periods
 //! (`EconParams::brain_period` / `metab_period`) are the ONLY per-system rate dials.
 //! A time-scale multiplier on `dt` would violate determinism and is not part of the v2 core.
 
-use cli::{bench_config, build_sim, config_with, default_config, run, run_conserved_hashes, DEFAULT_THREADS};
+use cli::{
+    apply_overrides, bench_config, build_sim, config_with, run, run_conserved_hashes,
+    DEFAULT_THREADS,
+};
 use sim_core::{EconParams, MergeStrategy};
 use telemetry::{compute_with_census, guild_csv_header, guild_csv_row};
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = raw.iter().map(String::as_str).collect();
-    let (seed, ticks, bench_pop, do_profile, timelapse_interval) = parse_args(&args);
+    let (seed, ticks, bench_pop, do_profile, timelapse_interval, sets) = parse_args(&args);
+
+    // Validate ALL overrides once, before any sim run — clean exit on bad params.
+    let mut econ = EconParams::default();
+    if let Err(msg) = apply_overrides(&mut econ, &sets) {
+        eprintln!("{msg}");
+        std::process::exit(1);
+    }
 
     if let Some(n_pop) = bench_pop {
-        run_bench(seed, n_pop, ticks, do_profile);
+        run_bench(seed, n_pop, ticks, do_profile, &sets);
         return;
     }
 
-    run_demo(seed, ticks, do_profile, timelapse_interval);
+    run_demo(seed, ticks, do_profile, timelapse_interval, econ);
 }
 
-/// Parse positional `[seed [ticks]]` plus flags.
-fn parse_args(args: &[&str]) -> (u64, u64, Option<u64>, bool, Option<u64>) {
+/// Parse positional `[seed [ticks]]` plus flags. Returns sets as `Vec<(key, val)>`.
+fn parse_args(args: &[&str]) -> (u64, u64, Option<u64>, bool, Option<u64>, Vec<(String, String)>) {
     let mut seed = 0xA11A_2A11u64;
     let mut ticks = 400u64;
     let mut bench_pop: Option<u64> = None;
     let mut do_profile = false;
     let mut timelapse: Option<u64> = None;
+    let mut sets: Vec<(String, String)> = Vec::new();
     let mut positional = 0usize;
     let mut i = 0usize;
     while i < args.len() {
@@ -58,7 +75,9 @@ fn parse_args(args: &[&str]) -> (u64, u64, Option<u64>, bool, Option<u64>) {
                 }
                 bench_pop = Some(n);
             }
-            "--profile" => { do_profile = true; }
+            "--profile" => {
+                do_profile = true;
+            }
             "--timelapse" => {
                 i += 1;
                 if i >= args.len() {
@@ -75,10 +94,24 @@ fn parse_args(args: &[&str]) -> (u64, u64, Option<u64>, bool, Option<u64>) {
                 }
                 timelapse = Some(interval);
             }
+            "--set" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --set requires a value in KEY=VALUE form");
+                    std::process::exit(1);
+                }
+                let kv = args[i];
+                let eq = kv.find('=').unwrap_or_else(|| {
+                    eprintln!("error: --set value must be KEY=VALUE (no '=' found in {:?})", kv);
+                    std::process::exit(1);
+                });
+                sets.push((kv[..eq].to_string(), kv[eq + 1..].to_string()));
+            }
             arg if !arg.starts_with('-') => {
                 match positional {
                     0 => {
-                        seed = arg.parse()
+                        seed = arg
+                            .parse()
                             .or_else(|_| u64::from_str_radix(arg.trim_start_matches("0x"), 16))
                             .unwrap_or_else(|_| {
                                 eprintln!("error: invalid seed {:?} (expected decimal or 0x hex)", arg);
@@ -105,27 +138,40 @@ fn parse_args(args: &[&str]) -> (u64, u64, Option<u64>, bool, Option<u64>) {
         }
         i += 1;
     }
-    (seed, ticks, bench_pop, do_profile, timelapse)
+    (seed, ticks, bench_pop, do_profile, timelapse, sets)
+}
+
+/// Build a `SimConfig` from `config_with` with `econ` patched in.
+/// When `econ == EconParams::default()` the result is field-for-field identical to
+/// `config_with(seed, threads, merge)` — the no-override path is byte-identical.
+fn patched_cfg(seed: u64, threads: usize, merge: MergeStrategy, econ: EconParams) -> sim_core::SimConfig {
+    let mut cfg = config_with(seed, threads, merge);
+    cfg.econ = econ;
+    cfg
 }
 
 /// Standard demo: two-run determinism, R14 1-vs-N, telemetry loop.
-/// Behaviourally identical to the pre-M4 hard-coded binary when run with no flags.
-fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<u64>) {
-    let econ = EconParams::default();
-    let a = run(default_config(seed), ticks);
-    let b = run(default_config(seed), ticks);
+/// Behaviourally identical to the pre-M4 hard-coded binary when run with no flags (`econ == default()`).
+fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<u64>, econ: EconParams) {
+    // ── Two-run determinism + R14 ────────────────────────────────────────────────────────────────
+    let a = run(patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ), ticks);
+    let b = run(patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ), ticks);
     println!("animata v2 — M4 perf foundation (integer brain + multi-rate)");
     println!(
         "seed={seed:#x} ticks={ticks} sim_threads={DEFAULT_THREADS} K(brain)={} N(metab)={}",
         econ.brain_period, econ.metab_period
     );
     println!("two-run-same-seed identical per tick: {}", a == b);
-    let c1 = run_conserved_hashes(config_with(seed, 1, MergeStrategy::Canonical), ticks);
-    let cn = run_conserved_hashes(config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical), ticks);
+    let c1 = run_conserved_hashes(patched_cfg(seed, 1, MergeStrategy::Canonical, econ), ticks);
+    let cn = run_conserved_hashes(
+        patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ),
+        ticks,
+    );
     println!("R14 conserved hash 1-vs-{DEFAULT_THREADS} identical: {}", c1 == cn);
     println!("final state hash: {:#018x}", a.last().copied().unwrap_or(0));
 
-    let mut sim = build_sim(default_config(seed));
+    // ── Telemetry loop ───────────────────────────────────────────────────────────────────────────
+    let mut sim = build_sim(patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ));
     let mut pop_min = u64::MAX;
     let mut pop_max = 0u64;
 
@@ -188,6 +234,17 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
     }
     println!("population range over run: [{pop_min}, {pop_max}] (bounded, no extinction/explosion)");
 
+    // ── Final-horizon summary (always printed; parseable key=value line for batch reducers) ──────
+    {
+        let tele = sim.telemetry();
+        let rep = compute_with_census(&tele.samples, &tele.species_census, sim.econ().detritus_layer);
+        let resid = sim.conservation_residual();
+        println!(
+            "HORIZON tick={ticks} pop={} resid={resid} size_mean={:.4} trait_var_diversity={:.6} shannon={:.6} simpson={:.6}",
+            rep.population, rep.means[3], rep.diversity, rep.shannon, rep.simpson,
+        );
+    }
+
     if do_profile {
         #[cfg(feature = "perf")]
         {
@@ -205,9 +262,16 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
 }
 
 /// Bench scenario: world_dim=128, `n_pop` founders, `ticks` ticks.
+/// Calibration overrides in `sets` are threaded into the bench econ (structural fields are already
+/// rejected by `parse_args`/`main` validation; `world_dim=128` is preserved by `bench_config`).
 /// Prints per-stage perf summary when `--features perf`; exits cleanly.
-fn run_bench(seed: u64, n_pop: u64, ticks: u64, do_profile: bool) {
-    let cfg = bench_config(seed, n_pop); // build once; reuse for both print and sim (F4)
+fn run_bench(seed: u64, n_pop: u64, ticks: u64, do_profile: bool, sets: &[(String, String)]) {
+    let mut cfg = bench_config(seed, n_pop);
+    // Thread calibration overrides into bench econ (already validated; world_dim=128 stays
+    // because world_dim is in the structural-reject list and can't appear in `sets`).
+    if !sets.is_empty() {
+        apply_overrides(&mut cfg.econ, sets).expect("overrides already validated in main");
+    }
     println!(
         "animata v2 bench — seed={seed:#x} n_founders={n_pop} ticks={ticks} world_dim={}",
         cfg.econ.world_dim

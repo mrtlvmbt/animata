@@ -4,7 +4,7 @@
 
 use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
-use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView};
+use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
 use world::NoiseWorld;
 
 /// Fixed timestep dt = 1/64 s, integer microseconds (the loop driver does no float).
@@ -218,6 +218,178 @@ pub fn run_conserved_hashes(config: SimConfig, ticks: u64) -> Vec<u64> {
     hashes
 }
 
+// ── EconParams override helper ────────────────────────────────────────────────────────────────────
+
+/// Max `u_max` accepted by `--set` (the overflow-safe cap documented in `stages.rs`).
+const U_MAX_CAP: i64 = 220;
+
+/// Apply `key=value` overrides to `econ`, validating each against the calibration whitelist and
+/// a safe numeric range. Structural fields (`n_layers`, `world_dim`, `m_sim`, `m_field`,
+/// `detritus_layer`, `detritus_frac_num`) are explicitly rejected. Returns `Err(msg)` on the
+/// first bad key or bad value — caller exits non-zero with that message BEFORE any sim runs.
+///
+/// Called ONCE before the sim starts; `expect()`-safe at every subsequent build site.
+pub fn apply_overrides(econ: &mut EconParams, sets: &[(String, String)]) -> Result<(), String> {
+    for (key, val) in sets {
+        match key.as_str() {
+            "km" => {
+                let v = p::<i64>(key, val)?;
+                if v <= 0 {
+                    return Err(format!(
+                        "error: --set km={v}: km must be > 0 (km=0 causes 0/0 in uptake U(R)=u_max·R/(R+km))"
+                    ));
+                }
+                econ.km = v;
+            }
+            "u_max" => {
+                let v = p::<i64>(key, val)?;
+                if v <= 0 || v > U_MAX_CAP {
+                    return Err(format!(
+                        "error: --set u_max={v}: u_max must be in [1, {U_MAX_CAP}] ({U_MAX_CAP} is the overflow-safe cap in stages.rs)"
+                    ));
+                }
+                econ.u_max = v;
+            }
+            "base_metab" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set base_metab={v}: must be ≥ 0"));
+                }
+                econ.base_metab = v;
+            }
+            "c_div" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set c_div={v}: must be ≥ 0"));
+                }
+                econ.c_div = v;
+            }
+            "e_cell" => {
+                let v = p::<i64>(key, val)?;
+                if v <= 0 {
+                    return Err(format!("error: --set e_cell={v}: must be > 0 (zero cell energy is non-viable)"));
+                }
+                econ.e_cell = v;
+            }
+            "k_size_metab" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set k_size_metab={v}: must be ≥ 0"));
+                }
+                econ.k_size_metab = v;
+            }
+            "k_move_cost" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set k_move_cost={v}: must be ≥ 0"));
+                }
+                econ.k_move_cost = v;
+            }
+            "k_sense_cost" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set k_sense_cost={v}: must be ≥ 0"));
+                }
+                econ.k_sense_cost = v;
+            }
+            "excrete" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set excrete={v}: must be ≥ 0"));
+                }
+                econ.excrete = v;
+            }
+            "recycle_num" => {
+                let v = p::<i64>(key, val)?;
+                if !(0..=RECYCLE_DEN).contains(&v) {
+                    return Err(format!(
+                        "error: --set recycle_num={v}: must be in [0, {RECYCLE_DEN}] (RECYCLE_DEN)"
+                    ));
+                }
+                econ.recycle_num = v;
+            }
+            "speciation_threshold" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set speciation_threshold={v}: must be ≥ 0"));
+                }
+                econ.speciation_threshold = v;
+            }
+            "brain_period" => {
+                let v = p::<u64>(key, val)?;
+                if v == 0 {
+                    return Err(format!("error: --set brain_period={v}: must be ≥ 1 (0 would divide-by-zero in the brain phase)"));
+                }
+                econ.brain_period = v;
+            }
+            "metab_period" => {
+                let v = p::<u64>(key, val)?;
+                if v == 0 {
+                    return Err(format!("error: --set metab_period={v}: must be ≥ 1 (0 would divide-by-zero in the metabolism phase)"));
+                }
+                econ.metab_period = v;
+            }
+            "d0_scaled" => {
+                let v = p::<u64>(key, val)?;
+                if v > D0_MASK {
+                    return Err(format!(
+                        "error: --set d0_scaled={v}: must be ≤ D0_MASK ({D0_MASK}); \
+                         d0_scaled > D0_MASK makes kill condition always true → instant extinction"
+                    ));
+                }
+                econ.d0_scaled = v;
+            }
+            "pheromone" => {
+                let v = p::<f32>(key, val)?;
+                if !v.is_finite() {
+                    return Err(format!(
+                        "error: --set pheromone={v}: must be finite (NaN/inf poison the signal field)"
+                    ));
+                }
+                if v < 0.0 {
+                    return Err(format!("error: --set pheromone={v}: must be ≥ 0.0"));
+                }
+                econ.pheromone = v;
+            }
+            // ── Explicitly rejected structural fields ──────────────────────────────────────────────
+            "n_layers" | "world_dim" | "m_sim" | "m_field" | "detritus_layer"
+            | "detritus_frac_num" => {
+                return Err(format!(
+                    "error: --set {key}=…: structural field — not overridable via --set. \
+                     Reason: n_layers is overwritten by build_sim; world_dim/m_sim/m_field break \
+                     R8 meta invariants or risk OOM; detritus_* require matching layer_specs."
+                ));
+            }
+            // mutation_rate is a genome/trait field, not EconParams
+            "mutation_rate" => {
+                return Err(
+                    "error: --set mutation_rate=…: mutation_rate is an evolved genome trait \
+                     (Genome::mutation_rate), not an EconParams calibration knob. \
+                     It cannot be overridden via --set."
+                    .to_string(),
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "error: --set {key}=…: not an overridable calibration knob. \
+                     Valid keys: km, u_max, base_metab, c_div, e_cell, k_size_metab, \
+                     k_move_cost, k_sense_cost, excrete, recycle_num, speciation_threshold, \
+                     brain_period, metab_period, d0_scaled, pheromone."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse a `--set KEY=VALUE` value string into type `T`. Returns `Err` with a clean error message.
+fn p<T: std::str::FromStr>(key: &str, val: &str) -> Result<T, String>
+where
+    T::Err: std::fmt::Display,
+{
+    val.parse().map_err(|e| format!("error: --set {key}={val}: invalid value: {e}"))
+}
+
 /// The fixed-dt loop driver (R9): accumulate wall-frame time, drain in fixed `dt` steps, capped per
 /// frame against the spiral of death. Integer-only.
 pub struct LoopDriver {
@@ -248,6 +420,150 @@ impl LoopDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #179 apply_overrides tests ────────────────────────────────────────────────────────────────
+
+    // Helper: build a SimConfig with the given `(key, val)` overrides applied on top of default.
+    fn cfg_with_sets(seed: u64, sets: &[(&str, &str)]) -> SimConfig {
+        let mut econ = EconParams::default();
+        let kv: Vec<(String, String)> =
+            sets.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        apply_overrides(&mut econ, &kv).expect("test sets must be valid");
+        let mut cfg = config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical);
+        cfg.econ = econ;
+        cfg
+    }
+
+    /// (1) No-override path must be byte-identical to `default_config` every tick.
+    #[test]
+    fn no_override_is_byte_identical_to_default() {
+        let seed = 1;
+        let ticks = 30;
+        let default_hashes = run(default_config(seed), ticks);
+        // apply_overrides with empty set → econ unchanged → same SimConfig
+        let override_hashes = run(cfg_with_sets(seed, &[]), ticks);
+        assert_eq!(
+            default_hashes, override_hashes,
+            "no-override path must produce bit-identical hash stream"
+        );
+    }
+
+    /// (2) An override moves the trajectory AND is reproducible across two identical runs.
+    /// Uses `base_metab=10` (default=2): 5× higher energy drain → clear population divergence
+    /// without waiting for km-saturated uptake to manifest (km is in the whitelist but field is
+    /// always resource-limited in the default 64×64 config, making km changes invisible).
+    #[test]
+    fn override_moves_trajectory_and_is_reproducible() {
+        let seed = 1;
+        let ticks = 30;
+        let default_hashes = run(default_config(seed), ticks);
+        let sets = &[("base_metab", "10")]; // 5× higher drain → clear divergence from default
+        let run1 = run(cfg_with_sets(seed, sets), ticks);
+        let run2 = run(cfg_with_sets(seed, sets), ticks);
+        assert_ne!(
+            default_hashes, run1,
+            "base_metab=10 override must produce a different hash stream from default"
+        );
+        assert_eq!(run1, run2, "same override must be reproducible");
+    }
+
+    /// (3) R14 — the 1-vs-N conserved hash check must run on the OVERRIDDEN econ, not default.
+    /// Uses `base_metab=10` to force visible divergence from the no-override sim.
+    #[test]
+    fn r14_conserved_hash_uses_overridden_econ() {
+        let seed = 1;
+        let ticks = 30;
+        let mut econ = EconParams::default();
+        apply_overrides(&mut econ, &[("base_metab".to_string(), "10".to_string())]).unwrap();
+
+        let mut cfg1 = config_with(seed, 1, MergeStrategy::Canonical);
+        cfg1.econ = econ;
+        let c1 = run_conserved_hashes(cfg1, ticks);
+
+        let mut cfgn = config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical);
+        cfgn.econ = econ;
+        let cn = run_conserved_hashes(cfgn, ticks);
+
+        assert_eq!(c1, cn, "R14: conserved hashes must match across thread counts under override");
+
+        // Verify the override actually changed the sim (not silently running default econ).
+        let default_c1 = run_conserved_hashes(config_with(seed, 1, MergeStrategy::Canonical), ticks);
+        assert_ne!(c1, default_c1, "R14 check must have used the overridden econ, not the default");
+    }
+
+    /// (4) Out-of-range value returns an `error:`-prefixed message, NOT a panic.
+    #[test]
+    fn out_of_range_returns_error_not_panic() {
+        let mut econ = EconParams::default();
+        // km=0 violates km > 0
+        let r = apply_overrides(&mut econ, &[("km".to_string(), "0".to_string())]);
+        assert!(r.is_err(), "km=0 must return Err");
+        assert!(
+            r.unwrap_err().starts_with("error:"),
+            "error message must start with 'error:'"
+        );
+
+        // u_max=221 violates u_max <= 220
+        let r2 = apply_overrides(&mut econ, &[("u_max".to_string(), "221".to_string())]);
+        assert!(r2.is_err(), "u_max=221 must return Err");
+        assert!(r2.unwrap_err().starts_with("error:"));
+
+        // structural field rejected
+        let r3 = apply_overrides(&mut econ, &[("world_dim".to_string(), "256".to_string())]);
+        assert!(r3.is_err(), "world_dim must be rejected");
+        assert!(r3.unwrap_err().starts_with("error:"));
+
+        // completely unknown key
+        let r4 = apply_overrides(&mut econ, &[("nonexistent".to_string(), "1".to_string())]);
+        assert!(r4.is_err(), "unknown key must return Err");
+        assert!(r4.unwrap_err().starts_with("error:"));
+    }
+
+    /// GAP-1: d0_scaled > D0_MASK must be rejected before the sim runs.
+    /// d0_scaled > D0_MASK makes `(r & D0_MASK) < d0_scaled` always true → 100% kill every tick.
+    #[test]
+    fn d0_scaled_above_mask_is_error() {
+        let mut econ = EconParams::default();
+        let over = (D0_MASK + 1).to_string();
+        let r = apply_overrides(&mut econ, &[("d0_scaled".to_string(), over.clone())]);
+        assert!(r.is_err(), "d0_scaled={} (> D0_MASK={}) must return Err", over, D0_MASK);
+        let msg = r.unwrap_err();
+        assert!(msg.starts_with("error:"), "error message must start with 'error:': {msg}");
+        assert!(msg.contains("D0_MASK"), "error must mention D0_MASK: {msg}");
+
+        // D0_MASK itself is valid (boundary)
+        let r_ok = apply_overrides(&mut econ, &[("d0_scaled".to_string(), D0_MASK.to_string())]);
+        assert!(r_ok.is_ok(), "d0_scaled=D0_MASK ({}) must be accepted", D0_MASK);
+        assert_eq!(econ.d0_scaled, D0_MASK);
+    }
+
+    /// GAP-2: pheromone=NaN and pheromone=inf must be rejected before the sim runs.
+    /// f32::from_str parses "NaN"/"inf" successfully; a NaN in the signal field poisons telemetry.
+    #[test]
+    fn pheromone_nan_inf_is_error() {
+        let mut econ = EconParams::default();
+
+        let r_nan = apply_overrides(&mut econ, &[("pheromone".to_string(), "NaN".to_string())]);
+        assert!(r_nan.is_err(), "pheromone=NaN must return Err");
+        let msg_nan = r_nan.unwrap_err();
+        assert!(msg_nan.starts_with("error:"), "error must start with 'error:': {msg_nan}");
+        assert!(msg_nan.contains("finite"), "error must mention 'finite': {msg_nan}");
+
+        let r_inf = apply_overrides(&mut econ, &[("pheromone".to_string(), "inf".to_string())]);
+        assert!(r_inf.is_err(), "pheromone=inf must return Err");
+        assert!(r_inf.unwrap_err().starts_with("error:"));
+
+        let r_neg_inf =
+            apply_overrides(&mut econ, &[("pheromone".to_string(), "-inf".to_string())]);
+        assert!(r_neg_inf.is_err(), "pheromone=-inf must return Err");
+        assert!(r_neg_inf.unwrap_err().starts_with("error:"));
+
+        // 0.0 is valid (turns off pheromone)
+        let r_ok = apply_overrides(&mut econ, &[("pheromone".to_string(), "0.0".to_string())]);
+        assert!(r_ok.is_ok(), "pheromone=0.0 must be accepted");
+    }
+
+    // ── Existing tests ────────────────────────────────────────────────────────────────────────────
 
     #[test]
     fn driver_caps_steps() {
