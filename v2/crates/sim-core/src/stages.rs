@@ -188,9 +188,11 @@ pub fn stage_metabolism(
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
         ledger.dissipated += actual;
-        // Track how much of the actual dissipation was photo-cost (capped same as total).
-        // Safe: photo_cost ≤ cost and actual ≤ cost, so photo_cost.min(actual) ≥ 0.
-        photo_cost_this_event += photo_cost.min(actual);
+        // Track the photo share of actual dissipation (proportional — not a naive min).
+        // When energy is short (actual < cost), the photo share is photo_cost·actual/cost,
+        // not min(photo_cost, actual) which overstates it. D′-2c measures regulated vs
+        // constitutive cost savings off this counter, so accuracy under deficit matters.
+        photo_cost_this_event += if cost > 0 { photo_cost * actual / cost } else { 0 };
     }
     // Accumulate cumulative photo-cost (non-inertness tooth: must be > 0 over a long dprime run).
     tel.photo_cost_total += photo_cost_this_event;

@@ -224,9 +224,9 @@ const VIAB_FLOOR_D2A: u64 = 50;
 
 /// (e) Non-inertness: total photo-machinery cost dissipated > 0 over TICKS_LONG on SEED_DPRIME2.
 ///
-/// Rationale: cost formula `(NUM·gain·n)/DEN` truncates to 0 for `gain < DEN/n = 8` (NUM=1,
-/// DEN=16, n=2). At TICKS_LONG, the photo sweep (known for this seed ~tick 5000) should have
-/// produced cells with `photo_gain ≥ 8` → non-zero charge. If the total is 0, the cost is
+/// Rationale: cost formula `(NUM·gain·n)/DEN` truncates to 0 for `gain < DEN/n = 8/2 = 4`
+/// (NUM=1, DEN=8, n=2). At TICKS_LONG, the photo sweep (known for this seed ~tick 5000) should
+/// have produced cells with `photo_gain ≥ 4` → non-zero charge. If the total is 0, the cost is
 /// silently inert across the whole run — a slice failure, not a green CI.
 ///
 /// Heavy test — release only (TICKS_LONG × ~population per tick).
