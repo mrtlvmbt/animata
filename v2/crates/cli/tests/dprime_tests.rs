@@ -1,4 +1,4 @@
-//! D′-1 conservation, determinism, oscillation, and viability acceptance teeth (issue #177).
+//! D′-1 + D′-2a conservation, determinism, oscillation, viability, and cost teeth (issues #177, #181).
 //!
 //! PRE-DECLARED FALSIFIABLE NUMERICS (anti-self-certification, doc54 §2 — declared BEFORE
 //! measuring; do NOT weaken post-hoc to force green):
@@ -195,4 +195,80 @@ fn dprime_viability_and_photo_nontrivial() {
         assert!(found_day, "no day tick found in one period (period_ticks={})", spec.period_ticks);
         assert!(found_night, "no night tick found in one period (period_ticks={})", spec.period_ticks);
     }
+}
+
+// ── D′-2a: photo-machinery expression cost teeth ─────────────────────────────────────────────────
+//
+// PRE-DECLARED gate constants (declared BEFORE measuring; do NOT weaken post-hoc):
+//
+//   (e) Non-inertness: total photo-machinery cost dissipated > 0 over TICKS_LONG=8000 ticks on
+//       the canonical seed 0xA11A_2A11. This seed's photo sub-population sweeps ~tick 5000
+//       (PM probe), so by 8000 ticks many cells have photo_gain above the truncation threshold
+//       (NUM=1, DEN=16, n=2 → threshold gain=8). A green CI with cost always 0 would be a
+//       silent slice failure — this tooth makes that impossible to ship.
+//
+//   (f) D′-2a viability re-band (direction: DOWN from D′-1). Cost lowers net energy → slightly
+//       lower N*. Pre-declared floor: N̄ ≥ VIAB_FLOOR_D2A = 50 at TICKS_LONG ticks on the
+//       same canonical seed. If cost collapses the population (N < 50), REPORT and do not
+//       silently lower cost — that is a real finding about the calibration's sim-transfer.
+//       Derived: D′-1 floor was 80 at 4000 ticks; direction is down; ±40% from D′-1 N̄ gives
+//       a lower bound; 50 represents "not collapsed" without predicting the exact magnitude.
+
+/// Canonical D′-2 seed: used by the dprime golden + PM probe (photo sweeps by ~tick 5000).
+const SEED_DPRIME2: u64 = 0xA11A_2A11;
+/// Long-horizon tick count for D′-2a teeth. Photo sweep + selection stabilise by ~8000 ticks.
+const TICKS_LONG: u64 = 8_000;
+/// D′-2a viability floor: N̄ ≥ 50 at TICKS_LONG ticks. Direction DOWN from D′-1 (cost reduces
+/// net energy). 50 = "not collapsed" threshold. Pre-declared per doc54 §2 before measuring.
+const VIAB_FLOOR_D2A: u64 = 50;
+
+/// (e) Non-inertness: total photo-machinery cost dissipated > 0 over TICKS_LONG on SEED_DPRIME2.
+///
+/// Rationale: cost formula `(NUM·gain·n)/DEN` truncates to 0 for `gain < DEN/n = 8/2 = 4`
+/// (NUM=1, DEN=8, n=2). At TICKS_LONG, the photo sweep (known for this seed ~tick 5000) should
+/// have produced cells with `photo_gain ≥ 4` → non-zero charge. If the total is 0, the cost is
+/// silently inert across the whole run — a slice failure, not a green CI.
+///
+/// Heavy test — release only (TICKS_LONG × ~population per tick).
+#[test]
+fn dprime_d2a_cost_non_inert() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut sim = build_sim(dprime_config(SEED_DPRIME2));
+    for _ in 0..TICKS_LONG {
+        sim.step();
+    }
+    let total_cost = sim.telemetry().photo_cost_total;
+    assert!(
+        total_cost > 0,
+        "D′-2a non-inertness FAILED: photo_cost_total=0 after {TICKS_LONG} ticks on \
+         seed={SEED_DPRIME2:#x}. Cost formula (NUM·gain·n)/DEN is inert for all cells \
+         (photo_gain never reached threshold ≥8). Either photo sweep failed or NUM/DEN miscalibrated."
+    );
+}
+
+/// (f) D′-2a viability re-band: N̄ ≥ VIAB_FLOOR_D2A at TICKS_LONG on SEED_DPRIME2.
+///
+/// The cost reduces net energy per cell → direction DOWN from D′-1 N̄. Pre-declared floor=50
+/// ("not collapsed"). If cost collapses the population, this fails — report the finding, do NOT
+/// silently reduce the cost to pass.
+///
+/// Heavy test — release only (TICKS_LONG × ~population per tick).
+#[test]
+fn dprime_d2a_viability_reband() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let mut sim = build_sim(dprime_config(SEED_DPRIME2));
+    for _ in 0..TICKS_LONG {
+        sim.step();
+    }
+    let pop = sim.population();
+    assert!(
+        pop >= VIAB_FLOOR_D2A,
+        "D′-2a viability FAILED: seed={SEED_DPRIME2:#x} N̄={pop} < VIAB_FLOOR_D2A={VIAB_FLOOR_D2A} \
+         at t={TICKS_LONG}. Photo-machinery cost may have collapsed the population. \
+         Report this finding — do NOT silently lower the cost. Check calibration sim-transfer."
+    );
 }

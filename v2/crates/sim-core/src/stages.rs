@@ -148,29 +148,54 @@ pub fn stage_move(
 }
 
 // ── Stage 5: Metabolism — base + size^¾ + move + sense cost, fixed-point ledger, N=1 (R20). ────────
+//
+// D′-2a: photo-machinery expression cost added here. Per-tick rate r = (NUM·photo_gain)/DEN;
+// charged every metab event (day AND night — NOT gated on L(t)). Placement: conceptually inside
+// the (base + size + move + sense + r)·n bracket; computed as (NUM·gain·n)/DEN to delay the integer
+// division and avoid truncating to 0 at small gain. This scales linearly with n → R20 holds.
 pub fn stage_metabolism(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
     mut ledger: ResMut<EnergyLedger>,
+    mut tel: ResMut<Telemetry>,
     mut q: Query<(&Genome, &mut Energy)>,
 ) {
     let n = econ.metab_period.max(1);
     if !clock.tick.is_multiple_of(n) {
         return; // multi-rate metabolism (D-Brain-4): runs every N ticks, GLOBAL phase.
     }
+    debug_assert!(econ.photo_cost_den > 0, "photo_cost_den must be > 0");
+    let mut photo_cost_this_event: i64 = 0;
     for (g, mut e) in &mut q {
         // Charge ×N — a lump standing in for the N base ticks since the last metabolism tick, so the
         // economy stays ≈invariant to N and conservation is exact (R15).
-        let cost = (econ.base_metab
+        let base_cost = (econ.base_metab
             + econ.k_size_metab * g.metab_units()
             + econ.k_move_cost * g.move_speed as i64
             + econ.k_sense_cost * g.sense_range as i64)
             * n as i64;
+        // D′-2a: photo-machinery expression cost. Constitutive: paid day AND night (NOT gated on
+        // L(t)). Inert when photo_gain == 0 (all non-dprime genomes → byte-identical isolation).
+        // Charge per event = (NUM · gain · n) / DEN (delayed division avoids truncation at low gain).
+        // Threshold: at NUM=1, DEN=8, n=2 → gain ≥ 4 for non-zero charge (≈ 16.7% of day income).
+        let photo_cost = if g.photo_gain > 0 {
+            (econ.photo_cost_num * g.photo_gain as i64 * n as i64) / econ.photo_cost_den
+        } else {
+            0
+        };
+        let cost = base_cost + photo_cost;
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
         ledger.dissipated += actual;
+        // Track the photo share of actual dissipation (proportional — not a naive min).
+        // When energy is short (actual < cost), the photo share is photo_cost·actual/cost,
+        // not min(photo_cost, actual) which overstates it. D′-2c measures regulated vs
+        // constitutive cost savings off this counter, so accuracy under deficit matters.
+        photo_cost_this_event += if cost > 0 { photo_cost * actual / cost } else { 0 };
     }
+    // Accumulate cumulative photo-cost (non-inertness tooth: must be > 0 over a long dprime run).
+    tel.photo_cost_total += photo_cost_this_event;
 }
 
 /// Monod saturating uptake demand: `U(R) = (u_max·R) / (R+km)`, integer, truncating toward zero.

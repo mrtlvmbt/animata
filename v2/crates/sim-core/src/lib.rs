@@ -133,6 +133,11 @@ pub struct Telemetry {
     /// Written by stage_interactions each tick; 0 for non-dprime configs or when L(t)=0 (night).
     /// Observational only — never fed to the tick or state hash.
     pub photo_produced: i64,
+    /// D′-2a: cumulative photo-machinery expression cost dissipated across the ENTIRE run (eu).
+    /// Accumulates monotonically (`+=`) each metab tick; never reset. 0 for non-dprime configs
+    /// (photo_gain ≡ 0 there → cost inert). Checked by the non-inertness tooth (must be > 0 after
+    /// ≥6000 ticks on dprime seed 0xA11A_2A11 where photo sweeps). Observational only.
+    pub photo_cost_total: i64,
 }
 
 #[cfg(feature = "perf")]
