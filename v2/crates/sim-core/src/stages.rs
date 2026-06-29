@@ -600,7 +600,7 @@ pub fn stage_birth_death(
             }
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers, econ.light.is_some(), econ.reg_gain_max);
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max);
             let species_c = *species;
             repro.parents.insert(bits);
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —

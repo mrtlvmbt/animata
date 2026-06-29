@@ -89,6 +89,12 @@ pub struct EconParams {
     /// stages (e.g. `stage_birth_death` needs it to clamp layer-trait mutations). Kept in sync by
     /// `build_sim` (`config.econ.n_layers = config.n_layers`). Default 2 (L=2 production).
     pub n_layers: usize,
+    /// Number of layers available to genome layer-targeting traits (`uptake_layer`/`excrete_layer`).
+    /// Normally equal to `n_layers`. Set LOWER than `n_layers` when a non-energy special layer
+    /// (e.g. the D′-3a mineral layer) is present and must NOT be reachable as an energy food source.
+    /// dprime_config: `n_energy_layers=2` (agents eat layers 0–1 only; mineral on layer 2 is
+    /// exclusively accessed by `stage_mineral_feed`). Default=`n_layers` for backward compat.
+    pub n_energy_layers: usize,
 
     // ── C-slice: background death + abiotic recycling (economy/01 §3) ────────────────────────────
     /// Background death hazard (C-1). Integer probability over `D0_MASK` (see constant above).
@@ -252,6 +258,7 @@ impl Default for EconParams {
             m_field: 1, // one field cell per world cell (the CLI default / doc 14 §1)
             speciation_threshold: 80,
             n_layers: 2,
+            n_energy_layers: 2, // same as n_layers by default; dprime overrides to 2 (mineral layer excluded)
             d0_scaled: 1049, // round(0.001 × 1_048_576); mean lifetime ≈ 1000 ticks (economy/01)
             recycle_num: 77,  // round(0.3 × 256) = 76.8 → 77; recycle ≈ 30.1% (economy/01 §3)
             detritus_layer: None,    // C′-1: None → byte-identical Slice-C behavior (→ layer 0)

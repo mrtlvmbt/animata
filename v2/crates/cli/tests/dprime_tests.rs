@@ -1,4 +1,4 @@
-//! D′-1 + D′-2a conservation, determinism, oscillation, viability, and cost teeth (issues #177, #181).
+//! D′-1 + D′-2a + D′-3a conservation, determinism, oscillation, viability, cost, and mineral teeth.
 //!
 //! PRE-DECLARED FALSIFIABLE NUMERICS (anti-self-certification, doc54 §2 — declared BEFORE
 //! measuring; do NOT weaken post-hoc to force green):
@@ -26,8 +26,8 @@
 //!       This is the sim-level complement to tooth (c): catches a wiring bug where L was computed
 //!       correctly but the photo path wasn't actually gated on it.
 
-use cli::{build_sim, dprime_config, run_conserved_hashes};
-use sim_core::{expressed_capacity, light_at_tick, Genome, SimConfig};
+use cli::{build_sim, config_with, dprime_config, dprime_light_config, run_conserved_hashes, DEFAULT_THREADS};
+use sim_core::{expressed_capacity, light_at_tick, EconParams, Genome, LayerSpec, LightSpec, MergeStrategy, SimConfig};
 
 const SEED: u64 = 0xD0_DE_5EED;
 const TICKS_SHORT: u64 = 512;  // for R14/R15 (fast, determinism)
@@ -51,21 +51,22 @@ const PHOTO_DAY_FLOOR: i64 = 1;
 
 // ── R15 ─────────────────────────────────────────────────────────────────────────────────────────
 
-/// R15: energy residual = 0 every tick on dprime_config — photo energy is booked as Σᵢ photo_energyᵢ
-/// to ledger.produced (exact integer match to what was credited to agent Energy components).
+/// R15: energy residual = 0 every tick on dprime_light_config — photo energy is booked as Σᵢ
+/// photo_energyᵢ to ledger.produced (exact integer match to what was credited to agent Energy).
 /// Covers both day ticks (photo_total > 0) and night ticks (photo_total = 0, path inert).
+/// Uses dprime_light_config (L=2, no mineral) — D′-3a mineral conservation is in dprime_d3a_r15.
 #[test]
 fn dprime_r15_conservation_exact() {
     if cfg!(debug_assertions) {
         return;
     }
-    let mut sim = build_sim(dprime_config(SEED));
+    let mut sim = build_sim(dprime_light_config(SEED));
     for _ in 0..TICKS_SHORT {
         sim.step();
         assert_eq!(
             sim.conservation_residual(),
             0,
-            "energy not conserved at tick {} on dprime_config \
+            "energy not conserved at tick {} on dprime_light_config \
              (photo energy booking leaked or residual non-zero)",
             sim.tick()
         );
@@ -74,17 +75,18 @@ fn dprime_r15_conservation_exact() {
 
 // ── R14 ─────────────────────────────────────────────────────────────────────────────────────────
 
-/// R14: 1-vs-N conserved-field hash identical on dprime_config — photo uptake is a deterministic
-/// pure function of (photo_gain, L(t)) with no cross-cell interaction, so thread count cannot
-/// affect the result. Conserved-field trajectory changes only through births/deaths/excretion,
-/// which are already canonical-merge guarded.
+/// R14: 1-vs-N conserved-field hash identical on dprime_light_config — photo uptake is a
+/// deterministic pure function of (photo_gain, L(t)) with no cross-cell interaction, so thread
+/// count cannot affect the result. Conserved-field trajectory changes only through
+/// births/deaths/excretion, which are already canonical-merge guarded.
+/// Uses dprime_light_config (L=2, no mineral) — D′-3a determinism is in dprime_d3a_r14.
 #[test]
 fn dprime_r14_thread_count_independent() {
     if cfg!(debug_assertions) {
         return;
     }
-    let one = run_conserved_hashes(SimConfig { sim_threads: 1, ..dprime_config(SEED) }, TICKS_SHORT);
-    let many = run_conserved_hashes(SimConfig { sim_threads: N_THREADS, ..dprime_config(SEED) }, TICKS_SHORT);
+    let one = run_conserved_hashes(SimConfig { sim_threads: 1, ..dprime_light_config(SEED) }, TICKS_SHORT);
+    let many = run_conserved_hashes(SimConfig { sim_threads: N_THREADS, ..dprime_light_config(SEED) }, TICKS_SHORT);
     for t in 0..TICKS_SHORT as usize {
         assert_eq!(
             one[t], many[t],
@@ -103,7 +105,7 @@ fn dprime_r14_thread_count_independent() {
 /// (constant) light field (critic F6 from plan).
 #[test]
 fn dprime_light_field_oscillates() {
-    let spec = dprime_config(0).econ.light.expect("dprime_config must have light: Some(...)");
+    let spec = dprime_light_config(0).econ.light.expect("dprime_light_config must have light: Some(...)");
     assert!(spec.period_ticks > 0, "period_ticks must be > 0");
     assert!(spec.day_ticks > 0, "day_ticks must be > 0 — else no day phase exists");
     assert!(
@@ -141,8 +143,8 @@ fn dprime_viability_and_photo_nontrivial() {
         return;
     }
     for seed in [0xD1_00_1111u64, 0xD2_00_2222u64] {
-        let mut sim = build_sim(dprime_config(seed));
-        let spec = sim.econ().light.expect("dprime_config must have light: Some(...)");
+        let mut sim = build_sim(dprime_light_config(seed));
+        let spec = sim.econ().light.expect("dprime_light_config must have light: Some(...)");
 
         // Run TICKS ticks to let photo_gain evolve under selection.
         for _ in 0..TICKS {
@@ -235,7 +237,7 @@ fn dprime_d2a_cost_non_inert() {
     if cfg!(debug_assertions) {
         return;
     }
-    let mut sim = build_sim(dprime_config(SEED_DPRIME2));
+    let mut sim = build_sim(dprime_light_config(SEED_DPRIME2));
     for _ in 0..TICKS_LONG {
         sim.step();
     }
@@ -260,7 +262,7 @@ fn dprime_d2a_viability_reband() {
     if cfg!(debug_assertions) {
         return;
     }
-    let mut sim = build_sim(dprime_config(SEED_DPRIME2));
+    let mut sim = build_sim(dprime_light_config(SEED_DPRIME2));
     for _ in 0..TICKS_LONG {
         sim.step();
     }
@@ -350,4 +352,131 @@ fn dprime_d2b_regulation_active_pure_fn() {
     assert_eq!(expressed_capacity(&g_night, 100), 0, "express-by-night: day == 0");
     assert_ne!(expressed_capacity(&g_night, 100), expressed_capacity(&g_night, 0),
         "express-by-night: day and night must differ");
+}
+
+// ── D′-3a: mineral field + Liebig co-limitation + overflow-heat teeth ────────────────────────────
+//
+// PRE-DECLARED FALSIFIABLE NUMERICS (anti-self-certification, declared BEFORE measuring):
+//
+//   (h) Unified conservation residual = 0 every tick on dprime_config (mineral + energy in one ledger).
+//       The energy ledger covers field_M + Σ quota (via conservation_residual), so this single
+//       check satisfies BOTH stock-identity teeth in the acceptance: (i) full energy ledger WITH
+//       overflow and (ii) mineral stock identity.
+//
+//   (i) Co-limitation is real: N*(dprime with mineral, L=100) ≤ COLIMIT_CAP_FRAC × N*(no_mineral).
+//       Pre-declared cap COLIMIT_CAP_NUM/100 = 90% — mineral must reduce population by ≥ 10%.
+//       Do NOT sample at L≈20 (FLAG-1 knife-edge); dprime_config uses l_max=100, 50% duty cycle,
+//       so the average-day population is measured in the light-rich regime.
+//       Ref: calibration shows 41.7% cut; 10% floor is conservative, anti-false-positive.
+//
+//   (j) Viability re-band: N̄ ≥ VIAB_FLOOR_D3A at TICKS_LONG. Mineral lowers N* vs D′-2;
+//       floor=30 (down from D′-2a floor=50). FLAG-2: if mineral collapses pop, increase regen_rate.
+//       "Not collapsed" threshold — the mineral MUST NOT kill the population entirely.
+//
+// Sampling note (FLAG-1): dprime_config uses l_max=100 and 50% duty cycle → light-rich regime.
+// No test samples at L≈20. The co-limitation test compares dprime vs. no-mineral at the same config.
+
+/// D′-3a no-mineral reference config (energy-only upper bound for co-limitation tooth).
+/// Delegates to dprime_light_config — same L=2 light economy, no mineral.
+fn dprime_no_mineral_config(seed: u64) -> SimConfig {
+    dprime_light_config(seed)
+}
+
+// ── Pre-declared gate constants for D′-3a ───────────────────────────────────────────────────────
+/// Viability floor for D′-3a: N̄ ≥ VIAB_FLOOR_D3A at TICKS_LONG. Mineral reduces N* below D′-2a.
+/// Pre-declared floor=30: "not collapsed" (conservative; calibration suggests N*≈200+ in sim).
+const VIAB_FLOOR_D3A: u64 = 30;
+/// Co-limitation cap: N*(mineral) ≤ (COLIMIT_CAP_NUM/100) × N*(no_mineral).
+/// Pre-declared at 90% — mineral must cut at least 10% of energy-only capacity (non-trivial).
+/// Calibration model predicts ~41.7% cut; 10% is the conservative anti-false-positive floor.
+const COLIMIT_CAP_NUM: u64 = 90; // N*(mineral) ≤ 90% of N*(no_mineral)
+
+/// (h) D′-3a stock-identity conservation: unified energy+mineral ledger residual = 0 every tick.
+///
+/// Covers BOTH required teeth from the acceptance:
+///   (i)  full energy ledger WITH overflow-heat (overflow δ → ledger.lost; residual = 0).
+///   (ii) mineral stock identity (field_M + Σ quota tracked via conserved_total_all + quota sum).
+///
+/// Fast test — runs 512 ticks in release (covers early transients before mineral depletes).
+#[test]
+fn dprime_d3a_r15_unified_conservation() {
+    if cfg!(debug_assertions) { return; }
+    let mut sim = build_sim(dprime_config(SEED));
+    for t in 0..TICKS_SHORT {
+        sim.step();
+        let residual = sim.conservation_residual();
+        assert_eq!(
+            residual, 0,
+            "D′-3a conservation FAILED at tick {t}: residual={residual} (unified energy+mineral \
+             ledger violation). Check mineral uptake booking, overflow delta path, or death recycle."
+        );
+    }
+}
+
+/// (i) D′-3a co-limitation is real: N*(mineral) ≤ 90% × N*(no-mineral).
+///
+/// Samples at L=100 (dprime_config day phase, light-rich regime) — NOT at L≈20 (FLAG-1 knife-edge).
+/// Both configs run to TICKS_LONG on SEED_DPRIME2 (canonical dprime seed where photo sweeps).
+///
+/// Pre-declared: N*(mineral) / N*(no_mineral) ≤ COLIMIT_CAP_NUM/100 = 0.90.
+/// If mineral is decorative (too abundant to limit), ratio ≈ 1.0 → FAILS.
+/// If mineral extinguishes pop: viability tooth (j) catches it separately.
+#[test]
+fn dprime_d3a_colimitation_binds() {
+    if cfg!(debug_assertions) { return; }
+    let mut sim_min = build_sim(dprime_config(SEED_DPRIME2));
+    let mut sim_ref = build_sim(dprime_no_mineral_config(SEED_DPRIME2));
+    for _ in 0..TICKS_LONG {
+        sim_min.step();
+        sim_ref.step();
+    }
+    let n_mineral = sim_min.population();
+    let n_ref    = sim_ref.population();
+    // Must bind: n_mineral ≤ cap fraction of n_ref (mineral is a genuine limiter).
+    // Guard against n_ref=0 (impossible under viability tooth, but defensive).
+    let cap = n_ref.saturating_mul(COLIMIT_CAP_NUM) / 100;
+    assert!(
+        n_mineral <= cap || n_ref == 0,
+        "D′-3a co-limitation FAILED: N*(mineral)={n_mineral} > {COLIMIT_CAP_NUM}% × N*(no-mineral)={n_ref} \
+         (cap={cap}). Mineral is decorative — regen_rate too high or q_mineral too low. \
+         Apply FLAG-2 fallback: lower regen_rate or raise q_mineral. Do NOT weaken this test."
+    );
+}
+
+/// (j) D′-3a viability re-band: N̄ ≥ VIAB_FLOOR_D3A = 30 at TICKS_LONG on SEED_DPRIME2.
+///
+/// Mineral lowers N* below D′-2a (VIAB_FLOOR_D2A=50). Floor=30 is "not collapsed":
+/// calibration predicts N*(L=100, mineral-limited) > 100 in the sim scale.
+/// FLAG-2: if collapsed, relax P_mineral (regen_rate) or q_mineral, re-band, and report.
+#[test]
+fn dprime_d3a_viability_reband() {
+    if cfg!(debug_assertions) { return; }
+    let mut sim = build_sim(dprime_config(SEED_DPRIME2));
+    for _ in 0..TICKS_LONG {
+        sim.step();
+    }
+    let pop = sim.population();
+    assert!(
+        pop >= VIAB_FLOOR_D3A,
+        "D′-3a viability FAILED: N̄={pop} < VIAB_FLOOR_D3A={VIAB_FLOOR_D3A} at t={TICKS_LONG} \
+         seed={SEED_DPRIME2:#x}. Mineral economy may have collapsed the population. \
+         Report this finding — apply FLAG-2 fallback (relax regen_rate or q_mineral). \
+         Do NOT silently lower the floor."
+    );
+}
+
+/// (h2) D′-3a determinism (R14): mineral uptake + overflow are entity-id-sorted → conserved-field
+/// hash is 1-vs-N thread-identical (same as dprime R14 but re-confirmed on the new config).
+#[test]
+fn dprime_d3a_r14_thread_count_independent() {
+    if cfg!(debug_assertions) { return; }
+    // Single-thread run.
+    let mut cfg1 = dprime_config(SEED);
+    cfg1.sim_threads = 1;
+    let h1 = run_conserved_hashes(cfg1, TICKS_SHORT);
+    // Multi-thread run.
+    let hN = run_conserved_hashes(dprime_config(SEED), TICKS_SHORT);
+    assert_eq!(h1, hN,
+        "D′-3a R14 FAILED: conserved-field hash differs between 1 and {N_THREADS} threads \
+         on dprime_config+mineral. Mineral uptake or overflow is not deterministic.");
 }
