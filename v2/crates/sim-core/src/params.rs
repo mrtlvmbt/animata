@@ -101,6 +101,18 @@ pub struct EconParams {
     /// On every death: `recycled = recycle_num · E / RECYCLE_DEN` (truncating) → substrate layer 0;
     /// `E − recycled` → `ledger.lost`. Truncation remainder lands in `lost`, never created.
     pub recycle_num: i64,
+
+    // ── C′-slice: biotic detritus redirect (C′-1) ────────────────────────────────────────────────
+    /// Detritus conserved layer index (C′-1). When `Some(l)`, the C-2 death-recycle deposit is
+    /// REDIRECTED to layer `l` (weighted by `detritus_frac_num`); when `None` (default), the deposit
+    /// keeps the exact Slice-C behavior (`deposit_conserved(cell, recycled, 0)`) — byte-identical,
+    /// so `default_config` and `l3_config` trajectories/goldens are unchanged.
+    pub detritus_layer: Option<usize>,
+    /// Detritus fraction numerator (C′-1). `detritus_frac = detritus_frac_num / RECYCLE_DEN`.
+    /// Active only when `detritus_layer` is `Some`. Bootstrap = `RECYCLE_DEN` (1.0, full-replace):
+    /// ALL recycled body energy → detritus layer on death; none abiotic. C′-3 calibrates down for
+    /// a hybrid if the biotic loop needs a partial abiotic shortcut to close before reducers evolve.
+    pub detritus_frac_num: i64,
 }
 
 impl Default for EconParams {
@@ -125,6 +137,8 @@ impl Default for EconParams {
             n_layers: 2,
             d0_scaled: 1049, // round(0.001 × 1_048_576); mean lifetime ≈ 1000 ticks (economy/01)
             recycle_num: 77,  // round(0.3 × 256) = 76.8 → 77; recycle ≈ 30.1% (economy/01 §3)
+            detritus_layer: None,    // C′-1: None → byte-identical Slice-C behavior (→ layer 0)
+            detritus_frac_num: RECYCLE_DEN, // = 256; dormant (only active when detritus_layer is Some)
         }
     }
 }

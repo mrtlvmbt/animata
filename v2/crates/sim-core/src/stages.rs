@@ -299,7 +299,8 @@ pub fn stage_birth_death(
             let r = seed_fold(clock.seed, &[SALT_DEATH, bits, clock.tick]);
             if (r & D0_MASK) < econ.d0_scaled {
                 // C-2: recycle split — agent holds full body energy (E > 0); the material case.
-                // recycled → substrate layer 0 (abiotic return, distinct from excreta on layer 1).
+                // Slice-C (detritus_layer=None): recycled → substrate layer 0 (byte-identical).
+                // C′-1 (detritus_layer=Some(l)): recycled·detritus_frac → layer l; remainder → 0.
                 // lost_here → ledger.lost (first real source for this bucket).
                 // Conservation: agents_total −E; field_staging +recycled (live in next solve());
                 //   ledger.lost +(E−recycled); residual unchanged (verified at tick boundary).
@@ -308,7 +309,19 @@ pub fn stage_birth_death(
                 let lost_here = e_body - recycled; // = E − ⌊recycle·E⌋; every eu in exactly one bucket
                 if recycled > 0 {
                     let cell = field.0.cell_index(pos.0);
-                    field.0.deposit_conserved(cell, recycled, 0); // layer 0 = substrate
+                    match econ.detritus_layer {
+                        None => {
+                            // Slice-C: byte-identical abiotic return → substrate (layer 0).
+                            field.0.deposit_conserved(cell, recycled, 0);
+                        }
+                        Some(det_l) => {
+                            // C′-1: biotic redirect. detritus_frac = detritus_frac_num / RECYCLE_DEN.
+                            let det = recycled * econ.detritus_frac_num / RECYCLE_DEN;
+                            let abiotic = recycled - det; // 0 at bootstrap frac=1.0
+                            if det > 0 { field.0.deposit_conserved(cell, det, det_l); }
+                            if abiotic > 0 { field.0.deposit_conserved(cell, abiotic, 0); }
+                        }
+                    }
                 }
                 ledger.lost += lost_here;
                 commands.entity(e).despawn();
