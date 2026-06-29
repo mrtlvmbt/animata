@@ -37,7 +37,7 @@ pub use genome::{isqrt, size_pow_three_quarters, Genome};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
-pub use params::{EconParams, LayerSpec, SimConfig, D0_MASK, RECYCLE_DEN};
+pub use params::{EconParams, LayerSpec, LightSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
@@ -129,6 +129,10 @@ pub struct Telemetry {
     /// Per-species live member count: `(species_id, count)` sorted by id. Observational; use
     /// for Shannon/Simpson diversity in the CLI (never fed to the tick or state hash).
     pub species_census: Vec<(u32, u32)>,
+    /// D′-1: total light energy credited to agents this tick (Σᵢ photo_gain_i·L(t)/(km+L(t))).
+    /// Written by stage_interactions each tick; 0 for non-dprime configs or when L(t)=0 (night).
+    /// Observational only — never fed to the tick or state hash.
+    pub photo_produced: i64,
 }
 
 #[cfg(feature = "perf")]

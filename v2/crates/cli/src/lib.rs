@@ -4,7 +4,7 @@
 
 use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
-use sim_core::{EconParams, LayerSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView};
+use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView};
 use world::NoiseWorld;
 
 /// Fixed timestep dt = 1/64 s, integer microseconds (the loop driver does no float).
@@ -82,6 +82,33 @@ pub fn cprime_config(seed: u64) -> SimConfig {
         econ: EconParams {
             detritus_layer: Some(2),
             detritus_frac_num: 256, // RECYCLE_DEN = 256 → frac=1.0 full-replace (bootstrap)
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
+/// D′-1 light-economy config (L=2): same layers as `default_config` but with the light field on.
+///
+/// `photo_gain` gene active: founder=0, mutation gated on `has_light=true`. Non-dprime genomes
+/// never carry a non-zero photo_gain — byte-identical isolation from existing goldens.
+///
+/// L(t) day-night driver: period=100 ticks, day_ticks=50 (50% duty cycle), L_max=100 eu,
+/// Km_photo=30 eu < Km_chem=74 (faster light saturation, plan §0).
+///
+/// Conservation: `U_photo_i = photo_gain_i · L(t) / (km_photo + L(t))` booked to `ledger.produced`
+/// as Σᵢ photo_energyᵢ (actual per-cell sum, not N·U_photo) — residual stays 0 (R15).
+pub fn dprime_config(seed: u64) -> SimConfig {
+    SimConfig {
+        n_layers: 2,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
+        econ: EconParams {
+            light: Some(LightSpec {
+                l_max: 100,
+                period_ticks: 100,
+                day_ticks: 50,   // 50 % duty cycle (plan §0: day-night parameterised)
+                km_photo: 30,    // Km_photo=30 < Km_chem=74 (plan §0 calibration)
+            }),
             ..EconParams::default()
         },
         ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)

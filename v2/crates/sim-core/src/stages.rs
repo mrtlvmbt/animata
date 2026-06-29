@@ -183,19 +183,41 @@ pub fn monod_demand(u_max: i64, km: i64, r: i64) -> i64 {
     (u_max * r) / (r + km)
 }
 
+/// Photo uptake demand (D′-1): `U_photo(L) = photo_gain · L / (km_photo + L)`, integer, truncating.
+///
+/// Returns 0 immediately when `l == 0` or `photo_gain == 0` (night phase or unexpressed gene).
+/// `km_photo` must be `> 0` (debug_assert). Overflow: `photo_gain ≤ 256`, `l ≤ l_max ≤ 1000`,
+/// so `photo_gain * l ≤ 256_000` — far below i64_max.
+pub fn photo_demand(photo_gain: i32, km_photo: i64, l: i64) -> i64 {
+    if l == 0 || photo_gain == 0 {
+        return 0;
+    }
+    debug_assert!(km_photo > 0, "km_photo must be > 0");
+    (photo_gain as i64 * l) / (l + km_photo)
+}
+
 // ── Stage 6: Interactions — feed: proportional deficit rationing (B-3). ─────────────────────────
 //    At a deficit cell (Σ demand > R_cell) each agent's grant is `U_i·R_cell / Σ U_j` (integer
 //    truncating). Non-deficit cells grant each agent its full Monod demand.
 //    Algorithm — ONE gather pass (no double archetype lookup), then sort by (cell×4+layer, entity)
 //    so same-(cell,layer) contestants are contiguous. Two cheap walks (Σ then grant) followed by one
 //    get_mut apply loop.  Order-independent: Σ is associative; grants depend only on cell totals.
+//
+//    D′-1: photo uptake is additive and non-rival (no contest), credited here in the same apply loop.
+//    Photo energy is booked to `ledger.produced` as an external source (non-conserved flux).
 pub fn stage_interactions(
     econ: Res<EconParams>,
+    clock: Res<SimClock>,
     mut field: ResMut<FieldRes>,
     mut ledger: ResMut<EnergyLedger>,
+    mut tel: ResMut<Telemetry>,
     mut q: Query<(Entity, &Position, &Genome, &mut Energy)>,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
+    // D′-1: compute L(t) once for this tick (pure function, non-rival — same value for every cell).
+    let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
+    let km_photo: Option<i64> = econ.light.map(|ls| ls.km_photo);
+
     // 1. Gather: one read per entity (Monod demand). No `conserved_take` yet.
     //    Sort key = cell_index * 4 + layer (B-2: layer ∈ 0..4); secondary = entity_bits.
     struct Contestant {
@@ -208,6 +230,13 @@ pub fn stage_interactions(
     }
     let mut contestants: Vec<Contestant> = q.iter().map(|(e, pos, g, _)| {
         let layer = g.uptake_layer as usize;
+        // D′-1 defensive assertion: uptake_layer must index a conserved stock layer (NOT the light
+        // field). Photo energy routes through photo_gain, never through uptake_layer.
+        debug_assert!(
+            layer < econ.n_layers,
+            "uptake_layer {} >= n_layers {} — must not route light through uptake_layer",
+            layer, econ.n_layers
+        );
         let r = field.0.conserved_at(pos.0, layer);
         let demand = monod_demand(econ.u_max, econ.km, r);
         let cell = field.0.cell_index(pos.0);
@@ -259,6 +288,8 @@ pub fn stage_interactions(
 
     // 3. Apply grants: ONE get_mut per entity (no second archetype scan).
     //    `conserved_take` is called for the GRANT amount (may be < demand at deficit cells).
+    //    D′-1: photo energy credited here too — same stage, so the booked set matches exactly.
+    let mut photo_total: i64 = 0;
     for (i, c) in contestants.iter().enumerate() {
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
@@ -268,7 +299,20 @@ pub fn stage_interactions(
         let lost = got - gained;
         energy.0 += gained;
         ledger.dissipated += lost;
+        // D′-1: additive photo energy (non-rival — each cell independently absorbs light).
+        // U_photo_i = photo_gain_i · L(t) / (km_photo + L(t)), integer truncating.
+        if let Some(km) = km_photo {
+            let photo = photo_demand(g.photo_gain, km, l_now);
+            energy.0 += photo;
+            photo_total += photo;
+        }
     }
+    // D′-1: book photo energy as external source (non-conserved flux, like regen from field.solve()).
+    // Uses the ACTUAL per-cell sum Σᵢ photo_energyᵢ — NOT N·U_photo — so the booked source matches
+    // exactly the credited energy, leaving residual 0 (R15) even after photo_gain mutates per-cell.
+    // Stage-precise: credits only cells alive at this stage (before birth_death this tick).
+    ledger.produced += photo_total;
+    tel.photo_produced = photo_total;
 }
 
 // ── Stage 7: BirthDeath — division (energy split) + death, via the command buffer (sync point). ────
@@ -345,7 +389,7 @@ pub fn stage_birth_death(
             ledger.dissipated += econ.c_div;
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers);
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers, econ.light.is_some());
             let species_c = *species;
             repro.parents.insert(bits);
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —

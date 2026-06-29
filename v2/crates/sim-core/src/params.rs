@@ -113,6 +113,49 @@ pub struct EconParams {
     /// ALL recycled body energy → detritus layer on death; none abiotic. C′-3 calibrates down for
     /// a hybrid if the biotic loop needs a partial abiotic shortcut to close before reducers evolve.
     pub detritus_frac_num: i64,
+
+    // ── D′-slice: light economy (D′-1) ───────────────────────────────────────────────────────────
+    /// Light field specification (D′-1). `Some(spec)` enables the light economy: `photo_gain` gene
+    /// mutation active, per-cell `U_photo(L(t))` credited each tick as an external source.
+    /// `None` (default) → light economy fully inert, `photo_gain` stays 0 in all genomes, and the
+    /// photo code path is never entered → `default_config`/`l3_config`/`cprime_config` trajectories
+    /// remain byte-identical (the isolation gate; un-re-pinned existing goldens ARE the test).
+    pub light: Option<LightSpec>,
+}
+
+// ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
+
+/// Light field specification for `EconParams.light` (D′-1).
+/// Light is a NON-conserved external flux — top-injected, per-cell, non-rival. It does NOT enter
+/// the conserved-layer ledger as a stock and does NOT bump `n_layers`. Instead it is credited to
+/// each cell's energy as `U_photo(L(t)) = photo_gain · L(t) / (km_photo + L(t))` and booked via
+/// `ledger.produced` (same bucket as field regen) so R15 closes to residual 0.
+#[derive(Clone, Copy, Debug)]
+pub struct LightSpec {
+    /// Peak light intensity (eu, integer). During day phase: L = l_max. At night: L = 0.
+    /// Calibrated at 100 eu (plan §0: `L_max=100`, same scale as substrate km=74).
+    pub l_max: i64,
+    /// Full day-night period in ticks. Must be > 0. E.g. 100 → 100-tick day-night cycle.
+    pub period_ticks: u64,
+    /// Day-phase duration per period (ticks where `tick % period_ticks < day_ticks → L = l_max`).
+    /// `duty_cycle = day_ticks / period_ticks`. Requires `0 < day_ticks < period_ticks`.
+    pub day_ticks: u64,
+    /// Photo Monod half-saturation constant (eu). Must be > 0. Km_photo < Km_chem (plan §0:
+    /// faster light saturation than substrate — calibrated at 30 vs km_chem=74).
+    pub km_photo: i64,
+}
+
+/// L(t): deterministic day-night light intensity, pure function of tick + `LightSpec`.
+///
+/// Day phase (`tick % period_ticks < day_ticks`) → `l_max`. Night → `0`.
+/// Pure, integer-only, no RNG — the photo path never introduces randomness.
+/// If `period_ticks == 0` (degenerate), returns `l_max` for every tick.
+pub fn light_at_tick(spec: &LightSpec, tick: u64) -> i64 {
+    if spec.period_ticks == 0 || tick % spec.period_ticks < spec.day_ticks {
+        spec.l_max
+    } else {
+        0
+    }
 }
 
 impl Default for EconParams {
@@ -139,6 +182,7 @@ impl Default for EconParams {
             recycle_num: 77,  // round(0.3 × 256) = 76.8 → 77; recycle ≈ 30.1% (economy/01 §3)
             detritus_layer: None,    // C′-1: None → byte-identical Slice-C behavior (→ layer 0)
             detritus_frac_num: RECYCLE_DEN, // = 256; dormant (only active when detritus_layer is Some)
+            light: None,             // D′-1: None → light economy inert, photo_gain stays 0
         }
     }
 }
