@@ -369,12 +369,25 @@ pub fn apply_overrides(econ: &mut EconParams, sets: &[(String, String)]) -> Resu
                     .to_string(),
                 );
             }
+            // D′-2c: reg_gain_max controls the evolvable regulation range.
+            // 0 = regulation locked OFF (constitutive control); default = 4 in dprime_config.
+            "reg_gain_max" => {
+                let v = p::<i32>(key, val)?;
+                if v < 0 {
+                    return Err(format!(
+                        "error: --set reg_gain_max={v}: must be ≥ 0 \
+                         (0 locks regulation OFF — the D′-2c constitutive control; \
+                         default = 4 in EconParams)"
+                    ));
+                }
+                econ.reg_gain_max = v;
+            }
             _ => {
                 return Err(format!(
                     "error: --set {key}=…: not an overridable calibration knob. \
                      Valid keys: km, u_max, base_metab, c_div, e_cell, k_size_metab, \
                      k_move_cost, k_sense_cost, excrete, recycle_num, speciation_threshold, \
-                     brain_period, metab_period, d0_scaled, pheromone."
+                     brain_period, metab_period, d0_scaled, pheromone, reg_gain_max."
                 ));
             }
         }
@@ -561,6 +574,241 @@ mod tests {
         // 0.0 is valid (turns off pheromone)
         let r_ok = apply_overrides(&mut econ, &[("pheromone".to_string(), "0.0".to_string())]);
         assert!(r_ok.is_ok(), "pheromone=0.0 must be accepted");
+    }
+
+    // ── #186 D′-2c tests ─────────────────────────────────────────────────────────────────────────
+
+    /// Smoke: reg-activity telemetry fields are computed and bounded correctly.
+    /// dprime_config: reg_gain can evolve → some cells may have reg_gain ≠ 0 after 50 ticks.
+    /// default_config: has_light=false → reg_gain stays 0 → reg_active_count must be 0.
+    /// Golden-neutral: telemetry is observational only, never affects state hash.
+    #[test]
+    fn dprime_2c_reg_activity_telemetry_is_computed() {
+        let mut sim = build_sim(dprime_config(1));
+        for _ in 0..50 {
+            sim.step();
+        }
+        let tel = sim.telemetry();
+        assert!(
+            tel.reg_active_count >= 0,
+            "reg_active_count must be non-negative"
+        );
+        assert!(
+            tel.reg_active_count <= tel.population,
+            "reg_active_count={} must not exceed population={}",
+            tel.reg_active_count, tel.population
+        );
+        assert!(
+            tel.reg_active_day_count >= 0,
+            "reg_active_day_count must be non-negative"
+        );
+        assert!(
+            tel.reg_active_day_count <= tel.reg_active_count,
+            "reg_active_day_count={} must be ≤ reg_active_count={}",
+            tel.reg_active_day_count, tel.reg_active_count
+        );
+
+        // Non-dprime: reg_gain stays 0 forever (has_light=false gates mutation).
+        let mut sim2 = build_sim(default_config(1));
+        for _ in 0..50 {
+            sim2.step();
+        }
+        let tel2 = sim2.telemetry();
+        assert_eq!(
+            tel2.reg_active_count, 0,
+            "non-dprime config: reg_gain never mutates → reg_active_count must be 0"
+        );
+    }
+
+    /// D′-2c constitutive control: reg_gain_max=0 locks regulation OFF after evolution.
+    /// Verifies the control config fixture (struct-update from dprime_config) works correctly.
+    #[test]
+    fn dprime_2c_constitutive_control_locks_reg_gain() {
+        let seed = 42;
+        let mut cfg = dprime_config(seed);
+        cfg.econ.reg_gain_max = 0; // D′-2c control line: regulation locked OFF
+        let mut sim = build_sim(cfg);
+        for _ in 0..50 {
+            sim.step();
+        }
+        let tel = sim.telemetry();
+        assert_eq!(
+            tel.reg_active_count, 0,
+            "constitutive control (reg_gain_max=0): reg_gain must stay 0 in all agents"
+        );
+    }
+
+    /// D′-2c: --set reg_gain_max is in the whitelist and validates correctly.
+    #[test]
+    fn dprime_2c_set_reg_gain_max_is_whitelisted() {
+        let mut econ = sim_core::EconParams::default();
+
+        // 0 is valid (constitutive control)
+        let r0 = apply_overrides(&mut econ, &[("reg_gain_max".to_string(), "0".to_string())]);
+        assert!(r0.is_ok(), "--set reg_gain_max=0 must be accepted");
+        assert_eq!(econ.reg_gain_max, 0);
+
+        // positive values are valid
+        let r4 = apply_overrides(&mut econ, &[("reg_gain_max".to_string(), "4".to_string())]);
+        assert!(r4.is_ok(), "--set reg_gain_max=4 must be accepted");
+        assert_eq!(econ.reg_gain_max, 4);
+
+        // negative value rejected
+        let mut econ2 = sim_core::EconParams::default();
+        let r_neg = apply_overrides(&mut econ2, &[("reg_gain_max".to_string(), "-1".to_string())]);
+        assert!(r_neg.is_err(), "--set reg_gain_max=-1 must return Err");
+        assert!(
+            r_neg.unwrap_err().starts_with("error:"),
+            "error must start with 'error:'"
+        );
+    }
+
+    // ── D′-2c verdict experiment ──────────────────────────────────────────────────────────────────
+    // PRE-DECLARED MARGIN (recorded before measuring, per ТЗ #186 criterion 3):
+    //   PASS = PLASTIC mean N̄ (last-window mean population) > CONSTITUTIVE mean N̄ by ≥ 5%
+    //          AND this sign holds in ≥ 4 of 5 seeds.
+    //   NULL = threshold not met — an honest informative finding (not a red build).
+    //
+    // Anti-false-positive guards:
+    //   (i) L(t) OSCILLATED: dprime_config has period_ticks=100, day_ticks=50 → verified below.
+    //   (ii) GENOTYPE signature: PLASTIC reg_active_count/population > 0 at horizon means
+    //        regulation evolved + fixed; if 0, the selective signal is too weak to fix.
+    //
+    // Configure via env var DPRIME_TICKS (default 400 for fast local iteration; cloud uses 8000).
+    // Run: cargo test --release -p cli -- dprime_2c_verdict --nocapture --ignored
+
+    /// D′-2c verdict: PLASTIC (reg_gain_max=4) vs CONSTITUTIVE (reg_gain_max=0) across ≥5 seeds.
+    /// Heavy (many ticks × 2 arms × 5 seeds) — ignored in CI; run explicitly for the verdict.
+    /// Cloud dispatch: scripts/sim-run.sh dprime-2c ticks=8000
+    #[test]
+    #[ignore]
+    fn dprime_2c_verdict() {
+        use sim_core::light_at_tick;
+
+        // Anti-false-positive (i): verify L(t) oscillates in dprime_config.
+        let spec = dprime_config(1).econ.light.unwrap();
+        let l_day = light_at_tick(&spec, 10);   // tick 10: well within day phase (day_ticks=50)
+        let l_night = light_at_tick(&spec, 60); // tick 60: well within night phase
+        assert!(
+            l_day > 0 && l_night == 0,
+            "anti-false-positive (i): L(t) must oscillate (l_day={l_day}, l_night={l_night})"
+        );
+
+        let ticks: u64 = std::env::var("DPRIME_TICKS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(400);
+        let seeds: &[u64] = &[1, 2, 3, 4, 5];
+        // Late-window: last 20% of run (at least 50 ticks)
+        let window_start = (ticks.saturating_sub(ticks / 5)).max(ticks.saturating_sub(200));
+
+        println!("\nD\u{2019}-2c verdict: PLASTIC (reg_gain_max=4) vs CONSTITUTIVE (reg_gain_max=0)");
+        println!("PRE-DECLARED MARGIN: PLASTIC N\u{304} > CONSTITUTIVE N\u{304} by \u{2265}5%, sign in \u{2265}4/5 seeds");
+        println!("ticks={ticks}  late-window=[{window_start},{ticks}]  period_ticks={}", spec.period_ticks);
+        println!("{:<6} {:>14} {:>16} {:>10} {:>12} {:>8}",
+            "seed", "PLASTIC N\u{304}", "CONSTITUTIVE N\u{304}", "diff%", "reg_active%", "sign");
+        println!("{}", "-".repeat(72));
+
+        let mut plastic_wins = 0usize;
+        let mut all_plastic: Vec<f64> = Vec::new();
+        let mut all_const: Vec<f64> = Vec::new();
+
+        for &seed in seeds {
+            let (p_mean, p_reg_frac, p_reg_day_frac) =
+                run_dprime_arm_detailed(seed, ticks, 4, window_start);
+            let (c_mean, _c_reg_frac, _) =
+                run_dprime_arm_detailed(seed, ticks, 0, window_start);
+
+            let diff_pct = if c_mean > 0.0 {
+                (p_mean - c_mean) / c_mean * 100.0
+            } else {
+                0.0
+            };
+            let sign = if p_mean >= c_mean { "+" } else { "-" };
+            let reg_pct = p_reg_frac * 100.0;
+
+            println!(
+                "{:<6} {:>14.1} {:>16.1} {:>+9.1}% {:>11.1}% {:>8}  (day-frac={:.0}%)",
+                seed, p_mean, c_mean, diff_pct, reg_pct, sign,
+                p_reg_day_frac * 100.0
+            );
+
+            if p_mean > c_mean { plastic_wins += 1; }
+            all_plastic.push(p_mean);
+            all_const.push(c_mean);
+        }
+
+        let plastic_grand: f64 = all_plastic.iter().sum::<f64>() / seeds.len() as f64;
+        let const_grand: f64 = all_const.iter().sum::<f64>() / seeds.len() as f64;
+        let margin_pct = if const_grand > 0.0 {
+            (plastic_grand - const_grand) / const_grand * 100.0
+        } else {
+            0.0
+        };
+
+        println!("{}", "-".repeat(72));
+        println!(
+            "{:<6} {:>14.1} {:>16.1} {:>+9.1}%  sign_consistency={}/5",
+            "MEAN", plastic_grand, const_grand, margin_pct, plastic_wins
+        );
+        println!();
+
+        let pass = margin_pct >= 5.0 && plastic_wins >= 4;
+        if pass {
+            println!("VERDICT: PASS");
+            println!("  Regulation has selective value in the dprime economy.");
+            println!("  margin={margin_pct:+.1}% \u{2265}5%, sign in {plastic_wins}/5 seeds \u{2265}4.");
+            println!("  D\u{2019} revives D: the GRN setpoint+gain pattern fixes and pays");
+            println!("  under a temporal driver (L(t)) + photo-machinery cost asymmetry.");
+            println!("  Closure note for #169/#171: SUPERSEDED-BUT-VINDICATED.");
+            println!("  The sense_range-on-substrate instance failed (no selective value on a");
+            println!("  static signal); the PATTERN is vindicated here on a temporal signal.");
+        } else {
+            println!("VERDICT: NULL");
+            println!("  margin={margin_pct:+.1}% (threshold: \u{2265}5%), sign in {plastic_wins}/5 seeds (threshold: \u{2265}4).");
+            println!("  Regulation confers no standing-crop advantage even with:");
+            println!("    - temporal L(t) driver (oscillating, period={} ticks)", spec.period_ticks);
+            println!("    - photo-machinery cost asymmetry (D\u{2019}-2a photo_cost_num/den)");
+            println!("  Honest informative finding per plan \u{00a7}8/F8.");
+            println!("  Closure note for #169/#171: GENERALIZED NULL.");
+            println!("  The GRN plasticity track (3rd instance) finds no selective value");
+            println!("  in this economy; the track is closed for Phase 1.");
+        }
+    }
+
+    fn run_dprime_arm_detailed(
+        seed: u64,
+        ticks: u64,
+        reg_gain_max: i32,
+        window_start: u64,
+    ) -> (f64, f64, f64) {
+        let mut cfg = dprime_config(seed);
+        cfg.econ.reg_gain_max = reg_gain_max;
+        let mut sim = build_sim(cfg);
+        let mut pop_sum = 0u64;
+        let mut pop_count = 0u64;
+        for t in 0..ticks {
+            sim.step();
+            if t >= window_start {
+                pop_sum += sim.population();
+                pop_count += 1;
+            }
+        }
+        // Anti-false-positive (ii): fraction of population with reg_gain ≠ 0 at horizon.
+        let tel = sim.telemetry();
+        let final_pop = tel.population.max(1);
+        let reg_active_frac = tel.reg_active_count as f64 / final_pop as f64;
+        let reg_day_frac = if tel.reg_active_count > 0 {
+            tel.reg_active_day_count as f64 / tel.reg_active_count as f64
+        } else {
+            0.0
+        };
+        let mean_pop = if pop_count > 0 {
+            pop_sum as f64 / pop_count as f64
+        } else {
+            0.0
+        };
+        (mean_pop, reg_active_frac, reg_day_frac)
     }
 
     // ── Existing tests ────────────────────────────────────────────────────────────────────────────

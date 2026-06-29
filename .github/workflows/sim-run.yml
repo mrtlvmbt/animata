@@ -20,6 +20,7 @@ on:
           - multiseed   # the same run across seeds 1..5 → cross-seed emergence (fragility probe)
           - sweep       # vary one Params field across a value grid (× seeds) SERIALLY in one job → CSV
           - gridsweep   # same grid as sweep but FANNED across a job matrix (one runner per value) → parallel
+          - dprime-2c   # D′-2c verdict: PLASTIC (reg_gain_max=4) vs CONSTITUTIVE (reg_gain_max=0), 5 seeds
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -69,9 +70,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Build the V1 headless binary (all scenarios except v2-perf).
+      # Build the V1 headless binary (all scenarios except v2-perf and dprime-2c).
       - name: Build headless (V1)
-        if: inputs.scenario != 'v2-perf'
+        if: inputs.scenario != 'v2-perf' && inputs.scenario != 'dprime-2c'
         run: cargo build -p animata-sim --bin headless --release
 
       # Build the V2 binary with the perf feature (v2-perf only). v2/ is a STANDALONE workspace;
@@ -79,6 +80,12 @@ jobs:
       - name: Build v2-sim --features perf (V2)
         if: inputs.scenario == 'v2-perf'
         run: cd v2 && cargo build --bin v2-sim --release --features perf
+
+      # D′-2c: pre-compile the cli test suite (fast subsequent `cargo test --no-run` → compile only).
+      # The verdict test is #[ignore] so it never runs in CI; the dprime-2c scenario invokes it explicitly.
+      - name: Build v2 cli tests for dprime-2c
+        if: inputs.scenario == 'dprime-2c'
+        run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
         run: |
@@ -120,6 +127,14 @@ jobs:
                 "$BIN" "$s" "${{ inputs.ticks }}" | tee -a "$SUM"
                 echo | tee -a "$SUM"
               done
+              ;;
+            dprime-2c)
+              # D′-2c verdict: PLASTIC (reg_gain_max=4) vs CONSTITUTIVE (reg_gain_max=0), 5 seeds.
+              # Pre-declared margin: PLASTIC mean N̄ > CONSTITUTIVE mean N̄ by ≥5%, sign in ≥4/5 seeds.
+              # Runs the #[ignore] test with DPRIME_TICKS override; --nocapture prints per-seed numbers.
+              cd v2
+              DPRIME_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- dprime_2c_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release

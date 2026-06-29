@@ -551,6 +551,8 @@ pub fn stage_observe(
     tel.samples.clear();
     let mut ents: Vec<(u64, Genome)> = q.iter().map(|(e, g)| (e.to_bits(), *g)).collect();
     ents.sort_unstable_by_key(|x| x.0);
+    let mut reg_active = 0i64;
+    let mut reg_active_day = 0i64;
     for (bits, g) in &ents {
         let offspring = u32::from(repro.parents.contains(bits));
         tel.samples.push(TraitSample {
@@ -566,7 +568,14 @@ pub fn stage_observe(
             ],
             offspring,
         });
+        // D′-2c: reg-activity aggregate — pure read, never fed to tick or state hash.
+        if g.reg_gain != 0 {
+            reg_active += 1;
+            if g.reg_gain > 0 { reg_active_day += 1; }
+        }
     }
+    tel.reg_active_count = reg_active;
+    tel.reg_active_day_count = reg_active_day;
     tel.population = ents.len() as i64;
     tel.field_total = field.0.conserved_total_all();
     // Signal-field metric (R25) — serial total concentration; never feeds the tick.
