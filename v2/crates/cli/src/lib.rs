@@ -49,6 +49,14 @@ const L2_ORGANICS_SPEC: LayerSpec = LayerSpec {
 const L2_DETRITUS_SPEC: LayerSpec = LayerSpec {
     regen_rate: 0, flux_alpha_num: 0, flux_alpha_den: 1, flat_cap: 0, world_cap_mult: 0,
 };
+// Layer 2 (D′-3a mineral): regen=1 (small per-cell influx), fast diffusion (α=1/4, like organics)
+// so mineral spreads from production zones; flat_cap=200 (starts at 100 per cell).
+// Calibration mapping: P_mineral=35 total per tick / 4096 cells ≈ 0.0085/cell → scaled to
+// regen_rate=1 (the minimum non-zero integer), with km_mineral=200 and u_max_mineral=70 calibrated
+// so N×U(M*)=regen×4096 at N*≈583 → M*≈22 eu-mineral. Scale ×10 from model units.
+const L2_MINERAL_SPEC: LayerSpec = LayerSpec {
+    regen_rate: 1, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 200, world_cap_mult: 0,
+};
 
 /// Default production config (L=2): layer 0 = substrate, layer 1 = organics/excreta (empty start).
 pub fn default_config(seed: u64) -> SimConfig {
@@ -88,20 +96,28 @@ pub fn cprime_config(seed: u64) -> SimConfig {
     }
 }
 
-/// D′-1 light-economy config (L=2): same layers as `default_config` but with the light field on.
+/// D′-1/2/3 light+mineral-economy config (L=3): substrate + organics + mineral.
 ///
-/// `photo_gain` gene active: founder=0, mutation gated on `has_light=true`. Non-dprime genomes
-/// never carry a non-zero photo_gain — byte-identical isolation from existing goldens.
+/// **D′-1/2 (light economy + photo-GRN regulation gene):** `photo_gain` and `reg_gain` active.
+/// Non-dprime goldens stay byte-identical (mineral and photo Option-gated).
 ///
-/// L(t) day-night driver: period=100 ticks, day_ticks=50 (50% duty cycle), L_max=100 eu,
-/// Km_photo=30 eu < Km_chem=74 (faster light saturation, plan §0).
+/// **D′-3a (mineral economy):** mineral conserved layer (layer 2) added as co-essential nutrient.
+///   - Mineral layer: `L2_MINERAL_SPEC` (regen_rate=1, α=1/4 diffusion, flat_cap=200/cell→starts
+///     at 100). `mineral_layer=Some(2)`.
+///   - Integer calibration (×10 scale from model units): Km=200, U_max=70, q_mineral=4000,
+///     recycle_mineral≈0.4, overflow_delta=50. See EconParams doc for mapping arithmetic.
+///   - Liebig AND-gate on division: `energy ≥ repro_threshold && quota ≥ q_mineral`.
+///   - Overflow site: when energy-ready but quota-poor → `energy -= overflow_delta` → `ledger.lost`.
+///   - Division: parent quota -= q_mineral → ledger.dissipated; child MineralQuota=0.
+///   - Death: recycle_mineral×quota → field_M; remainder → ledger.lost.
+///   - Conservation: unified EnergyLedger covers both energy + mineral (one stock identity).
 ///
-/// Conservation: `U_photo_i = photo_gain_i · L(t) / (km_photo + L(t))` booked to `ledger.produced`
-/// as Σᵢ photo_energyᵢ (actual per-cell sum, not N·U_photo) — residual stays 0 (R15).
+/// FLAG-2 fallback (tight economy): if mineral collapse observed, relax via `--set` overrides or
+/// parameter adjustment (P_mineral via regen_rate, q_mineral). See EconParams.mineral_layer doc.
 pub fn dprime_config(seed: u64) -> SimConfig {
     SimConfig {
-        n_layers: 2,
-        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
+        n_layers: 3,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L2_MINERAL_SPEC, LayerSpec::default()],
         econ: EconParams {
             light: Some(LightSpec {
                 l_max: 100,
@@ -109,6 +125,32 @@ pub fn dprime_config(seed: u64) -> SimConfig {
                 day_ticks: 50,   // 50 % duty cycle (plan §0: day-night parameterised)
                 km_photo: 30,    // Km_photo=30 < Km_chem=74 (plan §0 calibration)
             }),
+            // D′-3a: mineral economy enabled on layer 2.
+            mineral_layer: Some(2),
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
+/// D′-1/2 light-economy config (L=2, no mineral): substrate + organics.
+///
+/// Identical to dprime_config EXCEPT mineral_layer=None and n_layers=2.
+/// Used by D′-1 and D′-2 tests that measure photo sweep and photo-cost non-inertness — properties
+/// that require light to provide genuine selective advantage. With D′-3a's mineral Liebig gate, the
+/// overflow mechanism neutralises photo income (energy above threshold is burned off), so photo
+/// selection is near-zero and photo sweep tests are not meaningful on dprime_config.
+///
+/// Exported so D′-1/D′-2 test suites can pin to this config while D′-3a tests use dprime_config.
+pub fn dprime_light_config(seed: u64) -> SimConfig {
+    SimConfig {
+        n_layers: 2,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
+        econ: EconParams {
+            light: Some(LightSpec {
+                l_max: 100, period_ticks: 100, day_ticks: 50, km_photo: 30,
+            }),
+            // mineral_layer: None (default) — photo gene has genuine selective advantage
             ..EconParams::default()
         },
         ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
@@ -132,8 +174,16 @@ pub fn l3_config(seed: u64) -> SimConfig {
 /// Handles any `n_layers ≥ 1` from `config.layer_specs`; no fixed-L branches.
 pub fn build_sim(config: SimConfig) -> Sim {
     // B-2: sync econ.n_layers = config.n_layers so stage_birth_death can clamp layer-trait mutations.
+    // D′-3a: if mineral_layer is set, n_energy_layers = mineral_layer index (genomes can only
+    // target layers 0..mineral_layer; mineral is exclusively accessed via stage_mineral_feed).
+    // For all other configs, n_energy_layers == n_layers (backward-compatible).
     let mut config = config;
     config.econ.n_layers = config.n_layers;
+    if let Some(min_l) = config.econ.mineral_layer {
+        config.econ.n_energy_layers = min_l; // exclude mineral layer from genome mutation range
+    } else {
+        config.econ.n_energy_layers = config.n_layers;
+    }
     let econ = config.econ;
     let world = NoiseWorld::new(econ.world_dim, HMAX, RESOURCE_BASE, config.seed ^ WORLD_SALT);
     let grid_w = econ.world_dim / M_FIELD;
