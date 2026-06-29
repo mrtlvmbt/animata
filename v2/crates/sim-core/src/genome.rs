@@ -57,6 +57,11 @@ pub struct Genome {
     /// mutated exactly like the six Ф0 traits; the `brain` crate reads this vector during inference.
     /// Resident here (genome-SoA in the ECS) so no genome→weights repack happens on a Brain tick.
     pub weights: [i8; BRAIN_WEIGHTS],
+    /// Photo-energy absorption capacity (D′-1). `0` → no phototrophy; higher → more light energy
+    /// per tick via `U_photo(L) = photo_gain · L / (km_photo + L)`. Mutated only when the light
+    /// field is present (`EconParams.light.is_some()`) — non-dprime genomes always carry 0, so the
+    /// existing arm64 goldens stay byte-identical un-re-pinned. Range: 0..=256.
+    pub photo_gain: i32,
 }
 
 impl Genome {
@@ -85,6 +90,7 @@ impl Genome {
             uptake_layer: 0,
             excrete_layer: (n_layers.saturating_sub(1)).min(1) as i32,
             weights,
+            photo_gain: 0,  // D′-1: founders carry zero photo capacity; evolution brings it up
         }
     }
 
@@ -97,7 +103,9 @@ impl Genome {
     /// integer perturbation in `{-1,0,+1}` gated by `mutation_rate`, then is clamped to range.
     /// `n_layers` clamps layer traits to `0..=n_layers-1` — must equal the field's actual layer
     /// count (guaranteed by `build_sim` setting `econ.n_layers = config.n_layers`).
-    pub fn mutate(&self, stream: u64, n_layers: usize) -> Genome {
+    /// `has_light` gates the `photo_gain` mutation (D′-1): when `false`, `photo_gain` stays 0 —
+    /// non-dprime genomes never carry a non-zero photo gene, keeping existing goldens byte-identical.
+    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool) -> Genome {
         let mut g = *self;
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -125,6 +133,16 @@ impl Genome {
             if (r & 0xFF) < self.mutation_rate as u64 {
                 let delta = ((r >> 8) % 3) as i64 - 1; // -1,0,+1
                 *w = (*w as i64 + delta).clamp(-127, 127) as i8;
+            }
+        }
+        // D′-1: photo_gain mutates only when light is present. Salt 0x5048_4700 ("PHG\0") is
+        // disjoint from trait salts (0x6D757400+0..7) and weight salts (0x77000000+0..BRAIN_WEIGHTS-1)
+        // → uncorrelated draw stream. Comes AFTER weights so prior draws are undisturbed.
+        if has_light {
+            let r = seed_fold(stream, &[0x5048_4700u64]);
+            if (r & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
+                g.photo_gain = (g.photo_gain + delta).clamp(0, 256);
             }
         }
         g
@@ -156,6 +174,14 @@ impl Genome {
         for &w in &self.weights {
             h = fnv_mix(h, w as u64);
         }
+        // D′-1 F9 trade-off: fold photo_gain ONLY when non-zero. `fnv_mix(h, 0) = h * FNV_PRIME ≠ h`,
+        // so naively folding 0 would shift the checksum for every non-dprime cell. Gating preserves
+        // byte-identity for default_config/l3_config/cprime_config (photo_gain always 0 there).
+        // A dprime cell that evolves photo_gain > 0 IS locked. A dprime cell staying at 0 is not
+        // folded — mild weakening, safe because its other traits ARE folded and mutation is gated.
+        if self.photo_gain != 0 {
+            h = fnv_mix(h, self.photo_gain as u64);
+        }
         h
     }
 }
@@ -182,18 +208,25 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2), g.mutate(123, 2));
+        assert_eq!(g.mutate(123, 2, false), g.mutate(123, 2, false));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2);
+            let m = g.mutate(s, 2, false);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
             assert!((0..=1).contains(&m.excrete_layer));
+            // Without light, photo_gain must stay 0.
+            assert_eq!(m.photo_gain, 0, "photo_gain must not mutate when has_light=false");
+        }
+        // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
+        for s in 0..200u64 {
+            let m = g.mutate(s, 2, true);
+            assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1);
+        let m1 = g1.mutate(0, 1, false);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }

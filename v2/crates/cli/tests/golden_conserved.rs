@@ -16,7 +16,7 @@
 //! **Re-pin** (single-writer, agent A): only on an INTENDED conserved-field change; read the new
 //! left/right from `.ci-report/failed.log` (the arm64 job). Never re-pin to silence drift.
 
-use cli::{cprime_config, default_config, l3_config, run_conserved_hashes};
+use cli::{cprime_config, default_config, dprime_config, l3_config, run_conserved_hashes};
 
 // A-0 pin: conserved-field hash per tick, default SimConfig (seed 0xA11A_2A11, L=1 scalar).
 // Captured on arm64 + Rust 1.96.0 (matches the CI `v2-golden-arm64` job arch + toolchain).
@@ -846,6 +846,29 @@ fn v2_golden_conserved_cprime() {
         assert_eq!(
             h[t], GOLDEN_CONSERVED_CPRIME[t],
             "cprime conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED_CPRIME)"
+        );
+    }
+}
+
+// D′-1 dprime conserved-field golden (L=2 + light economy, seed 0xA11A_2A11).
+// PLACEHOLDER: zeros until PM pins arm64-local from CI `left:` in `.ci-report/failed.log`.
+// Name carries `v2_golden` → arm64-only CI route. Never re-pin to silence drift.
+const GOLDEN_CONSERVED_DPRIME: [u64; 384] = [0u64; 384];
+
+/// D′-1 dprime conserved-field golden pin. Arm64 + release only (`v2_golden` namespace).
+/// PLACEHOLDER zeros — PM pins arm64-local after CI surfaces the real arm64 hash from `left:`.
+/// Isolation gate: if ANY of the four existing goldens also turn red, the photo path leaked
+/// into a non-dprime config — fix the gate, do NOT re-pin the existing goldens.
+#[test]
+fn v2_golden_conserved_dprime() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let h = run_conserved_hashes(dprime_config(0xA11A_2A11), GOLDEN_CONSERVED_DPRIME.len() as u64);
+    for t in 0..GOLDEN_CONSERVED_DPRIME.len() {
+        assert_eq!(
+            h[t], GOLDEN_CONSERVED_DPRIME[t],
+            "dprime conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED_DPRIME)"
         );
     }
 }
