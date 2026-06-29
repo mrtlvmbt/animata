@@ -1,4 +1,4 @@
-//! Direct-encoded Ф0 genome (D3) — **6 integer traits**, no GRN/morphogenesis (Phase 2). Integer
+//! Direct-encoded Ф0 genome — **8 integer traits + photo-regulation gene (D′-2b)**. Integer
 //! everywhere: mutation is an integer perturbation, the metabolic cost is an integer function of
 //! size, and the genome folds into the deterministic state hash. No float in the genetics layer.
 // Guard: no float arithmetic in the conserved layer (M0/F2). Complements the token-grep in
@@ -62,6 +62,28 @@ pub struct Genome {
     /// field is present (`EconParams.light.is_some()`) — non-dprime genomes always carry 0, so the
     /// existing arm64 goldens stay byte-identical un-re-pinned. Range: 0..=256.
     pub photo_gain: i32,
+
+    // ── D′-2b: photo-GRN regulation gene (reuses D-slice setpoint+gain pattern on L(t)) ──────────
+    /// Light-signal setpoint for photo-expression regulation (D′-2b). Compared to `L(t)` by the
+    /// `expressed_capacity` rule. Calibrated to `l_max / 2 = 50` (equidistant from day=100 and
+    /// night=0 in `dprime_config`) so both positive and negative `reg_gain` polarities are viable
+    /// from the founder. Range [0, 256]. Mutates only when `has_light`.
+    pub reg_setpoint: i32,
+    /// Photo-expression signed gain (D′-2b). **Explicit disabled encoding**: `0` = INERT (founder /
+    /// regulation OFF) — the cell expresses photo constitutively, behaving exactly as D′-2a.
+    ///   `> 0`: express by DAY  (`L ≥ reg_setpoint` → full `photo_gain`; `L < reg_setpoint` → 0).
+    ///   `< 0`: express by NIGHT (`L < reg_setpoint` → full `photo_gain`; `L ≥ reg_setpoint` → 0).
+    ///
+    /// **Encoding (declared F3 — binary threshold).** The gain MAGNITUDE is dead weight on the
+    /// expression function — only `sign(reg_gain)` affects `expressed_capacity`. The trait is
+    /// effectively 3-state: neg / 0 / pos. `reg_gain_max` controls the evolvable range
+    /// `[−reg_gain_max, +reg_gain_max]` and LOCKS regulation OFF when 0 (the D′-2c control line).
+    /// D′-2c must account for this: the constitutive control is `reg_gain_max = 0`, not a specific
+    /// gain value. All non-zero gains produce identical binary expression behaviour.
+    ///
+    /// Founder = 0 (INERT). Mutates only when `has_light` (same gate as `photo_gain`) so non-dprime
+    /// genomes carry it at 0 forever → 4 existing goldens byte-identical. Range `[−max, +max]`.
+    pub reg_gain: i32,
 }
 
 impl Genome {
@@ -91,6 +113,11 @@ impl Genome {
             excrete_layer: (n_layers.saturating_sub(1)).min(1) as i32,
             weights,
             photo_gain: 0,  // D′-1: founders carry zero photo capacity; evolution brings it up
+            // D′-2b: regulation gene INERT at founding (reg_gain=0 explicit disabled encoding).
+            // reg_setpoint calibrated to l_max/2=50 so both polarities (+gain=day, -gain=night)
+            // are equidistant from the founder; evolution discovers direction (F7 — no hardcode).
+            reg_setpoint: 50,
+            reg_gain: 0,
         }
     }
 
@@ -103,9 +130,12 @@ impl Genome {
     /// integer perturbation in `{-1,0,+1}` gated by `mutation_rate`, then is clamped to range.
     /// `n_layers` clamps layer traits to `0..=n_layers-1` — must equal the field's actual layer
     /// count (guaranteed by `build_sim` setting `econ.n_layers = config.n_layers`).
-    /// `has_light` gates the `photo_gain` mutation (D′-1): when `false`, `photo_gain` stays 0 —
-    /// non-dprime genomes never carry a non-zero photo gene, keeping existing goldens byte-identical.
-    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool) -> Genome {
+    /// `has_light` gates the `photo_gain` and reg-gene mutations (D′-1/D′-2b): when `false`, both
+    /// stay at their founder values — non-dprime genomes never carry a non-zero photo or reg gene,
+    /// keeping existing goldens byte-identical.
+    /// `reg_gain_max` clamps the reg-gain range to `[−reg_gain_max, +reg_gain_max]` (D′-2b).
+    /// Set `reg_gain_max = 0` to lock regulation OFF — reg_gain stays 0 (the D′-2c control line).
+    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32) -> Genome {
         let mut g = *self;
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -135,14 +165,28 @@ impl Genome {
                 *w = (*w as i64 + delta).clamp(-127, 127) as i8;
             }
         }
-        // D′-1: photo_gain mutates only when light is present. Salt 0x5048_4700 ("PHG\0") is
-        // disjoint from trait salts (0x6D757400+0..7) and weight salts (0x77000000+0..BRAIN_WEIGHTS-1)
-        // → uncorrelated draw stream. Comes AFTER weights so prior draws are undisturbed.
+        // D′-1/D′-2b: photo_gain and reg gene mutate only when light is present.
+        // Salts are disjoint from trait (0x6D757400+) and weight (0x77000000+) salts → uncorrelated
+        // draw streams. Come AFTER weights so prior draws are undisturbed (§5.2 stream hygiene).
         if has_light {
+            // photo_gain — salt 0x5048_4700 ("PHG\0")
             let r = seed_fold(stream, &[0x5048_4700u64]);
             if (r & 0xFF) < self.mutation_rate as u64 {
                 let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
                 g.photo_gain = (g.photo_gain + delta).clamp(0, 256);
+            }
+            // D′-2b: reg_setpoint — salt 0x5253_5000 ("RSP\0")
+            let r_sp = seed_fold(stream, &[0x5253_5000u64]);
+            if (r_sp & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r_sp >> 8) % 3) as i32 - 1;
+                g.reg_setpoint = (g.reg_setpoint + delta).clamp(0, 256);
+            }
+            // D′-2b: reg_gain — salt 0x5247_4E00 ("RGN\0").
+            // When reg_gain_max=0: clamp(-0,0) always yields 0 → regulation locked OFF (D′-2c line).
+            let r_gn = seed_fold(stream, &[0x5247_4E00u64]);
+            if (r_gn & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r_gn >> 8) % 3) as i32 - 1;
+                g.reg_gain = (g.reg_gain + delta).clamp(-reg_gain_max, reg_gain_max);
             }
         }
         g
@@ -182,6 +226,17 @@ impl Genome {
         if self.photo_gain != 0 {
             h = fnv_mix(h, self.photo_gain as u64);
         }
+        // D′-2b (critic F2): fold BOTH reg_setpoint AND reg_gain when reg_gain != 0.
+        // Gated on reg_gain ≠ 0 (same pattern as photo_gain) — non-dprime genomes always have
+        // reg_gain=0, so their checksums are undisturbed → 4 existing goldens byte-identical.
+        // Folding both together catches a regression where only setpoint changes (F2).
+        // Accepted mild weakening: two dprime cells both with reg_gain=0 but differing setpoints
+        // collide in the hash — acceptable because gain-0 cells are behaviourally identical
+        // regardless of setpoint (the gene is inert at gain=0; setpoint only matters when active).
+        if self.reg_gain != 0 {
+            h = fnv_mix(h, self.reg_setpoint as u64);
+            h = fnv_mix(h, self.reg_gain as u64);
+        }
         h
     }
 }
@@ -208,25 +263,32 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2, false), g.mutate(123, 2, false));
+        assert_eq!(g.mutate(123, 2, false, 4), g.mutate(123, 2, false, 4));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, false);
+            let m = g.mutate(s, 2, false, 4);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
             assert!((0..=1).contains(&m.excrete_layer));
-            // Without light, photo_gain must stay 0.
+            // Without light, photo_gain and reg gene must stay at founder values.
             assert_eq!(m.photo_gain, 0, "photo_gain must not mutate when has_light=false");
+            assert_eq!(m.reg_gain, 0, "reg_gain must not mutate when has_light=false");
         }
         // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true);
+            let m = g.mutate(s, 2, true, 4);
             assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
+            assert!((-4..=4).contains(&m.reg_gain), "reg_gain must be in [-reg_gain_max, +reg_gain_max]");
+        }
+        // reg_gain_max=0 locks regulation OFF even when has_light=true.
+        for s in 0..200u64 {
+            let m = g.mutate(s, 2, true, 0);
+            assert_eq!(m.reg_gain, 0, "reg_gain must stay 0 when reg_gain_max=0 (D′-2c lock)");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1, false);
+        let m1 = g1.mutate(0, 1, false, 0);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }

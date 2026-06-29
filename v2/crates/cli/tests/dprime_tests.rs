@@ -27,7 +27,7 @@
 //!       correctly but the photo path wasn't actually gated on it.
 
 use cli::{build_sim, dprime_config, run_conserved_hashes};
-use sim_core::{light_at_tick, SimConfig};
+use sim_core::{expressed_capacity, light_at_tick, Genome, SimConfig};
 
 const SEED: u64 = 0xD0_DE_5EED;
 const TICKS_SHORT: u64 = 512;  // for R14/R15 (fast, determinism)
@@ -271,4 +271,83 @@ fn dprime_d2a_viability_reband() {
          at t={TICKS_LONG}. Photo-machinery cost may have collapsed the population. \
          Report this finding — do NOT silently lower the cost. Check calibration sim-transfer."
     );
+}
+
+// ── D′-2b: photo-GRN regulation gene teeth ───────────────────────────────────────────────────────
+//
+// PRE-DECLARED assertions (declared BEFORE measuring; do NOT weaken post-hoc):
+//
+//   (g) Regulation-active pure-fn: expressed_capacity(g, l_day) != expressed_capacity(g, l_night)
+//       for a hand-constructed genome with photo_gain>0 and a seeded non-zero reg_gain.
+//       Also: expressed_capacity(founder, l) == photo_gain for all l (founder-inert assertion).
+//       DETERMINISTIC — no sim needed. A no-op gene cannot pass vacuously.
+//
+//   Conservation and determinism (R15/R14) are covered by the existing dprime_r15_conservation_exact
+//   and dprime_r14_thread_count_independent tests — expressed_capacity is a pure fn of genome +
+//   global L(t) (no per-cell RNG), so R14 holds by construction.
+//
+//   Founder-inert ⟹ byte-identical to D′-2a by construction:
+//     - photo_gain=0 (founder) → expressed_capacity=0 → photo_demand=0, photo_cost=0 (D′-2a path).
+//     - reg_gain=0 (founder) → expressed_capacity = photo_gain unconditionally (D′-2a path).
+//   So until reg_gain mutates non-zero, every dprime cell behaves identically to D′-2a.
+
+/// R20 alignment guard: a misaligned light config (metab window straddles day↔night boundary)
+/// must panic at `Sim::new` construction. Hard assert fires in release too (not debug_assert).
+///
+/// Config: period_ticks=3, day_ticks=1, metab_period=2 → day_ticks(1) % 2 = 1 ≠ 0 → misaligned.
+/// A metab window at ticks [0,1] spans both phases (day=0, night=1).
+#[test]
+#[should_panic(expected = "R20 alignment violated")]
+fn dprime_d2b_r20_alignment_guard_fires() {
+    use cli::default_config;
+    use sim_core::{EconParams, LightSpec, SimConfig};
+    let bad = SimConfig {
+        econ: EconParams {
+            light: Some(LightSpec { l_max: 100, period_ticks: 3, day_ticks: 1, km_photo: 30 }),
+            metab_period: 2,
+            ..EconParams::default()
+        },
+        ..default_config(1)
+    };
+    build_sim(bad); // must panic with R20 alignment message
+}
+
+/// (g) Regulation-active pure-fn tooth (D′-2b).
+///
+/// DETERMINISTIC — a unit test on `expressed_capacity` with hand-constructed genomes.
+/// Primary proof that the gene works; no sim needed; a no-op gene cannot pass vacuously.
+#[test]
+fn dprime_d2b_regulation_active_pure_fn() {
+    // ── Founder inert: expressed == photo_gain (== 0) for all L ──────────────────────────────
+    let founder = Genome::founder(2);
+    assert_eq!(founder.reg_gain, 0, "founder must have reg_gain=0 (inert)");
+    assert_eq!(founder.photo_gain, 0, "founder must have photo_gain=0");
+    for l in [0i64, 50, 100] {
+        assert_eq!(
+            expressed_capacity(&founder, l),
+            founder.photo_gain,
+            "founder: expressed_capacity({l}) must equal photo_gain (constitutive at gain=0)"
+        );
+    }
+
+    // ── Express-by-day (reg_gain > 0): day=photo_gain, night=0 ───────────────────────────────
+    let g_day = Genome { photo_gain: 8, reg_setpoint: 50, reg_gain: 2, ..Genome::founder(2) };
+    let day_cap  = expressed_capacity(&g_day, 100); // l=100 ≥ setpoint=50 → photo_gain
+    let night_cap = expressed_capacity(&g_day, 0);  // l=0   <  setpoint=50 → 0
+    assert_eq!(day_cap,   8, "express-by-day: day capacity must equal photo_gain=8");
+    assert_eq!(night_cap, 0, "express-by-day: night capacity must be 0 (suppressed)");
+    assert_ne!(day_cap, night_cap,
+        "regulation-active: day and night expressed capacity must differ when reg_gain != 0");
+
+    // ── Constitutive control (reg_gain == 0, same photo_gain): day == night == photo_gain ─────
+    let g_const = Genome { photo_gain: 8, reg_setpoint: 50, reg_gain: 0, ..Genome::founder(2) };
+    assert_eq!(expressed_capacity(&g_const, 100), 8, "constitutive: day == photo_gain");
+    assert_eq!(expressed_capacity(&g_const, 0),   8, "constitutive: night == photo_gain");
+
+    // ── Express-by-night polarity (reg_gain < 0): night=photo_gain, day=0 ────────────────────
+    let g_night = Genome { photo_gain: 8, reg_setpoint: 50, reg_gain: -1, ..Genome::founder(2) };
+    assert_eq!(expressed_capacity(&g_night, 0),   8, "express-by-night: night == photo_gain");
+    assert_eq!(expressed_capacity(&g_night, 100), 0, "express-by-night: day == 0");
+    assert_ne!(expressed_capacity(&g_night, 100), expressed_capacity(&g_night, 0),
+        "express-by-night: day and night must differ");
 }

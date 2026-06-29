@@ -122,6 +122,16 @@ pub struct EconParams {
     /// remain byte-identical (the isolation gate; un-re-pinned existing goldens ARE the test).
     pub light: Option<LightSpec>,
 
+    // ── D′-2b: photo-GRN regulation gene ─────────────────────────────────────────────────────────
+    /// Maximum absolute value of the evolvable `reg_gain` field (D′-2b).
+    /// Reg-gene mutations clamp to `[−reg_gain_max, +reg_gain_max]`.
+    ///   `reg_gain_max = 0`: regulation locked OFF (the D′-2c constitutive control line) —
+    ///     reg_gain stays at the founder value (0) forever, dprime behaves as D′-2a.
+    ///   `reg_gain_max > 0`: regulation can evolve; non-zero gain enables day/night gating.
+    /// Default 4 (regulation enabled, light-gating can evolve). Non-dprime configs are
+    /// unaffected: reg_gain only mutates when `has_light=true` (same gate as photo_gain).
+    pub reg_gain_max: i32,
+
     // ── D′-2a: photo-machinery expression cost ────────────────────────────────────────────────────
     /// Photo-machinery expression cost numerator (D′-2a). Per-tick rate:
     /// `r = (photo_cost_num · photo_gain) / photo_cost_den` eu/tick.
@@ -215,6 +225,10 @@ impl Default for EconParams {
             detritus_layer: None,    // C′-1: None → byte-identical Slice-C behavior (→ layer 0)
             detritus_frac_num: RECYCLE_DEN, // = 256; dormant (only active when detritus_layer is Some)
             light: None,             // D′-1: None → light economy inert, photo_gain stays 0
+            // D′-2b: regulation gene. reg_gain_max=4 enables regulation (range [-4,+4]).
+            // Non-dprime unaffected: reg_gain mutates only when has_light=true.
+            // Set to 0 for the D′-2c constitutive-control experiment.
+            reg_gain_max: 4,
             // D′-2a: photo-machinery cost. Applies only when photo_gain > 0 (non-dprime configs
             // have photo_gain ≡ 0 → cost is inert → byte-identical isolation from existing goldens).
             // Calibrated at ≈9% of day income at threshold gain (NUM=1, DEN=16, n=2 → gain≥8).
