@@ -949,7 +949,8 @@ mod tests {
         const PROD_FRAC: f64 = 0.10; // pre-declared: ≥10% Phototrophs at horizon = EMERGES
 
         println!("\nD\u{2019}-3b emergence verdict: Guild::Phototroph in dprime mineral economy");
-        println!("PRE-DECLARED: signal=photo_in/(photo_in+chem_in), threshold=>50%, PROD_FRAC={PROD_FRAC:.0}%");
+        println!("PRE-DECLARED: signal=photo_in/(photo_in+chem_in), threshold=>50%, PROD_FRAC={:.0}%",
+            PROD_FRAC * 100.0);
         println!("Light regime: l_max={}, day_ticks={} (mineral-limited, not L\u{2248}20 knife-edge)",
             spec.l_max, spec.day_ticks);
         println!("ticks={ticks}  late-window=[{window_start},{ticks}]");
