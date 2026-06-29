@@ -35,12 +35,27 @@ impl Guild {
     pub const ALL: [Guild; 4] =
         [Guild::Producer, Guild::Consumer, Guild::Reducer, Guild::Phototroph];
 
-    /// Classify an organism by its metabolic guild. Uses `uptake_layer` (trait slot 6) as the
-    /// primary discriminant. `detritus_layer` enables the Reducer class (C′-2): an organism
-    /// with `uptake_layer == detritus_layer` is a Reducer regardless of the layer value. Pass
+    /// Classify an organism by its metabolic guild.
+    ///
+    /// **D′-3b Phototroph gate (pre-declared, checked before layer split):**
+    /// A cell is `Guild::Phototroph` when its realized photo income dominates its realized total
+    /// energy income: `photo_in * 2 > (photo_in + chem_in)` (i.e. photo fraction > 50%, exact
+    /// integer — no division). The `total_in == 0` guard prevents fasting cells from being
+    /// misclassified. Non-dprime configs always have `photo_in = 0` → condition is always false
+    /// → Producer/Consumer/Reducer split is byte-identical for all non-dprime goldens. ✅
+    ///
+    /// `detritus_layer` enables the Reducer class (C′-2): an organism with
+    /// `uptake_layer == detritus_layer` is a Reducer regardless of the layer value. Pass
     /// `None` for configs without a detritus layer — preserves the original Producer/Consumer
     /// split byte-identically (`default_config`, `l3_config`).
     pub const fn classify(s: &TraitSample, detritus_layer: Option<usize>) -> Guild {
+        // D′-3b: Phototroph by realized income fraction > 50% (pre-declared threshold).
+        // photo_in=0 → total_in=chem_in → photo_in*2=0 ≤ total_in → never Phototroph. ✅
+        let total_in = s.photo_in + s.chem_in;
+        if total_in > 0 && s.photo_in * 2 > total_in {
+            return Guild::Phototroph;
+        }
+        // Existing layer-based split: Reducer → Producer / Consumer.
         if let Some(dl) = detritus_layer {
             if s.traits[6] as usize == dl {
                 return Guild::Reducer;
@@ -203,7 +218,7 @@ mod tests {
     use super::*;
 
     fn s(traits: [i32; 8], offspring: u32) -> TraitSample {
-        TraitSample { traits, offspring }
+        TraitSample { traits, offspring, ..Default::default() }
     }
 
     // ── Guild classifier ─────────────────────────────────────────────────────────────────────────
@@ -224,6 +239,34 @@ mod tests {
     fn classifier_higher_layer_is_consumer() {
         let sample = s([200, 1, 1, 2, 1500, 32, 3, 1], 0);
         assert_eq!(Guild::classify(&sample, None), Guild::Consumer);
+    }
+
+    #[test]
+    fn classifier_phototroph_by_realized_income_fraction() {
+        // D′-3b: photo_in * 2 > total_in (>50%) → Phototroph.
+        let mut ph = s([200, 1, 1, 2, 1500, 32, 0, 1], 0);
+        ph.photo_in = 10;
+        ph.chem_in = 5; // fraction = 10/15 ≈ 66.7% > 50%
+        assert_eq!(Guild::classify(&ph, None), Guild::Phototroph);
+
+        // Exactly 50% is NOT Phototroph (threshold is strictly >50%).
+        ph.photo_in = 5;
+        ph.chem_in = 5; // fraction = 5/10 = 50% — not strictly above
+        assert_ne!(Guild::classify(&ph, None), Guild::Phototroph);
+
+        // Chem dominates: falls through to layer-based Producer/Consumer.
+        ph.photo_in = 2;
+        ph.chem_in = 10; // fraction = 2/12 ≈ 16.7%
+        assert_eq!(Guild::classify(&ph, None), Guild::Producer); // uptake_layer=0
+
+        // Fasting cell (total_in=0): NOT Phototroph — classified by layer.
+        ph.photo_in = 0;
+        ph.chem_in = 0;
+        assert_eq!(Guild::classify(&ph, None), Guild::Producer);
+
+        // Non-dprime cell: photo_in always 0 → never Phototroph → byte-identical split.
+        let non_dprime = s([200, 1, 1, 2, 1500, 32, 1, 0], 0); // consumer layer
+        assert_eq!(Guild::classify(&non_dprime, None), Guild::Consumer);
     }
 
     #[test]

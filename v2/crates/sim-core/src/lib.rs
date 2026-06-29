@@ -86,10 +86,21 @@ pub struct ReproEvents {
 /// Slots 0–5: six Ф0 traits (metabolism_eff, move_speed, sense_range, size, repro_threshold,
 /// mutation_rate). Slots 6–7: B-2 layer traits (uptake_layer, excrete_layer) — extended so that
 /// layer-targeting selection is observable through the Price covariance path.
+///
+/// D′-3b: `photo_in` and `chem_in` carry the per-cell realized income split recorded at the
+/// booking sites (stage_interactions). These are EXACT copies of the booked integers — never
+/// re-derived — so they match the tick that credited the energy. Purely observational; never
+/// fed to state_hash or any conserved value.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TraitSample {
     pub traits: [i32; 8],
     pub offspring: u32,
+    /// D′-3b: realized per-cell photo energy income this tick (exact booked integer).
+    /// 0 for non-dprime configs (photo_gain ≡ 0 → photo_demand returns 0 always).
+    pub photo_in: i64,
+    /// D′-3b: realized per-cell chemical (field) energy income this tick (after metabolism_eff).
+    /// 0 if field was empty or cell received no grant.
+    pub chem_in: i64,
 }
 
 /// Speciation state (M5/criterion 2). Tracks the founder genome of each species and the
@@ -150,6 +161,14 @@ pub struct Telemetry {
     /// A sub-count of `reg_active_count`; agents with `reg_gain < 0` are night-phase regulators.
     /// Observational only — never fed to tick or state hash.
     pub reg_active_day_count: i64,
+
+    // ── D′-3b: per-entity realized income record ──────────────────────────────────────────────────
+    /// D′-3b: entity_bits → (photo_in, chem_in) for the current tick.
+    /// Populated in stage_interactions with the EXACT booked integers (same values credited to Energy).
+    /// Cleared at the start of each stage_interactions call; consumed (via std::mem::take) in
+    /// stage_observe to build per-sample income split in TraitSample. Purely observational —
+    /// never fed to state_hash or any conserved value; non-dprime entities always have (0, 0).
+    pub income_record: DetMap<u64, (i64, i64)>,
 }
 
 #[cfg(feature = "perf")]

@@ -355,6 +355,10 @@ pub fn stage_interactions(
     // 3. Apply grants: ONE get_mut per entity (no second archetype scan).
     //    `conserved_take` is called for the GRANT amount (may be < demand at deficit cells).
     //    D′-1: photo energy credited here too — same stage, so the booked set matches exactly.
+    //    D′-3b: record per-entity income split (photo_in, chem_in) in tel.income_record using the
+    //    EXACT integers booked here. This is a read-only side-channel — never fed back to any
+    //    conserved value or state hash. Non-dprime: photo=0 always → (0, gained) written.
+    tel.income_record.clear();
     let mut photo_total: i64 = 0;
     for (i, c) in contestants.iter().enumerate() {
         #[cfg(feature = "perf")]
@@ -368,11 +372,14 @@ pub fn stage_interactions(
         // D′-1/D′-2b: additive photo energy on the EXPRESSED capacity.
         // Night-downregulated cells have expressed_capacity=0 → photo_demand returns 0 (also because
         // L=0 at night, so the saving is in COST not income — see expressed_capacity doc).
-        if let Some(km) = km_photo {
-            let photo = photo_demand(expressed_capacity(g, l_now), km, l_now);
-            energy.0 += photo;
-            photo_total += photo;
-        }
+        let photo = if let Some(km) = km_photo {
+            let p = photo_demand(expressed_capacity(g, l_now), km, l_now);
+            energy.0 += p;
+            photo_total += p;
+            p
+        } else { 0 };
+        // D′-3b: record income split (exact booked integers, read-only, never fed back).
+        tel.income_record.insert(c.entity_bits, (photo, gained));
     }
     // D′-1: book photo energy as external source (non-conserved flux, like regen from field.solve()).
     // Uses the ACTUAL per-cell sum Σᵢ photo_energyᵢ — NOT N·U_photo — so the booked source matches
@@ -714,10 +721,16 @@ pub fn stage_observe(
     tel.samples.clear();
     let mut ents: Vec<(u64, Genome)> = q.iter().map(|(e, g)| (e.to_bits(), *g)).collect();
     ents.sort_unstable_by_key(|x| x.0);
+    // D′-3b: take the income record so we can read it while pushing to tel.samples (avoids
+    // borrow conflict). The record will be repopulated by stage_interactions next tick.
+    let income_record = std::mem::take(&mut tel.income_record);
     let mut reg_active = 0i64;
     let mut reg_active_day = 0i64;
     for (bits, g) in &ents {
         let offspring = u32::from(repro.parents.contains(bits));
+        // D′-3b: read the exact booked integers recorded at stage_interactions.
+        // Returns (0, 0) for entities not in the record (founders at tick 0, or non-dprime).
+        let (photo_in, chem_in) = income_record.get(bits).copied().unwrap_or((0, 0));
         tel.samples.push(TraitSample {
             traits: [
                 g.metabolism_eff,
@@ -730,6 +743,8 @@ pub fn stage_observe(
                 g.excrete_layer,  // B-2 slot 7
             ],
             offspring,
+            photo_in,
+            chem_in,
         });
         // D′-2c: reg-activity aggregate — pure read, never fed to tick or state hash.
         if g.reg_gain != 0 {
