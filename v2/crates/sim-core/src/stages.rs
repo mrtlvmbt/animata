@@ -382,7 +382,79 @@ pub fn stage_interactions(
     tel.photo_produced = photo_total;
 }
 
+// ── Stage 6b: MineralFeed — contested Monod uptake from mineral layer into per-entity MineralQuota.
+//    Mirrors stage_interactions (energy feed-ration): gather → sort by (cell, entity) → ration.
+//    Entity-id sort (R10): same canonical order as stage_birth_death, not (cell+layer) sort.
+//    Non-rival check is still `sigma > r_cell` — mineral IS contested (unlike light, which is non-rival).
+//    EARLY EXIT when `econ.mineral_layer` is None — stage is always scheduled but inert for non-dprime.
+//    Conservation: field_M decreases by grant; quota increases by grant; no ledger entry (conserved).
+pub fn stage_mineral_feed(
+    econ: Res<EconParams>,
+    mut field: ResMut<FieldRes>,
+    mut q: Query<(Entity, &Position, &mut MineralQuota)>,
+) {
+    let min_l = match econ.mineral_layer {
+        Some(l) => l,
+        None => return, // inert for non-dprime configs; MineralQuota not present anyway
+    };
+
+    // 1. Gather: Monod demand from mineral field layer. Entity-id-sorted (R10/R14).
+    struct MinContestant {
+        entity_bits: u64,
+        entity: Entity,
+        pos: Vec2Fixed,
+        demand: i64,
+    }
+    let mut contestants: Vec<MinContestant> = q.iter().map(|(e, pos, _)| {
+        let r = field.0.conserved_at(pos.0, min_l);
+        let demand = monod_demand(econ.u_max_mineral, econ.km_mineral, r);
+        MinContestant { entity_bits: e.to_bits(), entity: e, pos: pos.0, demand }
+    }).collect();
+    // Entity-id order — same sort as stage_birth_death (R10). The mineral uptake contest is
+    // purely per-cell (not per-layer pair), so the sort key is cell_index × secondary = entity.
+    contestants.sort_unstable_by(|a, b| {
+        let cell_a = field.0.cell_index(a.pos);
+        let cell_b = field.0.cell_index(b.pos);
+        cell_a.cmp(&cell_b).then_with(|| a.entity_bits.cmp(&b.entity_bits))
+    });
+
+    // 2. Two-pass ration: Σ demand per cell, then proportional grant at deficit.
+    let n = contestants.len();
+    let mut grants: Vec<i64> = vec![0; n];
+    let mut run_start = 0;
+    while run_start < n {
+        let cell_a = field.0.cell_index(contestants[run_start].pos);
+        let mut run_end = run_start + 1;
+        while run_end < n && field.0.cell_index(contestants[run_end].pos) == cell_a {
+            run_end += 1;
+        }
+        let r_cell = field.0.conserved_at(contestants[run_start].pos, min_l);
+        let sigma: i64 = contestants[run_start..run_end].iter().map(|c| c.demand).sum();
+        if sigma <= r_cell {
+            for i in run_start..run_end {
+                grants[i] = contestants[i].demand;
+            }
+        } else if r_cell == 0 {
+            // empty cell — all zeros
+        } else {
+            for i in run_start..run_end {
+                grants[i] = contestants[i].demand * r_cell / sigma;
+            }
+        }
+        run_start = run_end;
+    }
+
+    // 3. Apply: take from field (conserved), credit to quota. No ledger entry — conserved transfer.
+    for (i, c) in contestants.iter().enumerate() {
+        let (_, _, mut quota) = q.get_mut(c.entity).expect("entity present");
+        let got = field.0.conserved_take(c.pos, grants[i], min_l);
+        quota.0 += got;
+    }
+}
+
 // ── Stage 7: BirthDeath — division (energy split) + death, via the command buffer (sync point). ────
+// D′-3a additions: Liebig AND-gate on division (quota ≥ q_mineral), overflow-heat when energy-ready
+// but mineral-poor (ONE site, same sorted loop), and mineral quota recycled on death.
 pub fn stage_birth_death(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
@@ -391,9 +463,11 @@ pub fn stage_birth_death(
     mut repro: ResMut<ReproEvents>,
     mut commands: Commands,
     mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId)>,
+    mut qmin: Query<&mut MineralQuota>,  // D′-3a: separate query (avoids borrow conflict)
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     use crate::params::{D0_MASK, RECYCLE_DEN};
+    let has_mineral = econ.mineral_layer.is_some();
     repro.parents.clear();
     let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
@@ -435,6 +509,22 @@ pub fn stage_birth_death(
                     }
                 }
                 ledger.lost += lost_here;
+                // D′-3a: on d0 death, recycle mineral quota fraction back to mineral layer;
+                // remainder → ledger.lost (mineral analogue of energy recycle at C-2).
+                if has_mineral {
+                    if let Ok(quota) = qmin.get(e) {
+                        let q_body = quota.0;
+                        if q_body > 0 {
+                            let recycled_min = econ.recycle_mineral_num * q_body / RECYCLE_DEN;
+                            let lost_min = q_body - recycled_min;
+                            if recycled_min > 0 {
+                                let cell = field.0.cell_index(pos.0);
+                                field.0.deposit_conserved(cell, recycled_min, econ.mineral_layer.unwrap());
+                            }
+                            ledger.lost += lost_min;
+                        }
+                    }
+                }
                 commands.entity(e).despawn();
                 continue;
             }
@@ -446,14 +536,68 @@ pub fn stage_birth_death(
             // ledger.lost += 0 is a no-op; no field deposit; conservation intact (as before C).
             let recycled = econ.recycle_num * energy.0 / RECYCLE_DEN; // = 0
             ledger.lost += energy.0 - recycled;                        // = 0
+            // D′-3a: starvation death — recycle mineral quota (same path as d0 death).
+            if has_mineral {
+                if let Ok(quota) = qmin.get(e) {
+                    let q_body = quota.0;
+                    if q_body > 0 {
+                        let recycled_min = econ.recycle_mineral_num * q_body / RECYCLE_DEN;
+                        let lost_min = q_body - recycled_min;
+                        if recycled_min > 0 {
+                            let cell = field.0.cell_index(pos.0);
+                            field.0.deposit_conserved(cell, recycled_min, econ.mineral_layer.unwrap());
+                        }
+                        ledger.lost += lost_min;
+                    }
+                }
+            }
             commands.entity(e).despawn();
             continue;
         }
-        if energy.0 >= genome.repro_threshold as i64 && energy.0 >= econ.e_cell + econ.c_div {
+
+        // ── D′-3a: Liebig AND-gate + overflow (ONE site, same sorted loop, no new RNG). ───────
+        // Overflow trigger: energy-ready (≥ e_cell+c_div) but mineral-poor (quota < q_mineral).
+        // The cell burns overflow_delta energy → ledger.lost (the Liebig surplus-heat sink).
+        // Conservation: energy.0 -= δ; ledger.lost += δ; residual unchanged.
+        // Non-dprime configs: has_mineral=false → block skipped → byte-identical.
+        let mineral_gate_passes = if has_mineral {
+            match qmin.get(e) {
+                Ok(quota) => {
+                    let q_val = quota.0;
+                    let energy_ready = energy.0 >= econ.e_cell + econ.c_div;
+                    let quota_ready = q_val >= econ.q_mineral;
+                    if energy_ready && !quota_ready {
+                        // Overflow: surplus energy that cannot become biomass dissipates as heat.
+                        // Clamped to available energy (overflow cannot drive energy negative).
+                        let delta = econ.overflow_delta.min(energy.0.max(0));
+                        energy.0 -= delta;
+                        ledger.lost += delta;
+                    }
+                    quota_ready
+                }
+                Err(_) => true, // safety fallback: entity without quota → gate open (never fires)
+            }
+        } else {
+            true // no mineral economy → gate always open
+        };
+
+        if energy.0 >= genome.repro_threshold as i64
+            && energy.0 >= econ.e_cell + econ.c_div
+            && mineral_gate_passes
+        {
             // Division: child stock e_cell stays in the system (the child), c_div dissipated.
             // Δenergy = −(e_cell + c_div) + e_cell(child) + c_div(dissipated) = 0  (conserved).
             energy.0 -= econ.e_cell + econ.c_div;
             ledger.dissipated += econ.c_div;
+            // D′-3a: parent spends q_mineral from quota; child starts fresh (quota=0).
+            // q_mineral → ledger.dissipated (analogous to c_div; the mineral cost of division).
+            // Conservation: quota.0 -= q_mineral; dissipated += q_mineral; residual unchanged.
+            if has_mineral {
+                if let Ok(mut quota) = qmin.get_mut(e) {
+                    ledger.dissipated += econ.q_mineral;
+                    quota.0 -= econ.q_mineral;
+                }
+            }
             let pos_c = *pos;
             let child_genome =
                 genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_layers, econ.light.is_some(), econ.reg_gain_max);
@@ -469,22 +613,41 @@ pub fn stage_birth_death(
             // is no partial migration where BrainState moves but BrainOutput does not. All per-slot
             // buffers are therefore always in sync; the "forgot to move h_new" class of bug cannot
             // occur. The zeroing here covers the initial allocation, not partial row-updates.
-            commands.spawn((
-                Position(pos_c.0),
-                PositionNext(pos_c.0),
-                Velocity::default(),
-                VelocityNext::default(),
-                Energy(econ.e_cell),
-                child_genome,
-                species_c,
-                Sensors::default(),
-                Intent::default(),
-                BrainState::zeroed(),
-                BrainOutput::zeroed(),
-                // M5: marks child for speciation check in Sim::process_pending_speciation()
-                // (post-stage, outside the ECS system so SpeciationState stays off the world).
-                PendingSpeciation,
-            ));
+            if has_mineral {
+                commands.spawn((
+                    Position(pos_c.0),
+                    PositionNext(pos_c.0),
+                    Velocity::default(),
+                    VelocityNext::default(),
+                    Energy(econ.e_cell),
+                    child_genome,
+                    species_c,
+                    Sensors::default(),
+                    Intent::default(),
+                    BrainState::zeroed(),
+                    BrainOutput::zeroed(),
+                    MineralQuota(0), // D′-3a: child inherits zero quota (must re-accumulate)
+                    // M5: marks child for speciation check in Sim::process_pending_speciation()
+                    PendingSpeciation,
+                ));
+            } else {
+                commands.spawn((
+                    Position(pos_c.0),
+                    PositionNext(pos_c.0),
+                    Velocity::default(),
+                    VelocityNext::default(),
+                    Energy(econ.e_cell),
+                    child_genome,
+                    species_c,
+                    Sensors::default(),
+                    Intent::default(),
+                    BrainState::zeroed(),
+                    BrainOutput::zeroed(),
+                    // M5: marks child for speciation check in Sim::process_pending_speciation()
+                    // (post-stage, outside the ECS system so SpeciationState stays off the world).
+                    PendingSpeciation,
+                ));
+            }
         }
     }
 }

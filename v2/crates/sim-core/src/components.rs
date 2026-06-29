@@ -46,6 +46,16 @@ pub struct SpeciesId(pub u32);
 #[derive(Component, Default)]
 pub struct PendingSpeciation;
 
+/// Per-entity mineral quota stock (D′-3a). Present only when `EconParams.mineral_layer.is_some()`.
+/// Mineral flows: field → quota (Monod uptake, stage_mineral_feed); quota → spent at division
+/// (`q_mineral` deducted); quota → field on death (recycle fraction). Overflow: when
+/// energy-ready but quota < q_mineral, the cell burns `overflow_delta` energy as heat.
+/// Founders and newborns start at 0 (no inherited mineral).
+/// Conservation: every mineral-eu in quota + field_mineral = conserved (tracked in EnergyLedger
+/// alongside energy, since all conserved layers are unified in `conserved_total_all()`).
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct MineralQuota(pub i64);
+
 /// Recurrent hidden state of the brain (M3 / D-Brain-2) — a per-entity **double buffer** of the
 /// `H = BRAIN_HIDDEN` hidden units (`FixedI16` Q8.8). All recurrent edges read `h_old` and write
 /// `h_new`; the buffers are swapped **only on Brain ticks** (1/K), so between Brain ticks the hidden

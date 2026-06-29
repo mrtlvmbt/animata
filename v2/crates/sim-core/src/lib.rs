@@ -28,8 +28,8 @@ mod stages;
 mod traits;
 
 pub use components::{
-    BrainOutput, BrainState, Energy, Intent, PendingSpeciation, Sensors, SpeciesId, Velocity,
-    VelocityNext,
+    BrainOutput, BrainState, Energy, Intent, MineralQuota, PendingSpeciation, Sensors, SpeciesId,
+    Velocity, VelocityNext,
 };
 pub use det_map::DetMap;
 pub use energy::EnergyLedger;
@@ -255,25 +255,47 @@ impl Sim {
             econ.n_layers, config.n_layers,
         );
         let founder = Genome::founder(config.n_layers);
+        let has_mineral = econ.mineral_layer.is_some();
         for i in 0..config.n_founders {
             // Deterministic scatter across the domain (co-prime strides → spread, no float).
             let x = ((i.wrapping_mul(7).wrapping_add(3)) % econ.world_dim as u64) as i64;
             let z = ((i.wrapping_mul(13).wrapping_add(5)) % econ.world_dim as u64) as i64;
             let p = Vec2Fixed(x, z);
-            w.spawn((
-                Position(p),
-                PositionNext(p),
-                Velocity::default(),
-                VelocityNext::default(),
-                Energy(config.founder_energy),
-                founder,
-                SpeciesId(0),
-                Sensors::default(),
-                Intent::default(),
-                // Spawn contract (D-Brain-2a): brain buffers start zeroed — same path as a newborn.
-                BrainState::zeroed(),
-                BrainOutput::zeroed(),
-            ));
+            // D′-3a: founders get MineralQuota(0) when mineral is active. The quota(0) does NOT
+            // change EnergyLedger.initial: quota=0 contributes nothing to the conserved sum.
+            // Non-dprime configs do NOT spawn MineralQuota → their archetype is unchanged →
+            // byte-identical goldens (no extra entity column, no hash perturbation).
+            if has_mineral {
+                w.spawn((
+                    Position(p),
+                    PositionNext(p),
+                    Velocity::default(),
+                    VelocityNext::default(),
+                    Energy(config.founder_energy),
+                    founder,
+                    SpeciesId(0),
+                    Sensors::default(),
+                    Intent::default(),
+                    BrainState::zeroed(),
+                    BrainOutput::zeroed(),
+                    MineralQuota(0),
+                ));
+            } else {
+                w.spawn((
+                    Position(p),
+                    PositionNext(p),
+                    Velocity::default(),
+                    VelocityNext::default(),
+                    Energy(config.founder_energy),
+                    founder,
+                    SpeciesId(0),
+                    Sensors::default(),
+                    Intent::default(),
+                    // Spawn contract (D-Brain-2a): brain buffers start zeroed — same path as a newborn.
+                    BrainState::zeroed(),
+                    BrainOutput::zeroed(),
+                ));
+            }
         }
 
         let field_total = field.conserved_total_all();
@@ -340,10 +362,10 @@ impl Sim {
     pub fn state_hash(&mut self) -> u64 {
         let mut q = self
             .world
-            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput, &Velocity)>();
+            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput, &Velocity, Option<&MineralQuota>)>();
         let items: Vec<(Entity, u64)> = q
             .iter(&self.world)
-            .map(|(e, p, en, g, bs, bo, v)| {
+            .map(|(e, p, en, g, bs, bo, v, mq)| {
                 let mut h = fnv_mix(FNV_OFFSET, p.0 .0 as u64);
                 h = fnv_mix(h, p.0 .1 as u64);
                 h = fnv_mix(h, en.0 as u64);
@@ -356,6 +378,15 @@ impl Sim {
                 }
                 h = fnv_mix(h, v.0 .0 as u64);
                 h = fnv_mix(h, v.0 .1 as u64);
+                // D′-3a: fold mineral quota only when non-zero (same gating as photo_gain in
+                // Genome::hash_contribution). Non-dprime entities have no MineralQuota → mq=None
+                // → sum=0 → byte-identical for all non-dprime goldens. Dprime: quota is folded
+                // when it differs from 0 (immediately after first mineral uptake tick).
+                if let Some(m) = mq {
+                    if m.0 != 0 {
+                        h = fnv_mix(h, m.0 as u64);
+                    }
+                }
                 (e, h)
             })
             .collect();
@@ -388,11 +419,17 @@ impl Sim {
     }
 
     /// Energy-conservation residual (R15) — MUST be 0 every tick. Sums live conserved field + agent
-    /// energy and the ledger buckets. (The signal field is float, NOT in the balance.)
+    /// energy (+ mineral quota when D′-3a active) and the ledger buckets. The signal field is float,
+    /// NOT in the balance. The mineral layer (when `mineral_layer.is_some()`) is part of
+    /// `conserved_total_all()` and mineral quotas are added to `agents`, making this one unified
+    /// identity: `(field_E + field_M + Σ energy + Σ quota + dissipated + lost) − produced − initial = 0`.
+    /// When `mineral_layer` is None: no entities have `MineralQuota` → quota sum is 0 → backwards-compatible.
     pub fn conservation_residual(&mut self) -> i64 {
         let field_total = self.world.resource::<FieldRes>().0.conserved_total_all();
-        let mut q = self.world.query::<&Energy>();
-        let agents: i64 = q.iter(&self.world).map(|e| e.0).sum();
+        let mut q = self.world.query::<(&Energy, Option<&MineralQuota>)>();
+        let agents: i64 = q.iter(&self.world)
+            .map(|(e, mq)| e.0 + mq.map(|m| m.0).unwrap_or(0))
+            .sum();
         let ledger = *self.world.resource::<EnergyLedger>();
         ledger.residual(field_total, agents)
     }
@@ -548,6 +585,7 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         stage!("4_move", stage_move),
         stage!("5_metabolism", stage_metabolism),
         stage!("6_interactions", stage_interactions),
+        stage!("6b_mineral_feed", stage_mineral_feed),
         stage!("7_birth_death", stage_birth_death),
         stage!("8_field_scatter", stage_field_scatter),
         stage!("9_observe", stage_observe),

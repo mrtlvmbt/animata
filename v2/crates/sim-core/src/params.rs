@@ -132,6 +132,38 @@ pub struct EconParams {
     /// unaffected: reg_gain only mutates when `has_light=true` (same gate as photo_gain).
     pub reg_gain_max: i32,
 
+    // ── D′-3a: mineral nutrient economy ──────────────────────────────────────────────────────────
+    /// Mineral conserved-layer index (D′-3a). `Some(l)` enables the mineral economy: contested
+    /// Monod uptake from layer `l` into per-entity `MineralQuota`, Liebig AND-gate on division,
+    /// overflow-heat when energy-ready but mineral-poor. `None` → mineral inert, byte-identical.
+    ///
+    /// Option-gated like `detritus_layer` and `light` so default/l3/cprime stay byte-identical.
+    /// In `dprime_config`: `Some(2)` (layer 0 = substrate, layer 1 = organics, layer 2 = mineral).
+    pub mineral_layer: Option<usize>,
+    /// Monod half-saturation constant for mineral uptake (D′-3a, eu-mineral).
+    /// Calibration mapping: Km_mineral=20 model units → `km_mineral=200` (×10 scale).
+    /// Must be > 0. At `km_mineral=200`, mineral concentration 22 eu ≈ 11% Km → oligotrophic.
+    pub km_mineral: i64,
+    /// Monod U_max for mineral uptake (D′-3a, eu-mineral per tick per entity).
+    /// Calibration mapping: U_max_mineral=2.5 model units × (world_dim²/N_calibration) scale.
+    /// With world_dim=64 (4096 cells), regen_rate=1 and N*≈583 at field depletion:
+    ///   N × U_max × M*/(M*+Km) = regen × n_cells → U_max ≈ 70 gives M*≈22 eu at N*=583.
+    pub u_max_mineral: i64,
+    /// Mineral quota required per division event (D′-3a, eu-mineral). Parent spends this from
+    /// its quota when dividing; child inherits 0. Liebig gate: `quota ≥ q_mineral` required.
+    /// Calibration mapping: q_mineral=0.10 model units × 10 = 1 → T_accumulate ≈ 1–2 ticks.
+    /// Set to `q_mineral=4000` so T_mineral ≈ T_energy at equilibrium N* (Liebig binds).
+    pub q_mineral: i64,
+    /// Mineral recycle fraction numerator (D′-3a). `recycle_mineral = recycle_mineral_num / 256`.
+    /// On death: `recycled = recycle_mineral_num × quota / 256` → mineral field; remainder → lost.
+    /// Calibration: recycle_mineral=0.4 → `round(0.4 × 256) = 102`.
+    pub recycle_mineral_num: i64,
+    /// Energy burned per tick as overflow-heat when a cell is energy-ready but mineral-poor
+    /// (D′-3a). Trigger: `energy ≥ e_cell+c_div && quota < q_mineral`. Deducted from agent energy
+    /// → `ledger.lost`. Calibrated to neutralise the photo-subsidy at mineral-limited N*, limiting
+    /// the standing crop below the energy-only ceiling (the Liebig cap signature).
+    pub overflow_delta: i64,
+
     // ── D′-2a: photo-machinery expression cost ────────────────────────────────────────────────────
     /// Photo-machinery expression cost numerator (D′-2a). Per-tick rate:
     /// `r = (photo_cost_num · photo_gain) / photo_cost_den` eu/tick.
@@ -229,6 +261,14 @@ impl Default for EconParams {
             // Non-dprime unaffected: reg_gain mutates only when has_light=true.
             // Set to 0 for the D′-2c constitutive-control experiment.
             reg_gain_max: 4,
+            // D′-3a: mineral economy. None → inert; non-dprime configs are byte-identical.
+            // MineralQuota only spawned when Some; queries return empty on non-dprime → safe.
+            mineral_layer: None,
+            km_mineral: 200,          // Km=20 model units × 10 scale
+            u_max_mineral: 70,        // calibrated so N×U(M*)=regen×4096 at N*≈583 (local tuning)
+            q_mineral: 4000,          // T_mineral≈T_energy at equilibrium (Liebig-binds condition)
+            recycle_mineral_num: 102, // ≈0.4 × 256 (calibration recycle_mineral=0.4)
+            overflow_delta: 50,       // energy drain when energy-ready but mineral-poor; calibrated
             // D′-2a: photo-machinery cost. Applies only when photo_gain > 0 (non-dprime configs
             // have photo_gain ≡ 0 → cost is inert → byte-identical isolation from existing goldens).
             // Calibrated at ≈9% of day income at threshold gain (NUM=1, DEN=16, n=2 → gain≥8).
