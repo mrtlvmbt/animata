@@ -791,7 +791,89 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
 
 #[cfg(test)]
 mod tests {
-    use super::monod_demand;
+    use super::{monod_demand, stage_sense};
+    use crate::{
+        Deposit, FieldRes, FieldStore, Genome, MergeStrategy, Phenotype, Position, Sensors,
+        Vec2Fixed,
+    };
+    use bevy_ecs::prelude::*;
+
+    /// Minimal `FieldStore` test double for the `stage_sense` regression test below: layer 0 and
+    /// layer 1 hold DISTINCT, hand-set amounts, so a Sense read that used the wrong layer index is
+    /// directly observable (not just "runs without panicking"). Every method beyond
+    /// `conserved_at`/`conserved_gradient` is a trivial stub — `stage_sense` never calls them.
+    struct TwoLayerFieldStub {
+        amounts: [i64; 2], // [layer0, layer1]
+    }
+    impl FieldStore for TwoLayerFieldStub {
+        fn m_field(&self) -> i64 { 1 }
+        fn cell_index(&self, _pos: Vec2Fixed) -> usize { 0 }
+        fn cell_morton(&self, _pos: Vec2Fixed) -> u32 { 0 }
+        fn check_meta(&self, _expected_m_field: i64) -> Result<(), String> { Ok(()) }
+        fn conserved_at(&self, _pos: Vec2Fixed, layer: usize) -> i64 { self.amounts[layer] }
+        fn conserved_gradient(&self, _pos: Vec2Fixed, _range: i64, _layer: usize) -> (i64, i64) { (0, 0) }
+        fn conserved_take(&mut self, _pos: Vec2Fixed, _amount: i64, _layer: usize) -> i64 { 0 }
+        fn deposit_conserved(&mut self, _cell: usize, _amount: i64, _layer: usize) {}
+        fn conserved_total(&self, layer: usize) -> i64 { self.amounts[layer] }
+        fn conserved_total_all(&self) -> i64 { self.amounts.iter().sum() }
+        fn conserved_hash(&self) -> u64 { 0 }
+        fn signal_total(&self) -> f32 { 0.0 }
+        fn signal_hash(&self) -> u64 { 0 }
+        fn signal_all_finite(&self) -> bool { true }
+        fn commit_merge(&mut self, _batches: &[Vec<Deposit>], _strategy: MergeStrategy) {}
+        fn solve(&mut self) -> i64 { 0 }
+    }
+
+    /// **The `stage_sense` routing regression** (E-4b-i, subsystem-reviewer finding #1): proves
+    /// `stage_sense` reads the sensed layer from `Phenotype.uptake_layer`, NOT `Genome.uptake_layer`
+    /// — via the ACTUAL system running over the ACTUAL `Sensors` output, not by inspecting
+    /// `Phenotype` directly (which would not distinguish "Sense reads Phenotype" from "Sense reads
+    /// Genome and Phenotype merely happens to be tracked elsewhere"). Two entities share the SAME
+    /// `Genome.uptake_layer` (0) but have DIFFERENT `Phenotype.uptake_layer` (0 vs 1); layer 0 and
+    /// layer 1 hold different amounts. If `stage_sense` regressed to reading `Genome` again, both
+    /// entities would sense layer 0's amount — this test would catch it.
+    #[test]
+    fn stage_sense_reads_phenotype_uptake_layer_not_genome() {
+        let mut world = World::new();
+        world.insert_resource(FieldRes(Box::new(TwoLayerFieldStub { amounts: [111, 222] })));
+
+        let founder = Genome::founder(2);
+        assert_eq!(founder.uptake_layer, 0, "sanity: founder genome uptake_layer is 0");
+
+        // Entity A: Genome.uptake_layer=0, Phenotype.uptake_layer=0 (agrees — the E-1 baseline).
+        let a = world
+            .spawn((
+                Position(Vec2Fixed(0, 0)),
+                founder,
+                Phenotype { uptake_layer: 0, cell_type: None },
+                Sensors::default(),
+            ))
+            .id();
+        // Entity B: Genome.uptake_layer=0 (UNCHANGED) but Phenotype.uptake_layer=1 (E-4b-i chain
+        // result) — the discriminating case. If Sense read Genome, B would sense layer 0 (111);
+        // reading Phenotype, B must sense layer 1 (222).
+        let b = world
+            .spawn((
+                Position(Vec2Fixed(0, 0)),
+                founder,
+                Phenotype { uptake_layer: 1, cell_type: None },
+                Sensors::default(),
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_sense);
+        schedule.run(&mut world);
+
+        let sensors_a = world.get::<Sensors>(a).unwrap();
+        let sensors_b = world.get::<Sensors>(b).unwrap();
+        assert_eq!(sensors_a.local_resource, 111, "Phenotype.uptake_layer=0 must sense layer 0's amount");
+        assert_eq!(
+            sensors_b.local_resource, 222,
+            "Phenotype.uptake_layer=1 must sense layer 1's amount — if this is 111, stage_sense \
+             regressed to reading Genome.uptake_layer (both entities share Genome.uptake_layer=0)"
+        );
+    }
 
     /// Monod shape invariants (R13 / B-1). Arch-independent: pure integer arithmetic, no floats.
     #[test]
