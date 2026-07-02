@@ -619,7 +619,7 @@ pub fn stage_birth_death(
 
             // E-1: decode-seam gate. Ф0 always returns Some — the None arm is plumbing for E-4
             // (viability filtering). Test-only injection point: pass None to verify skip path.
-            let Some(child_phenotype) = child_genome.decode() else { continue; };
+            let Some(child_phenotype) = child_genome.decode(&econ) else { continue; };
 
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
             // `BrainState` (both `h_old`/`h_new`) and `BrainOutput` — so no prior occupant's hidden

@@ -6,7 +6,7 @@
 // misses (e.g. `let x = 1.5; x + 1.0` where no `f32`/`f64` keyword appears).
 #![deny(clippy::float_arithmetic)]
 
-use crate::{brain_w_ho, brain_w_ih, fnv_mix, seed_fold, BRAIN_WEIGHTS};
+use crate::{brain_w_ho, brain_w_ih, fnv_mix, grn, morphogen, seed_fold, CellType, EconParams, BRAIN_WEIGHTS};
 use bevy_ecs::prelude::Component;
 
 /// Integer square root (floor), Newton's method. Deterministic, arch-independent.
@@ -99,8 +99,15 @@ pub struct Genome {
 /// (not optional) — a missed spawn site makes that entity invisible to the consumer stage,
 /// which is detectable via a shifted golden (the correct detection signal, not a runtime panic).
 ///
-/// **Ф0 content**: only `uptake_layer` — the single raw integer field consumed by
-/// `stage_interactions`. Future slices (E-2/E-3) add morphogen-derived fields here.
+/// **Ф0 content**: `uptake_layer` — the raw integer field consumed by `stage_interactions`.
+///
+/// **E-4a**: `cell_type` — the resolved ontogenesis attractor when `EconParams.morphogen` +
+/// `EconParams.grn` are both `Some` (E-1's trivial Ф0 projection otherwise, `None`). Pinned as
+/// `Option<CellType>`, NOT a new `CellType::Undifferentiated` variant (critic F5): `CellType` is
+/// the GRN's own attractor enum (`grn.rs`) and must not carry a value `grn_resolve` never
+/// produces; `Option` is the same proven gate `EconParams.light`/`.mineral_layer` already use.
+/// **No consumer reads this field in E-4a** — it is behaviourally inert this slice (E-4b adds the
+/// consumer); growing this archetype column is what this slice proves neutral (see `Genome::decode`).
 ///
 /// NOT folded into `hash_contribution`: phenotype is a deterministic cold derivative of the
 /// genome that is already in the hash; double-hashing is redundant (plan §2/§6, R19).
@@ -108,6 +115,8 @@ pub struct Genome {
 pub struct Phenotype {
     /// Layer index the entity will eat from (direct copy of `Genome::uptake_layer` for Ф0).
     pub uptake_layer: i32,
+    /// Resolved ontogenesis cell type (E-4a). `None` for Ф0 / all 5 existing configs.
+    pub cell_type: Option<CellType>,
 }
 
 
@@ -228,25 +237,39 @@ impl Genome {
             .sum()
     }
 
-    /// Decode this genome to a `Phenotype` (Phase-2 E-1 seam entry point).
+    /// Decode this genome to a `Phenotype` (Phase-2 E-1 seam entry point; E-4a adds the ontogenesis
+    /// chain opt-in).
     ///
-    /// For Ф0 (direct-encoded genomes) the decode is a trivial 1:1 projection — the phenotype
-    /// carries the raw integer traits the hot-path stages actually consume. Returns `Some` for
-    /// every valid Ф0 genome. The `None` arm is wired so the BirthDeath gate can skip stillborns
-    /// without code-change when E-4 introduces real viability logic.
+    /// **E-4a:** when `econ.morphogen` and `econ.grn` are BOTH `Some`, runs the full ontogenesis
+    /// chain — `morphogen(self, &mspec)` → `grn(&gradient, &gspec)` — and caches the resolved
+    /// `CellType` on `Phenotype.cell_type`. The chain is a PURE function of `(self, econ)`: no
+    /// RNG/clock/thread-dependence (E-2/E-3 determinism holds transitively). When either spec is
+    /// absent (all 5 existing configs, and every production config until E-4b), `decode` is the
+    /// E-1 trivial Ф0 projection with `cell_type: None` — byte-identical to before this slice.
+    ///
+    /// Returns `Some` for every valid Ф0 genome. The `None` arm is wired so the BirthDeath gate can
+    /// skip stillborns without code-change when E-5 introduces real viability logic.
     ///
     /// Pure and deterministic: no RNG, no clock, no thread-dependent work.
     /// Phenotype is NOT folded into `hash_contribution` (it is a cold derivative of Genome;
     /// genome IS in the hash, decode is deterministic ⟹ phenotype is fully determined — plan §2/R19).
-    pub fn decode(&self) -> Option<Phenotype> {
+    pub fn decode(&self, econ: &EconParams) -> Option<Phenotype> {
         // E-1/E-4 test injection: when force_decode_none=true, the gate fires the skip path.
         // In Ф0 production this branch is compiled OUT entirely (#[cfg(test)]).
         #[cfg(test)]
         if self.force_decode_none {
             return None;
         }
+        let cell_type = match (&econ.morphogen, &econ.grn) {
+            (Some(mspec), Some(gspec)) => {
+                let gradient = morphogen(self, mspec);
+                Some(grn(&gradient, gspec))
+            }
+            _ => None, // E-1 trivial projection: no production config sets both specs in E-4a
+        };
         Some(Phenotype {
             uptake_layer: self.uptake_layer,
+            cell_type,
         })
     }
 
@@ -351,14 +374,14 @@ mod tests {
     fn decode_is_deterministic_across_calls() {
         for n_layers in [1usize, 2, 3] {
             let g = Genome::founder(n_layers);
-            let a = g.decode();
-            let b = g.decode();
+            let a = g.decode(&EconParams::default());
+            let b = g.decode(&EconParams::default());
             assert_eq!(a, b, "decode must be deterministic: same genome → same Phenotype");
         }
         // Also holds for a mutated genome.
         let g = Genome::founder(2);
         let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4);
-        assert_eq!(mutated.decode(), mutated.decode(), "decode deterministic on mutated genome");
+        assert_eq!(mutated.decode(&EconParams::default()), mutated.decode(&EconParams::default()), "decode deterministic on mutated genome");
     }
 
     /// Every Ф0 genome decodes to Some — Ф0 viability is unconditional.
@@ -366,7 +389,7 @@ mod tests {
     fn decode_some_for_all_phi0_founders() {
         for n_layers in [1usize, 2, 3] {
             let g = Genome::founder(n_layers);
-            assert!(g.decode().is_some(), "founder genome must decode to Some (Ф0 trivial case)");
+            assert!(g.decode(&EconParams::default()).is_some(), "founder genome must decode to Some (Ф0 trivial case)");
         }
     }
 
@@ -375,21 +398,21 @@ mod tests {
     #[test]
     fn phenotype_uptake_layer_matches_genome() {
         let g = Genome::founder(2);
-        let ph = g.decode().expect("Ф0 must decode to Some");
+        let ph = g.decode(&EconParams::default()).expect("Ф0 must decode to Some");
         assert_eq!(ph.uptake_layer, g.uptake_layer,
             "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
         // Also for mutated genome — projection stays 1:1 regardless of trait value.
         for s in 0..50u64 {
             let m = g.mutate(s, 2, false, 0);
-            let mph = m.decode().expect("mutated Ф0 must decode to Some");
+            let mph = m.decode(&EconParams::default()).expect("mutated Ф0 must decode to Some");
             assert_eq!(mph.uptake_layer, m.uptake_layer,
                 "1:1 projection must hold after mutation (seed={s})");
         }
     }
 
-    /// None-gate wiring test: proves the REAL `Genome::decode()` — the function called by
-    /// `stage_birth_death` at `let Some(child_phenotype) = child_genome.decode() else { continue; }`
-    /// — returns `None` when the E-4 injection flag is set, and `Some` otherwise.
+    /// None-gate wiring test: proves the REAL `Genome::decode()` — the function `stage_birth_death`
+    /// calls (`let Some(child_phenotype) = child_genome.decode(&econ) else { continue; }`) —
+    /// returns `None` when the E-4 injection flag is set, and `Some` otherwise.
     ///
     /// This is NOT a tautology on `Option::is_some()`: it injects `force_decode_none=true`
     /// into the SAME `decode()` that production calls; the prior `phenotype_gate` wrapper
@@ -407,25 +430,110 @@ mod tests {
         // Normal genome (force_decode_none=false): decode() returns Some → gate passes.
         let g = Genome::founder(2);
         assert!(!g.force_decode_none, "founder must have force_decode_none=false");
-        assert!(g.decode().is_some(), "Ф0 genome must decode to Some (gate passes)");
+        assert!(g.decode(&EconParams::default()).is_some(), "Ф0 genome must decode to Some (gate passes)");
 
         // E-4 injection: set force_decode_none=true → THE SAME decode() returns None.
         // This is the identical function stage_birth_death calls on child_genome.
         let mut stillborn = Genome::founder(2);
         stillborn.force_decode_none = true;
-        assert!(stillborn.decode().is_none(),
+        assert!(stillborn.decode(&EconParams::default()).is_none(),
             "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
 
         // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
         let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0);
         assert!(mutated_child.force_decode_none,
             "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
-        assert!(mutated_child.decode().is_none(),
+        assert!(mutated_child.decode(&EconParams::default()).is_none(),
             "inherited flag: child decode() also returns None (lineage-level stillbirth)");
 
         // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
         let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0);
         assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
-        assert!(normal_child.decode().is_some(), "normal child decode() must return Some");
+        assert!(normal_child.decode(&EconParams::default()).is_some(), "normal child decode() must return Some");
+    }
+
+    // ── E-4a: chain-in-decode wiring (INJECTED test config, not a production path) ────────────
+
+    /// Proves the PRODUCTION `decode()` genuinely runs `morphogen → grn` when both specs are
+    /// `Some` — via an injected `EconParams` (E-1's inject-and-test pattern), not a dead branch.
+    /// Golden-vector on the resolved `cell_type`: catches any regression in the chain wiring
+    /// (wrong spec threaded through, chain skipped, wrong gradient/spec paired).
+    #[test]
+    fn decode_runs_ontogenesis_chain_when_both_specs_present() {
+        use crate::{Boundary, GrnSpec, MorphogenSpec};
+
+        let mspec = MorphogenSpec {
+            g_dev: 4,
+            n_dev: 8,
+            boundary: Boundary::Reflecting,
+            diffuse_shift: 3,
+            decay_num: 1,
+            decay_shift: 4,
+            seed_scale: 4096,
+            stop_threshold: 0,
+        };
+        let gspec = GrnSpec {
+            n_genes: 2,
+            weights: vec![64, -64, -64, 64],
+            input_weights: vec![0, 0],
+            bias: vec![0, 0],
+            shift: 3,
+            max_steps: 12,
+            sample_x: 0,
+            sample_z: 0,
+            initial: vec![256, 0],
+        };
+        let econ = EconParams { morphogen: Some(mspec), grn: Some(gspec.clone()), ..EconParams::default() };
+
+        let g = Genome::founder(2);
+        let ph = g.decode(&econ).expect("Ф0 genome must still decode to Some with the chain enabled");
+
+        // The SAME chain, called directly, must agree exactly (proves decode wires the REAL
+        // morphogen()/grn() functions, not a stand-in).
+        let gradient = crate::morphogen(&g, &mspec);
+        let expected = crate::grn(&gradient, &gspec);
+        assert_eq!(ph.cell_type, Some(expected), "decode's cached cell_type must equal the direct chain result");
+
+        // Golden vector (pinned on this implementation — founder genome, the fixtures above):
+        // catches a stencil/arithmetic/wiring regression even if the direct-chain comparison above
+        // were accidentally also wrong in the same way.
+        assert_eq!(ph.cell_type, Some(CellType::A), "pinned chain-in-decode golden");
+
+        // Determinism: repeated decode() calls with the SAME injected config agree.
+        let ph2 = g.decode(&econ).expect("must decode to Some again");
+        assert_eq!(ph.cell_type, ph2.cell_type, "chain-in-decode must be deterministic across calls");
+    }
+
+    /// When only ONE spec is present, decode() must NOT run the chain (both are required) —
+    /// stays the E-1 trivial projection with `cell_type: None`.
+    #[test]
+    fn decode_stays_trivial_when_only_one_spec_present() {
+        use crate::{Boundary, MorphogenSpec};
+
+        let mspec = MorphogenSpec {
+            g_dev: 4,
+            n_dev: 8,
+            boundary: Boundary::Reflecting,
+            diffuse_shift: 3,
+            decay_num: 1,
+            decay_shift: 4,
+            seed_scale: 4096,
+            stop_threshold: 0,
+        };
+        // grn stays None.
+        let econ_morphogen_only = EconParams { morphogen: Some(mspec), ..EconParams::default() };
+
+        let g = Genome::founder(2);
+        let ph = g.decode(&econ_morphogen_only).expect("Ф0 must decode to Some");
+        assert_eq!(ph.cell_type, None, "chain must NOT run when only one of morphogen/grn is Some");
+    }
+
+    /// All 5 existing configs carry `morphogen: None, grn: None` — decode's `cell_type` stays
+    /// `None`, the E-1 trivial projection. The direct proof the archetype-growth is neutral.
+    #[test]
+    fn decode_cell_type_is_none_for_default_econ() {
+        let g = Genome::founder(2);
+        let ph = g.decode(&EconParams::default()).expect("Ф0 must decode to Some");
+        assert_eq!(ph.cell_type, None, "default EconParams must never enable the ontogenesis chain");
     }
 }

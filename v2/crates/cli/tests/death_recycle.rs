@@ -93,7 +93,8 @@ fn death_d0_rate() {
     };
 
     // World_dim=64, P0=200 with founder_energy far below repro_threshold (genome default).
-    let config = c_config(S ^ 0x1, econ, P0, econ.e_cell / 2);
+    let e_cell = econ.e_cell;
+    let config = c_config(S ^ 0x1, econ, P0, e_cell / 2);
     let mut sim = build_sim(config);
     for _ in 0..TICKS { sim.step(); }
 
@@ -136,7 +137,8 @@ fn recycle_to_substrate() {
         excrete: 0,
         ..EconParams::default()
     };
-    let config = c_config(S ^ 0x2, econ, 200, econ.e_cell);
+    let e_cell = econ.e_cell;
+    let config = c_config(S ^ 0x2, econ, 200, e_cell);
     let mut sim = build_sim(config);
 
     let l0_before = sim.field_layer_total(0);
@@ -189,7 +191,9 @@ fn recycle_fraction_exact() {
         ..EconParams::default()
     };
     // Single agent, energy = e_cell (exact body pool = recycle base).
-    let config = c_config(S ^ 0x3, econ, 1, econ.e_cell);
+    let e_cell = econ.e_cell;
+    let recycle_num = econ.recycle_num;
+    let config = c_config(S ^ 0x3, econ, 1, e_cell);
     let mut sim = build_sim(config);
 
     let l0_before = sim.field_layer_total(0);
@@ -198,13 +202,12 @@ fn recycle_fraction_exact() {
 
     let l0_after = sim.field_layer_total(0);
 
-    let expected_recycled = econ.recycle_num * econ.e_cell / RECYCLE_DEN; // truncating
+    let expected_recycled = recycle_num * e_cell / RECYCLE_DEN; // truncating
     let delta = l0_after - l0_before;
     assert_eq!(
         delta, expected_recycled,
         "recycle split wrong: Δlayer_0={delta} ≠ ⌊recycle_num·e_cell/RECYCLE_DEN⌋={expected_recycled} \
-         (e_cell={}, recycle_num={}, RECYCLE_DEN={RECYCLE_DEN})",
-        econ.e_cell, econ.recycle_num
+         (e_cell={e_cell}, recycle_num={recycle_num}, RECYCLE_DEN={RECYCLE_DEN})",
     );
     // Agent must be dead.
     assert_eq!(sim.population(), 0, "agent not dead after 100%-kill d0");

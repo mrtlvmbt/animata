@@ -184,7 +184,7 @@ pub fn build_sim(config: SimConfig) -> Sim {
     } else {
         config.econ.n_energy_layers = config.n_layers;
     }
-    let econ = config.econ;
+    let econ = config.econ.clone();
     let world = NoiseWorld::new(econ.world_dim, HMAX, RESOURCE_BASE, config.seed ^ WORLD_SALT);
     let grid_w = econ.world_dim / M_FIELD;
     let n = (grid_w * grid_w) as usize;
@@ -540,7 +540,7 @@ mod tests {
         apply_overrides(&mut econ, &[("base_metab".to_string(), "10".to_string())]).unwrap();
 
         let mut cfg1 = config_with(seed, 1, MergeStrategy::Canonical);
-        cfg1.econ = econ;
+        cfg1.econ = econ.clone();
         let c1 = run_conserved_hashes(cfg1, ticks);
 
         let mut cfgn = config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical);
