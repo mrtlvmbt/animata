@@ -1045,7 +1045,7 @@ mod e1_gate_tests {
     /// The direct proof (critic's "no new conservation code" + "real, non-injected" requirements):
     /// a REAL size-criterion stillbirth — reached via `Genome::decode`'s `(Some, Some)` chain arm,
     /// not `force_decode_none` — conserves energy exactly, leaves the population unchanged by that
-    /// birth, sets NO offspring flag, AND is attributed by `StillbirthEvents` (not left as an
+    /// birth, sets NO offspring flag, AND is attributed by `ReproEvents.stillbirths` (not left as an
     /// unattributed `None`).
     #[test]
     fn real_criterion_stillbirth_conserves_energy_and_sets_no_offspring_flag() {
@@ -1067,7 +1067,7 @@ mod e1_gate_tests {
         let stillbirths_after = sim.stillbirth_count();
         assert_eq!(
             stillbirths_after, stillbirths_before + 1,
-            "real stillbirth: StillbirthEvents.total must have incremented by exactly 1 \
+            "real stillbirth: ReproEvents.stillbirths must have incremented by exactly 1 \
              (test setup drifted from calibration — the boundary-size founder did not miscarry as expected)"
         );
 
