@@ -817,4 +817,150 @@ mod e1_gate_tests {
             "stages.rs:~642", "stages.rs:~660"
         );
     }
+
+    // ── E-5a: stillbirth conservation fix ────────────────────────────────────────────────────────
+    //
+    // `d0_scaled: 0` in BOTH configs below: `StubField::deposit_conserved` is a NO-OP (documented
+    // above — the stub was built for entity-count checks, not ledger residuals), so a background-
+    // death (C-1) recycle deposit on the SAME tick would silently vanish from the field and falsely
+    // trip the residual-0 assertion below with an unrelated failure. Disabling d0 isolates the
+    // conservation math to exactly the stillbirth path under test.
+
+    /// Non-mineral variant of `make_quick_repro_sim`, with background death OFF (see above).
+    fn make_quick_repro_sim_no_d0(seed: u64, n_founders: u64) -> Sim {
+        let config = SimConfig {
+            seed,
+            n_founders,
+            founder_energy: 2000,
+            n_layers: 2,
+            econ: EconParams {
+                n_layers: 2, n_energy_layers: 2, d0_scaled: 0,
+                excrete: 0, // StubField::deposit_conserved is a no-op — excretion would silently
+                // vanish from the field, leaking the residual independent of the stillbirth path.
+                ..EconParams::default()
+            },
+            sim_threads: 1,
+            merge_strategy: MergeStrategy::Canonical,
+            layer_specs: [
+                LayerSpec { regen_rate: 6, flux_alpha_num: 1, flux_alpha_den: 8, flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec::default(),
+                LayerSpec::default(),
+            ],
+        };
+        Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
+    }
+
+    /// Mineral-active variant (critic F5/F6): `mineral_layer: Some(2)`, `n_layers: 3`, background
+    /// death OFF (see above), and **`q_mineral: 0`** — clears the Liebig AND-gate (`stages.rs:589`)
+    /// so a founder spawned with the production default `MineralQuota(0)` (`lib.rs` founder spawn,
+    /// `has_mineral` branch) still satisfies `quota_ready = q_val >= q_mineral = 0 >= 0`. Without
+    /// this the division block is skipped entirely BEFORE the stillbirth gate is ever reached and
+    /// the test would pass green while exercising nothing (critic F6).
+    fn make_quick_repro_sim_mineral(seed: u64, n_founders: u64) -> Sim {
+        let config = SimConfig {
+            seed,
+            n_founders,
+            founder_energy: 2000,
+            n_layers: 3,
+            econ: EconParams {
+                n_layers: 3,
+                n_energy_layers: 2, // mineral (layer 2) excluded from energy-uptake targeting
+                mineral_layer: Some(2),
+                q_mineral: 0, // clears the Liebig gate for MineralQuota(0) founders
+                d0_scaled: 0,
+                excrete: 0, // see make_quick_repro_sim_no_d0 — StubField's deposit_conserved no-op
+                ..EconParams::default()
+            },
+            sim_threads: 1,
+            merge_strategy: MergeStrategy::Canonical,
+            layer_specs: [
+                LayerSpec { regen_rate: 6, flux_alpha_num: 1, flux_alpha_den: 8, flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec::default(),
+            ],
+        };
+        Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(3, 100_000)), Box::new(StubBrain))
+    }
+
+    /// Anti-vacuity control (mirrors `control_quick_repro_grows`): the mineral config, with the
+    /// Liebig gate cleared and `force_decode_none=false`, actually grows the population — proving
+    /// the gate-clearing itself is not what silently prevented division (critic F6's own concern
+    /// applied to the negative/control direction too).
+    #[test]
+    fn control_quick_repro_grows_mineral() {
+        let mut sim = make_quick_repro_sim_mineral(SEED_E1, 8);
+        let initial = sim.population();
+        sim.step();
+        let after = sim.population();
+        assert!(
+            after > initial,
+            "mineral control: population must grow (Liebig gate cleared, decode()=Some); \
+             initial={initial} after={after}"
+        );
+    }
+
+    /// The E-5a fix, non-mineral: on a `force_decode_none`-injected stillbirth, (1) conservation
+    /// residual stays EXACTLY 0, (2) population does not grow (no child materialized), and (3) no
+    /// offspring flag is set (`ReproEvents.parents` stays empty — `born_total` would not inflate).
+    #[test]
+    fn stillbirth_conserves_energy_and_sets_no_offspring_flag() {
+        let mut sim = make_quick_repro_sim_no_d0(SEED_E1, 8);
+        let initial = sim.population();
+
+        {
+            let mut q = sim.world.query::<&mut genome::Genome>();
+            for mut g in q.iter_mut(&mut sim.world) {
+                g.force_decode_none = true;
+            }
+        }
+
+        sim.step();
+
+        let after = sim.population();
+        assert_eq!(after, initial, "stillbirth: population must be UNCHANGED (no death enabled, no child spawned)");
+
+        let residual = sim.conservation_residual();
+        assert_eq!(residual, 0, "stillbirth: conservation residual must be EXACTLY 0, got {residual}");
+
+        let repro = sim.world.resource::<ReproEvents>();
+        assert!(
+            repro.parents.is_empty(),
+            "stillbirth: ReproEvents.parents must be EMPTY (no offspring flag on a miscarried division) — \
+             got {} entries; born_total would be inflated",
+            repro.parents.len()
+        );
+    }
+
+    /// The E-5a fix, mineral-active (critic F3): same three assertions, with the Liebig gate cleared
+    /// so the division block — and therefore the stillbirth branch — is genuinely reached, exercising
+    /// the `q_mineral` debit/dissipate path that runs BEFORE the decode gate.
+    #[test]
+    fn stillbirth_conserves_energy_mineral_active() {
+        let mut sim = make_quick_repro_sim_mineral(SEED_E1, 8);
+        let initial = sim.population();
+
+        {
+            let mut q = sim.world.query::<&mut genome::Genome>();
+            for mut g in q.iter_mut(&mut sim.world) {
+                g.force_decode_none = true;
+            }
+        }
+
+        sim.step();
+
+        let after = sim.population();
+        assert_eq!(after, initial, "mineral stillbirth: population must be UNCHANGED");
+
+        let residual = sim.conservation_residual();
+        assert_eq!(residual, 0, "mineral stillbirth: conservation residual must be EXACTLY 0, got {residual}");
+
+        let repro = sim.world.resource::<ReproEvents>();
+        assert!(
+            repro.parents.is_empty(),
+            "mineral stillbirth: ReproEvents.parents must be EMPTY — got {} entries",
+            repro.parents.len()
+        );
+    }
 }

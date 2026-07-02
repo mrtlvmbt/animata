@@ -623,11 +623,21 @@ pub fn stage_birth_death(
             let child_genome =
                 genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max);
             let species_c = *species;
-            repro.parents.insert(bits);
 
-            // E-1: decode-seam gate. Ф0 always returns Some — the None arm is plumbing for E-4
-            // (viability filtering). Test-only injection point: pass None to verify skip path.
-            let Some(child_phenotype) = child_genome.decode(&econ) else { continue; };
+            // E-1/E-5a: decode-seam gate. Ф0 always returns Some; `phase2` always resolves a
+            // CellType — no production config produces None today (the real inviability criterion
+            // is E-5b). On None (test-only injection: `force_decode_none`), the child never
+            // materializes: `e_cell` — already debited from the parent above but with nowhere to
+            // go — is booked to `ledger.lost` (mirrors the death-recycle `lost` pattern above),
+            // closing the residual EXACTLY: −(e_cell+c_div) + c_div(dissipated) + e_cell(lost) = 0.
+            // If mineral is active, the q_mineral debit/dissipate above already closed (paid before
+            // this gate; a miscarried division still burnt its mineral cost). The offspring flag is
+            // set AFTER this gate (not before) so a stillbirth never inflates `born_total`.
+            let Some(child_phenotype) = child_genome.decode(&econ) else {
+                ledger.lost += econ.e_cell;
+                continue;
+            };
+            repro.parents.insert(bits);
 
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
             // `BrainState` (both `h_old`/`h_new`) and `BrainOutput` — so no prior occupant's hidden
