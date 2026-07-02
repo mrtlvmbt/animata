@@ -874,14 +874,7 @@ fn v2_golden_conserved_dprime() {
 }
 
 // E-4b-i: the FIRST Phase-2 conserved-field golden (L=2 + live ontogenesis chain, seed 0xA11A_2A11).
-//
-// ⚠️ PLACEHOLDER — [0u64; 384]. Per issue #199's explicit process (critic F4): the AUTHOR does NOT
-// hand-pin this golden. This array compiles (so the test runs and FAILS the assert, printing the
-// real hashes as `left:` in `golden-arm64` CI output) rather than being wrong-length (which would
-// be a compile error → a red job with no `left:` to read). PM is the SOLE owner of the pin move:
-// PM reads `left:` from the `golden-arm64` job, commits the pinned array over this placeholder
-// (auto-re-running CI), and ONLY THEN is `ci-report.sh` exit 0 / this PR merge-eligible.
-// E-4b-i first Phase-2 conserved-field golden (morphogen->GRN chain live; cell-type drives uptake).
+// morphogen->GRN chain live; cell-type drives uptake.
 // PINNED arm64-local (PM, #199) from the golden-arm64 CI `left:` (tick-0=2722519072970061603, matches CI).
 // Captured on the matched-arch dev box (arm64 release == golden-arm64). The chain is Phase-2-only; the
 // five existing goldens stay byte-identical (specs=None => cell_type=None => raw genome uptake). Never
