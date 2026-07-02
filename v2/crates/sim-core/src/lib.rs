@@ -19,6 +19,8 @@ mod det_map;
 mod energy;
 mod genome;
 mod grid;
+mod grn;
+mod grn_lut;
 mod hash;
 mod input;
 mod morphogen;
@@ -38,6 +40,11 @@ pub use genome::{isqrt, size_pow_three_quarters, Genome, Phenotype};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};
+pub use grn::{grn, grn_resolve, sigma as grn_sigma, CellType, GrnSpec};
+pub use grn_lut::{
+    SIGMA_LUT, SIGMA_LUT_SHA256, EXPR_MAX as GRN_EXPR_MAX, LUT_BIN as GRN_LUT_BIN,
+    PREACT_MAX as GRN_PREACT_MAX, PREACT_MIN as GRN_PREACT_MIN,
+};
 pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
 pub use params::{EconParams, LayerSpec, LightSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick};
 pub use stages::expressed_capacity;

@@ -9,6 +9,11 @@ description = "animata v2 deterministic simulation core (M0 walking skeleton)"
 bevy_ecs.workspace = true
 rayon.workspace = true
 
+[dev-dependencies]
+# Test-only: verify the committed grn_lut.rs SIGMA_LUT by SHA-256 checksum (mirrors the brain crate's
+# lut_checksum_matches_committed). Never used in the inference/dynamics path itself.
+sha2 = "0.10"
+
 [features]
 # Per-stage wall-clock ns + ns/entity instrumentation (R26). Off by default — zero cost in the
 # golden/determinism path; timing is non-deterministic so it never feeds the tick or the state hash.
