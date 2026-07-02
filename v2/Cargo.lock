@@ -738,6 +738,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "rayon",
+ "sha2",
 ]
 
 [[package]]
