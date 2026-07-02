@@ -510,6 +510,21 @@ impl Sim {
         if min_l1 == i64::MAX { (0, 0) } else { (min_l1, max_l1) }
     }
 
+    /// E-4b-i: per-layer count of live entities' `Phenotype.uptake_layer` (index = layer, up to
+    /// `n_layers`). Probe/test helper — read-only, not used in the deterministic tick loop or state
+    /// hash. The direct per-entity liveness proof: comparing this histogram between a Phase-2 config
+    /// and its specs-`None` twin is the authoritative "the chain is live" test (critic F2/F10) — the
+    /// conserved golden hash moves only transitively through field sinks and could stay silent.
+    pub fn uptake_layer_histogram(&mut self, n_layers: usize) -> Vec<u64> {
+        let mut hist = vec![0u64; n_layers.max(1)];
+        let mut q = self.world.query::<&Phenotype>();
+        for ph in q.iter(&self.world) {
+            let l = (ph.uptake_layer as usize).min(hist.len() - 1);
+            hist[l] += 1;
+        }
+        hist
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }

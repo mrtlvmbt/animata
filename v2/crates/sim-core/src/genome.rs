@@ -120,6 +120,19 @@ pub struct Phenotype {
 }
 
 
+/// Exact-integer `CellType` → `uptake_layer` decision (E-4b-i). `A` eats layer 0; `B` eats layer 1
+/// (clamped into `[0, n_layers)` — degenerate `n_layers <= 1` configs never route here in practice,
+/// but the clamp keeps the function total); an exact-tie `Mixed` resolution falls back to the raw
+/// genome value (no differentiation signal to act on). Never a float threshold.
+fn cell_type_uptake_layer(cell_type: CellType, genome_fallback: i32, n_layers: usize) -> i32 {
+    let max_layer = (n_layers.max(1) - 1) as i32;
+    match cell_type {
+        CellType::A => 0,
+        CellType::B => 1.min(max_layer),
+        CellType::Mixed => genome_fallback,
+    }
+}
+
 impl Genome {
     /// The founder phenotype — viable (feeds more than it burns at abundance). The founder brain is a
     /// minimal **resource-chemotaxis reflex** so the M3 population starts behaviourally viable (it
@@ -267,10 +280,16 @@ impl Genome {
             }
             _ => None, // E-1 trivial projection: no production config sets both specs in E-4a
         };
-        Some(Phenotype {
-            uptake_layer: self.uptake_layer,
-            cell_type,
-        })
+        // E-4b-i: when the chain ran, cell_type DRIVES uptake_layer (the live hot-path consumer —
+        // stage_sense and stage_interactions both read Phenotype.uptake_layer, never Genome's raw
+        // field, so this single derivation point keeps both stages consistent — critic F3/F11).
+        // When cell_type is None (every non-Phase-2 config, always, until a Phase-2 config exists),
+        // uptake_layer stays the raw 1:1 genome projection — BYTE-IDENTICAL to E-1/E-4a.
+        let uptake_layer = match cell_type {
+            Some(ct) => cell_type_uptake_layer(ct, self.uptake_layer, econ.n_layers),
+            None => self.uptake_layer,
+        };
+        Some(Phenotype { uptake_layer, cell_type })
     }
 
     /// Fold all six traits into the per-entity state-hash contribution.
@@ -502,6 +521,40 @@ mod tests {
         // Determinism: repeated decode() calls with the SAME injected config agree.
         let ph2 = g.decode(&econ).expect("must decode to Some again");
         assert_eq!(ph.cell_type, ph2.cell_type, "chain-in-decode must be deterministic across calls");
+    }
+
+    /// E-4b-i: `cell_type` DRIVES `uptake_layer` (the live hot-path consumer) when the chain runs —
+    /// exact-integer decision, not a float threshold. Genome's `uptake_layer` defaults to 0 for the
+    /// founder, so a `CellType::A` result would be indistinguishable from "chain didn't run"; this
+    /// test forces `CellType::B` (via the flipped-corner bistable fixture) to prove the derivation
+    /// actually OVERRIDES the raw genome value, not just happens to agree with it.
+    #[test]
+    fn decode_cell_type_drives_uptake_layer() {
+        use crate::{Boundary, GrnSpec, MorphogenSpec};
+
+        let mspec = MorphogenSpec {
+            g_dev: 4,
+            n_dev: 8,
+            boundary: Boundary::Reflecting,
+            diffuse_shift: 3,
+            decay_num: 1,
+            decay_shift: 4,
+            seed_scale: 4096,
+            stop_threshold: 0,
+        };
+        // Flipped-corner bistable fixture (mirrors grn.rs's, initial swapped) → resolves to B.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 256]);
+        let econ = EconParams { morphogen: Some(mspec), grn: Some(gspec.clone()), n_layers: 2, ..EconParams::default() };
+
+        let g = Genome::founder(2);
+        assert_eq!(g.uptake_layer, 0, "founder's raw genome uptake_layer is 0 (sanity)");
+        let ph = g.decode(&econ).expect("Ф0 must decode to Some");
+
+        let gradient = crate::morphogen(&g, &mspec);
+        let expected_ct = crate::grn(&gradient, &gspec);
+        assert_eq!(ph.cell_type, Some(CellType::B), "fixture must resolve to B (pinned)");
+        assert_eq!(ph.cell_type, Some(expected_ct));
+        assert_eq!(ph.uptake_layer, 1, "CellType::B must route uptake_layer to 1, overriding genome's raw 0");
     }
 
     /// When only ONE spec is present, decode() must NOT run the chain (both are required) —
