@@ -17,6 +17,9 @@
 //! These domain/clamp constants are COMMITTED `const` beside the table under the same checksum
 //! provenance: NOT calibrated from a run's statistics at runtime (hidden per-run state → replay
 //! divergence). Calibration, if ever changed, happens offline at re-pin.
+// Guard: no float arithmetic (this file is pure integer const data, but the lint is kept consistent
+// with grn.rs/morphogen.rs — belt-and-braces alongside the no_float_guard.rs token scan).
+#![deny(clippy::float_arithmetic)]
 
 /// Q8.8 pre-activation clamp lower bound (real −8.0). `SIGMA_LUT[0]`.
 pub const PREACT_MIN: i64 = -2048;
