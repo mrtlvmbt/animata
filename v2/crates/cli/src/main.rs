@@ -279,13 +279,24 @@ fn run_bench(seed: u64, n_pop: u64, ticks: u64, do_profile: bool, sets: &[(Strin
     let mut sim = build_sim(cfg);
     let mut peak_pop = 0u64;
     let mut min_pop = u64::MAX;
+    // born_total (E-2): count of entities ACTUALLY SPAWNED over the run — the numerator the
+    // `births/tick × N_dev × G_dev²` morphogen perf ceiling (E-3 precondition) needs. Deliberately
+    // NOT `WorkCounters::birth_death_iters` (F11): that counts every-entity-every-tick gate
+    // iterations (≈ N×ticks), which would inflate this denominator by orders of magnitude. Read
+    // purely from `sim.telemetry()` (already-public, read-only, outside the sim hot-path) — no
+    // sim-core change, no effect on the trajectory or any golden.
+    let mut born_total = 0u64;
     for _ in 0..ticks {
         sim.step();
         let p = sim.population();
         peak_pop = peak_pop.max(p);
         min_pop = min_pop.min(p);
+        born_total += sim.telemetry().samples.iter().map(|s| s.offspring as u64).sum::<u64>();
     }
-    println!("peak_population={peak_pop}  min_population={min_pop}");
+    let mean_births_per_tick = born_total as f64 / ticks as f64;
+    println!(
+        "peak_population={peak_pop}  min_population={min_pop}  born_total={born_total}  mean_births_per_tick={mean_births_per_tick:.3}"
+    );
 
     if do_profile {
         #[cfg(feature = "perf")]

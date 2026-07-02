@@ -397,7 +397,7 @@ mod tests {
     ///
     /// Point (a) — non-materialization: the `let Some(...) else { continue }` in stage_birth_death
     /// fires `continue`, skipping BOTH mineral and non-mineral spawn sites. The integration test
-    /// `e1_none_gate_suppresses_births` (cli/tests/e1_gate_test.rs) proves this end-to-end.
+    /// `e1_none_gate_suppresses_births_end_to_end` (`sim-core/src/lib.rs`) proves this end-to-end.
     ///
     /// Point (b) — other newborns deterministic: 5 goldens byte-identical (force_decode_none is
     /// always `false` in Ф0; `#[cfg(test)]` compiles the branch out in release, and even in test
