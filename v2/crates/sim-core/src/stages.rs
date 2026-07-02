@@ -624,17 +624,24 @@ pub fn stage_birth_death(
                 genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max);
             let species_c = *species;
 
-            // E-1/E-5a: decode-seam gate. Ф0 always returns Some; `phase2` always resolves a
-            // CellType — no production config produces None today (the real inviability criterion
-            // is E-5b). On None (test-only injection: `force_decode_none`), the child never
-            // materializes: `e_cell` — already debited from the parent above but with nowhere to
-            // go — is booked to `ledger.lost` (mirrors the death-recycle `lost` pattern above),
-            // closing the residual EXACTLY: −(e_cell+c_div) + c_div(dissipated) + e_cell(lost) = 0.
-            // If mineral is active, the q_mineral debit/dissipate above already closed (paid before
-            // this gate; a miscarried division still burnt its mineral cost). The offspring flag is
-            // set AFTER this gate (not before) so a stillbirth never inflates `born_total`.
+            // E-1/E-5a/E-5b: decode-seam gate. Ф0 always returns Some; the five existing configs
+            // always resolve `cell_type: None` and return Some. Only `phase2_config` can reach a
+            // real `None` (E-5b: the size-viability criterion, `genome.rs`'s `(Some, Some)` chain
+            // arm) — or, in test builds, the `#[cfg(test)]` `force_decode_none` injection. Either
+            // way, the child never materializes: `e_cell` — already debited from the parent above
+            // but with nowhere to go — is booked to `ledger.lost` (mirrors the death-recycle `lost`
+            // pattern above), closing the residual EXACTLY: −(e_cell+c_div) + c_div(dissipated) +
+            // e_cell(lost) = 0. If mineral is active, the q_mineral debit/dissipate above already
+            // closed (paid before this gate; a miscarried division still burnt its mineral cost).
+            // The offspring flag is set AFTER this gate (not before) so a stillbirth never inflates
+            // `born_total`. E-5b: attribute the None to the REAL criterion (not a test injection)
+            // via `is_stillbirth_by_size_criterion` — the dedicated telemetry counter, distinct from
+            // this generic gate, so a `force_decode_none` probe never pollutes the production count.
             let Some(child_phenotype) = child_genome.decode(&econ) else {
                 ledger.lost += econ.e_cell;
+                if child_genome.is_stillbirth_by_size_criterion(&econ) {
+                    repro.stillbirths += 1;
+                }
                 continue;
             };
             repro.parents.insert(bits);

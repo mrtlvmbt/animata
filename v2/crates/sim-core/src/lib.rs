@@ -86,9 +86,21 @@ pub struct InputLog {
 
 /// Parents that divided this tick (Entity bits) — the reproduction signal for the Price covariance.
 /// `BTreeSet` ⇒ deterministic iteration.
+///
+/// `stillbirths` (E-5b): cumulative count of REAL, criterion-triggered stillbirths — unlike
+/// `parents`, this is a run-lifetime total, NEVER cleared per-tick. Incremented ONLY when
+/// `Genome::is_stillbirth_by_size_criterion` attributes the `None` to the size-viability gate, NOT
+/// to the `#[cfg(test)]` `force_decode_none` injection — a test mixing both in one run would
+/// double-count (documented on the predicate; probes must run "clean"). Folded into this EXISTING
+/// resource rather than a new `Resource` type/insertion: `bevy_ecs` 0.19 allocates a fresh `Entity`
+/// slot per `insert_resource` call, so one more `w.insert_resource` in `Sim::new` would shift every
+/// subsequent entity's bits — and therefore every `seed_fold(seed, [.., bits, ..])` RNG draw — for
+/// every config, silently breaking all six goldens (the same pitfall `SpeciationState` is kept
+/// outside the ECS `World` to avoid — see its doc comment on the `Sim` struct).
 #[derive(Resource, Default)]
 pub struct ReproEvents {
     pub parents: std::collections::BTreeSet<u64>,
+    pub stillbirths: u64,
 }
 
 /// One organism's traits + offspring-this-tick, snapshotted by Observe for the telemetry crate.
@@ -523,6 +535,15 @@ impl Sim {
             hist[l] += 1;
         }
         hist
+    }
+
+    /// E-5b: cumulative count of REAL, criterion-triggered stillbirths (the size-viability gate —
+    /// never `#[cfg(test)]` `force_decode_none` injections). Probe/test helper — read-only, not used
+    /// in the deterministic tick loop or state hash. Mirrors [`Sim::uptake_layer_histogram`]'s
+    /// telemetry-probe pattern: a stillbirth leaves no entity behind to query, so this is a run-
+    /// lifetime counter incremented at the attribution site in `stage_birth_death`, not a snapshot.
+    pub fn stillbirth_count(&mut self) -> u64 {
+        self.world.resource::<ReproEvents>().stillbirths
     }
 
     pub fn tick(&self) -> u64 {
@@ -960,6 +981,104 @@ mod e1_gate_tests {
         assert!(
             repro.parents.is_empty(),
             "mineral stillbirth: ReproEvents.parents must be EMPTY — got {} entries",
+            repro.parents.len()
+        );
+    }
+
+    // ── E-5b: REAL (non-injected) criterion-triggered stillbirth ────────────────────────────────
+    //
+    // No new conservation code here (per the issue's explicit "out of scope") — this reuses the
+    // EXACT E-5a booking/ordering, just reaches it via the real `size`-viability gate instead of
+    // `force_decode_none`. `phase2_shaped_econ` mirrors `cli::phase2_config`'s morphogen/grn
+    // fixtures (same values) so the chain is prod-shaped, not a stand-in.
+    //
+    // `n_founders=1` + directly setting that founder's `size` to `SIZE_VIABILITY_FLOOR` (the exact
+    // boundary — a real production field, no `#[cfg(test)]` flag needed) makes its first division
+    // attempt deterministically likely to produce a real stillbirth: mutation fires only ~12.5% of
+    // the time, so the child's `size` stays at the floor (inviable) unless that rare draw both
+    // fires AND rolls +1. A single founder keeps the tick's ReproEvents/population trace
+    // attributable to exactly one lineage — the same clean-isolation shape as `make_quick_repro_sim`.
+
+    fn phase2_shaped_econ() -> EconParams {
+        use crate::{Boundary, GrnSpec, MorphogenSpec};
+        let mspec = MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4, seed_scale: 4096, stop_threshold: 0,
+        };
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![256, 0]);
+        EconParams {
+            n_layers: 2, n_energy_layers: 2, d0_scaled: 0,
+            excrete: 0, // see make_quick_repro_sim_no_d0 — StubField's deposit_conserved no-op
+            morphogen: Some(mspec), grn: Some(gspec),
+            ..EconParams::default()
+        }
+    }
+
+    fn make_phase2_shaped_sim_no_d0(seed: u64, n_founders: u64) -> Sim {
+        let config = SimConfig {
+            seed, n_founders, founder_energy: 2000, n_layers: 2,
+            econ: phase2_shaped_econ(),
+            sim_threads: 1,
+            merge_strategy: MergeStrategy::Canonical,
+            layer_specs: [
+                LayerSpec { regen_rate: 6, flux_alpha_num: 1, flux_alpha_den: 8, flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 0, world_cap_mult: 0 },
+                LayerSpec::default(),
+                LayerSpec::default(),
+            ],
+        };
+        Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
+    }
+
+    /// Control: the phase2-shaped chain, with founder `size` left at its default (4, viable) — the
+    /// division block is reached and succeeds. Proves the boundary-poisoning test below isn't
+    /// vacuous (the config itself divides fine absent the size-floor poison).
+    #[test]
+    fn control_phase2_shaped_sim_grows_at_default_size() {
+        let mut sim = make_phase2_shaped_sim_no_d0(SEED_E1, 1);
+        let initial = sim.population();
+        sim.step();
+        let after = sim.population();
+        assert!(after > initial, "control: phase2-shaped sim must grow at default founder size; initial={initial} after={after}");
+    }
+
+    /// The direct proof (critic's "no new conservation code" + "real, non-injected" requirements):
+    /// a REAL size-criterion stillbirth — reached via `Genome::decode`'s `(Some, Some)` chain arm,
+    /// not `force_decode_none` — conserves energy exactly, leaves the population unchanged by that
+    /// birth, sets NO offspring flag, AND is attributed by `ReproEvents.stillbirths` (not left as an
+    /// unattributed `None`).
+    #[test]
+    fn real_criterion_stillbirth_conserves_energy_and_sets_no_offspring_flag() {
+        let mut sim = make_phase2_shaped_sim_no_d0(SEED_E1, 1);
+        {
+            let mut q = sim.world.query::<&mut genome::Genome>();
+            for mut g in q.iter_mut(&mut sim.world) {
+                g.size = genome::SIZE_VIABILITY_FLOOR;
+            }
+        }
+        let initial = sim.population();
+        let stillbirths_before = sim.stillbirth_count();
+
+        sim.step();
+
+        let after = sim.population();
+        assert_eq!(after, initial, "real stillbirth: population must be UNCHANGED (no death enabled, no child spawned)");
+
+        let stillbirths_after = sim.stillbirth_count();
+        assert_eq!(
+            stillbirths_after, stillbirths_before + 1,
+            "real stillbirth: ReproEvents.stillbirths must have incremented by exactly 1 \
+             (test setup drifted from calibration — the boundary-size founder did not miscarry as expected)"
+        );
+
+        let residual = sim.conservation_residual();
+        assert_eq!(residual, 0, "real stillbirth: conservation residual must be EXACTLY 0, got {residual}");
+
+        let repro = sim.world.resource::<ReproEvents>();
+        assert!(
+            repro.parents.is_empty(),
+            "real stillbirth: ReproEvents.parents must be EMPTY (no offspring flag on a miscarried \
+             division) — got {} entries; born_total would be inflated",
             repro.parents.len()
         );
     }

@@ -63,6 +63,11 @@ fn specs_none_twin_founders_start_at_layer_zero() {
 
 /// `phase2_config` runs a bounded, non-degenerate trajectory (no extinction/explosion) over the
 /// golden horizon — a precondition for the golden pin, checked independently of the liveness proof.
+///
+/// E-5b: `decode`'s `(Some, Some)` chain arm — the only arm `phase2_config` enters — unconditionally
+/// includes the size-viability criterion (no separate "criterion enabled" toggle), so this test now
+/// exercises the trajectory WITH real stillbirths live (critic F4's no-extinction re-assert). See
+/// `phase2_viability.rs` for the direct stillbirth-recurrence proof over a longer horizon.
 #[test]
 fn phase2_config_population_is_bounded() {
     let mut sim = build_sim(phase2_config(SEED));
