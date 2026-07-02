@@ -72,6 +72,49 @@ pub struct GrnSpec {
     pub initial: Vec<i32>,
 }
 
+impl GrnSpec {
+    /// Length-validated constructor (E-4b-i, critic F7): `grn_resolve`/`step`/`classify` index into
+    /// `weights`/`input_weights`/`bias`/`initial` using `n_genes` as the stride — a mis-sized spec
+    /// would index-panic mid-`decode()` at the FIRST birth in production, not at construction. This
+    /// is the config-construction-boundary guard the E-4a `classify` generalization deferred to.
+    ///
+    /// Panics (loudly, at construction) if any length disagrees with `n_genes`, or if
+    /// `n_genes < 2` (below that, `classify`'s A/B split is meaningless — see `grn.rs`'s
+    /// `classify_is_panic_safe_below_two_genes` for the *runtime* fallback this constructor exists
+    /// to make unreachable in practice).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        n_genes: usize,
+        weights: Vec<i32>,
+        input_weights: Vec<i32>,
+        bias: Vec<i32>,
+        shift: u32,
+        max_steps: u32,
+        sample_x: usize,
+        sample_z: usize,
+        initial: Vec<i32>,
+    ) -> Self {
+        assert!(n_genes >= 2, "GrnSpec::new: n_genes must be >= 2 (got {n_genes})");
+        assert_eq!(
+            weights.len(), n_genes * n_genes,
+            "GrnSpec::new: weights.len() ({}) must equal n_genes^2 ({})", weights.len(), n_genes * n_genes
+        );
+        assert_eq!(
+            input_weights.len(), n_genes,
+            "GrnSpec::new: input_weights.len() ({}) must equal n_genes ({n_genes})", input_weights.len()
+        );
+        assert_eq!(
+            bias.len(), n_genes,
+            "GrnSpec::new: bias.len() ({}) must equal n_genes ({n_genes})", bias.len()
+        );
+        assert_eq!(
+            initial.len(), n_genes,
+            "GrnSpec::new: initial.len() ({}) must equal n_genes ({n_genes})", initial.len()
+        );
+        GrnSpec { n_genes, weights, input_weights, bias, shift, max_steps, sample_x, sample_z, initial }
+    }
+}
+
 /// Conservative `i64` accumulator bound for the overflow guard (mirrors `brain::ACC_BOUND`'s
 /// derive-from-topology discipline): `n_genes` regulatory terms at `|weight| ≤ i32::MAX` times a
 /// state bounded by `EXPR_MAX`, plus one input term at the same weight bound times a `Gradient`
@@ -188,6 +231,45 @@ mod tests {
         assert_eq!(classify(&[10, 5]), CellType::A);
         assert_eq!(classify(&[5, 10]), CellType::B);
         assert_eq!(classify(&[7, 7]), CellType::Mixed);
+    }
+
+    // ── E-4b-i: validated GrnSpec::new (critic F7 — construction-boundary, not per-tick) ────────
+
+    #[test]
+    fn grn_spec_new_accepts_correctly_sized_spec() {
+        let spec = GrnSpec::new(2, vec![1, 2, 3, 4], vec![5, 6], vec![7, 8], 3, 8, 0, 0, vec![9, 10]);
+        assert_eq!(spec.n_genes, 2);
+        assert_eq!(spec.weights, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    #[should_panic(expected = "n_genes must be >= 2")]
+    fn grn_spec_new_rejects_n_genes_below_2() {
+        GrnSpec::new(1, vec![1], vec![1], vec![1], 3, 8, 0, 0, vec![1]);
+    }
+
+    #[test]
+    #[should_panic(expected = "weights.len()")]
+    fn grn_spec_new_rejects_mis_sized_weights() {
+        GrnSpec::new(2, vec![1, 2, 3], vec![5, 6], vec![7, 8], 3, 8, 0, 0, vec![9, 10]);
+    }
+
+    #[test]
+    #[should_panic(expected = "input_weights.len()")]
+    fn grn_spec_new_rejects_mis_sized_input_weights() {
+        GrnSpec::new(2, vec![1, 2, 3, 4], vec![5], vec![7, 8], 3, 8, 0, 0, vec![9, 10]);
+    }
+
+    #[test]
+    #[should_panic(expected = "bias.len()")]
+    fn grn_spec_new_rejects_mis_sized_bias() {
+        GrnSpec::new(2, vec![1, 2, 3, 4], vec![5, 6], vec![7], 3, 8, 0, 0, vec![9, 10]);
+    }
+
+    #[test]
+    #[should_panic(expected = "initial.len()")]
+    fn grn_spec_new_rejects_mis_sized_initial() {
+        GrnSpec::new(2, vec![1, 2, 3, 4], vec![5, 6], vec![7, 8], 3, 8, 0, 0, vec![9]);
     }
 
     /// Symmetric bistable toggle-switch fixture (self-activation + mutual inhibition): from the two

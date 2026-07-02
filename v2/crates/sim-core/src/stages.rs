@@ -21,10 +21,18 @@ const SALT_DEATH: u64 = 0x4445_4100; // "DEA\0" — C-1 background-death draw, M
 //    Signal pheromone gradient is intentionally NOT fed to the integer brain in M3 (see stage_brain);
 //    the dead per-tick compute was removed (M3/F3). Signal still contributes to state_hash via
 //    signal_hash(), keeping the golden arm64-pinned. ───────────────────────────────────────────────
-pub fn stage_sense(field: Res<FieldRes>, mut q: Query<(&Position, &Genome, &mut Sensors)>) {
-    for (pos, g, mut s) in &mut q {
+//
+// E-4b-i (critic F3/F11): the sensed layer comes from `Phenotype.uptake_layer`, NOT
+// `Genome.uptake_layer` directly — the SAME field `stage_interactions` reads below. Before this
+// slice both stages agreed only because `Phenotype.uptake_layer` was always a 1:1 copy of the
+// genome (E-1); E-4b-i's `decode` can now DERIVE it from `cell_type`, so reading the raw genome
+// here would let an entity SENSE one layer and EAT another — a silent desync. Neutral for the five
+// existing configs: `cell_type: None` ⇒ `phenotype.uptake_layer == genome.uptake_layer` exactly
+// (genome.rs `decode`), so this is byte-identical there.
+pub fn stage_sense(field: Res<FieldRes>, mut q: Query<(&Position, &Genome, &Phenotype, &mut Sensors)>) {
+    for (pos, g, ph, mut s) in &mut q {
         let range = g.sense_range.max(1) as i64;
-        let layer = g.uptake_layer as usize; // B-2: sense the layer the agent eats from
+        let layer = ph.uptake_layer as usize; // E-4b-i: same field stage_interactions reads
         let (gx, gz) = field.0.conserved_gradient(pos.0, range, layer);
         s.gradient = Vec2Fixed(gx, gz);
         s.local_resource = field.0.conserved_at(pos.0, layer);

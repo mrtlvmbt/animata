@@ -16,7 +16,7 @@
 //! **Re-pin** (single-writer, agent A): only on an INTENDED conserved-field change; read the new
 //! left/right from `.ci-report/failed.log` (the arm64 job). Never re-pin to silence drift.
 
-use cli::{cprime_config, default_config, dprime_config, l3_config, run_conserved_hashes};
+use cli::{cprime_config, default_config, dprime_config, l3_config, phase2_config, run_conserved_hashes};
 
 // A-0 pin: conserved-field hash per tick, default SimConfig (seed 0xA11A_2A11, L=1 scalar).
 // Captured on arm64 + Rust 1.96.0 (matches the CI `v2-golden-arm64` job arch + toolchain).
@@ -869,6 +869,33 @@ fn v2_golden_conserved_dprime() {
         assert_eq!(
             h[t], GOLDEN_CONSERVED_DPRIME[t],
             "dprime conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED_DPRIME)"
+        );
+    }
+}
+
+// E-4b-i: the FIRST Phase-2 conserved-field golden (L=2 + live ontogenesis chain, seed 0xA11A_2A11).
+//
+// ⚠️ PLACEHOLDER — [0u64; 384]. Per issue #199's explicit process (critic F4): the AUTHOR does NOT
+// hand-pin this golden. This array compiles (so the test runs and FAILS the assert, printing the
+// real hashes as `left:` in `golden-arm64` CI output) rather than being wrong-length (which would
+// be a compile error → a red job with no `left:` to read). PM is the SOLE owner of the pin move:
+// PM reads `left:` from the `golden-arm64` job, commits the pinned array over this placeholder
+// (auto-re-running CI), and ONLY THEN is `ci-report.sh` exit 0 / this PR merge-eligible.
+const GOLDEN_CONSERVED_PHASE2: [u64; 384] = [0u64; 384];
+
+/// First Phase-2 conserved-field golden pin — AWAITING PM PIN (see `GOLDEN_CONSERVED_PHASE2` docs).
+/// Arm64 + release only (`v2_golden` namespace). Do NOT hand-pin; do NOT `#[ignore]`.
+#[test]
+fn v2_golden_conserved_phase2() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let h = run_conserved_hashes(phase2_config(0xA11A_2A11), GOLDEN_CONSERVED_PHASE2.len() as u64);
+    for t in 0..GOLDEN_CONSERVED_PHASE2.len() {
+        assert_eq!(
+            h[t], GOLDEN_CONSERVED_PHASE2[t],
+            "phase2 conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED_PHASE2) — \
+             AWAITING PM PIN: read `left:` from the golden-arm64 CI job and commit it here"
         );
     }
 }

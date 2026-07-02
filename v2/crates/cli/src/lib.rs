@@ -168,6 +168,44 @@ pub fn l3_config(seed: u64) -> SimConfig {
     }
 }
 
+/// E-4b-i: the ontogenesis chain LIVE (L=2, structurally identical to `default_config` otherwise).
+/// `morphogen`/`grn` are BOTH `Some` → `decode` runs `morphogen → grn` at every birth and the
+/// resolved `CellType` drives `Phenotype.uptake_layer` (both `stage_sense`/`stage_interactions`
+/// read sites — see `stages.rs`). Fixtures stay within the provisional perf ceiling
+/// (`G_dev<=4`, `N_dev<=16`; `GrnSpec.max_steps<=16`) and the bistable toggle-switch shape
+/// (self-activation + mutual inhibition) already proven multistable/deterministic in `grn.rs`'s
+/// own unit tests. This is a MONOMORPHIC-acceptable slice (E-4b-i, plan §5 honest scoping) — the
+/// five existing configs are untouched (`morphogen`/`grn` stay `None` there).
+pub fn phase2_config(seed: u64) -> SimConfig {
+    let mspec = sim_core::MorphogenSpec {
+        g_dev: 4,
+        n_dev: 8,
+        boundary: sim_core::Boundary::Reflecting,
+        diffuse_shift: 3,
+        decay_num: 1,
+        decay_shift: 4,
+        seed_scale: 4096,
+        stop_threshold: 0,
+    };
+    // Symmetric bistable toggle-switch (mirrors grn.rs's own fixture — self-activation + mutual
+    // inhibition, proven genuinely multistable): validated via GrnSpec::new (F7).
+    let gspec = sim_core::GrnSpec::new(
+        2,
+        vec![64, -64, -64, 64],
+        vec![0, 0],
+        vec![0, 0],
+        3,
+        12,
+        0,
+        0,
+        vec![256, 0],
+    );
+    SimConfig {
+        econ: EconParams { morphogen: Some(mspec), grn: Some(gspec), ..EconParams::default() },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the noise world + the two-class field (conserved fixed-point + signal f32).
 /// Per-cell caps for layer 0 come from `WorldView::resource` (float-noise-derived, arch-dependent).
 /// Layers 1+ use `config.layer_specs[l].flat_cap` (0 = empty start) or `world_cap_mult × world`.
