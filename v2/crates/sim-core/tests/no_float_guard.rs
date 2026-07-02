@@ -64,14 +64,16 @@ fn scan(dir: &Path, banned: &[&str], hits: &mut Vec<String>) {
 fn conserved_layer_is_integer_and_no_hashmap() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 
-    // (1) The conserved-critical modules must be float-free.
+    // (1) The conserved-critical modules must be float-free. `morphogen.rs` (E-2) carries its own
+    // `#![deny(clippy::float_arithmetic)]`, which CI does not gate on (nextest, not clippy) — this
+    // token scan IS run by `cargo nextest` in CI, so it closes that gap for the plain-token case.
     let mut float_hits = Vec::new();
-    for module in ["energy.rs", "genome.rs"] {
+    for module in ["energy.rs", "genome.rs", "morphogen.rs"] {
         scan_file(&src.join(module), &["f32", "f64"], &mut float_hits);
     }
     assert!(
         float_hits.is_empty(),
-        "conserved layer must be integer (no f32/f64 in energy.rs/genome.rs):\n{}",
+        "conserved layer must be integer (no f32/f64 in energy.rs/genome.rs/morphogen.rs):\n{}",
         float_hits.join("\n")
     );
 
