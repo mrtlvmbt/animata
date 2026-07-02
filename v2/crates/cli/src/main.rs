@@ -154,17 +154,17 @@ fn patched_cfg(seed: u64, threads: usize, merge: MergeStrategy, econ: EconParams
 /// Behaviourally identical to the pre-M4 hard-coded binary when run with no flags (`econ == default()`).
 fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<u64>, econ: EconParams) {
     // ── Two-run determinism + R14 ────────────────────────────────────────────────────────────────
-    let a = run(patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ), ticks);
-    let b = run(patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ), ticks);
+    let a = run(patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ.clone()), ticks);
+    let b = run(patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ.clone()), ticks);
     println!("animata v2 — M4 perf foundation (integer brain + multi-rate)");
     println!(
         "seed={seed:#x} ticks={ticks} sim_threads={DEFAULT_THREADS} K(brain)={} N(metab)={}",
         econ.brain_period, econ.metab_period
     );
     println!("two-run-same-seed identical per tick: {}", a == b);
-    let c1 = run_conserved_hashes(patched_cfg(seed, 1, MergeStrategy::Canonical, econ), ticks);
+    let c1 = run_conserved_hashes(patched_cfg(seed, 1, MergeStrategy::Canonical, econ.clone()), ticks);
     let cn = run_conserved_hashes(
-        patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ),
+        patched_cfg(seed, DEFAULT_THREADS, MergeStrategy::Canonical, econ.clone()),
         ticks,
     );
     println!("R14 conserved hash 1-vs-{DEFAULT_THREADS} identical: {}", c1 == cn);

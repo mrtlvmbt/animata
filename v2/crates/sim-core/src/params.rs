@@ -1,7 +1,7 @@
 //! Run parameters. `EconParams` are the on-the-shore economy numbers (economy/01); they are a
 //! documented cargo-tunable contract (re-pinning the golden after a change is cheap). All integer.
 
-use crate::MergeStrategy;
+use crate::{GrnSpec, MergeStrategy, MorphogenSpec};
 use bevy_ecs::prelude::Resource;
 
 // ── C-slice death-recycling constants ────────────────────────────────────────────────────────────
@@ -36,7 +36,12 @@ pub struct LayerSpec {
 
 /// Energy/space economy constants (integer `eu`). The energy SCALE is 1 eu = 1 integer unit here;
 /// raising it (a documented cargo parameter) only rescales the ledger — conservation is unaffected.
-#[derive(Resource, Clone, Copy, Debug)]
+///
+/// **`Clone`, NOT `Copy`** (E-4a): `GrnSpec` carries `Vec<i32>` regulatory-matrix fields, so
+/// `Option<GrnSpec>` cannot be `Copy`. Every prior implicit-copy call site (`let econ = config.econ;`
+/// etc.) was audited and converted to an explicit `.clone()` — the identical value, just no longer
+/// silently duplicated.
+#[derive(Resource, Clone, Debug)]
 pub struct EconParams {
     /// Energy capacity of a body = stock handed to an offspring = recycle pool (one number — the
     /// single-pool invariant; splitting it into inconsistent values leaks energy, economy/01 §2).
@@ -201,6 +206,15 @@ pub struct EconParams {
     pub photo_cost_num: i64,
     /// Photo-machinery expression cost denominator (D′-2a). Must be > 0. See `photo_cost_num`.
     pub photo_cost_den: i64,
+
+    // ── E-4a: ontogenesis chain opt-in (morphogen → GRN → cell fate) ────────────────────────────
+    /// Morphogen reaction-diffusion spec (E-2). `Some` together with `grn` enables the full
+    /// `decode` ontogenesis chain; `None` (default, all 5 existing configs) → `decode` stays the
+    /// E-1 trivial Ф0 projection, byte-identical to every existing golden. Option-gated exactly
+    /// like `light`/`mineral_layer` above. NO production config sets this in E-4a (E-4b does).
+    pub morphogen: Option<MorphogenSpec>,
+    /// GRN dynamics spec (E-3). See `morphogen` — both must be `Some` for the chain to run.
+    pub grn: Option<GrnSpec>,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -281,12 +295,19 @@ impl Default for EconParams {
             // Calibrated at ≈9% of day income at threshold gain (NUM=1, DEN=16, n=2 → gain≥8).
             photo_cost_num: 1,
             photo_cost_den: 8,
+            // E-4a: ontogenesis chain OFF by default — None for all 5 existing configs.
+            morphogen: None,
+            grn: None,
         }
     }
 }
 
 /// Construction-time configuration handed to `Sim::new`.
-#[derive(Clone, Copy, Debug)]
+///
+/// **`Clone`, NOT `Copy`** (E-4a): carries `EconParams`, which lost `Copy` when `GrnSpec`'s
+/// `Vec<i32>` fields entered it (see `EconParams` docs). Callers that reused a `SimConfig` value
+/// twice now `.clone()` explicitly.
+#[derive(Clone, Debug)]
 pub struct SimConfig {
     pub seed: u64,
     pub n_founders: u64,

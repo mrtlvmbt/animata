@@ -273,7 +273,7 @@ impl Sim {
         w.insert_resource(SimClock { seed: config.seed, tick: 0 });
         w.insert_resource(InputLog::default());
         w.insert_resource(Telemetry::default());
-        w.insert_resource(econ);
+        w.insert_resource(econ.clone());
         // NeighborGrid is intentionally NOT inserted here (M1/F2): it was rebuilt every tick by
         // stage_spatial_rebuild but never queried by any stage → dead per-tick work. Removed until
         // a real neighbour-coupled consumer lands (M4+ nearest-neighbour interactions).
@@ -305,7 +305,7 @@ impl Sim {
             // Non-dprime configs do NOT spawn MineralQuota → their archetype is unchanged →
             // byte-identical goldens (no extra entity column, no hash perturbation).
             // E-1: decode the founder genome once at birth; Ф0 always returns Some.
-            let founder_phenotype = founder.decode().expect("Ф0 founder decode must succeed");
+            let founder_phenotype = founder.decode(&econ).expect("Ф0 founder decode must succeed");
             if has_mineral {
                 w.spawn((
                     Position(p),

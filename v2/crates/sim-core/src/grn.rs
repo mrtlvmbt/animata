@@ -96,11 +96,19 @@ pub fn sigma(preact: i64) -> i32 {
 
 /// Exact-integer attractor → cell-type decision. `n_genes == 2` for the Ф0 fixture (argmax of the two
 /// gene levels; an exact tie is `Mixed`). Never a float threshold.
+/// Generalized (E-4a, critic F7): panic-safe for any `n_genes`, not just the `n_genes == 2` Ф0
+/// fixture. `n_genes < 2` has no meaningful A/B split → `Mixed` (the same "no differentiation"
+/// value as an exact tie). This is a construction-boundary safety net, not a per-tick guard: a
+/// production `GrnSpec` should still be built with `n_genes >= 2` (the safety here is defense in
+/// depth, not a substitute for constructing a sane spec).
 fn classify(state: &[i32]) -> CellType {
-    match state[0].cmp(&state[1]) {
-        std::cmp::Ordering::Greater => CellType::A,
-        std::cmp::Ordering::Less => CellType::B,
-        std::cmp::Ordering::Equal => CellType::Mixed,
+    match (state.first(), state.get(1)) {
+        (Some(a), Some(b)) => match a.cmp(b) {
+            std::cmp::Ordering::Greater => CellType::A,
+            std::cmp::Ordering::Less => CellType::B,
+            std::cmp::Ordering::Equal => CellType::Mixed,
+        },
+        _ => CellType::Mixed,
     }
 }
 
@@ -168,6 +176,18 @@ mod tests {
 
     fn flat_gradient(g_dev: usize, value: i32) -> Gradient {
         Gradient { g_dev, cells: vec![value; g_dev * g_dev] }
+    }
+
+    /// E-4a critic F7: `classify` must not panic for `n_genes < 2` (a malformed/degenerate spec) —
+    /// generalized to `Mixed` (no meaningful split) instead of hard-indexing `state[0]/state[1]`.
+    #[test]
+    fn classify_is_panic_safe_below_two_genes() {
+        assert_eq!(classify(&[]), CellType::Mixed);
+        assert_eq!(classify(&[42]), CellType::Mixed);
+        // Sanity: n_genes >= 2 still classifies normally.
+        assert_eq!(classify(&[10, 5]), CellType::A);
+        assert_eq!(classify(&[5, 10]), CellType::B);
+        assert_eq!(classify(&[7, 7]), CellType::Mixed);
     }
 
     /// Symmetric bistable toggle-switch fixture (self-activation + mutual inhibition): from the two
