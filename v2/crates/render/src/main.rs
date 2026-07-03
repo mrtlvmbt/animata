@@ -140,10 +140,10 @@ async fn main() {
                 // R-3: Zoom-LOD — pure function of zoom level (RnD R21). At far zoom draw cheap
                 // (small sphere), at near zoom draw fuller. zoom_lod_factor: 0=far, 1=close.
                 if zoom_lod < ZOOM_LOD_NEAR_THRESHOLD {
-                    // Far zoom (zoom_lod < 0.3, ortho_span > ~65): minimal creature draw (cheap).
+                    // Far zoom (zoom_lod < 0.3, ortho_span > ~141): minimal creature draw (cheap).
                     draw_sphere(creature_pos, 0.08, None, color);
                 } else {
-                    // Near zoom (zoom_lod >= 0.3, ortho_span <= ~65): fuller creature draw.
+                    // Near zoom (zoom_lod >= 0.3, ortho_span <= ~141): fuller creature draw.
                     draw_sphere(creature_pos, 0.12, None, color);
                 }
             }
