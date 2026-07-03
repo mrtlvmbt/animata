@@ -83,7 +83,7 @@ fn v2_species_determinism_and_gates() {
     // Asserted explicitly as a regression guard.
     if count >= K {
         let spec = sim_a.speciation_state();
-        let s0_ref = *spec.refs.get(&SpeciesId(0)).expect("S0 must exist");
+        let s0_ref = spec.refs.get(&SpeciesId(0)).expect("S0 must exist").clone();
         let live_ids: std::collections::BTreeSet<u32> =
             census.iter().map(|(id, _)| *id).collect();
         let live_l1s: Vec<i64> = live_ids.iter()

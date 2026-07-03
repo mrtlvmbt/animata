@@ -14,7 +14,7 @@ fn b2_genome_hash_includes_layers() {
     let base = Genome::founder(2);
     let hash_base = base.hash_contribution(0);
 
-    let mut g_ul = base;
+    let mut g_ul = base.clone();
     g_ul.uptake_layer = 1; // flip to layer 1
     assert_ne!(
         hash_base,

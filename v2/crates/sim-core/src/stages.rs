@@ -639,7 +639,7 @@ pub fn stage_birth_death(
             // this generic gate, so a `force_decode_none` probe never pollutes the production count.
             let Some(child_phenotype) = child_genome.decode(&econ) else {
                 ledger.lost += econ.e_cell;
-                if child_genome.is_stillbirth_by_size_criterion(&econ) {
+                if child_genome.is_stillbirth_by_size_criterion() {
                     repro.stillbirths += 1;
                 }
                 continue;
@@ -757,7 +757,7 @@ pub fn stage_observe(
     q: Query<(Entity, &Genome)>,
 ) {
     tel.samples.clear();
-    let mut ents: Vec<(u64, Genome)> = q.iter().map(|(e, g)| (e.to_bits(), *g)).collect();
+    let mut ents: Vec<(u64, Genome)> = q.iter().map(|(e, g)| (e.to_bits(), g.clone())).collect();
     ents.sort_unstable_by_key(|x| x.0);
     // D′-3b: take the income record so we can read it while pushing to tel.samples (avoids
     // borrow conflict). The record will be repopulated by stage_interactions next tick.
@@ -861,7 +861,7 @@ mod tests {
         let a = world
             .spawn((
                 Position(Vec2Fixed(0, 0)),
-                founder,
+                founder.clone(),
                 Phenotype { uptake_layer: 0, cell_type: None },
                 Sensors::default(),
             ))

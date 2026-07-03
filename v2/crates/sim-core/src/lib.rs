@@ -58,6 +58,7 @@ pub use traits::{
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::Schedule;
+use std::sync::Arc;
 
 /// Integer 2-vector — the fixed-point spatial domain (`i64`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -305,7 +306,12 @@ impl Sim {
              calling Sim::new (build_sim does this automatically)",
             econ.n_layers, config.n_layers,
         );
-        let founder = Genome::founder(config.n_layers);
+        // V-1: seed the founder's heritable GRN/morphogen spec from `EconParams`'s founder
+        // template — the ONLY place `econ.grn`/`econ.morphogen` are consulted; `decode` reads
+        // `self.grn_spec`/`self.morphogen_spec` from here on (never `econ.grn`/`econ.morphogen`
+        // directly). `GrnSpec` is `Arc`-wrapped for CoW; `MorphogenSpec` is `Copy`, no `Arc` needed.
+        let founder = Genome::founder(config.n_layers)
+            .with_specs(econ.grn.clone().map(Arc::new), econ.morphogen);
         let has_mineral = econ.mineral_layer.is_some();
         for i in 0..config.n_founders {
             // Deterministic scatter across the domain (co-prime strides → spread, no float).
@@ -318,6 +324,9 @@ impl Sim {
             // byte-identical goldens (no extra entity column, no hash perturbation).
             // E-1: decode the founder genome once at birth; Ф0 always returns Some.
             let founder_phenotype = founder.decode(&econ).expect("Ф0 founder decode must succeed");
+            // V-1: `Genome` is no longer `Copy` (heritable `Arc<GrnSpec>`) — each spawn needs its
+            // own clone; the last iteration's clone is cheap (CoW: an `Arc` refcount bump, not a
+            // deep copy — critic F14).
             if has_mineral {
                 w.spawn((
                     Position(p),
@@ -325,7 +334,7 @@ impl Sim {
                     Velocity::default(),
                     VelocityNext::default(),
                     Energy(config.founder_energy),
-                    founder,
+                    founder.clone(),
                     founder_phenotype, // E-1: cached cold phenotype
                     SpeciesId(0),
                     Sensors::default(),
@@ -341,7 +350,7 @@ impl Sim {
                     Velocity::default(),
                     VelocityNext::default(),
                     Energy(config.founder_energy),
-                    founder,
+                    founder.clone(),
                     founder_phenotype, // E-1: cached cold phenotype
                     SpeciesId(0),
                     Sensors::default(),
@@ -600,7 +609,7 @@ impl Sim {
                 .world
                 .query_filtered::<(Entity, &Genome, &SpeciesId), With<PendingSpeciation>>();
             let mut v: Vec<(Entity, Genome, SpeciesId)> =
-                q.iter(&self.world).map(|(e, g, s)| (e, *g, *s)).collect();
+                q.iter(&self.world).map(|(e, g, s)| (e, g.clone(), *s)).collect();
             v.sort_unstable_by_key(|(e, _, _)| e.to_bits());
             v
         };
@@ -609,7 +618,7 @@ impl Sim {
         let mut updates: Vec<(Entity, SpeciesId)> = Vec::with_capacity(pending.len());
         for (e, genome, parent_species) in pending {
             let parent_ref =
-                self.speciation.refs.get(&parent_species).copied().unwrap_or(genome);
+                self.speciation.refs.get(&parent_species).cloned().unwrap_or_else(|| genome.clone());
             let d = genome.brain_weight_l1(&parent_ref);
             let species_c = if d > threshold {
                 let new_id = SpeciesId(self.speciation.next_id);

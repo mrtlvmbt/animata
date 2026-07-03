@@ -168,14 +168,30 @@ pub fn l3_config(seed: u64) -> SimConfig {
     }
 }
 
-/// E-4b-i: the ontogenesis chain LIVE (L=2, structurally identical to `default_config` otherwise).
-/// `morphogen`/`grn` are BOTH `Some` → `decode` runs `morphogen → grn` at every birth and the
-/// resolved `CellType` drives `Phenotype.uptake_layer` (both `stage_sense`/`stage_interactions`
-/// read sites — see `stages.rs`). Fixtures stay within the provisional perf ceiling
-/// (`G_dev<=4`, `N_dev<=16`; `GrnSpec.max_steps<=16`) and the bistable toggle-switch shape
-/// (self-activation + mutual inhibition) already proven multistable/deterministic in `grn.rs`'s
-/// own unit tests. This is a MONOMORPHIC-acceptable slice (E-4b-i, plan §5 honest scoping) — the
-/// five existing configs are untouched (`morphogen`/`grn` stay `None` there).
+/// E-4b-i/V-1: the ontogenesis chain LIVE (L=2, structurally identical to `default_config`
+/// otherwise). `morphogen`/`grn` are BOTH `Some` → every founder's `Genome` is seeded (at
+/// `Sim::new`) with this spec as its heritable, per-individual GRN/morphogen program (V-1); from
+/// there `decode` runs `morphogen → grn` at every birth against the LINEAGE's own (possibly
+/// point-mutated) spec, and the resolved `CellType` drives `Phenotype.uptake_layer` (both
+/// `stage_sense`/`stage_interactions` read sites — see `stages.rs`).
+///
+/// **V-1 reposition (PM-verified, plan-consensus):** the GRN matrix moved from the monomorphic
+/// strong-bistable `weights=[64,-64,-64,64]`/`initial=[256,0]` (E-4b-i) to a WEAKER matrix
+/// `weights=[32,-32,-32,32]` with an off-center `initial=[144,112]` — a mutation-SENSITIVE-but-
+/// STABLE regime (a small minority of point-mutations flip the fate; most preserve it — see the
+/// heritability teeth in `phase2_viability.rs`). The monomorphic shape was E-4b-i's deliberate
+/// choice (a live spec every genome would share identically, immune to point-mutation because
+/// none existed yet); V-1 makes the spec heritable and point-mutable, so this test bed needed to
+/// move into a regime where mutation has a genuine, non-razor-edge phenotypic effect (the shipped
+/// `[64,-64,-64,64]`/`[256,0]` spec was found PHENOTYPICALLY INERT under point-mutation — no
+/// realistic drift ever flips it in-window; the exact-symmetric `[128,128]` alternative is a
+/// 100%-flip-rate coin-flip, not heritable). `input_weights` stays `[0,0]` (drive dead — phase2
+/// stays structurally distinct from E-6's drive-coupled `[8,0]` test-only fixture) and the
+/// bistable toggle-switch family (self-activation + mutual inhibition) is unchanged, still
+/// multistable/deterministic per `grn.rs`'s own unit tests.
+///
+/// This is golden-TOUCHING for phase2 ONLY (V-1) — the five other configs are untouched
+/// (`morphogen`/`grn` stay `None` there, so their founders are never seeded with a spec).
 pub fn phase2_config(seed: u64) -> SimConfig {
     let mspec = sim_core::MorphogenSpec {
         g_dev: 4,
@@ -187,18 +203,18 @@ pub fn phase2_config(seed: u64) -> SimConfig {
         seed_scale: 4096,
         stop_threshold: 0,
     };
-    // Symmetric bistable toggle-switch (mirrors grn.rs's own fixture — self-activation + mutual
-    // inhibition, proven genuinely multistable): validated via GrnSpec::new (F7).
+    // V-1 reposition: weaker bistable matrix + off-center initial — mutation-sensitive-but-stable
+    // (see the doc comment above). Validated via GrnSpec::new (F7).
     let gspec = sim_core::GrnSpec::new(
         2,
-        vec![64, -64, -64, 64],
+        vec![32, -32, -32, 32],
         vec![0, 0],
         vec![0, 0],
         3,
         12,
         0,
         0,
-        vec![256, 0],
+        vec![144, 112],
     );
     SimConfig {
         econ: EconParams { morphogen: Some(mspec), grn: Some(gspec), ..EconParams::default() },
