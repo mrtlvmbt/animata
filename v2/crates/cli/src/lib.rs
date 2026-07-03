@@ -26,7 +26,7 @@ const HMAX: i64 = 200;
 // base=120 → b3=295 (>160), economy=1580. Откат floor-caps → barren беднее.
 // base=70 targets both b3 [30..160] AND economy [low..282] without early bloom.
 // Pattern richness (relative biome contrast) preserved; only magnitude scaled.
-const RESOURCE_BASE: i64 = 88;
+const RESOURCE_BASE: i64 = 91;
 const REGEN_RATE: i64 = 6;
 const M_FIELD: i64 = 1;
 const WORLD_SALT: u64 = 0x5743_4C44; // "WCLD"
