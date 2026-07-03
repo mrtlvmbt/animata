@@ -29,3 +29,6 @@ arc-swap = "1.7"
 # itself). `cli` wires the concrete world/field/brain backends (`cli::build_sim`).
 sim-core = { path = "../sim-core" }
 cli = { path = "../cli" }
+# R-2 (#223): the render's OWN `WorldView` (hex terrain mesh) — see src/main.rs's `WORLD_HMAX`/
+# `WORLD_SALT` doc comment for the pinned-param contract with `cli`'s private world-construction.
+world = { path = "../world" }

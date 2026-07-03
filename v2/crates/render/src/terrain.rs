@@ -1,0 +1,86 @@
+//! R-2: hex-voxel terrain mesh — `WorldView` → flat-top hex columns + cliff quads (RnD `rendering/01`
+//! §1.3 height-as-Y + cliff quads, `rendering/02` §3 hidden-face removal). Built ONCE at startup —
+//! the cold terrain is immutable for the run (R19); never rebuilt per frame.
+//!
+//! Split into row-band chunks so no single `Mesh` exceeds macroquad's `u16` index limit (65536):
+//! worst case ~30 vertices/cell (6 top + up to 6×4 cliff), so [`ROWS_PER_CHUNK`] rows of
+//! `world_dim=64` stays an order of magnitude under the limit.
+
+use crate::biome_palette::{biome_color, cliff_shade};
+use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE};
+use macroquad::models::{Mesh, Vertex};
+use macroquad::prelude::*;
+use sim_core::{Vec2Fixed, WorldView};
+
+const ROWS_PER_CHUNK: i64 = 8;
+
+/// Build the whole `world_dim × world_dim` hex terrain as a handful of row-band meshes.
+pub fn build_hex_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<Mesh> {
+    let mut chunks = Vec::new();
+    let mut row0 = 0i64;
+    while row0 < world_dim {
+        let row1 = (row0 + ROWS_PER_CHUNK).min(world_dim);
+        chunks.push(build_chunk(world_dim, world, row0, row1));
+        row0 = row1;
+    }
+    chunks
+}
+
+fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> Mesh {
+    let mut vertices: Vec<Vertex> = Vec::new();
+    let mut indices: Vec<u16> = Vec::new();
+
+    for row in row0..row1 {
+        for col in 0..world_dim {
+            let h = world.height(col, row) as f32 * HEIGHT_SCALE;
+            let (cx, cz) = hex_center(col, row);
+            let top_color = biome_color(world.biome(Vec2Fixed(col, row)));
+
+            // Top face: 6 corners, fan-triangulated from corner 0 (4 triangles, 6 unique verts).
+            let base = vertices.len() as u16;
+            for k in 0..6 {
+                vertices.push(vertex(hex_corner(cx, cz, h, k), top_color));
+            }
+            for k in 1..5u16 {
+                indices.extend_from_slice(&[base, base + k, base + k + 1]);
+            }
+
+            // Cliff quads: hidden-face removal (RnD 02 §3) — emit a side ONLY where the neighbour is
+            // STRICTLY lower; an equal-or-higher neighbour covers that face, so skip it. Off-grid
+            // neighbours (map edge) are treated as height 0 — draws a full cliff at the boundary.
+            let cliff_color = cliff_shade(top_color);
+            for (dir_i, &(ncol, nrow)) in neighbors(col, row).iter().enumerate() {
+                let nh = if (0..world_dim).contains(&ncol) && (0..world_dim).contains(&nrow) {
+                    world.height(ncol, nrow) as f32 * HEIGHT_SCALE
+                } else {
+                    0.0
+                };
+                if nh >= h {
+                    continue;
+                }
+                let edge = edge_for_direction(dir_i);
+                let top_a = hex_corner(cx, cz, h, edge);
+                let top_b = hex_corner(cx, cz, h, (edge + 1) % 6);
+                let bot_a = Vec3::new(top_a.x, nh, top_a.z);
+                let bot_b = Vec3::new(top_b.x, nh, top_b.z);
+                let cbase = vertices.len() as u16;
+                vertices.push(vertex(top_a, cliff_color));
+                vertices.push(vertex(top_b, cliff_color));
+                vertices.push(vertex(bot_b, cliff_color));
+                vertices.push(vertex(bot_a, cliff_color));
+                indices.extend_from_slice(&[cbase, cbase + 1, cbase + 2, cbase, cbase + 2, cbase + 3]);
+            }
+        }
+    }
+
+    assert!(
+        vertices.len() <= u16::MAX as usize,
+        "terrain chunk exceeded the u16 index limit ({} vertices) — shrink ROWS_PER_CHUNK",
+        vertices.len()
+    );
+    Mesh { vertices, indices, texture: None }
+}
+
+fn vertex(position: Vec3, color: Color) -> Vertex {
+    Vertex { position, uv: Vec2::ZERO, color: color.into(), normal: Vec4::ZERO }
+}
