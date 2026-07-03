@@ -11,11 +11,11 @@ use world::NoiseWorld;
 pub const DT_MICROS: u64 = 1_000_000 / 64;
 
 // World/field tuning (documented cargo-parameters; re-pinning the golden after a change is cheap).
-const HMAX: i64 = 16;
+pub const HMAX: i64 = 16;
 const RESOURCE_BASE: i64 = 120;
 const REGEN_RATE: i64 = 6;
 const M_FIELD: i64 = 1;
-const WORLD_SALT: u64 = 0x5743_4C44; // "WCLD"
+pub const WORLD_SALT: u64 = 0x5743_4C44; // "WCLD"
 // Conserved flux diffusion: α = D·dt/dx² ∈ (0,¼]. Here α = 1/8, F = 16 → k = round(α·2^F) = 8192.
 const FLUX_ALPHA_NUM: i64 = 1;
 const FLUX_ALPHA_DEN: i64 = 8;
