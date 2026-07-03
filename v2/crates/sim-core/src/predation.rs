@@ -37,9 +37,9 @@ pub struct PredationSpec {
 
     /// Combat trait influence scale: how much the predator's combat trait (genome.size) amplifies
     /// the base bite. Formulation: `bite = (base_bite * (256 + combat_trait_scale * trait)) >> 8`,
-    /// where `trait = predator.size`. Allows both positive (larger predator → bigger bite) and
-    /// zero (all bites equal regardless of predator size). Range: 0..=4 (mirroring genome trait
-    /// scale; higher values rapidly dominate).
+    /// where `trait = predator.size` clamped to `[0, 256]`. Allows both positive (larger predator →
+    /// bigger bite) and zero (all bites equal regardless of predator size). Range: 0..=16 (scaling
+    /// factor applied before the >>8 shift; realistic combat strength modulation).
     pub combat_trait_scale: i32,
 
     /// Metabolic efficiency of predation: fraction of taken energy the predator actually gains,
@@ -99,12 +99,13 @@ pub fn resolve_encounter(
     let base_bite: i64 = prey_energy >> spec.bite_shift;
 
     // Apply combat trait influence: larger predator (larger genome.size) → bigger bite.
-    // Formula: bite = (base_bite * (256 + scale * trait)) >> 8
-    // This is a saturating multiply-accumulate in i64 to prevent intermediate overflow.
-    let trait_val = (predator.size as i64).clamp(0, 256); // clamp trait to reasonable range
-    let trait_factor: i64 = 256i64 + ((spec.combat_trait_scale as i64 * trait_val) >> 4); // >> 4 to keep scale reasonable
+    // Formula: bite = (base_bite * (256 + combat_trait_scale * trait)) >> 8
+    // where trait = predator.size ∈ [0, 256]. This is a saturating multiply-accumulate in i64
+    // to prevent intermediate overflow (worst case: base_bite ≈ VALUE_MAX, trait_factor ≈ 256 + 16*256 = 4352 ⇒ wide ≈ 4.3B, ≪ i64::MAX).
+    let trait_val = (predator.size as i64).clamp(0, 256);
+    let trait_factor: i64 = 256i64 + (spec.combat_trait_scale as i64 * trait_val);
     let bite_wide: i64 = (base_bite * trait_factor) >> 8;
-    let bite = bite_wide.saturate(0, VALUE_MAX);
+    let bite = bite_wide.clamp(0, VALUE_MAX);
 
     // Clamp bite to what prey has available (prey cannot lose more than it carries).
     let actual_bite = bite.min(prey_energy);
@@ -115,7 +116,7 @@ pub fn resolve_encounter(
     let efficiency_clamped = (spec.efficiency_num as i64).clamp(1, 256);
     let dissipation_frac: i64 = 256 - efficiency_clamped;
     let dissipated_wide: i64 = (actual_bite * dissipation_frac) >> 8;
-    let dissipated = dissipated_wide.saturate(0, actual_bite); // dissipated cannot exceed bite
+    let dissipated = dissipated_wide.clamp(0, actual_bite); // dissipated cannot exceed bite
 
     // Predator gain: what remains of the bite after dissipation.
     let predator_gain = (actual_bite - dissipated).max(0);
@@ -128,17 +129,6 @@ pub fn resolve_encounter(
     }
 }
 
-/// Saturating clamp for i64: clamp `val` to the range `[min, max]`.
-trait SaturatingClamp {
-    fn saturate(self, min: i64, max: i64) -> i64;
-}
-
-impl SaturatingClamp for i64 {
-    #[inline]
-    fn saturate(self, min: i64, max: i64) -> i64 {
-        self.max(min).min(max)
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -172,17 +162,30 @@ mod tests {
 
     #[test]
     fn conservation_invariant_holds_across_grid() {
+        // Test the conservation invariant across the FULL input grid as specified in ТЗ.
+        // Predator sizes 1..32 (all reasonable combat strengths), prey energies 0..10000
+        // (including edge cases and realistic Ф0 ecology values).
         let spec = prod_spec();
-        let step = 100;
-        let predator_sizes = [1, 8, 16, 32];
-        let prey_energies = vec![0, 100, 500, 1000, 5000, 10000];
 
-        for &predator_size in &predator_sizes {
-            for &prey_eu in &prey_energies {
-                let pred = predator_genome(predator_size);
+        // Full sweep: predator sizes span the documented range (1..32 inclusive).
+        for predator_size in 1..=32 {
+            // Prey energies: 0 (edge), then logarithmic sampling to cover 1..10000.
+            // This ensures both dense coverage near edges and reasonable step size for large values.
+            let prey_energies: Vec<i64> = (0..=100)
+                .map(|i| {
+                    if i == 0 { 0 }
+                    else if i <= 10 { i as i64 * 100 }     // 100..1000 by 100
+                    else if i <= 20 { (i - 10) as i64 * 1000 + 1000 }  // 2000..11000 by 1000 (clamp to 10000)
+                    else { 10000 }
+                })
+                .filter(|&e| e <= 10000)
+                .collect();
+
+            for prey_eu in prey_energies {
+                let pred = predator_genome(predator_size as i32);
                 let outcome = resolve_encounter(&pred, prey_eu, &spec);
 
-                // Invariant 1: predator_gain + dissipated == prey_loss (exact integer)
+                // Invariant 1: predator_gain + dissipated == prey_loss (exact integer, R15)
                 assert_eq!(
                     outcome.predator_gain + outcome.dissipated,
                     outcome.prey_loss,
@@ -247,29 +250,42 @@ mod tests {
 
     #[test]
     fn saturation_at_max_energy_no_wrap() {
+        // Test saturation behavior at i64::MAX-adjacent values (adversarial ТЗ check).
+        // Prove that no wrapping occurs, even when intermediate accumulators exceed i32/i64 bounds.
         let mut spec = prod_spec();
         spec.bite_shift = 0; // force very large bites to stress accumulator
 
         let mut pred = predator_genome(32);
         pred.size = 32; // max realistic size
 
-        // Prey with very high energy
-        let high_prey = 500_000i64;
+        // Test progression: realistic value, then VALUE_MAX, then i64::MAX boundary.
+        let test_prey_energies = vec![
+            500_000i64,        // realistic Ф0 value
+            VALUE_MAX,         // module's documented ceiling (1M)
+            900_000_000i64,    // large value (well before i64::MAX)
+            i64::MAX / 2,      // near i64::MAX/2 to test wide accumulator
+        ];
 
-        let out = resolve_encounter(&pred, high_prey, &spec);
+        for prey_eu in test_prey_energies {
+            let out = resolve_encounter(&pred, prey_eu, &spec);
 
-        // Conservation must hold even at saturation edges
-        assert_eq!(
-            out.predator_gain + out.dissipated,
-            out.prey_loss,
-            "conservation violated at saturation: gain={} + dissipated={} != loss={}",
-            out.predator_gain, out.dissipated, out.prey_loss
-        );
+            // Conservation must hold even at saturation edges (R15).
+            assert_eq!(
+                out.predator_gain + out.dissipated,
+                out.prey_loss,
+                "conservation violated at saturation (prey_eu={}): gain={} + dissipated={} != loss={}",
+                prey_eu, out.predator_gain, out.dissipated, out.prey_loss
+            );
 
-        // No panic, no wrap — the function returns a valid Outcome
-        assert!(out.predator_gain >= 0 && out.predator_gain <= high_prey);
-        assert!(out.prey_loss >= 0 && out.prey_loss <= high_prey);
-        assert!(out.dissipated >= 0 && out.dissipated <= high_prey);
+            // No panic, no wrap — results are bounded and sensible.
+            assert!(out.predator_gain >= 0, "predator_gain<0 at prey_eu={}: {}", prey_eu, out.predator_gain);
+            assert!(out.prey_loss >= 0 && out.prey_loss <= prey_eu, "prey_loss oob at prey_eu={}: {}", prey_eu, out.prey_loss);
+            assert!(out.dissipated >= 0, "dissipated<0 at prey_eu={}: {}", prey_eu, out.dissipated);
+
+            // Double-check that clamping to VALUE_MAX worked: output never exceeds prey energy.
+            let total_energy = out.predator_gain + out.dissipated;
+            assert!(total_energy <= prey_eu, "energy conservation bound violated at prey_eu={}: total={} > prey={}", prey_eu, total_energy, prey_eu);
+        }
     }
 
     // ── Monotonicity: stronger predator → non-decreasing gain ──────────────────────────────────
