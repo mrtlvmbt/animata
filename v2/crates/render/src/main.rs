@@ -8,10 +8,13 @@
 //! R-3 (merged #225): interactive pan/zoom/rotate IsoCam + box-frustum culling (terrain chunks +
 //! creatures), minimal zoom-LOD, and the R-2 HMAX-literal footgun fix (cli consts now pub).
 //!
-//! R-4 (this slice): creatures Tier-1 LOD — px_per_m-driven point/sphere/morphology tiers; snapshot
+//! R-4 (merged #227): creatures Tier-1 LOD — px_per_m-driven point/sphere/morphology tiers; snapshot
 //! fields `size`/`uptake_layer`; consume R-3 dead-code warnings (render crate out of CI, local verify).
 //!
-//! OUT of scope here (later R-slices): cube-voxel toggle (R-5), full HUD/inspector/minimap (R-6).
+//! R-5 (this slice): cube-voxel toggle — a second terrain mesh builder (square columns vs hex prisms),
+//! runtime key to switch hex↔cube, creature projection follows active layout. Golden-NEUTRAL (render-only).
+//!
+//! OUT of scope here (later R-slices): full HUD/inspector/minimap (R-6).
 //!
 //! Not part of the v2 CI workspace (`v2/Cargo.toml`'s `exclude`) — a leaf bin, verified LOCALLY:
 //! `cargo build`/`cargo clippy` from this directory + a manual run (window opens, hex terrain +
@@ -22,6 +25,7 @@ mod camera;
 mod driver;
 mod hex;
 mod terrain;
+mod terrain_cube;
 
 use camera::IsoCam;
 use macroquad::prelude::*;
@@ -40,7 +44,7 @@ const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 /// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
 fn window_conf() -> Conf {
     Conf {
-        window_title: "animata v2 — render scaffold (R-4 creatures LOD)".to_owned(),
+        window_title: "animata v2 — render scaffold (R-5 cube-voxel toggle)".to_owned(),
         window_width: 1024,
         window_height: 768,
         high_dpi: true,
@@ -82,7 +86,11 @@ async fn main() {
     // is unused by the methods read below, so `0` is a documented don't-care (see the contract note).
     // R-3 footgun fix: use `cli::HMAX` and `cli::WORLD_SALT` directly (now pub).
     let world = world::NoiseWorld::new(world_dim, cli::HMAX, 0, config.seed ^ cli::WORLD_SALT);
-    let terrain_chunks = terrain::build_hex_terrain(world_dim, &world);
+    let hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world);
+    let cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world);
+
+    // R-5: Runtime hex↔cube toggle state. Default = hex (R-2's established look).
+    let mut use_cube_terrain = false;
 
     // R-3: Interactive isometric camera — pan (WASD/arrows + mouse drag), zoom (scroll),
     // rotate (yaw: Q/E or comma/period). Starts centered on the world at a standard iso view.
@@ -101,6 +109,10 @@ async fn main() {
         if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
             handle.step_once();
         }
+        // R-5: Toggle hex↔cube terrain with 'T' key.
+        if is_key_pressed(KeyCode::T) {
+            use_cube_terrain = !use_cube_terrain;
+        }
 
         clear_background(Color::from_rgba(18, 18, 22, 255));
 
@@ -114,8 +126,10 @@ async fn main() {
         set_camera(&cam3d);
 
         // R-3: Frustum-cull terrain chunks — only draw chunks whose AABB intersects the frustum.
+        // R-5: Works over both hex and cube layouts (same chunk AABB structure).
+        let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
         let mut chunks_drawn = 0;
-        for chunk in &terrain_chunks {
+        for chunk in terrain_chunks {
             let (min, max) = chunk.bounds;
             if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
                 draw_mesh(&chunk.mesh);
@@ -123,14 +137,21 @@ async fn main() {
             }
         }
 
-        // R-4: Creatures rendered by px_per_m LOD tier (point → sphere → morphology).
-        // Projected into the SAME hex view: world (x, z) → hex center of cell, floating above terrain.
+        // R-4/R-5: Creatures rendered by px_per_m LOD tier (point → sphere → morphology).
+        // R-5: Projected into the ACTIVE view (hex or cube).
         // Tier selection is a pure function of camera zoom ONLY (RnD R21), never per-creature distance.
         if let Some(s) = snap.as_ref() {
             let px_per_m = camera.px_per_m(); // Pure fn of ortho_span + viewport; whole frame shares one tier.
 
             for c in &s.creatures {
-                let (cx, cz) = hex::hex_center(c.pos.0, c.pos.1);
+                // R-5: Creature projection follows active terrain layout.
+                let (cx, cz) = if use_cube_terrain {
+                    // Cube mode: square cell center at (col + 0.5, row + 0.5)
+                    (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
+                } else {
+                    // Hex mode: hex center (R-2/R-4 behavior)
+                    hex::hex_center(c.pos.0, c.pos.1)
+                };
                 let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
                 let creature_pos = vec3(cx, h + 0.15, cz);
 
@@ -193,7 +214,7 @@ async fn main() {
         set_default_camera();
 
         egui_macroquad::ui(|ctx| {
-            egui::Window::new("v2 render scaffold — R-3").show(ctx, |ui| {
+            egui::Window::new("v2 render scaffold — R-5").show(ctx, |ui| {
                 match snap.as_ref() {
                     Some(s) => {
                         ui.label(format!("tick: {}", s.tick));
@@ -205,8 +226,12 @@ async fn main() {
                         ui.label("waiting for the sim worker's first tick…");
                     }
                 }
-                ui.label(format!("terrain: {world_dim}×{world_dim} hexes, {} mesh chunks", terrain_chunks.len()));
+                ui.label(format!("terrain: {world_dim}×{world_dim}, {} mesh chunks", terrain_chunks.len()));
                 ui.label(format!("chunks drawn: {}/{}", chunks_drawn, terrain_chunks.len()));
+                ui.label(format!(
+                    "terrain: {} (T to toggle)",
+                    if use_cube_terrain { "cube" } else { "hex" }
+                ));
                 ui.separator();
                 ui.label("Pan: WASD / arrows / middle-drag");
                 ui.label("Zoom: mouse wheel (clamped 5..200)");
