@@ -4,14 +4,13 @@
 //! recursive glob no-float guard** (`world/tests/no_float_guard_gen.rs`, pattern
 //! `world/src/gen/**/*.rs`) — a stage file needs NO per-file registration to be scanned, unlike
 //! `sim-core`'s hardcoded module allow-list (`no_float_guard.rs`). This is deliberate: the whole
-//! pipeline must be pure integer/fixed-point (the point of replacing `NoiseWorld`'s `f64 sin`
-//! path), and the glob makes that enforced-by-construction rather than resting on remembering to
-//! add each new file to a list.
+//! pipeline must be pure integer/fixed-point (the point of replacing the legacy `NoiseWorld`'s
+//! `f64 sin` path), and the glob makes that enforced-by-construction rather than resting on
+//! remembering to add each new file to a list.
 //!
-//! **W-1…W-5 status**: this module is compiled and tested but PROD-INERT — no `WorldView` impl
-//! or `build_sim` calls into it yet (that wiring is W-6, golden-TOUCHING). The legacy `NoiseWorld`
-//! (`world/src/lib.rs`, still `f64 sin`) sits OUTSIDE `gen/` and is deliberately NOT scanned by
-//! the glob guard — it is deleted at W-6.
+//! **W-6 status**: `gen::caps::classify_and_caps` now backs the production `ProcgenWorld`
+//! (`world/src/lib.rs`) — the pipeline is WIRED. `NoiseWorld`, the last `f64 sin` in the world
+//! path, is deleted.
 
 pub mod biome;
 pub mod caps;

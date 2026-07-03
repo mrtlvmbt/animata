@@ -3,9 +3,8 @@
 //! clause `[biome-classify]`). **Pure integer / fixed-point throughout — no `f32`/`f64` anywhere in
 //! this file** (enforced by the recursive glob guard, `world/tests/no_float_guard_gen.rs`).
 //!
-//! **Prod-inert (W-5 scope, like W-1…W-4):** [`classify_and_caps`] is `pub` but called by NO
-//! `WorldView` impl and NOT by `build_sim` — production classification doesn't exist until W-6
-//! assembles the pipeline. This module changes zero runtime behavior on its own.
+//! **W-6 status:** [`classify_and_caps`] is now `ProcgenWorld::new`'s (`world/src/lib.rs`) entry
+//! point into the whole `gen/` pipeline — the production `WorldView` impl.
 //!
 //! ## Pipeline
 //!
@@ -179,13 +178,18 @@ pub fn caps_from(biome: FinalBiome, moisture: i64, material: MaterialId) -> i64 
 }
 
 /// The full W-5 output over a `dim × dim` grid (mirrors W-3/W-4's state shape, critic F5): the
-/// final post-override biome + the per-cell resource cap. `pub` surface W-6 builds a `WorldView`
-/// impl from (`biome(pos)`/`resource(pos)`).
+/// POST-erosion `height` (W-6's `ProcgenWorld` needs this for `WorldView::height`/`is_solid` —
+/// added here rather than having W-6 re-run `erode` a second time), the final post-override biome,
+/// and the per-cell resource cap. `pub` surface W-6 builds a `WorldView` impl from
+/// (`height`/`biome(pos)`/`resource(pos)`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorldFields {
     pub dim: usize,
+    pub height: Vec<i64>,
     pub final_biome: Vec<FinalBiome>,
     pub caps: Vec<i64>,
+    /// Surface material per cell (from W-4 erosion), exposed for richness testing.
+    pub surface_material: Vec<u8>,
 }
 
 /// Sample `erode(seed, hmax, dim)` (W-4) and classify the FINAL biome + caps per cell: zonal biome
@@ -223,7 +227,8 @@ pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
         }
     }
 
-    WorldFields { dim, final_biome, caps }
+    let surface_material = erosion.surface_material.iter().map(|&m| m as u8).collect();
+    WorldFields { dim, height: erosion.height, final_biome, caps, surface_material }
 }
 
 #[cfg(test)]

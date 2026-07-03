@@ -3,9 +3,9 @@
 //! file** (enforced by the recursive glob guard, `world/tests/no_float_guard_gen.rs`, extended in
 //! this slice to also fail on bare float literals and scientific notation).
 //!
-//! **Prod-inert (W-2 scope, like W-1):** [`climate_at`] is `pub` but called by NO `WorldView` impl
-//! and NOT by `build_sim` — production climate still doesn't exist until W-6 assembles the
-//! pipeline. This module changes zero runtime behavior on its own.
+//! **W-6 status:** [`climate_at`]'s extracted core, [`climate_from_height`], is now called by
+//! production via `gen::caps::classify_and_caps` (re-classifying the biome on the post-erosion
+//! surface); `climate_at` itself remains available for any per-position (infinite-domain) use.
 //!
 //! ## Fixed-point scale (documented, critic F3/F4/F5)
 //!

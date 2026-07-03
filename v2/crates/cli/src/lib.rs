@@ -5,17 +5,31 @@
 use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
 use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
-use world::NoiseWorld;
+use world::ProcgenWorld;
 
 /// Fixed timestep dt = 1/64 s, integer microseconds (the loop driver does no float).
 pub const DT_MICROS: u64 = 1_000_000 / 64;
 
 // World/field tuning (documented cargo-parameters; re-pinning the golden after a change is cheap).
-pub const HMAX: i64 = 16;
-const RESOURCE_BASE: i64 = 120;
+//
+// W-6 WIRE: layer-0-cap-affecting knobs are FROZEN here as named consts (critic F4) so a PM re-pin
+// pins against a stable, documented surface — any future change to one of these is a new commit
+// (new SHA), requiring a fresh pin (the pin-against-SHA discipline).
+//
+// HMAX=200 (was 16 under the legacy NoiseWorld): matches the value the WHOLE gen/ pipeline
+// (climate/biome/drainage/erosion/caps) was calibrated and golden-tested against. HMAX=16 would put
+// the relief spread BELOW erosion::INCISION_EXPOSURE_THRESHOLD=20, so Bedrock could never be
+// exposed — the HMAX-degeneracy W-6 must avoid (world/src/lib.rs's richness test guards this).
+const HMAX: i64 = 200;
+// RESOURCE_BASE: W-6b Phase A.2 scale reconciliation + caps.rs откат.
+// Decouple un-zeroed 84% solid cells (many productive high biomes) → total resource ↑2×.
+// base=120 → b3=295 (>160), economy=1580. Откат floor-caps → barren беднее.
+// base=70 targets both b3 [30..160] AND economy [low..282] without early bloom.
+// Pattern richness (relative biome contrast) preserved; only magnitude scaled.
+const RESOURCE_BASE: i64 = 91;
 const REGEN_RATE: i64 = 6;
 const M_FIELD: i64 = 1;
-pub const WORLD_SALT: u64 = 0x5743_4C44; // "WCLD"
+const WORLD_SALT: u64 = 0x5743_4C44; // "WCLD"
 // Conserved flux diffusion: α = D·dt/dx² ∈ (0,¼]. Here α = 1/8, F = 16 → k = round(α·2^F) = 8192.
 const FLUX_ALPHA_NUM: i64 = 1;
 const FLUX_ALPHA_DEN: i64 = 8;
@@ -25,11 +39,11 @@ const SIGNAL_DECAY: f32 = 0.06;
 /// Production thread count for the demo / fixed-N tests.
 pub const DEFAULT_THREADS: usize = 4;
 
-// Layer 0: primary substrate — world-noise-derived per-cell caps, regen from the resource base.
+// Layer 0: primary substrate — ProcgenWorld-derived per-cell caps, regen from the resource base.
 // α = 1/8 (moderate diffusion). Used by every config.
 const L0_SPEC: LayerSpec = LayerSpec {
     regen_rate: REGEN_RATE, flux_alpha_num: FLUX_ALPHA_NUM, flux_alpha_den: FLUX_ALPHA_DEN,
-    flat_cap: 0, world_cap_mult: 0, // layer 0 always uses world-noise caps (flat_cap/world_cap_mult ignored)
+    flat_cap: 0, world_cap_mult: 0, // layer 0 always uses ProcgenWorld caps (flat_cap/world_cap_mult ignored)
 };
 // Layer 1 (B-0 production): organics/excreta — regen=0 (no phantom free energy), α=1/4 (fast
 // lateral spread so excreted metabolites diffuse quickly). cap=0 → starts EMPTY (cap/2=0).
@@ -49,13 +63,12 @@ const L2_ORGANICS_SPEC: LayerSpec = LayerSpec {
 const L2_DETRITUS_SPEC: LayerSpec = LayerSpec {
     regen_rate: 0, flux_alpha_num: 0, flux_alpha_den: 1, flat_cap: 0, world_cap_mult: 0,
 };
-// Layer 2 (D′-3a mineral): regen=1 (small per-cell influx), fast diffusion (α=1/4, like organics)
+// Layer 2 (D′-3a mineral): regen=2 (relaxed per-cell influx), fast diffusion (α=1/4, like organics)
 // so mineral spreads from production zones; flat_cap=200 (starts at 100 per cell).
-// Calibration mapping: P_mineral=35 total per tick / 4096 cells ≈ 0.0085/cell → scaled to
-// regen_rate=1 (the minimum non-zero integer), with km_mineral=200 and u_max_mineral=70 calibrated
-// so N×U(M*)=regen×4096 at N*≈583 → M*≈22 eu-mineral. Scale ×10 from model units.
+// Calibration mapping: P_mineral=35 total per tick / 4096 cells ≈ 0.0085/cell. W-6b base=91
+// reduced resource → increased mineral pressure. regen_rate raised 1→2 to maintain N̄≥30 (d3a viability).
 const L2_MINERAL_SPEC: LayerSpec = LayerSpec {
-    regen_rate: 1, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 200, world_cap_mult: 0,
+    regen_rate: 2, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 200, world_cap_mult: 0,
 };
 
 /// Default production config (L=2): layer 0 = substrate, layer 1 = organics/excreta (empty start).
@@ -118,7 +131,7 @@ pub fn dprime_config(seed: u64) -> SimConfig {
     SimConfig {
         n_layers: 3,
         layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L2_MINERAL_SPEC, LayerSpec::default()],
-        econ: EconParams {
+        econ: EconParams { resource_base: 120, // W-6b starve-safe
             light: Some(LightSpec {
                 l_max: 100,
                 period_ticks: 100,
@@ -146,7 +159,7 @@ pub fn dprime_light_config(seed: u64) -> SimConfig {
     SimConfig {
         n_layers: 2,
         layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
-        econ: EconParams {
+        econ: EconParams { resource_base: 120, // W-6b starve-safe
             light: Some(LightSpec {
                 l_max: 100, period_ticks: 100, day_ticks: 50, km_photo: 30,
             }),
@@ -222,10 +235,13 @@ pub fn phase2_config(seed: u64) -> SimConfig {
     }
 }
 
-/// Build a `Sim` with the noise world + the two-class field (conserved fixed-point + signal f32).
-/// Per-cell caps for layer 0 come from `WorldView::resource` (float-noise-derived, arch-dependent).
-/// Layers 1+ use `config.layer_specs[l].flat_cap` (0 = empty start) or `world_cap_mult × world`.
-/// Handles any `n_layers ≥ 1` from `config.layer_specs`; no fixed-L branches.
+/// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
+/// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
+/// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
+/// `WorldView::resource` — now PURE INTEGER (arch-identical by construction; the golden stays
+/// per-arch only because of the sim's unrelated f32 signal field). Layers 1+ use
+/// `config.layer_specs[l].flat_cap` (0 = empty start) or `world_cap_mult × world`. Handles any
+/// `n_layers ≥ 1` from `config.layer_specs`; no fixed-L branches.
 pub fn build_sim(config: SimConfig) -> Sim {
     // B-2: sync econ.n_layers = config.n_layers so stage_birth_death can clamp layer-trait mutations.
     // D′-3a: if mineral_layer is set, n_energy_layers = mineral_layer index (genomes can only
@@ -239,11 +255,12 @@ pub fn build_sim(config: SimConfig) -> Sim {
         config.econ.n_energy_layers = config.n_layers;
     }
     let econ = config.econ.clone();
-    let world = NoiseWorld::new(econ.world_dim, HMAX, RESOURCE_BASE, config.seed ^ WORLD_SALT);
+    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT);
     let grid_w = econ.world_dim / M_FIELD;
     let n = (grid_w * grid_w) as usize;
 
-    // World-noise per-cell caps — layer 0 always, and any layer 1+ with world_cap_mult > 0.
+    // World per-cell caps (ProcgenWorld: real relief + biome/edaphic-derived) — layer 0 always,
+    // and any layer 1+ with world_cap_mult > 0.
     let mut world_caps = Vec::with_capacity(n);
     for cz in 0..grid_w {
         for cx in 0..grid_w {
