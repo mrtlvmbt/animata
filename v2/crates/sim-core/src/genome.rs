@@ -6,8 +6,12 @@
 // misses (e.g. `let x = 1.5; x + 1.0` where no `f32`/`f64` keyword appears).
 #![deny(clippy::float_arithmetic)]
 
-use crate::{brain_w_ho, brain_w_ih, fnv_mix, grn, morphogen, seed_fold, CellType, EconParams, BRAIN_WEIGHTS};
+use crate::{
+    brain_w_ho, brain_w_ih, fnv_mix, grn, morphogen, seed_fold, Boundary, CellType, EconParams,
+    GrnSpec, MorphogenSpec, BRAIN_WEIGHTS, GRN_EXPR_MAX,
+};
 use bevy_ecs::prelude::Component;
+use std::sync::Arc;
 
 /// Integer square root (floor), Newton's method. Deterministic, arch-independent.
 pub fn isqrt(n: i64) -> i64 {
@@ -33,7 +37,12 @@ pub fn size_pow_three_quarters(size: i32) -> i64 {
 
 /// The six Ф0 traits + two B-2 layer-targeting traits (research/13 §2). Ranges are clamped on
 /// mutation; all integer.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// **`Clone`, NOT `Copy`** (V-1): `grn_spec` carries a `GrnSpec` (`Vec<i32>` fields), so
+/// `Option<Arc<GrnSpec>>` cannot be `Copy`. Mirrors the `EconParams` Copy→Clone ripple from E-4a —
+/// every implicit-copy call site was audited and converted to an explicit `.clone()` (compiler-
+/// enforced: a missed site is a compile-time move error, not a silent runtime bug).
+#[derive(Component, Clone, Debug, PartialEq, Eq)]
 pub struct Genome {
     /// Resource→energy conversion efficiency, as a fraction of 256 (0..=256).
     pub metabolism_eff: i32,
@@ -91,6 +100,21 @@ pub struct Genome {
     /// Founder = 0 (INERT). Mutates only when `has_light` (same gate as `photo_gain`) so non-dprime
     /// genomes carry it at 0 forever → 4 existing goldens byte-identical. Range `[−max, +max]`.
     pub reg_gain: i32,
+
+    // ── V-1: heritable + point-mutable indirect genome (the differentiation PROGRAM) ────────────
+    /// The GRN regulatory spec — heritable, per-individual, point-mutated by [`Genome::mutate`].
+    /// `None` for the five non-phase2 configs (`EconParams.grn` stays `None` there too — `decode`
+    /// takes the trivial `_ => None` cell_type projection, byte-identical to pre-V-1 behavior).
+    /// `Arc` for copy-on-write (RnD 37 §1): an unmutated child SHARES the parent's spec (a cheap
+    /// refcount bump via `Genome::clone`); only a spec-mutating division allocates a fresh clone
+    /// (`mutate`, below). Folded into [`Genome::hash_contribution`] by INTEGER CONTENTS, Some-gated
+    /// — the `Arc` pointer itself is never hashed (CoW sharing is transparent to the hash).
+    pub grn_spec: Option<Arc<GrnSpec>>,
+    /// The morphogen spec — heritable (carried per-individual like `grn_spec`) but NOT mutated in
+    /// V-1 (scope: the fate-relevant lever on the dead-drive phase2 spec is the GRN spec; morphogen-
+    /// param mutation is a trivial later addition, out of V-1 scope). `MorphogenSpec` is small and
+    /// `Copy` — no `Arc` needed here (unlike `grn_spec`'s `Vec<i32>` fields).
+    pub morphogen_spec: Option<MorphogenSpec>,
 }
 
 /// Phase-2 E-1: cold, lean cache of the decoded genome traits consumed by hot-path stages.
@@ -194,7 +218,21 @@ impl Genome {
             // Test-only E-1/E-4 injection flag — always false in production.
             #[cfg(test)]
             force_decode_none: false,
+            // V-1: no heritable spec by default — attach one via `with_specs` at founder-spawn
+            // (production: `Sim::new`, seeded from `EconParams.grn`/`.morphogen`).
+            grn_spec: None,
+            morphogen_spec: None,
         }
+    }
+
+    /// V-1: attach a heritable GRN/morphogen spec to this genome. Used ONCE, at founder-spawn
+    /// (`Sim::new`), to seed the per-lineage differentiation program from `EconParams`'s founder
+    /// template — `EconParams.grn`/`.morphogen` are consulted ONLY there; `decode` reads `self`
+    /// instead (below), never `econ.grn`/`econ.morphogen` directly.
+    pub fn with_specs(mut self, grn_spec: Option<Arc<GrnSpec>>, morphogen_spec: Option<MorphogenSpec>) -> Self {
+        self.grn_spec = grn_spec;
+        self.morphogen_spec = morphogen_spec;
+        self
     }
 
     /// Integer metabolic cost units `size^(3/4)`.
@@ -212,7 +250,7 @@ impl Genome {
     /// `reg_gain_max` clamps the reg-gain range to `[−reg_gain_max, +reg_gain_max]` (D′-2b).
     /// Set `reg_gain_max = 0` to lock regulation OFF — reg_gain stays 0 (the D′-2c control line).
     pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32) -> Genome {
-        let mut g = *self;
+        let mut g = self.clone();
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
             (&mut g.metabolism_eff, 0, 256),
@@ -265,6 +303,69 @@ impl Genome {
                 g.reg_gain = (g.reg_gain + delta).clamp(-reg_gain_max, reg_gain_max);
             }
         }
+
+        // V-1: point-mutation of the heritable GRN spec — FIXED-LENGTH only (n_genes==2 invariant
+        // holds: no gene duplication/indel/translocation, those are deferred). A known 10 integer
+        // draws (4 weights + 2 input_weights + 2 bias + 2 initial), disjoint salts from every
+        // prior draw stream above, drawn AFTER them (§5.2 stream hygiene — backward-compatible
+        // draw positions preserved). `g.grn_spec` already shares the parent's `Arc` (from
+        // `self.clone()` above) — CoW: only overwritten with a fresh `Arc::new` if a draw actually
+        // fires, so an unmutated child (the common case) never allocates. Morphogen spec is
+        // heritable but NOT mutated in V-1 (`g.morphogen_spec` already carried over by
+        // `self.clone()`, unchanged — `MorphogenSpec` is `Copy`).
+        //
+        // Step magnitude `GRN_SPEC_MUT_STEP=4` (NOT `±1` like the six Ф0 traits): this GRN toggle
+        // family self-amplifies over its iterated steps (grn.rs) into a hard either/or attractor —
+        // empirically (throwaway probe, mirrors E-6's calibration process) a `±1` step on the
+        // repositioned spec (`weights=[32,-32,-32,32]`, `initial=[144,112]`, `cli::phase2_config`)
+        // NEVER flips the fate (0/20 single-field perturbations); `±4` gives a measured 2/20 (10%)
+        // — a real but strict-minority flip rate, comfortably inside `0 < rate < 50%` (see the
+        // heritability teeth in `phase2_viability.rs`).
+        const GRN_SPEC_MUT_STEP: i32 = 4;
+        if let Some(gspec) = &self.grn_spec {
+            let mut mutated = (**gspec).clone();
+            let mut any_change = false;
+
+            for (i, w) in mutated.weights.iter_mut().enumerate() {
+                let r = seed_fold(stream, &[0x4752_4E57 + i as u64]); // "GRNW" + index
+                if (r & 0xFF) < self.mutation_rate as u64 {
+                    let delta = (((r >> 8) % 3) as i32 - 1) * GRN_SPEC_MUT_STEP; // -4,0,+4
+                    *w = (*w + delta).clamp(-1024, 1024);
+                    any_change = true;
+                }
+            }
+            for (i, w) in mutated.input_weights.iter_mut().enumerate() {
+                let r = seed_fold(stream, &[0x4752_4E49 + i as u64]); // "GRNI" + index
+                if (r & 0xFF) < self.mutation_rate as u64 {
+                    let delta = (((r >> 8) % 3) as i32 - 1) * GRN_SPEC_MUT_STEP;
+                    *w = (*w + delta).clamp(-1024, 1024);
+                    any_change = true;
+                }
+            }
+            for (i, w) in mutated.bias.iter_mut().enumerate() {
+                let r = seed_fold(stream, &[0x4752_4E42 + i as u64]); // "GRNB" + index
+                if (r & 0xFF) < self.mutation_rate as u64 {
+                    let delta = (((r >> 8) % 3) as i32 - 1) * GRN_SPEC_MUT_STEP;
+                    *w = (*w + delta).clamp(-1024, 1024);
+                    any_change = true;
+                }
+            }
+            for (i, w) in mutated.initial.iter_mut().enumerate() {
+                // "GRNL" ("initiaL") + index — clamped to [0, GRN_EXPR_MAX]: `initial` is a gene
+                // EXPRESSION level (grn.rs), not a free coefficient like weights/input_weights/bias.
+                let r = seed_fold(stream, &[0x4752_4E4C + i as u64]);
+                if (r & 0xFF) < self.mutation_rate as u64 {
+                    let delta = (((r >> 8) % 3) as i32 - 1) * GRN_SPEC_MUT_STEP;
+                    *w = (*w + delta).clamp(0, GRN_EXPR_MAX);
+                    any_change = true;
+                }
+            }
+
+            if any_change {
+                g.grn_spec = Some(Arc::new(mutated));
+            }
+        }
+
         g
     }
 
@@ -279,19 +380,27 @@ impl Genome {
     /// Decode this genome to a `Phenotype` (Phase-2 E-1 seam entry point; E-4a adds the ontogenesis
     /// chain opt-in).
     ///
-    /// **E-4a:** when `econ.morphogen` and `econ.grn` are BOTH `Some`, runs the full ontogenesis
-    /// chain — `morphogen(self, &mspec)` → `grn(&gradient, &gspec)` — and caches the resolved
-    /// `CellType` on `Phenotype.cell_type`. The chain is a PURE function of `(self, econ)`: no
-    /// RNG/clock/thread-dependence (E-2/E-3 determinism holds transitively). When either spec is
-    /// absent (all 5 existing configs, and every production config until E-4b), `decode` is the
-    /// E-1 trivial Ф0 projection with `cell_type: None` — byte-identical to before this slice.
+    /// **E-4a/V-1:** when `self.morphogen_spec` and `self.grn_spec` are BOTH `Some`, runs the full
+    /// ontogenesis chain — `morphogen(self, &mspec)` → `grn(&gradient, &gspec)` — and caches the
+    /// resolved `CellType` on `Phenotype.cell_type`. The chain is a PURE function of `self` (spec
+    /// included): no RNG/clock/thread-dependence (E-2/E-3 determinism holds transitively). **V-1**:
+    /// the spec is read from `self`, NOT `econ.morphogen`/`econ.grn` (those fields are consulted
+    /// ONLY once, at founder-spawn, to seed `self.grn_spec`/`self.morphogen_spec` via
+    /// [`Genome::with_specs`] — `decode` never reads them directly). When either per-individual
+    /// spec is absent (all 5 non-phase2 configs — their founders are never seeded with one),
+    /// `decode` is the E-1 trivial Ф0 projection with `cell_type: None` — byte-identical to before
+    /// V-1/E-4a.
     ///
     /// Returns `Some` for every valid Ф0 genome, and for every genome under the five existing
-    /// configs (`morphogen`/`grn` stay `None` there, so the viability gate below is unreachable).
-    /// **E-5b**: under `phase2_config` (the only config with both specs `Some`), an embryo whose
-    /// `size` does not clear [`SIZE_VIABILITY_FLOOR`] returns `None` — a real, production-reachable
-    /// stillbirth. `stage_birth_death` (E-5a) already books the conservation-correct `None` branch;
-    /// this slice makes that branch reachable, it adds no new conservation code.
+    /// configs (no spec there, so the viability gate below is unreachable).
+    /// **E-5b**: under `phase2_config` (the only config whose founders are seeded with both specs),
+    /// an embryo whose `size` does not clear [`SIZE_VIABILITY_FLOOR`] returns `None` — a real,
+    /// production-reachable stillbirth. `stage_birth_death` (E-5a) already books the conservation-
+    /// correct `None` branch; this slice makes that branch reachable, it adds no new conservation
+    /// code.
+    ///
+    /// `econ` is still consulted for `econ.n_layers` (the `uptake_layer` clamp) — only the
+    /// morphogen/GRN spec moved onto `self` (V-1).
     ///
     /// Pure and deterministic: no RNG, no clock, no thread-dependent work.
     /// Phenotype is NOT folded into `hash_contribution` (it is a cold derivative of Genome;
@@ -303,7 +412,7 @@ impl Genome {
         if self.force_decode_none {
             return None;
         }
-        let cell_type = match (&econ.morphogen, &econ.grn) {
+        let cell_type = match (&self.morphogen_spec, &self.grn_spec) {
             (Some(mspec), Some(gspec)) => {
                 let gradient = morphogen(self, mspec);
                 let ct = grn(&gradient, gspec);
@@ -313,7 +422,7 @@ impl Genome {
                 }
                 Some(ct)
             }
-            _ => None, // E-1 trivial projection: no production config sets both specs in E-4a
+            _ => None, // E-1 trivial projection: no non-phase2 founder is ever seeded with both specs
         };
         // E-4b-i: when the chain ran, cell_type DRIVES uptake_layer (the live hot-path consumer —
         // stage_sense and stage_interactions both read Phenotype.uptake_layer, never Genome's raw
@@ -336,8 +445,11 @@ impl Genome {
     /// condition is ever reached in `decode`, so a genome with both flags set is attributed to the
     /// real criterion here — callers must not mix the two in the same probe run (see
     /// `phase2_viability.rs`'s "clean run" requirement).
-    pub(crate) fn is_stillbirth_by_size_criterion(&self, econ: &EconParams) -> bool {
-        matches!((&econ.morphogen, &econ.grn), (Some(_), Some(_))) && !is_viable_size(self.size)
+    ///
+    /// **V-1**: reads `self.morphogen_spec`/`self.grn_spec` (no longer `econ.morphogen`/`econ.grn`
+    /// — those are the founder-spawn template only, per `decode`'s doc), so no `econ` param needed.
+    pub(crate) fn is_stillbirth_by_size_criterion(&self) -> bool {
+        matches!((&self.morphogen_spec, &self.grn_spec), (Some(_), Some(_))) && !is_viable_size(self.size)
     }
 
     /// Fold all six traits into the per-entity state-hash contribution.
@@ -376,6 +488,45 @@ impl Genome {
         if self.reg_gain != 0 {
             h = fnv_mix(h, self.reg_setpoint as u64);
             h = fnv_mix(h, self.reg_gain as u64);
+        }
+        // V-1: fold the heritable GRN/morphogen spec by INTEGER CONTENTS, in a FIXED field order —
+        // exactly like the existing i32 traits above, never the `Arc` pointer (CoW sharing is
+        // transparent to the hash; two lineages with byte-identical spec CONTENTS hash the same
+        // regardless of whether they share one `Arc` or hold independent clones).
+        //
+        // Some-GATED: a `None` spec contributes NOTHING (`if let Some(...) { fold }`), NOT
+        // `fnv_mix(h, hash_of_option)` (which would fold a value even for `None` and shift the
+        // checksum for every one of the five non-phase2 configs, whose founders are never seeded
+        // with a spec). `n_genes` is fixed at 2 in V-1 (no variable-length operator yet), so every
+        // `Vec` length here is constant — no length-encoding ambiguity to worry about.
+        if let Some(gspec) = &self.grn_spec {
+            for &v in &gspec.weights {
+                h = fnv_mix(h, v as u64);
+            }
+            for &v in &gspec.input_weights {
+                h = fnv_mix(h, v as u64);
+            }
+            for &v in &gspec.bias {
+                h = fnv_mix(h, v as u64);
+            }
+            h = fnv_mix(h, gspec.shift as u64);
+            h = fnv_mix(h, gspec.max_steps as u64);
+            h = fnv_mix(h, gspec.sample_x as u64);
+            h = fnv_mix(h, gspec.sample_z as u64);
+            for &v in &gspec.initial {
+                h = fnv_mix(h, v as u64);
+            }
+            h = fnv_mix(h, gspec.n_genes as u64);
+        }
+        if let Some(mspec) = &self.morphogen_spec {
+            h = fnv_mix(h, mspec.g_dev as u64);
+            h = fnv_mix(h, mspec.n_dev as u64);
+            h = fnv_mix(h, match mspec.boundary { Boundary::Reflecting => 0u64, Boundary::Absorbing => 1u64 });
+            h = fnv_mix(h, mspec.diffuse_shift as u64);
+            h = fnv_mix(h, mspec.decay_num as u64);
+            h = fnv_mix(h, mspec.decay_shift as u64);
+            h = fnv_mix(h, mspec.seed_scale as u64);
+            h = fnv_mix(h, mspec.stop_threshold as u64);
         }
         h
     }
@@ -550,9 +701,12 @@ mod tests {
             sample_z: 0,
             initial: vec![256, 0],
         };
-        let econ = EconParams { morphogen: Some(mspec), grn: Some(gspec.clone()), ..EconParams::default() };
+        let econ = EconParams::default();
 
-        let g = Genome::founder(2);
+        // V-1: decode reads the spec from `self` (the genome), not `econ` — attach it here via
+        // `with_specs` (production seeds this ONCE at founder-spawn from `EconParams`'s template;
+        // this test attaches it directly, mirroring that seam).
+        let g = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), Some(mspec));
         let ph = g.decode(&econ).expect("Ф0 genome must still decode to Some with the chain enabled");
 
         // The SAME chain, called directly, must agree exactly (proves decode wires the REAL
@@ -592,9 +746,10 @@ mod tests {
         };
         // Flipped-corner bistable fixture (mirrors grn.rs's, initial swapped) → resolves to B.
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 256]);
-        let econ = EconParams { morphogen: Some(mspec), grn: Some(gspec.clone()), n_layers: 2, ..EconParams::default() };
+        let econ = EconParams { n_layers: 2, ..EconParams::default() };
 
-        let g = Genome::founder(2);
+        // V-1: attach the spec to the genome (decode reads `self`, not `econ` — see above).
+        let g = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), Some(mspec));
         assert_eq!(g.uptake_layer, 0, "founder's raw genome uptake_layer is 0 (sanity)");
         let ph = g.decode(&econ).expect("Ф0 must decode to Some");
 
@@ -621,11 +776,9 @@ mod tests {
             seed_scale: 4096,
             stop_threshold: 0,
         };
-        // grn stays None.
-        let econ_morphogen_only = EconParams { morphogen: Some(mspec), ..EconParams::default() };
-
-        let g = Genome::founder(2);
-        let ph = g.decode(&econ_morphogen_only).expect("Ф0 must decode to Some");
+        // grn_spec stays None — only morphogen_spec attached.
+        let g = Genome::founder(2).with_specs(None, Some(mspec));
+        let ph = g.decode(&EconParams::default()).expect("Ф0 must decode to Some");
         assert_eq!(ph.cell_type, None, "chain must NOT run when only one of morphogen/grn is Some");
     }
 
@@ -678,8 +831,13 @@ mod tests {
         GrnSpec::new(2, vec![64, -64, -64, 64], vec![8, 0], vec![0, 0], 3, 12, 0, 0, vec![0, crate::GRN_EXPR_MAX])
     }
 
-    fn e6_econ() -> EconParams {
-        EconParams { morphogen: Some(e6_mspec()), grn: Some(e6_gspec()), ..EconParams::default() }
+    /// V-1: decode reads the spec from `self` (the genome), not `econ` — build a genome with the
+    /// E-6 fixture spec attached (production seeds this ONCE at founder-spawn from `EconParams`'s
+    /// template via `Genome::with_specs`; this helper mirrors that seam directly).
+    fn e6_genome(size: i32) -> Genome {
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(e6_gspec())), Some(e6_mspec()));
+        g.size = size;
+        g
     }
 
     /// The capstone assertion: two genomes differing ONLY in `size` decode to DISTINCT, exact,
@@ -688,15 +846,14 @@ mod tests {
     /// decode under the identical spec; only `genome.size` differs between the two calls).
     #[test]
     fn e6_end_to_end_size_only_divergence_crosses_fate_boundary() {
-        let econ = e6_econ();
-        let mut g_lo = Genome::founder(2);
-        g_lo.size = 20;
-        let mut g_hi = Genome::founder(2);
-        g_hi.size = 21;
+        let econ = EconParams::default();
+        let g_lo = e6_genome(20);
+        let g_hi = e6_genome(21);
 
-        // The two genomes differ ONLY in `size` (both otherwise the untouched founder).
+        // The two genomes differ ONLY in `size` (both otherwise the untouched founder + same spec).
         assert_eq!(g_lo.metabolism_eff, g_hi.metabolism_eff);
         assert_eq!(g_lo.weights, g_hi.weights);
+        assert_eq!(g_lo.grn_spec, g_hi.grn_spec);
         assert_ne!(g_lo.size, g_hi.size);
 
         let ph_lo = g_lo.decode(&econ).expect("size=20 must be viable (> SIZE_VIABILITY_FLOOR)");
@@ -726,11 +883,10 @@ mod tests {
     /// fate-distinctness count (a stillbirth has no `CellType`), not a failure of this test.
     #[test]
     fn e6_size_sweep_is_mutation_reachable_and_multi_fate() {
-        let econ = e6_econ();
+        let econ = EconParams::default();
         let mut fates: Vec<(i32, CellType)> = Vec::new();
         for size in 1..=32i32 {
-            let mut g = Genome::founder(2);
-            g.size = size;
+            let g = e6_genome(size);
             if let Some(ph) = g.decode(&econ) {
                 let ct = ph.cell_type.expect("(Some, Some) arm must always resolve a CellType when viable");
                 fates.push((size, ct));
@@ -766,10 +922,9 @@ mod tests {
     /// float-noise arch-dependence) — the fate decision is fully integer.
     #[test]
     fn e6_decode_is_bit_deterministic_across_repeated_calls() {
-        let econ = e6_econ();
+        let econ = EconParams::default();
         for size in [4, 20, 21, 32] {
-            let mut g = Genome::founder(2);
-            g.size = size;
+            let g = e6_genome(size);
             let a = g.decode(&econ);
             let b = g.decode(&econ);
             assert_eq!(a, b, "decode(size={size}) must be byte-identical across repeated calls");
