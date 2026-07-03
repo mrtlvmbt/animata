@@ -637,4 +637,164 @@ mod tests {
         let ph = g.decode(&EconParams::default()).expect("Ф0 must decode to Some");
         assert_eq!(ph.cell_type, None, "default EconParams must never enable the ontogenesis chain");
     }
+
+    // ── E-6: differentiation-verdict capstone (golden-NEUTRAL) ──────────────────────────────────
+    //
+    // Proves the ASSEMBLED chain (genome.size → morphogen seed → gradient → GRN drive → attractor
+    // → classify) differentiates end-to-end: two genomes differing ONLY in `size` decode to
+    // DISTINCT `CellType`s, and the fate boundary is crossable by the real `size` mutation
+    // operator (a `±1` step). **This verdicts the engine's CAPABILITY — reachable and
+    // bit-deterministic — NOT that differentiation emerges or is selectively maintained in the
+    // live shipped population.** The shipped `phase2_config` (`cli` crate) stays monomorphic
+    // (`input_weights: [0,0]`, `bias: [0,0]` — the morphogen drive has zero effect there, verified
+    // structurally distinct below); live emergence / selective maintenance is deferred to the
+    // driver work (#37 heritable programs / #42 predation economics) — verdicting it now, on
+    // monomorphic founders with no driver, would repeat the E-4b-ii shelved NULL.
+    //
+    // Mechanism: the morphogen's Dirichlet seed `drive = genome.size · seed_scale` is
+    // POSITIVE-only and monotonic in `size` (morphogen.rs) — a sign-flip GRN readout can never
+    // differentiate on it. The only topology that flips a fate on a positive-only, monotonic
+    // drive is a bistable toggle (`weights=[64,-64,-64,64]`, the same matrix `phase2_config`'s own
+    // spec uses) seeded INSIDE one basin (`initial=[0, EXPR_MAX]` = basin B) with the drive
+    // biasing the OTHER gene (`input_weights=[8,0]`): below a size-dependent threshold the basin
+    // holds; above it the drive overpowers the cross-inhibition and the basin flips to A.
+    // PM-verified anchor (`seed_scale=64, input_weights=[8,0]`): clean monotonic B→A step at
+    // size 20|21, no `Mixed`, no oscillation, across the whole `[1,32]` range.
+
+    use crate::{Boundary, GrnSpec, MorphogenSpec};
+
+    fn e6_mspec() -> MorphogenSpec {
+        MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+        }
+    }
+
+    /// Production-shaped (via the validated `GrnSpec::new`), drive-coupled spec — a TEST fixture
+    /// only, structurally distinct from `phase2_config`'s spec (`input_weights != [0,0]`), so it
+    /// can never collapse into the shipped monomorphic config.
+    fn e6_gspec() -> GrnSpec {
+        GrnSpec::new(2, vec![64, -64, -64, 64], vec![8, 0], vec![0, 0], 3, 12, 0, 0, vec![0, crate::GRN_EXPR_MAX])
+    }
+
+    fn e6_econ() -> EconParams {
+        EconParams { morphogen: Some(e6_mspec()), grn: Some(e6_gspec()), ..EconParams::default() }
+    }
+
+    /// The capstone assertion: two genomes differing ONLY in `size` decode to DISTINCT, exact,
+    /// pinned `CellType`s through the full assembled chain — driven by the SIZE difference
+    /// propagating through the morphogen seed, not a hand-set GRN initial state (both genomes
+    /// decode under the identical spec; only `genome.size` differs between the two calls).
+    #[test]
+    fn e6_end_to_end_size_only_divergence_crosses_fate_boundary() {
+        let econ = e6_econ();
+        let mut g_lo = Genome::founder(2);
+        g_lo.size = 20;
+        let mut g_hi = Genome::founder(2);
+        g_hi.size = 21;
+
+        // The two genomes differ ONLY in `size` (both otherwise the untouched founder).
+        assert_eq!(g_lo.metabolism_eff, g_hi.metabolism_eff);
+        assert_eq!(g_lo.weights, g_hi.weights);
+        assert_ne!(g_lo.size, g_hi.size);
+
+        let ph_lo = g_lo.decode(&econ).expect("size=20 must be viable (> SIZE_VIABILITY_FLOOR)");
+        let ph_hi = g_hi.decode(&econ).expect("size=21 must be viable (> SIZE_VIABILITY_FLOOR)");
+
+        // Pinned exact fates (not just "differ") — catches a future perturbation of the chain.
+        assert_eq!(ph_lo.cell_type, Some(CellType::B), "size=20 must resolve to the pinned fate B");
+        assert_eq!(ph_hi.cell_type, Some(CellType::A), "size=21 must resolve to the pinned fate A");
+        assert_ne!(ph_lo.cell_type, ph_hi.cell_type, "size-only difference must flip the resolved fate");
+
+        // The divergence flows through the morphogen seed itself.
+        let grad_lo = crate::morphogen(&g_lo, &e6_mspec());
+        let grad_hi = crate::morphogen(&g_hi, &e6_mspec());
+        assert_ne!(
+            grad_lo.at(0, 0), grad_hi.at(0, 0),
+            "the morphogen seed itself must differ by size (drive = size · seed_scale)"
+        );
+    }
+
+    /// The reachability proof: sweep `size` across the FULL `[1,32]` mutation range (the real
+    /// `mutate()` clamp — `(&mut g.size, 1, 32)` in the trait table above), decode each through
+    /// the real chain, and prove (a) ≥2 distinct `CellType`s occur and (b) some adjacent pair
+    /// `(s, s+1)` straddles the boundary — the fate flip is reachable by a single real `±1`
+    /// mutation step, not just a hand-picked far-apart pair. Sizes `<= SIZE_VIABILITY_FLOOR` (E-5b)
+    /// decode to `None` (a stillbirth) under this drive-coupled spec too — expected (E-5b's
+    /// criterion lives in the SAME `(Some, Some)` chain arm E-6 exercises) and excluded from the
+    /// fate-distinctness count (a stillbirth has no `CellType`), not a failure of this test.
+    #[test]
+    fn e6_size_sweep_is_mutation_reachable_and_multi_fate() {
+        let econ = e6_econ();
+        let mut fates: Vec<(i32, CellType)> = Vec::new();
+        for size in 1..=32i32 {
+            let mut g = Genome::founder(2);
+            g.size = size;
+            if let Some(ph) = g.decode(&econ) {
+                let ct = ph.cell_type.expect("(Some, Some) arm must always resolve a CellType when viable");
+                fates.push((size, ct));
+            }
+        }
+
+        assert!(!fates.is_empty(), "sweep must produce at least one viable, decoded genome");
+        let first_ct = fates[0].1;
+        assert!(
+            fates.iter().any(|(_, ct)| *ct != first_ct),
+            "the engine must differentiate SOMEWHERE across size∈[1,32] — got only {first_ct:?} for every viable size: {fates:?}"
+        );
+
+        let boundary = fates.windows(2).find(|w| w[0].1 != w[1].1);
+        assert!(
+            boundary.is_some(),
+            "no adjacent (size, size+1) pair straddles a fate boundary — the flip would not be \
+             reachable by a single real ±1 mutation step; fates={fates:?}"
+        );
+        let w = boundary.unwrap();
+        let (s_lo, ct_lo) = w[0];
+        let (s_hi, ct_hi) = w[1];
+        assert_eq!(s_hi, s_lo + 1, "the straddling pair must be mutation-adjacent (±1), got {s_lo}|{s_hi}");
+        assert_ne!(ct_lo, ct_hi);
+        // Pinned to the same PM-verified anchor as the capstone test above (not a coincidence).
+        assert_eq!((s_lo, ct_lo, s_hi, ct_hi), (20, CellType::B, 21, CellType::A));
+    }
+
+    /// Determinism: repeated decode of the SAME genome (on either side of the boundary) yields
+    /// byte-identical `cell_type` and resolved GRN state — no float, no RNG, no clock, no
+    /// thread-dependence (E-2/E-3 determinism holds transitively). Arch-stable: `morphogen`/`grn`
+    /// are called DIRECTLY here (never through a live `build_sim` field, which would reintroduce
+    /// float-noise arch-dependence) — the fate decision is fully integer.
+    #[test]
+    fn e6_decode_is_bit_deterministic_across_repeated_calls() {
+        let econ = e6_econ();
+        for size in [4, 20, 21, 32] {
+            let mut g = Genome::founder(2);
+            g.size = size;
+            let a = g.decode(&econ);
+            let b = g.decode(&econ);
+            assert_eq!(a, b, "decode(size={size}) must be byte-identical across repeated calls");
+
+            let (mspec, gspec) = (e6_mspec(), e6_gspec());
+            let grad_a = crate::morphogen(&g, &mspec);
+            let grad_b = crate::morphogen(&g, &mspec);
+            assert_eq!(grad_a, grad_b, "morphogen(size={size}) must be byte-identical across repeated calls");
+            let (state_a, ct_a, _) = crate::grn_resolve(&grad_a, &gspec);
+            let (state_b, ct_b, _) = crate::grn_resolve(&grad_b, &gspec);
+            assert_eq!((state_a, ct_a), (state_b, ct_b), "grn_resolve(size={size}) must be byte-identical across repeated calls");
+        }
+    }
+
+    /// Golden-neutrality guard (belt-and-braces — the real proof is CI's byte-identical goldens):
+    /// this test's fixture spec is structurally distinct from `phase2_config`'s shipped spec, so
+    /// it can never be mistaken for, or accidentally collapse into, a production coupling.
+    #[test]
+    fn e6_fixture_spec_is_structurally_distinct_from_shipped_monomorphic_shape() {
+        let gspec = e6_gspec();
+        assert_ne!(
+            gspec.input_weights, vec![0, 0],
+            "E-6's fixture spec must be drive-COUPLED (input_weights != [0,0]) — phase2_config's \
+             shipped spec has input_weights=[0,0] (monomorphic, zero morphogen effect); the two \
+             must never collapse into the same shape"
+        );
+    }
 }
