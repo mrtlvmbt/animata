@@ -188,6 +188,8 @@ pub struct WorldFields {
     pub height: Vec<i64>,
     pub final_biome: Vec<FinalBiome>,
     pub caps: Vec<i64>,
+    /// Surface material per cell (from W-4 erosion), exposed for richness testing.
+    pub surface_material: Vec<u8>,
 }
 
 /// Sample `erode(seed, hmax, dim)` (W-4) and classify the FINAL biome + caps per cell: zonal biome
@@ -225,7 +227,8 @@ pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
         }
     }
 
-    WorldFields { dim, height: erosion.height, final_biome, caps }
+    let surface_material = erosion.surface_material.iter().map(|&m| m as u8).collect();
+    WorldFields { dim, height: erosion.height, final_biome, caps, surface_material }
 }
 
 #[cfg(test)]

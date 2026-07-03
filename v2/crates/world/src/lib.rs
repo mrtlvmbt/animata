@@ -26,6 +26,9 @@ pub struct ProcgenWorld {
     /// Resource, ALREADY rescaled into the `resource_base`-comparable magnitude at build time (see
     /// `rescale_cap`'s doc) — `resource()` just indexes + applies the solid-zeroing rule.
     resource: Vec<i64>,
+    /// Surface material per cell (W-4's `ErosionState.surface_material`), exposed for richness
+    /// testing (critic F2: assert Bedrock material is actually exposed, not just slope-driven Rock).
+    surface_material: Vec<u8>,
 }
 
 /// Rescale a W-5 cap (`[0, CAP_MAX]`) into the SAME magnitude range the legacy `NoiseWorld` fed the
@@ -81,7 +84,7 @@ impl ProcgenWorld {
              the wired world would starve nearly everything"
         );
 
-        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource }
+        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, surface_material: fields.surface_material }
     }
 
     fn wrap(&self, v: i64) -> i64 {
@@ -171,6 +174,7 @@ mod tests {
         let mut biomes = std::collections::BTreeSet::new();
         let mut resources = std::collections::BTreeSet::new();
         let mut saw_rock = false;
+        let mut saw_bedrock = false;
 
         for x in 0..DIM {
             for z in 0..DIM {
@@ -181,6 +185,10 @@ mod tests {
                 biomes.insert(b);
                 if b == FinalBiome::Rock as u8 {
                     saw_rock = true;
+                }
+                // Check for actual Bedrock material (not just slope-driven Rock biome)
+                if w.surface_material[z as usize * DIM as usize + x as usize] == 4 { // MaterialId::Bedrock = 4
+                    saw_bedrock = true;
                 }
                 resources.insert(w.resource(Vec2Fixed(x, z)));
             }
