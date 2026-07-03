@@ -63,11 +63,9 @@ impl ProcgenWorld {
         let mut heights_sorted = fields.height.clone();
         heights_sorted.sort_unstable();
 
-        // For 15-50% solid range, target middle of band ≈ 32-33% solid (67-68 percentile of heights).
-        // Try p65 (65th percentile, expecting ~35% solid)
+        // For 15-50% solid range, target middle of band ≈ 35% solid (65th percentile of heights).
         let h_p65 = heights_sorted[(heights_sorted.len() * 65) / 100];
         let h_p50 = heights_sorted[heights_sorted.len() / 2];
-        let h_p85 = heights_sorted[(heights_sorted.len() * 85) / 100];
         let mut solid_level = h_p65;
 
         // Guard: verify the guess lands in [15,50]
@@ -77,9 +75,8 @@ impl ProcgenWorld {
         if !(0.15..=0.50).contains(&test_frac) {
             // Fallback: try p50 (should be close to 50% solid)
             solid_level = h_p50;
-            let solid_count_fallback = fields.height.iter().filter(|&&h| h >= solid_level).count();
-            let fallback_frac = solid_count_fallback as f64 / n as f64;
-            // Use fallback even if it's still out of range — let the guard assert surface it
+            let _solid_count_fallback = fields.height.iter().filter(|&&h| h >= solid_level).count();
+            // Use fallback even if out of range — let the guard assert surface it
         }
 
         let mut resource = Vec::with_capacity(n);
@@ -94,6 +91,9 @@ impl ProcgenWorld {
         let mut sorted = resource.clone();
         sorted.sort_unstable();
         let median_resource = sorted[sorted.len() / 2];
+
+        let solid_count = fields.height.iter().filter(|&&h| h >= solid_level).count();
+        let solid_frac_final = solid_count as f64 / n as f64;
         assert!(
             max_resource <= resource_base + 1,
             "PROCGEN SCALE CHECK: max resource {max_resource} exceeds resource_base+1={} — \
@@ -113,9 +113,9 @@ impl ProcgenWorld {
         let solid_count = fields.height.iter().filter(|&&h| h >= solid_level).count();
         let solid_frac = solid_count as f64 / n as f64;
         assert!(
-            (0.15..=0.50).contains(&solid_frac),
+            (0.15..=0.50).contains(&solid_frac_final),
             "PROCGEN SOLID FRACTION CHECK: solid cells {:.1}% (threshold: 15–50%) —              movement/space balance may be off (critic F3); if drift is legitimate, re-pin after recalibrating solid_level",
-            solid_frac * 100.0
+            solid_frac_final * 100.0
         );
 
         ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, surface_material: fields.surface_material }

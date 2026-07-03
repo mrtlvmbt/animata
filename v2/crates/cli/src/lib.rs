@@ -21,11 +21,12 @@ pub const DT_MICROS: u64 = 1_000_000 / 64;
 // the relief spread BELOW erosion::INCISION_EXPOSURE_THRESHOLD=20, so Bedrock could never be
 // exposed — the HMAX-degeneracy W-6 must avoid (world/src/lib.rs's richness test guards this).
 const HMAX: i64 = 200;
-// RESOURCE_BASE=120 (unchanged): the prod carrying-capacity magnitude `ProcgenWorld::new`'s
-// scale-reconciliation rescales the W-5 [0,CAP_MAX=300] cap INTO — preserving the SAME
-// resource_base*(hmax-h)/hmax+1-shaped range [1,121] the acceptance corridors were tuned against
-// (critic F1: the richness comes from the spatial pattern, not a magnitude blow-up).
-const RESOURCE_BASE: i64 = 120;
+// RESOURCE_BASE: W-6b Phase A.2 scale reconciliation.
+// Decouple un-zeroed 84% solid cells (many productive high biomes) → total resource ↑2×.
+// base=120 → b3=295 (>160 CEIL), reducer=9.4%. Lowering to recover carrying-capacity magnitude.
+// base=100 targets b3 band [30..160] + reducer >=10% band.
+// Pattern richness (relative biome contrast) preserved; only magnitude scaled.
+const RESOURCE_BASE: i64 = 100;
 const REGEN_RATE: i64 = 6;
 const M_FIELD: i64 = 1;
 const WORLD_SALT: u64 = 0x5743_4C44; // "WCLD"
