@@ -25,6 +25,10 @@ use camera::IsoCam;
 use macroquad::prelude::*;
 use sim_core::WorldView;
 
+/// Zoom-LOD threshold: zoom_lod_factor >= this value means CLOSE zoom (draw fuller creatures).
+/// Below this: far zoom (draw cheap/small creatures). Pure function of zoom, deterministic (RnD R21).
+const ZOOM_LOD_NEAR_THRESHOLD: f32 = 0.3;
+
 fn window_conf() -> Conf {
     Conf {
         window_title: "animata v2 — render scaffold (R-3 isocam + cull)".to_owned(),
@@ -133,13 +137,13 @@ async fn main() {
                     None => WHITE,
                 };
 
-                // R-3: Zoom-LOD — at far zoom draw cheaper (small sphere), at near zoom fuller.
-                // Threshold: zoom_lod < 0.3 → far (cheap), else near (fuller).
-                if zoom_lod < 0.3 {
-                    // Far zoom: minimal creature (smaller radius).
+                // R-3: Zoom-LOD — pure function of zoom level (RnD R21). At far zoom draw cheap
+                // (small sphere), at near zoom draw fuller. zoom_lod_factor: 0=far, 1=close.
+                if zoom_lod < ZOOM_LOD_NEAR_THRESHOLD {
+                    // Far zoom (zoom_lod < 0.3, ortho_span > ~65): minimal creature draw (cheap).
                     draw_sphere(creature_pos, 0.08, None, color);
                 } else {
-                    // Near zoom: fuller creature.
+                    // Near zoom (zoom_lod >= 0.3, ortho_span <= ~65): fuller creature draw.
                     draw_sphere(creature_pos, 0.12, None, color);
                 }
             }

@@ -212,13 +212,13 @@ impl IsoCam {
             },
         ];
 
-        // Normalize planes.
+        // Normalize planes. Assert non-degenerate matrices (macroquad's Camera3D should never
+        // produce zero-length normals from orthographic projection).
         for plane in &mut planes {
             let len = plane.normal.length();
-            if len > 1e-6 {
-                plane.normal /= len;
-                plane.d /= len;
-            }
+            assert!(len > 1e-6, "frustum plane normal too small (degenerate matrix)");
+            plane.normal /= len;
+            plane.d /= len;
         }
 
         planes
@@ -236,9 +236,11 @@ impl IsoCam {
         planes.iter().all(|plane| plane.aabb_intersects(min, max))
     }
 
-    /// Get the current zoom level as a value in [0, 1] for LOD purposes (0 = far, 1 = close).
+    /// Get the current zoom level as a value in [0, 1] for LOD purposes.
+    /// Returns 0 when zoomed FAR (ortho_span=200), 1 when zoomed CLOSE (ortho_span=5).
+    /// For RnD R21: LOD is a pure function of zoom, deterministic, never per-creature distance.
     pub fn zoom_lod_factor(&self) -> f32 {
-        // Map ortho_span to [0, 1] linearly: 0 at max zoom, 1 at min zoom.
-        ((self.ortho_span - ORTHO_SPAN_MIN) / (ORTHO_SPAN_MAX - ORTHO_SPAN_MIN)).clamp(0.0, 1.0)
+        // Invert the span-to-factor mapping: 1 at small ortho_span (close zoom), 0 at large (far zoom).
+        (1.0 - (self.ortho_span - ORTHO_SPAN_MIN) / (ORTHO_SPAN_MAX - ORTHO_SPAN_MIN)).clamp(0.0, 1.0)
     }
 }
