@@ -5,11 +5,13 @@
 //! double buffer, and a proof-of-life naive 2D projection — R-2 replaces that projection with the
 //! real 3D hex view; the sim seam itself (driver.rs) is untouched.
 //!
-//! R-3 (this slice): interactive pan/zoom/rotate IsoCam + box-frustum culling (terrain chunks +
+//! R-3 (merged #225): interactive pan/zoom/rotate IsoCam + box-frustum culling (terrain chunks +
 //! creatures), minimal zoom-LOD, and the R-2 HMAX-literal footgun fix (cli consts now pub).
 //!
-//! OUT of scope here (later R-slices): creature LOD tiers/morphology (R-4), cube-voxel toggle (R-5),
-//! full HUD/inspector/minimap (R-6).
+//! R-4 (this slice): creatures Tier-1 LOD — px_per_m-driven point/sphere/morphology tiers; snapshot
+//! fields `size`/`uptake_layer`; consume R-3 dead-code warnings (render crate out of CI, local verify).
+//!
+//! OUT of scope here (later R-slices): cube-voxel toggle (R-5), full HUD/inspector/minimap (R-6).
 //!
 //! Not part of the v2 CI workspace (`v2/Cargo.toml`'s `exclude`) — a leaf bin, verified LOCALLY:
 //! `cargo build`/`cargo clippy` from this directory + a manual run (window opens, hex terrain +
@@ -38,7 +40,7 @@ const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 /// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
 fn window_conf() -> Conf {
     Conf {
-        window_title: "animata v2 — render scaffold (R-3 isocam + cull)".to_owned(),
+        window_title: "animata v2 — render scaffold (R-4 creatures LOD)".to_owned(),
         window_width: 1024,
         window_height: 768,
         high_dpi: true,
