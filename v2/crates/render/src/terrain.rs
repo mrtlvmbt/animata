@@ -5,6 +5,8 @@
 //! Split into row-band chunks so no single `Mesh` exceeds macroquad's `u16` index limit (65536):
 //! worst case ~30 vertices/cell (6 top + up to 6×4 cliff), so [`ROWS_PER_CHUNK`] rows of
 //! `world_dim=64` stays an order of magnitude under the limit.
+//!
+//! R-3: Each chunk carries a world-space AABB for frustum culling.
 
 use crate::biome_palette::{biome_color, cliff_shade};
 use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE};
@@ -14,8 +16,15 @@ use sim_core::{Vec2Fixed, WorldView};
 
 const ROWS_PER_CHUNK: i64 = 8;
 
-/// Build the whole `world_dim × world_dim` hex terrain as a handful of row-band meshes.
-pub fn build_hex_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<Mesh> {
+/// A terrain chunk: mesh + world-space AABB for frustum culling.
+pub struct TerrainChunk {
+    pub mesh: Mesh,
+    pub bounds: (Vec3, Vec3), // (min, max)
+}
+
+/// Build the whole `world_dim × world_dim` hex terrain as a handful of row-band chunks.
+/// Each chunk carries its own AABB (computed once at build).
+pub fn build_hex_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<TerrainChunk> {
     let mut chunks = Vec::new();
     let mut row0 = 0i64;
     while row0 < world_dim {
@@ -26,7 +35,7 @@ pub fn build_hex_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<Mesh> {
     chunks
 }
 
-fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> Mesh {
+fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> TerrainChunk {
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u16> = Vec::new();
 
@@ -78,7 +87,25 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> M
         "terrain chunk exceeded the u16 index limit ({} vertices) — shrink ROWS_PER_CHUNK",
         vertices.len()
     );
-    Mesh { vertices, indices, texture: None }
+
+    // Compute AABB from vertices.
+    let bounds = if vertices.is_empty() {
+        (Vec3::ZERO, Vec3::ZERO)
+    } else {
+        let mut min = vertices[0].position;
+        let mut max = vertices[0].position;
+        for v in &vertices {
+            min.x = min.x.min(v.position.x);
+            min.y = min.y.min(v.position.y);
+            min.z = min.z.min(v.position.z);
+            max.x = max.x.max(v.position.x);
+            max.y = max.y.max(v.position.y);
+            max.z = max.z.max(v.position.z);
+        }
+        (min, max)
+    };
+
+    TerrainChunk { mesh: Mesh { vertices, indices, texture: None }, bounds }
 }
 
 fn vertex(position: Vec3, color: Color) -> Vertex {
