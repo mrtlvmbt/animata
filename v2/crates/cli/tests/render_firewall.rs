@@ -1,15 +1,20 @@
-//! R-1 DETERMINISM FIREWALL (RnD 02 §det-orthogonal, R26/R17/R19) — the load-bearing tooth for the
-//! render seam. `Sim::observe_render` is a NEW read-only ECS query on a CI'd crate (`sim-core`); this
-//! test proves it can never perturb the tick trajectory.
+//! R-1/R-2 DETERMINISM FIREWALL (RnD 02 §det-orthogonal, R26/R17/R19) — the load-bearing tooth for
+//! the render seam. `Sim::observe_render` is a NEW read-only ECS query on a CI'd crate (`sim-core`);
+//! this test proves it can never perturb the tick trajectory.
 //!
 //! Method: run the SAME seed for N ticks TWICE — once calling `observe_render()` after every step,
-//! once never calling it — and assert the FULL per-tick `state_hash` (folds BOTH the conserved field
-//! AND the f32 signal field, R19) plus population are byte-identical between the two runs. Both runs
-//! execute on the same machine/arch/profile, so the f32 signal is bit-identical between them
-//! regardless of arch — asserting the FULL hash (not just `conserved_field_hash`) is safe here and
-//! strictly stronger: a future regression that sneaks ANY mutation into `observe_render` (even one
-//! that only touches the signal field) turns this red. Runs on BOTH CI arches (not `v2_golden_*`
-//! namespaced) since it is a same-run relative comparison, not a fixed golden constant.
+//! once never calling it — and assert a per-tick trace is byte-identical between the two runs. The
+//! trace is a TRUE whole-state fence (R-2 carry-forward, critic F1): `state_hash` (folds Position +
+//! Energy + Genome + BrainState + BrainOutput + Velocity + the f32 signal field, R19) is NOT enough
+//! on its own — it deliberately excludes the conserved field's own digest (`state_hash`'s doc: "The
+//! conserved field is NOT here") and `SpeciesId` (excluded by M5/F7 as a non-physical label) — so a
+//! mutation touching ONLY `conserved_field_hash()` or the species assignment would slip past
+//! `state_hash` alone. Extending the trace with both (`conserved_field_hash()` — the R14 conserved-
+//! field digest — and `species_hash()` — fold of live `SpeciesId`s + the `next_id` allocator, both
+//! pre-existing `Sim` methods, no new tick state) closes that gap. Both runs execute on the same
+//! machine/arch/profile, so the f32 signal is bit-identical between them regardless of arch —
+//! asserting the FULL hash is safe here and strictly stronger. Runs on BOTH CI arches (not
+//! `v2_golden_*` namespaced) since it is a same-run relative comparison, not a fixed golden constant.
 
 use cli::{build_sim, default_config};
 
@@ -30,15 +35,25 @@ fn v2_observe_render_is_golden_neutral() {
         // would consume it, but the point is that calling it here must not move the trajectory below.
         let snap = with_observe.observe_render();
         std::hint::black_box(&snap);
-        trace_with.push((with_observe.state_hash(), with_observe.population()));
+        trace_with.push((
+            with_observe.state_hash(),
+            with_observe.conserved_field_hash(),
+            with_observe.species_hash(),
+            with_observe.population(),
+        ));
 
         without_observe.step();
-        trace_without.push((without_observe.state_hash(), without_observe.population()));
+        trace_without.push((
+            without_observe.state_hash(),
+            without_observe.conserved_field_hash(),
+            without_observe.species_hash(),
+            without_observe.population(),
+        ));
     }
 
     assert_eq!(
         trace_with, trace_without,
-        "observe_render perturbed the sim trajectory — the R-1 determinism firewall (R26/R17/R19) is broken"
+        "observe_render perturbed the sim trajectory — the R-1/R-2 determinism firewall (R26/R17/R19) is broken"
     );
 }
 
