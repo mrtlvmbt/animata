@@ -2,6 +2,9 @@
 /target
 # v2 is a standalone nested workspace — ignore its build dir too
 /v2/target
+# R-1 (#219): v2/crates/render is its OWN standalone workspace (excluded from v2/Cargo.toml), so its
+# build dir is a separate path `/v2/target` does not cover.
+/v2/crates/render/target
 
 # OS junk
 .DS_Store

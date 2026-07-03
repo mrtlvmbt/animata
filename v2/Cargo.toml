@@ -6,6 +6,14 @@ resolver = "2"
 # M1 adds world/fields/telemetry (F6: introduced when there is something to put in them).
 # M3 adds brain (fixed-point integer neural inference behind the `sim-core::Brain` trait).
 members = ["crates/sim-core", "crates/cli", "crates/world", "crates/fields", "crates/telemetry", "crates/brain"]
+# R-1: `crates/render` (the macroquad render bin) is EXCLUDED, not a member — CI's v2 jobs run
+# `cargo nextest run --workspace`, which builds/tests every listed member; a workspace member would
+# drag the render bin (macroquad/egui/GL deps) into every CI run, contradicting the render posture
+# (CLAUDE.md / issue #219): the render bin is a leaf, verified LOCALLY only, never in CI. `render` is
+# its own STANDALONE workspace (own Cargo.toml/[workspace]/Cargo.lock, same pattern this file uses
+# relative to the v1 root workspace) with ordinary path deps into sim-core/cli/world — depending on a
+# CI'd crate is fine and golden-neutral; being *depended on* by one would not be.
+exclude = ["crates/render"]
 
 [workspace.package]
 edition = "2021"

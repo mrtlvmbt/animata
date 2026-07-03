@@ -1,0 +1,31 @@
+# R-1 (issue #219): the v2 renderer scaffold. STANDALONE cargo workspace (own [workspace]/Cargo.lock),
+# EXCLUDED from v2/Cargo.toml's workspace (see that file's `exclude` comment) so it never enters the
+# v2 CI jobs (`cargo nextest run --workspace`) — exactly like the v1 `animata` bin is kept out of v1's
+# CI via explicit `-p animata-sim` scoping. Verified LOCALLY only: `cargo build`/`cargo clippy` from
+# THIS directory (or `-p render` — the only member of this sub-workspace) + a manual run.
+[workspace]
+resolver = "2"
+
+[package]
+name = "render"
+version = "0.1.0"
+edition = "2021"
+description = "animata v2 renderer — R-ladder scaffold (R-1: worker-thread sim driver + read-only snapshot proof-of-life; hex terrain/iso-camera/creature LOD land in R-2+)"
+
+[[bin]]
+name = "render"
+path = "src/main.rs"
+
+[dependencies]
+# Mirrors v1 crates/animata's render deps (macroquad + egui HUD).
+macroquad = "0.4"
+egui = "0.31"
+egui-macroquad = "0.17.3"
+# Wait-free snapshot publish (critic F2): unlike `Mutex`, a render-thread panic can never poison it
+# and deadlock/panic the sim worker. See src/driver.rs.
+arc-swap = "1.7"
+# The v2 deterministic core, as an ordinary path dep — depending on a CI'd crate is golden-neutral;
+# only sim-core's new `observe_render` is the one touch TO a CI'd crate (the read-only ECS query
+# itself). `cli` wires the concrete world/field/brain backends (`cli::build_sim`).
+sim-core = { path = "../sim-core" }
+cli = { path = "../cli" }
