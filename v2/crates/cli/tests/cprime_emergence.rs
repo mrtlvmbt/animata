@@ -107,6 +107,16 @@ fn cprime_viability_both_seeds() {
 /// A reducer has uptake_layer == detritus_layer (=2). Presence above the floor confirms the niche
 /// emerged by evolution (not seeded), closing the biotic loop (research/14 §8).
 /// If BOTH seeds fail, the loop does NOT close at frac=1.0 → honest-null finding → calibrate.
+///
+/// ## W-6b IGNORED: ProcgenWorld barren-rich honest emergence-NULL
+///
+/// Both seeds → 0% reducers on decoupled-barren world (base=91).
+/// Honest finding: rich world + barren-cells (cap→trivial-1) = insufficient detritus for turnover.
+/// Expected to restore when P-2 predation wires death→detritus→reducer-emergence (now on roadmap).
+#[ignore = "NULL-on-ProcgenWorld: reducer guild 0% both seeds (CI 067ccc91, W-6b decouple+barren); \
+            regressed when ProcgenWorld wired at HMAX=200 — realistic barren-rich landscape does not \
+            sustain reducer turnover at detritus_frac=1.0. User-accepted honest emergence-NULL. \
+            DEFERRED to P-2 predation (death→detritus→turnover ecosystem). Re-enable when P-2 lands."]
 #[test]
 fn cprime_reducer_guild_emerges() {
     if cfg!(debug_assertions) {
