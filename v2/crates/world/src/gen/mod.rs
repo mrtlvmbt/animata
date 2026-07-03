@@ -8,7 +8,7 @@
 //! path), and the glob makes that enforced-by-construction rather than resting on remembering to
 //! add each new file to a list.
 //!
-//! **W-1/W-2/W-3 status**: this module is compiled and tested but PROD-INERT — no `WorldView` impl
+//! **W-1…W-4 status**: this module is compiled and tested but PROD-INERT — no `WorldView` impl
 //! or `build_sim` calls into it yet (that wiring is W-6, golden-TOUCHING). The legacy `NoiseWorld`
 //! (`world/src/lib.rs`, still `f64 sin`) sits OUTSIDE `gen/` and is deliberately NOT scanned by
 //! the glob guard — it is deleted at W-6.
@@ -16,6 +16,7 @@
 pub mod biome;
 pub mod climate;
 pub mod drainage;
+pub mod erosion;
 pub mod height;
 pub mod material;
 pub mod moisture;
