@@ -84,6 +84,17 @@ impl ProcgenWorld {
              the wired world would starve nearly everything"
         );
 
+        // (d) Solid-fraction guard (critic F3): solid cells (height >= solid_level) should be a
+        // reasonable fraction (roughly 25-40% at prod HMAX=200). Too few solid cells → too much
+        // free movement/energy. Too many → too little usable space. Mirror NoiseWorld's semantics.
+        let solid_count = fields.height.iter().filter(|&&h| h >= solid_level).count();
+        let solid_frac = solid_count as f64 / n as f64;
+        assert!(
+            (0.15..=0.50).contains(&solid_frac),
+            "PROCGEN SOLID FRACTION CHECK: solid cells {:.1}% (threshold: 15–50%) —              movement/space balance may be off (critic F3); if drift is legitimate, re-pin after recalibrating solid_level",
+            solid_frac * 100.0
+        );
+
         ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, surface_material: fields.surface_material }
     }
 
