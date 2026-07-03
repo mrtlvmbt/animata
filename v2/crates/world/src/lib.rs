@@ -8,6 +8,10 @@
 
 use sim_core::{Vec2Fixed, WorldView};
 
+/// W-1..W-6 world-gen pipeline stage home (see the module doc). Prod-inert until W-6 wires the
+/// assembled pipeline into a `WorldView` impl — `NoiseWorld` below is unaffected.
+pub mod gen;
+
 /// A square heightmap world.
 pub struct NoiseWorld {
     dim: i64,
