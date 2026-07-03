@@ -26,6 +26,7 @@ mod input;
 mod morphogen;
 mod params;
 mod pool;
+mod predation;
 mod rng;
 mod stages;
 mod traits;
@@ -47,6 +48,7 @@ pub use grn_lut::{
 };
 pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
 pub use params::{EconParams, LayerSpec, LightSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick};
+pub use predation::{resolve_encounter, Outcome, PredationSpec};
 pub use stages::expressed_capacity;
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
