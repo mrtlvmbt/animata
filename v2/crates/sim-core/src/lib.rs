@@ -207,6 +207,13 @@ pub struct CreatureDot {
     /// Compact appearance token (E-4a ontogenesis attractor); `None` for the Ф0 / non-morphogen
     /// configs. `CellType` is `Copy` — an owned value, not a borrow (critic F5).
     pub cell_type: Option<CellType>,
+    /// Body size (R-4): read from `Genome::size` in `observe_render`. Range [1, 32]. Scales morphology
+    /// rendering and energy-visual representation. Copy snapshot, not a borrow (critic F5).
+    pub size: i32,
+    /// Uptake layer (R-4): read from `Phenotype::uptake_layer` in `observe_render`. Which conserved
+    /// layer the creature feeds from. Copy snapshot for render consistency. May support future biome/
+    /// layer-driven coloring.
+    pub uptake_layer: i32,
 }
 
 /// R-1 render seam: an OWNED, read-only copy of per-entity render state, produced by
@@ -608,8 +615,21 @@ impl Sim {
                 let pos = e.get::<Position>()?;
                 let energy = e.get::<Energy>()?;
                 let species = e.get::<SpeciesId>()?;
-                let cell_type = e.get::<Phenotype>().and_then(|p| p.cell_type);
-                Some(CreatureDot { id: e.id().to_bits(), pos: pos.0, energy: energy.0, species: species.0, cell_type })
+                let phenotype = e.get::<Phenotype>()?;
+                let genome = e.get::<Genome>()?;
+                let cell_type = phenotype.cell_type;
+                // R-4: read size and uptake_layer from the genome/phenotype for LOD rendering.
+                let size = genome.size;
+                let uptake_layer = phenotype.uptake_layer;
+                Some(CreatureDot {
+                    id: e.id().to_bits(),
+                    pos: pos.0,
+                    energy: energy.0,
+                    species: species.0,
+                    cell_type,
+                    size,
+                    uptake_layer,
+                })
             })
             .collect();
         creatures.sort_unstable_by_key(|c| c.id);
