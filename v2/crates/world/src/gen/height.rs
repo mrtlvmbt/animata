@@ -3,11 +3,9 @@
 //! throughout — no `f32`/`f64` anywhere in this file** (enforced by the recursive glob guard,
 //! `world/tests/no_float_guard_gen.rs`, which scans every `.rs` under `world/src/gen/`).
 //!
-//! **Prod-inert (W-1 scope):** [`height_at`] is `pub` (part of the crate's public API surface, so
-//! it is NOT flagged dead-code even though no in-crate caller uses it yet — the correct idiom,
-//! not `#[allow(dead_code)]`) but is called by NO `WorldView` impl and NOT by `build_sim`.
-//! Production height is still `NoiseWorld`'s `f64 sin` path (`world/src/lib.rs`) until W-6 wires
-//! the assembled `ProcgenWorld`. This module changes zero runtime behavior on its own.
+//! **W-6 status:** [`height_at`] is now called by production (`ProcgenWorld::new`,
+//! `world/src/lib.rs`) via the `erode` → `classify_and_caps` chain — it is `pub` (part of the
+//! crate's public API surface) and no longer prod-inert.
 //!
 //! ## Algorithm (locked by the golden-vector test, re-derivable from this doc — critic F10)
 //!

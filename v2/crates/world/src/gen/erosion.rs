@@ -3,9 +3,9 @@
 //! anywhere in this file** (enforced by the recursive glob guard,
 //! `world/tests/no_float_guard_gen.rs`).
 //!
-//! **Prod-inert (W-4 scope, like W-1…W-3):** [`erode`] is `pub` but called by NO `WorldView` impl
-//! and NOT by `build_sim` — production erosion doesn't exist until W-6 assembles the pipeline. This
-//! module changes zero runtime behavior on its own.
+//! **W-6 status:** [`erode`] is now called by production — `gen::caps::classify_and_caps` calls it,
+//! wired into `ProcgenWorld::new` (`world/src/lib.rs`), so the eroded relief actually shapes the
+//! sim's world.
 //!
 //! ## W-4 is the phase's SECOND global-flow stage (like W-3), now ITERATIVE
 //!
@@ -115,8 +115,11 @@ const TALUS_FRAC_DEN: i64 = 2;
 /// Material refinement: a cell whose NET height delta over the whole macro-loop is `<=` this
 /// (negative) threshold has been incised past the soil layer → exposed `Bedrock`. Implementer's
 /// call, documented, locked (erosion-scale threshold — larger magnitude than W-2's single-tick
-/// `SOIL_DEPTH`, since this accumulates over `MACRO_ITERATIONS`).
-const INCISION_EXPOSURE_THRESHOLD: i64 = 20;
+/// `SOIL_DEPTH`, since this accumulates over `MACRO_ITERATIONS`). `pub(crate)` (W-6 critic F2):
+/// `world/src/lib.rs`'s prod-scale richness test asserts the ACTUAL relief spread exceeds this
+/// threshold — otherwise Bedrock could never be exposed at a too-small `HMAX` (the exact
+/// HMAX-degeneracy W-6 must avoid), so the test reads the real constant rather than a duplicated copy.
+pub(crate) const INCISION_EXPOSURE_THRESHOLD: i64 = 20;
 
 #[inline]
 const fn linear_index(x: usize, z: usize, dim: usize) -> usize {

@@ -3,9 +3,11 @@
 //! `f32`/`f64` anywhere in this file** (enforced by the recursive glob guard,
 //! `world/tests/no_float_guard_gen.rs`).
 //!
-//! **Prod-inert (W-3 scope, like W-1/W-2):** [`compute_drainage`] is `pub` but called by NO
-//! `WorldView` impl and NOT by `build_sim` — production hydrology doesn't exist until W-6 assembles
-//! the pipeline. This module changes zero runtime behavior on its own.
+//! **W-6 status:** the low-level functions ([`priority_flood_fill`], [`d8_directions`],
+//! [`kahn_accumulate`]) are called by production — W-4's `erode` reuses them on the eroding
+//! surface, wired into `ProcgenWorld` via `gen::caps::classify_and_caps`. [`compute_drainage`]
+//! itself (the `height_at`-baked convenience wrapper) remains available but is not the production
+//! call path (production always goes through the eroding-terrain reuse, not a static heightmap).
 //!
 //! ## W-3 is the phase's first GLOBAL FLOW stage (unlike W-1/W-2's per-position pure fns)
 //!
