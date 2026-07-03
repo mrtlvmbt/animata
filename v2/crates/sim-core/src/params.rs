@@ -64,6 +64,10 @@ pub struct EconParams {
     pub km: i64,
     /// Asymptotic per-tick uptake capacity (the Monod U_max). At R≫Km, uptake → u_max.
     pub u_max: i64,
+    /// World resource base: rescale cap from [0,CAP_MAX=300] into [1, resource_base+1] magnitude.
+    /// Carried-capacity knob for per-config balance (W-6b: bloom-prone @ 91, starve-prone @ 120).
+    /// Default 120 (NoiseWorld calibration). Set per-config to avoid population overshoot/collapse.
+    pub resource_base: i64,
     /// Square world side length, in cells.
     pub world_dim: i64,
     /// Sim-neighbor grid scale `M` (cells per neighbor bucket) — integer, immutable, checked (R8).
@@ -263,6 +267,7 @@ impl Default for EconParams {
             k_sense_cost: 1,
             km: 74,   // calibrated: km=50→R̄=32.2→km₁=74→R̄=32.2→fixed (B-1)
             u_max: 220, // Monod asymptote — realized U(R̄) < u_max; km tunes the shape (B-1)
+            resource_base: 120, // NoiseWorld-calibrated magnitude [1, resource_base+1]; per-config tuning
             world_dim: 64,
             m_sim: 4,
             brain_period: 4, // K — behaviour at 16 Hz (64/4)

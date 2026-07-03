@@ -63,13 +63,12 @@ const L2_ORGANICS_SPEC: LayerSpec = LayerSpec {
 const L2_DETRITUS_SPEC: LayerSpec = LayerSpec {
     regen_rate: 0, flux_alpha_num: 0, flux_alpha_den: 1, flat_cap: 0, world_cap_mult: 0,
 };
-// Layer 2 (D′-3a mineral): regen=1 (small per-cell influx), fast diffusion (α=1/4, like organics)
+// Layer 2 (D′-3a mineral): regen=2 (relaxed per-cell influx), fast diffusion (α=1/4, like organics)
 // so mineral spreads from production zones; flat_cap=200 (starts at 100 per cell).
-// Calibration mapping: P_mineral=35 total per tick / 4096 cells ≈ 0.0085/cell → scaled to
-// regen_rate=1 (the minimum non-zero integer), with km_mineral=200 and u_max_mineral=70 calibrated
-// so N×U(M*)=regen×4096 at N*≈583 → M*≈22 eu-mineral. Scale ×10 from model units.
+// Calibration mapping: P_mineral=35 total per tick / 4096 cells ≈ 0.0085/cell. W-6b base=91
+// reduced resource → increased mineral pressure. regen_rate raised 1→2 to maintain N̄≥30 (d3a viability).
 const L2_MINERAL_SPEC: LayerSpec = LayerSpec {
-    regen_rate: 1, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 200, world_cap_mult: 0,
+    regen_rate: 2, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 200, world_cap_mult: 0,
 };
 
 /// Default production config (L=2): layer 0 = substrate, layer 1 = organics/excreta (empty start).
@@ -132,7 +131,7 @@ pub fn dprime_config(seed: u64) -> SimConfig {
     SimConfig {
         n_layers: 3,
         layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L2_MINERAL_SPEC, LayerSpec::default()],
-        econ: EconParams {
+        econ: EconParams { resource_base: 120, // W-6b starve-safe
             light: Some(LightSpec {
                 l_max: 100,
                 period_ticks: 100,
@@ -160,7 +159,7 @@ pub fn dprime_light_config(seed: u64) -> SimConfig {
     SimConfig {
         n_layers: 2,
         layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
-        econ: EconParams {
+        econ: EconParams { resource_base: 120, // W-6b starve-safe
             light: Some(LightSpec {
                 l_max: 100, period_ticks: 100, day_ticks: 50, km_photo: 30,
             }),
@@ -256,7 +255,7 @@ pub fn build_sim(config: SimConfig) -> Sim {
         config.econ.n_energy_layers = config.n_layers;
     }
     let econ = config.econ.clone();
-    let world = ProcgenWorld::new(econ.world_dim, HMAX, RESOURCE_BASE, config.seed ^ WORLD_SALT);
+    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT);
     let grid_w = econ.world_dim / M_FIELD;
     let n = (grid_w * grid_w) as usize;
 
