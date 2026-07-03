@@ -230,17 +230,12 @@ impl IsoCam {
         planes.iter().all(|plane| plane.point_in_front(p))
     }
 
-    /// Check if an AABB is visible (or intersecting) the frustum.
-    pub fn aabb_in_frustum(&self, min: Vec3, max: Vec3) -> bool {
-        let planes = self.frustum_planes();
-        planes.iter().all(|plane| plane.aabb_intersects(min, max))
-    }
-
-    /// Get the current zoom level as a value in [0, 1] for LOD purposes.
-    /// Returns 0 when zoomed FAR (ortho_span=200), 1 when zoomed CLOSE (ortho_span=5).
-    /// For RnD R21: LOD is a pure function of zoom, deterministic, never per-creature distance.
-    pub fn zoom_lod_factor(&self) -> f32 {
-        // Invert the span-to-factor mapping: 1 at small ortho_span (close zoom), 0 at large (far zoom).
-        (1.0 - (self.ortho_span - ORTHO_SPAN_MIN) / (ORTHO_SPAN_MAX - ORTHO_SPAN_MIN)).clamp(0.0, 1.0)
+    /// Compute pixels-per-world-unit at the current orthographic zoom (R-4 LOD).
+    /// Formula: `screen_height / ortho_span` — the number of screen pixels that span one world unit.
+    /// Returns a value proportional to zoom: larger values = zoomed in (closer), smaller = zoomed out (farther).
+    /// This is a pure function of zoom and viewport ONLY (RnD R21 determinism) — never per-creature
+    /// distance or wall-clock — so the whole creature set shares one LOD tier per frame.
+    pub fn px_per_m(&self) -> f32 {
+        screen_height() / self.ortho_span
     }
 }

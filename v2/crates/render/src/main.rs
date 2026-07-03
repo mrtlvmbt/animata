@@ -5,11 +5,13 @@
 //! double buffer, and a proof-of-life naive 2D projection — R-2 replaces that projection with the
 //! real 3D hex view; the sim seam itself (driver.rs) is untouched.
 //!
-//! R-3 (this slice): interactive pan/zoom/rotate IsoCam + box-frustum culling (terrain chunks +
+//! R-3 (merged #225): interactive pan/zoom/rotate IsoCam + box-frustum culling (terrain chunks +
 //! creatures), minimal zoom-LOD, and the R-2 HMAX-literal footgun fix (cli consts now pub).
 //!
-//! OUT of scope here (later R-slices): creature LOD tiers/morphology (R-4), cube-voxel toggle (R-5),
-//! full HUD/inspector/minimap (R-6).
+//! R-4 (this slice): creatures Tier-1 LOD — px_per_m-driven point/sphere/morphology tiers; snapshot
+//! fields `size`/`uptake_layer`; consume R-3 dead-code warnings (render crate out of CI, local verify).
+//!
+//! OUT of scope here (later R-slices): cube-voxel toggle (R-5), full HUD/inspector/minimap (R-6).
 //!
 //! Not part of the v2 CI workspace (`v2/Cargo.toml`'s `exclude`) — a leaf bin, verified LOCALLY:
 //! `cargo build`/`cargo clippy` from this directory + a manual run (window opens, hex terrain +
@@ -25,13 +27,20 @@ use camera::IsoCam;
 use macroquad::prelude::*;
 use sim_core::WorldView;
 
-/// Zoom-LOD threshold: zoom_lod_factor >= this value means CLOSE zoom (draw fuller creatures).
-/// Below this: far zoom (draw cheap/small creatures). Pure function of zoom, deterministic (RnD R21).
-const ZOOM_LOD_NEAR_THRESHOLD: f32 = 0.3;
+// ── R-4 LOD tier thresholds (px_per_m-driven) ──────────────────────────────────────────────────────
+/// FAR tier: creatures are sub-pixel or nearly invisible (point/billboard). Triggers when px_per_m < 5.
+/// At default 768px tall, this happens when ortho_span > ~154 world units (very far zoom).
+const PX_PER_M_FAR_THRESHOLD: f32 = 5.0;
 
+/// MID tier: creatures are cell-type-colored spheres (R-3 behavior). Active when 5 <= px_per_m < 20.
+/// At default viewport, this is ortho_span in [38, 154] — a standard play range.
+const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
+
+/// NEAR tier: creatures are minimal cell-type morphology (differentiated small shapes).
+/// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
 fn window_conf() -> Conf {
     Conf {
-        window_title: "animata v2 — render scaffold (R-3 isocam + cull)".to_owned(),
+        window_title: "animata v2 — render scaffold (R-4 creatures LOD)".to_owned(),
         window_width: 1024,
         window_height: 768,
         high_dpi: true,
@@ -114,22 +123,23 @@ async fn main() {
             }
         }
 
-        // Creatures as dots, projected into the SAME hex view (a rough mapping is fine — R-4 does
-        // real creature rendering): world (x, z) → the hex center of its cell, floating just above
-        // that cell's terrain height so the dot doesn't z-fight the top face.
-        // R-3: Creature culling (point-in-frustum) and minimal zoom-LOD (pure function of zoom).
+        // R-4: Creatures rendered by px_per_m LOD tier (point → sphere → morphology).
+        // Projected into the SAME hex view: world (x, z) → hex center of cell, floating above terrain.
+        // Tier selection is a pure function of camera zoom ONLY (RnD R21), never per-creature distance.
         if let Some(s) = snap.as_ref() {
-            let zoom_lod = camera.zoom_lod_factor(); // 0 = far zoom, 1 = close zoom
+            let px_per_m = camera.px_per_m(); // Pure fn of ortho_span + viewport; whole frame shares one tier.
+
             for c in &s.creatures {
                 let (cx, cz) = hex::hex_center(c.pos.0, c.pos.1);
                 let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
                 let creature_pos = vec3(cx, h + 0.15, cz);
 
-                // R-3: Cull creatures outside the frustum (point-in-frustum test).
-                if !frustum_planes.iter().all(|plane| plane.point_in_front(creature_pos)) {
+                // R-3 frustum cull: skip creatures outside the view frustum.
+                if !camera.point_in_frustum(creature_pos) {
                     continue;
                 }
 
+                // Base color by cell_type (used across all tiers).
                 let color = match c.cell_type {
                     Some(sim_core::CellType::A) => YELLOW,
                     Some(sim_core::CellType::B) => SKYBLUE,
@@ -137,14 +147,46 @@ async fn main() {
                     None => WHITE,
                 };
 
-                // R-3: Zoom-LOD — pure function of zoom level (RnD R21). At far zoom draw cheap
-                // (small sphere), at near zoom draw fuller. zoom_lod_factor: 0=far, 1=close.
-                if zoom_lod < ZOOM_LOD_NEAR_THRESHOLD {
-                    // Far zoom (zoom_lod < 0.3, ortho_span > ~141): minimal creature draw (cheap).
-                    draw_sphere(creature_pos, 0.08, None, color);
+                // R-4 LOD tier by px_per_m: FAR (point) < MID (sphere) < NEAR (morphology).
+                if px_per_m < PX_PER_M_FAR_THRESHOLD {
+                    // ─── FAR tier: sub-pixel point/billboard (cheapest) ───────────────────────────────
+                    // Creatures so tiny they're unresolvable. Draw a minimal dot.
+                    draw_sphere(creature_pos, 0.04, None, color);
+                } else if px_per_m < PX_PER_M_MID_THRESHOLD {
+                    // ─── MID tier: cell-type-colored sphere (R-3 behavior) ─────────────────────────────
+                    // Standard rendering: a sphere scaled by `size` and energy. This is the workhorse tier.
+                    // Size is [1..32], so scale by (size / 16.0) for a base of ~0.1 world units at size=16.
+                    let size_scale = c.size as f32 / 16.0;
+                    let energy_factor = (c.energy as f32).max(0.0).sqrt() / 100.0; // Rough energy visual cue.
+                    let radius = (size_scale * energy_factor).max(0.08); // Clamp to visible minimum.
+                    draw_sphere(creature_pos, radius, None, color);
                 } else {
-                    // Near zoom (zoom_lod >= 0.3, ortho_span <= ~141): fuller creature draw.
-                    draw_sphere(creature_pos, 0.12, None, color);
+                    // ─── NEAR tier: minimal cell-type morphology (shape differentiation) ───────────────
+                    // Each cell_type has a small distinctive form, sized by creature's `size`.
+                    let size_scale = c.size as f32 / 16.0;
+                    let base_size = 0.15 * size_scale;
+
+                    match c.cell_type {
+                        Some(sim_core::CellType::A) => {
+                            // Type A: main body + upper accent sphere (a small top ball).
+                            draw_sphere(creature_pos, base_size, None, color);
+                            draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, YELLOW);
+                        }
+                        Some(sim_core::CellType::B) => {
+                            // Type B: main body + side accent sphere (a small offset ball).
+                            draw_sphere(creature_pos, base_size, None, color);
+                            draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, SKYBLUE);
+                        }
+                        Some(sim_core::CellType::Mixed) => {
+                            // Type Mixed: main body + front accent sphere (a small forward ball).
+                            draw_sphere(creature_pos, base_size, None, color);
+                            draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, GREEN);
+                        }
+                        None => {
+                            // Neutral: single sphere (for non-morphogen configs).
+                            draw_sphere(creature_pos, base_size, None, color);
+                        }
+                    }
                 }
             }
         }
