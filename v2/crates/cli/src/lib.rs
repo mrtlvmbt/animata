@@ -21,12 +21,12 @@ pub const DT_MICROS: u64 = 1_000_000 / 64;
 // the relief spread BELOW erosion::INCISION_EXPOSURE_THRESHOLD=20, so Bedrock could never be
 // exposed — the HMAX-degeneracy W-6 must avoid (world/src/lib.rs's richness test guards this).
 const HMAX: i64 = 200;
-// RESOURCE_BASE: W-6b Phase A.2 scale reconciliation.
+// RESOURCE_BASE: W-6b Phase A.2 scale reconciliation + caps.rs откат.
 // Decouple un-zeroed 84% solid cells (many productive high biomes) → total resource ↑2×.
-// base=120 → b3=295 (>160 CEIL), reducer=9.4%. Lowering to recover carrying-capacity magnitude.
-// base=100 targets b3 band [30..160] + reducer >=10% band.
+// base=120 → b3=295 (>160), economy=1580. Откат floor-caps → barren беднее.
+// base=70 targets both b3 [30..160] AND economy [low..282] without early bloom.
 // Pattern richness (relative biome contrast) preserved; only magnitude scaled.
-const RESOURCE_BASE: i64 = 100;
+const RESOURCE_BASE: i64 = 88;
 const REGEN_RATE: i64 = 6;
 const M_FIELD: i64 = 1;
 const WORLD_SALT: u64 = 0x5743_4C44; // "WCLD"
