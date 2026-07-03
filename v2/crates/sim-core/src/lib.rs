@@ -193,6 +193,34 @@ pub struct Telemetry {
     pub income_record: DetMap<u64, (i64, i64)>,
 }
 
+// ── R-1: render seam (RnD 02 §det-orthogonal, R26/R17/R19/R21) ─────────────────────────────────────
+
+/// One live creature's render-relevant state — an OWNED, `Copy` snapshot (critic F5): never a borrow
+/// into the ECS, so it safely outlives the query and can cross to the render thread. Mirrors v1
+/// `render_snapshot.rs::CreatureDot`, adapted to v2 components.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CreatureDot {
+    pub id: u64,
+    pub pos: Vec2Fixed,
+    pub energy: i64,
+    pub species: u32,
+    /// Compact appearance token (E-4a ontogenesis attractor); `None` for the Ф0 / non-morphogen
+    /// configs. `CellType` is `Copy` — an owned value, not a borrow (critic F5).
+    pub cell_type: Option<CellType>,
+}
+
+/// R-1 render seam: an OWNED, read-only copy of per-entity render state, produced by
+/// [`Sim::observe_render`]. Holds no borrow into the `Sim` — the render thread can read it while the
+/// worker steps the next tick. Terrain is read separately via `WorldView` (R-2).
+#[derive(Clone, Debug, Default)]
+pub struct RenderSnapshot {
+    pub tick: u64,
+    pub population: i64,
+    /// Live species count — the other aggregate the R-1 HUD shows (from [`Telemetry::species_count`]).
+    pub species_count: u64,
+    pub creatures: Vec<CreatureDot>,
+}
+
 #[cfg(feature = "perf")]
 mod perf {
     use crate::DetMap;
@@ -562,6 +590,36 @@ impl Sim {
     /// Telemetry snapshot (samples for Price covariance, population, field total, species census).
     pub fn telemetry(&self) -> &Telemetry {
         self.world.resource::<Telemetry>()
+    }
+
+    /// R-1: read-only per-entity render snapshot (RnD 02 R26/R17/R19/R21 — render never enters the
+    /// tick). `&self` ONLY — never `&mut`, and no render-side args (selection/viewport are R-3/R-4
+    /// render concerns; this returns ALL live creatures, the render side culls/selects later).
+    /// Allocates its own owned output and mutates nothing, so the tick trajectory is byte-identical
+    /// whether or not this is ever called — pinned by `v2_observe_render_is_golden_neutral` (cli
+    /// crate). Uses `iter_entities` + `EntityRef::get` (read-only) rather than `World::query`, which
+    /// in bevy_ecs 0.19 requires `&mut World` to build the `QueryState` — the `&self` signature is a
+    /// hard acceptance criterion, not a style choice.
+    pub fn observe_render(&self) -> RenderSnapshot {
+        let mut creatures: Vec<CreatureDot> = self
+            .world
+            .iter_entities()
+            .filter_map(|e| {
+                let pos = e.get::<Position>()?;
+                let energy = e.get::<Energy>()?;
+                let species = e.get::<SpeciesId>()?;
+                let cell_type = e.get::<Phenotype>().and_then(|p| p.cell_type);
+                Some(CreatureDot { id: e.id().to_bits(), pos: pos.0, energy: energy.0, species: species.0, cell_type })
+            })
+            .collect();
+        creatures.sort_unstable_by_key(|c| c.id);
+        let tel = self.world.resource::<Telemetry>();
+        RenderSnapshot {
+            tick: self.world.resource::<SimClock>().tick,
+            population: tel.population,
+            species_count: tel.species_count,
+            creatures,
+        }
     }
 
     /// Hash of the live species assignment: fold of sorted live SpeciesId values plus the
