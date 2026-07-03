@@ -67,7 +67,10 @@ const LAPSE_NUM: i64 = 10;
 const LAPSE_DEN: i64 = 1;
 
 /// Windward sampling offset, in world cells, for the orographic slope (fixed wind direction: +x).
-const WIND_DX: i64 = 4;
+/// `pub(crate)` (not private): W-5's `classify_and_caps` re-derives the SAME upwind offset on the
+/// post-erosion (finite-grid) heightmap via [`climate_from_height`], so it must read the identical
+/// constant rather than risk drifting a duplicated copy. Visibility-only change — no behavior here.
+pub(crate) const WIND_DX: i64 = 4;
 /// Baseline precipitation at zero slope, in mm/year.
 const P_BASE: i64 = 900;
 /// Orographic term numerator/denominator: `+ Δh · OROG_NUM / OROG_DEN` mm/year per unit slope.
@@ -104,27 +107,40 @@ fn noise_term(x: i64, z: i64, seed: u64, salt: u64, amplitude: i64) -> i64 {
     (h % span) as i64 - amplitude
 }
 
-/// Deterministic integer climate `(T, P)` at world position `(x, z)` for `seed`, reading the W-1
-/// heightmap via `height_at(.., hmax)`. Pure function — no RNG-of-clock, no thread-dependence, no
-/// global mutable state; chunk-ready (any position independently re-derivable). Bit-identical
-/// across runs and across CPU architecture (pure integer — no FMA/libm divergence).
+/// Pure climate core (W-5 critic F2 extract): takes the cell's height and its upwind neighbor's
+/// height EXPLICITLY (rather than calling `height_at` internally), so it can be reused on ANY
+/// heightmap — in particular W-5's POST-erosion (finite `dim×dim`) height field, where `height_at`
+/// (infinite-`i64`-domain) cannot be called directly. [`climate_at`] delegates here after looking
+/// up both heights from `height_at`; this extract-and-delegate split is BEHAVIOR-IDENTICAL to the
+/// original inline formula (verified by this module's own tests + the `w2_chain.rs` golden, which
+/// must stay byte-identical).
 ///
 /// Returns `(temperature_centidegrees, precipitation_mm_per_year)`.
-pub fn climate_at(x: i64, z: i64, seed: u64, hmax: i64) -> (i64, i64) {
-    let h = height_at(x, z, seed, hmax);
-
+pub fn climate_from_height(h_cell: i64, h_west: i64, x: i64, z: i64, seed: u64) -> (i64, i64) {
     let t_lat = latitude_term(z);
-    let t_lapse = -(h * LAPSE_NUM / LAPSE_DEN);
+    let t_lapse = -(h_cell * LAPSE_NUM / LAPSE_DEN);
     let t_noise = noise_term(x, z, seed, SALT_CLIMATE_T, NOISE_T_AMPLITUDE);
     let t = t_lat + t_lapse + t_noise;
 
-    let h_west = height_at(x - WIND_DX, z, seed, hmax);
-    let slope = h - h_west; // >0 windward lift, <0 leeward rain-shadow
+    let slope = h_cell - h_west; // >0 windward lift, <0 leeward rain-shadow
     let p_orog = slope * OROG_NUM / OROG_DEN;
     let p_noise = noise_term(x, z, seed, SALT_CLIMATE_P, NOISE_P_AMPLITUDE);
     let p = (P_BASE + p_orog + p_noise).max(0);
 
     (t, p)
+}
+
+/// Deterministic integer climate `(T, P)` at world position `(x, z)` for `seed`, reading the W-1
+/// heightmap via `height_at(.., hmax)` then delegating to [`climate_from_height`]. Pure function —
+/// no RNG-of-clock, no thread-dependence, no global mutable state; chunk-ready (any position
+/// independently re-derivable). Bit-identical across runs and across CPU architecture (pure
+/// integer — no FMA/libm divergence).
+///
+/// Returns `(temperature_centidegrees, precipitation_mm_per_year)`.
+pub fn climate_at(x: i64, z: i64, seed: u64, hmax: i64) -> (i64, i64) {
+    let h = height_at(x, z, seed, hmax);
+    let h_west = height_at(x - WIND_DX, z, seed, hmax);
+    climate_from_height(h, h_west, x, z, seed)
 }
 
 #[cfg(test)]
