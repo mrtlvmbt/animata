@@ -151,14 +151,15 @@ fn biome_base_cap(b: FinalBiome) -> i64 {
         FinalBiome::TemperateGrassland | FinalBiome::Savanna => 180,
         FinalBiome::Tundra => 80,
         FinalBiome::Desert | FinalBiome::Dune => 40,
-        FinalBiome::Rock => 0,
+        FinalBiome::Rock => 10, // floor-cap for slope-exposed rock
     }
 }
 
 /// Per-`MaterialId` cap multiplier (numerator/denominator — integer-domain, never a float scale).
 fn material_mult(m: MaterialId) -> (i64, i64) {
     match m {
-        MaterialId::Bedrock | MaterialId::Air => (0, 1),
+        MaterialId::Bedrock => (1, 20), // floor-cap: bedrock is poor but livable
+        MaterialId::Air => (0, 1),
         MaterialId::Sand => (1, 2),
         MaterialId::Permafrost => (3, 4),
         MaterialId::Soil => (1, 1),
