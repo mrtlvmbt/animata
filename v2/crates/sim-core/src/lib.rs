@@ -50,7 +50,7 @@ pub use grn_lut::{
 };
 pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
 pub use params::{EconParams, LayerSpec, LightSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick};
-pub use predation::{resolve_encounter, Outcome, PredationSpec};
+pub use predation::{resolve_encounter, Outcome, PredationSpec, SizeRefugeSpec};
 pub use stages::expressed_capacity;
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
@@ -616,6 +616,23 @@ impl Sim {
             }
         }
         (max, count_positive, sum)
+    }
+
+    /// D-2 (#270): multicellular body-size population statistics — `Σ Phenotype.graph.
+    /// module_cell_count` per entity. Returns `(max_body_size, count_multicellular)`. Probe/test
+    /// helper — read-only, no state mutation, not used in the deterministic tick loop or state hash.
+    pub fn body_size_stats(&mut self) -> (i64, u64) {
+        let mut max_size = 0i64;
+        let mut count_multicellular = 0u64;
+        let mut q = self.world.query::<&Phenotype>();
+        for ph in q.iter(&self.world) {
+            let n: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
+            max_size = max_size.max(n);
+            if n > 1 {
+                count_multicellular += 1;
+            }
+        }
+        (max_size, count_multicellular)
     }
 
     pub fn tick(&self) -> u64 {

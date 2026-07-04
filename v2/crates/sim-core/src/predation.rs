@@ -149,6 +149,12 @@ pub fn resolve_encounter(
     // `Some` ⇒ scale the PRE-CLAMP bite by the prey's own body size (larger body → smaller bite).
     let bite = match spec.size_refuge {
         Some(refuge) => {
+            // F1 (D-1 code-critic, #268): a negative `refuge_k` silently INVERTS the intended
+            // monotonicity — `denom.max(1)` below hides the sign flip instead of panicking, so a
+            // misconfigured spec would quietly reward larger bodies with bigger bites. Caught in
+            // debug/test builds; production release stays panic-free (the `.max(1)` guard still
+            // holds the invariant, just without the earlier signal).
+            debug_assert!(refuge.refuge_k >= 0, "SizeRefugeSpec.refuge_k must be >= 0 (negative k inverts monotonicity): got {}", refuge.refuge_k);
             // Defensive cap on `shift`: bite ≤ VALUE_MAX (1e6), so `shift ≤ 32` keeps the i128
             // numerator far below i128::MAX with headroom to spare — a misconfigured spec cannot
             // overflow this widened arithmetic.

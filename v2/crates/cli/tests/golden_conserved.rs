@@ -16,7 +16,10 @@
 //! **Re-pin** (single-writer, agent A): only on an INTENDED conserved-field change; read the new
 //! left/right from `.ci-report/failed.log` (the arm64 job). Never re-pin to silence drift.
 
-use cli::{cprime_config, default_config, dprime_config, l3_config, phase2_config, run_conserved_hashes};
+use cli::{
+    cprime_config, default_config, driver_config, dprime_config, l3_config, phase2_config,
+    run_conserved_hashes,
+};
 
 // A-0 pin: conserved-field hash per tick, default SimConfig (seed 0xA11A_2A11, L=1 scalar).
 // Captured on arm64 + Rust 1.96.0 (matches the CI `v2-golden-arm64` job arch + toolchain).
@@ -370,6 +373,29 @@ fn v2_golden_conserved_phase2() {
         assert_eq!(
             h[t], GOLDEN_CONSERVED_PHASE2[t],
             "phase2 conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED_PHASE2)"
+        );
+    }
+}
+
+// D-2 (#270) driver conserved-field golden (L=2 phase2 layout + predation/size-refuge/c_coord,
+// seed 0xA11A_2A11). ADDITIVE: driver_config is new/opt-in, the 5 configs above are untouched.
+// PLACEHOLDER — all zeros. PM pins this from a fresh arm64 release run (single-writer discipline,
+// per the D-2 ТЗ: "do NOT self-pin"). This test is EXPECTED RED until then.
+const GOLDEN_CONSERVED_DRIVER: [u64; 384] = [0; 384];
+
+/// D-2 driver conserved-field golden pin. Arm64 + release only (`v2_golden` namespace).
+/// Expected FAILING until PM pins `GOLDEN_CONSERVED_DRIVER` from the golden-arm64 CI `left:`.
+#[test]
+fn v2_golden_conserved_driver() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    let h = run_conserved_hashes(driver_config(0xA11A_2A11), GOLDEN_CONSERVED_DRIVER.len() as u64);
+    for t in 0..GOLDEN_CONSERVED_DRIVER.len() {
+        assert_eq!(
+            h[t], GOLDEN_CONSERVED_DRIVER[t],
+            "driver conserved golden drift at tick {t} (left=run, right=GOLDEN_CONSERVED_DRIVER) \
+             — EXPECTED until PM pins this from a fresh arm64 release run"
         );
     }
 }
