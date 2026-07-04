@@ -379,8 +379,8 @@ fn v2_golden_conserved_phase2() {
 
 // D-2 (#270) driver conserved-field golden (L=2 phase2 layout + predation/size-refuge/c_coord,
 // seed 0xA11A_2A11). ADDITIVE: driver_config is new/opt-in, the 5 configs above are untouched.
-// PLACEHOLDER — all zeros. PM pins this from a fresh arm64 release run (single-writer discipline,
-// per the D-2 ТЗ: "do NOT self-pin"). This test is EXPECTED RED until then.
+// PM-PINNED (matched-arch darwin arm64, single-writer discipline): dumped from a fresh release run of
+// driver_config(0xA11A_2A11) and pasted by the PM (not the coder). Existing 5 goldens untouched.
 const GOLDEN_CONSERVED_DRIVER: [u64; 384] = [
     17786614838254327586, 8530861788626042039, 5897415341230146793, 2683141797812804182, 12101703580744551369, 15105878028308212797, 4755000245030805588, 9361003581106364799,
     13613349840952281399, 42052190136005939, 1582594939852873656, 5948730413678794488, 8242877744878126476, 2405609127234867873, 11417843800678049260, 11675116870760461378,
@@ -433,7 +433,7 @@ const GOLDEN_CONSERVED_DRIVER: [u64; 384] = [
 ];
 
 /// D-2 driver conserved-field golden pin. Arm64 + release only (`v2_golden` namespace).
-/// Expected FAILING until PM pins `GOLDEN_CONSERVED_DRIVER` from the golden-arm64 CI `left:`.
+/// PM-pinned `GOLDEN_CONSERVED_DRIVER` (matched-arch). Guards driver_config determinism/conservation.
 #[test]
 fn v2_golden_conserved_driver() {
     if cfg!(debug_assertions) {
