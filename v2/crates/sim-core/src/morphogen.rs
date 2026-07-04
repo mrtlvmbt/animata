@@ -63,6 +63,12 @@ pub struct MorphogenSpec {
     /// evaluated on gene 0 of the per-cell GRN-resolved `state` (`state[0] < t`), marks the cell dead
     /// BEFORE union-find labeling (F3, PINNED — integer-only, no float, no multi-term formula).
     pub apoptosis_threshold: Option<i32>,
+    /// **M7-c germ/soma gate.** `None` (default, every shipped spec) disables the pass entirely —
+    /// `CellGraph::from_gradient` leaves `module_is_germ` all-`false`, byte-identical to M7-b.
+    /// `Some(t)` (test-only): a LIVE module (post Step-3 collection, dead cells already excluded) is
+    /// classified GERM iff `module_cell_count[mid] <= t` (small=germ, large=soma) — a module-level
+    /// integer predicate, PINNED, no float, no morphogen re-traversal.
+    pub germ_threshold: Option<i32>,
 }
 
 /// The morphogen output: a local, position-indexed integer concentration field (row-major,
@@ -192,6 +198,7 @@ mod tests {
             seed_scale: 4096,
             stop_threshold: 0, // always run the full 8 steps (deterministic fixed count)
             apoptosis_threshold: None,
+            germ_threshold: None,
         }
     }
 
