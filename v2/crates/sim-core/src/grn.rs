@@ -144,7 +144,8 @@ pub fn sigma(preact: i64) -> i32 {
 /// value as an exact tie). This is a construction-boundary safety net, not a per-tick guard: a
 /// production `GrnSpec` should still be built with `n_genes >= 2` (the safety here is defense in
 /// depth, not a substitute for constructing a sane spec).
-fn classify(state: &[i32]) -> CellType {
+/// M7-a: made public for CellGraph's per-grid-cell classification.
+pub fn classify(state: &[i32]) -> CellType {
     match (state.first(), state.get(1)) {
         (Some(a), Some(b)) => match a.cmp(b) {
             std::cmp::Ordering::Greater => CellType::A,

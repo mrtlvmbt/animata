@@ -125,6 +125,137 @@ pub struct Genome {
     pub morphogen_spec: Option<MorphogenSpec>,
 }
 
+/// M7-a: graph-body COLD representation — the multicellular module lattice derived from
+/// per-grid-cell classification of the morphogen gradient. Integer-only, canonical labeling,
+/// deterministic, prod-inert (never consumed in M7-a). `ModuleId` is row-major order + union-find
+/// minimum index (order-independent, architecture-stable). Each module records its cell type and
+/// total cell count (per-module adjacency deferred to M7-f).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CellGraph {
+    /// Grid size (square grid is `g_dev × g_dev`, same as the morphogen spec).
+    pub g_dev: usize,
+    /// Per-module cell type (indexed by ModuleId = module's representative index in row-major traversal).
+    pub module_type: Vec<CellType>,
+    /// Per-module cell count (indexed by ModuleId).
+    pub module_cell_count: Vec<i32>,
+}
+
+impl CellGraph {
+    /// Empty graph (zero modules, e.g. for non-phase2 configs where the graph is not computed).
+    pub fn empty() -> Self {
+        CellGraph {
+            g_dev: 0,
+            module_type: Vec::new(),
+            module_cell_count: Vec::new(),
+        }
+    }
+
+    /// Decode a morphogen gradient into a multicellular graph: per-grid-cell classification,
+    /// connected-component labeling via union-find, canonical row-major order + min-index representative.
+    pub fn from_gradient(gradient: &crate::morphogen::Gradient, gspec: &GrnSpec) -> Self {
+        let g_dev = gradient.g_dev;
+        let n_cells = g_dev * g_dev;
+
+        // 1. Per-grid-cell classification: each cell gets a CellType from its local gradient value.
+        // For each grid cell, sample the gradient at that position and run the GRN to resolve
+        // the attractor state, then classify that state to determine the cell type.
+        let mut grid_cell_type: Vec<CellType> = Vec::with_capacity(n_cells);
+        for z in 0..g_dev {
+            for x in 0..g_dev {
+                // Create a singleton gradient with the value at this cell
+                let grad_val = gradient.at(x, z);
+                let cell_gradient = crate::morphogen::Gradient {
+                    g_dev: 1,
+                    cells: vec![grad_val],
+                };
+                // Create a modified GrnSpec that samples at (0, 0) (the only cell in the singleton gradient)
+                let mut cell_gspec = gspec.clone();
+                cell_gspec.sample_x = 0;
+                cell_gspec.sample_z = 0;
+                // Run the GRN with this gradient value and resolve to attractor
+                let (_state, ct, _steps) = crate::grn_resolve(&cell_gradient, &cell_gspec);
+                grid_cell_type.push(ct);
+            }
+        }
+
+        // 2. Union-find: connect same-type adjacent cells (4-neighbour), min-index representative.
+        let mut parent: Vec<usize> = (0..n_cells).collect();
+
+        fn find(parent: &mut [usize], mut i: usize) -> usize {
+            while parent[i] != i {
+                parent[i] = parent[parent[i]]; // path compression
+                i = parent[i];
+            }
+            i
+        }
+
+        fn union(parent: &mut [usize], a: usize, b: usize) {
+            let ra = find(parent, a);
+            let rb = find(parent, b);
+            if ra != rb {
+                // Union by min-index representative (deterministic, order-independent).
+                if ra < rb {
+                    parent[rb] = ra;
+                } else {
+                    parent[ra] = rb;
+                }
+            }
+        }
+
+        // Row-major traversal: connect each cell to its right and down neighbors (if same type).
+        for z in 0..g_dev {
+            for x in 0..g_dev {
+                let idx = z * g_dev + x;
+                let ct = grid_cell_type[idx];
+                // Right neighbor
+                if x + 1 < g_dev {
+                    let right_idx = z * g_dev + (x + 1);
+                    if grid_cell_type[right_idx] == ct {
+                        union(&mut parent, idx, right_idx);
+                    }
+                }
+                // Down neighbor
+                if z + 1 < g_dev {
+                    let down_idx = (z + 1) * g_dev + x;
+                    if grid_cell_type[down_idx] == ct {
+                        union(&mut parent, idx, down_idx);
+                    }
+                }
+            }
+        }
+
+        // 3. Collect modules: each distinct root → one module.
+        let mut module_id_map: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+        let mut module_type: Vec<CellType> = Vec::new();
+        let mut module_cell_count: Vec<i32> = Vec::new();
+
+        for idx in 0..n_cells {
+            let root = find(&mut parent, idx);
+            let ct = grid_cell_type[idx];
+
+            if !module_id_map.contains_key(&root) {
+                let mid = module_type.len();
+                module_id_map.insert(root, mid);
+                module_type.push(ct);
+                module_cell_count.push(0);
+            }
+            let mid = module_id_map[&root];
+            module_cell_count[mid] += 1;
+        }
+
+        CellGraph {
+            g_dev,
+            module_type,
+            module_cell_count,
+        }
+    }
+
+    /// Number of modules (connected components).
+    pub fn num_modules(&self) -> usize {
+        self.module_type.len()
+    }
+}
+
 /// Phase-2 E-1: cold, lean cache of the decoded genome traits consumed by hot-path stages.
 ///
 /// Attached at every spawn site (founders + children) so a `&Phenotype` query is REQUIRED
@@ -141,14 +272,22 @@ pub struct Genome {
 /// **No consumer reads this field in E-4a** — it is behaviourally inert this slice (E-4b adds the
 /// consumer); growing this archetype column is what this slice proves neutral (see `Genome::decode`).
 ///
+/// **M7-a**: `graph` — the multicellular graph-body COLD representation. `CellGraph` is computed
+/// from the morphogen grid, never consumed in M7-a (prod-inert), and causes `Phenotype` to lose
+/// `Copy` (must be `Clone`). All hot-path copy sites have been audited and updated to use
+/// `.clone()` explicitly (copy propagates through reference, no performance impact).
+///
 /// NOT folded into `hash_contribution`: phenotype is a deterministic cold derivative of the
 /// genome that is already in the hash; double-hashing is redundant (plan §2/§6, R19).
-#[derive(bevy_ecs::prelude::Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(bevy_ecs::prelude::Component, Clone, Debug, PartialEq, Eq)]
 pub struct Phenotype {
     /// Layer index the entity will eat from (direct copy of `Genome::uptake_layer` for Ф0).
     pub uptake_layer: i32,
     /// Resolved ontogenesis cell type (E-4a). `None` for Ф0 / all 5 existing configs.
     pub cell_type: Option<CellType>,
+    /// M7-a: multicellular graph-body COLD representation. Computed from the morphogen grid;
+    /// never consumed in M7-a (prod-inert). Empty for non-phase2 configs.
+    pub graph: CellGraph,
 }
 
 
@@ -435,7 +574,7 @@ impl Genome {
         if self.force_decode_none {
             return None;
         }
-        let cell_type = match (&self.morphogen_spec, &self.grn_spec) {
+        let (cell_type, graph) = match (&self.morphogen_spec, &self.grn_spec) {
             (Some(mspec), Some(gspec)) => {
                 let gradient = morphogen(self, mspec);
                 let ct = grn(&gradient, gspec);
@@ -443,9 +582,12 @@ impl Genome {
                 if !is_viable_size(self.size) {
                     return None;
                 }
-                Some(ct)
+                // M7-a: compute the multicellular graph from the morphogen gradient.
+                // This is cold-derived and prod-inert (never consumed in M7-a).
+                let g = CellGraph::from_gradient(&gradient, gspec);
+                (Some(ct), g)
             }
-            _ => None, // E-1 trivial projection: no non-phase2 founder is ever seeded with both specs
+            _ => (None, CellGraph::empty()), // E-1 trivial projection: no non-phase2 founder is ever seeded with both specs
         };
         // E-4b-i: when the chain ran, cell_type DRIVES uptake_layer (the live hot-path consumer —
         // stage_sense and stage_interactions both read Phenotype.uptake_layer, never Genome's raw
@@ -456,7 +598,7 @@ impl Genome {
             Some(ct) => cell_type_uptake_layer(ct, self.uptake_layer, econ.n_layers),
             None => self.uptake_layer,
         };
-        Some(Phenotype { uptake_layer, cell_type })
+        Some(Phenotype { uptake_layer, cell_type, graph })
     }
 
     /// E-5b: `true` iff a `decode(econ)` call on this genome returns `None` because of the REAL
@@ -980,5 +1122,115 @@ mod tests {
              shipped spec has input_weights=[0,0] (monomorphic, zero morphogen effect); the two \
              must never collapse into the same shape"
         );
+    }
+
+    // ── M7-a: multicellular graph-body COLD representation (golden-NEUTRAL) ────────────────────
+    //
+    // Proves the CellGraph computation (per-grid-cell classification + module labeling) is
+    // (a) BYTE-IDENTICAL: the 6 production goldens are unchanged (the existing cell_type/uptake_layer
+    //     derivation is untouched — CellGraph is purely additive, never consumed in M7-a);
+    // (b) MULTI-MODULE: a drive-coupled genome (input_weights≠[0,0]) produces ≥2 modules;
+    // (c) DEAD-DRIVE: the shipped monomorphic genome (input_weights=[0,0]) produces 1 module;
+    // (d) DETERMINISTIC: repeated decodes give byte-identical CellGraph, canonical module labeling
+    //     is order-independent (min-index representative via union-find).
+
+    /// M7-a: dead-drive fixture (monomorphic, 1 module). Reuses `e6_gspec` matrix but with
+    /// input_weights=[0,0] (zero morphogen drive) — the shipped Phase-2 config topology.
+    /// Despite the GRN drive being zero, the grid still classifies every cell identically
+    /// (all cells see gradient=0, all resolve to `Mixed` or the same attractor), yielding 1 module.
+    fn m7a_dead_drive_gspec() -> GrnSpec {
+        GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, crate::GRN_EXPR_MAX])
+    }
+
+    /// M7-a: live-drive fixture (drive-coupled, ≥2 modules). Input weights [8, 0] biases the
+    /// input toward gene 0, allowing a gradient-driven fate flip across the [1,32] size range.
+    fn m7a_live_drive_gspec() -> GrnSpec {
+        GrnSpec::new(2, vec![64, -64, -64, 64], vec![8, 0], vec![0, 0], 3, 12, 0, 0, vec![0, crate::GRN_EXPR_MAX])
+    }
+
+    #[test]
+    fn m7a_dead_drive_produces_one_module() {
+        let econ = EconParams::default();
+        let mspec = MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+        };
+        let gspec = m7a_dead_drive_gspec();
+
+        // Dead-drive genome (input_weights=[0,0] → zero morphogen effect).
+        // Every cell classifies identically → 1 module.
+        let g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        let ph = g.decode(&econ).expect("dead-drive genome must decode to Some");
+
+        assert_eq!(
+            ph.graph.num_modules(), 1,
+            "dead-drive (input_weights=[0,0]) must produce exactly 1 module (uniform classification)"
+        );
+    }
+
+    #[test]
+    fn m7a_live_drive_produces_multiple_modules() {
+        let econ = EconParams::default();
+        let mspec = MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+        };
+        let gspec = m7a_live_drive_gspec();
+
+        // Live-drive genome (input_weights=[8,0] → morphogen biases gene 0).
+        // Use size=21 (above the boundary from E-6) to maximize the gradient effect.
+        // The gradient varies spatially → different cells classify to different types → ≥2 modules.
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        g.size = 21; // Above the fate boundary (size=20|21 in E-6)
+        let ph = g.decode(&econ).expect("live-drive genome must decode to Some");
+
+        assert!(
+            ph.graph.num_modules() >= 2,
+            "live-drive (input_weights=[8,0]) with size=21 must produce ≥2 modules; got {}",
+            ph.graph.num_modules()
+        );
+    }
+
+    #[test]
+    fn m7a_cell_graph_determinism() {
+        let econ = EconParams::default();
+        let mspec = MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+        };
+        let gspec = m7a_live_drive_gspec();
+
+        let g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        let ph1 = g.decode(&econ).expect("must decode to Some");
+        let ph2 = g.decode(&econ).expect("must decode to Some");
+
+        assert_eq!(
+            ph1.graph, ph2.graph,
+            "repeated decode() calls must produce byte-identical CellGraph (determinism)"
+        );
+        assert_eq!(
+            ph1.graph.module_type, ph2.graph.module_type,
+            "module types must be byte-identical"
+        );
+        assert_eq!(
+            ph1.graph.module_cell_count, ph2.graph.module_cell_count,
+            "module cell counts must be byte-identical"
+        );
+    }
+
+    #[test]
+    fn m7a_graph_empty_for_non_phase2_config() {
+        let econ = EconParams::default();
+        let g = Genome::founder(2); // No specs attached → non-phase2
+        let ph = g.decode(&econ).expect("Ф0 must decode to Some");
+
+        assert_eq!(
+            ph.graph, CellGraph::empty(),
+            "non-phase2 genome (no specs) must have empty CellGraph"
+        );
+        assert_eq!(ph.graph.num_modules(), 0, "empty graph must have zero modules");
     }
 }

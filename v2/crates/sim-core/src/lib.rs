@@ -37,7 +37,7 @@ pub use components::{
 };
 pub use det_map::DetMap;
 pub use energy::EnergyLedger;
-pub use genome::{isqrt, size_pow_three_quarters, Genome, Phenotype};
+pub use genome::{isqrt, size_pow_three_quarters, CellGraph, Genome, Phenotype};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use input::{sort_tick_events, InputEvent, InputKind};

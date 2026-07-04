@@ -982,7 +982,7 @@ mod tests {
             .spawn((
                 Position(Vec2Fixed(0, 0)),
                 founder.clone(),
-                Phenotype { uptake_layer: 0, cell_type: None },
+                Phenotype { uptake_layer: 0, cell_type: None, graph: crate::CellGraph::empty() },
                 Sensors::default(),
             ))
             .id();
@@ -993,7 +993,7 @@ mod tests {
             .spawn((
                 Position(Vec2Fixed(0, 0)),
                 founder,
-                Phenotype { uptake_layer: 1, cell_type: None },
+                Phenotype { uptake_layer: 1, cell_type: None, graph: crate::CellGraph::empty() },
                 Sensors::default(),
             ))
             .id();
