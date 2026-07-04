@@ -22,6 +22,7 @@ mod grid;
 mod grn;
 mod grn_lut;
 mod hash;
+mod homology;
 mod input;
 mod morphogen;
 mod params;
@@ -40,6 +41,7 @@ pub use energy::EnergyLedger;
 pub use genome::{isqrt, size_pow_three_quarters, CellGraph, Genome, Phenotype};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
+pub use homology::genome_distance;
 pub use input::{sort_tick_events, InputEvent, InputKind};
 pub use grn::{grn, grn_resolve, sigma as grn_sigma, CellType, GrnSpec};
 pub use grn_lut::{
@@ -193,6 +195,13 @@ pub struct Telemetry {
     /// stage_observe to build per-sample income split in TraitSample. Purely observational —
     /// never fed to state_hash or any conserved value; non-dprime entities always have (0, 0).
     pub income_record: DetMap<u64, (i64, i64)>,
+
+    /// V-3-e: population diversity observable — mean [`genome_distance`] over CONSECUTIVE valid
+    /// (`Some(grn_spec)`) genomes, entity-id order (computed by `stages::stage_observe`). `0` when
+    /// fewer than 2 valid genomes exist (all non-phase2 configs; single-survivor populations).
+    /// Read-only, never fed to the tick or folded into `state_hash` — the speciation/reproductive-
+    /// barrier consumer is deferred to a later phase.
+    pub genome_diversity: i64,
 }
 
 // ── R-1: render seam (RnD 02 §det-orthogonal, R26/R17/R19/R21) ─────────────────────────────────────
