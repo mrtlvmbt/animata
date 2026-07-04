@@ -376,6 +376,13 @@ pub fn driver_config(seed: u64) -> SimConfig {
         }),
     });
     cfg.econ.c_coord = DRIVER_C_COORD;
+    // V-4 (#276): the founder starts UNICELLULAR (g_dev=1) and body size is heritable — the
+    // driver corridor must show multicellularity EVOLVE under the refuge benefit / c_coord cost,
+    // not start there. Non-driver configs (`phase2_config` etc.) keep g_dev=4/evolve_body_size=false.
+    if let Some(mspec) = cfg.econ.morphogen.as_mut() {
+        mspec.g_dev = 1;
+    }
+    cfg.econ.evolve_body_size = true;
     cfg
 }
 
