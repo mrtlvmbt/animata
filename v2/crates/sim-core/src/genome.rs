@@ -151,15 +151,26 @@ impl CellGraph {
     }
 
     /// Decode a morphogen gradient into a multicellular graph: per-grid-cell classification,
-    /// connected-component labeling via union-find, canonical row-major order + min-index representative.
-    pub fn from_gradient(gradient: &crate::morphogen::Gradient, gspec: &GrnSpec) -> Self {
+    /// M7-b apoptosis marking, connected-component labeling via union-find (skipping dead cells),
+    /// canonical row-major order + min-index representative.
+    ///
+    /// `apoptosis_threshold`: `None` (every shipped spec) runs the pass exactly as M7-a — byte-
+    /// identical, no dead cells ever marked. `Some(t)` (test-only): a cell is marked dead iff its
+    /// resolved gene-0 expression `state[0] < t` (F3, PINNED — integer-only). Dead cells are marked
+    /// in place (**F1, PINNED: `grid_cell_type` is never compacted** — union-find indexes by
+    /// `idx = z*g_dev + x`, so compacting would shift indices and corrupt labeling) and are skipped
+    /// by both union-find and module collection: a dead cell is never a union representative, never
+    /// unioned with a neighbor, and contributes to no module.
+    pub fn from_gradient(gradient: &crate::morphogen::Gradient, gspec: &GrnSpec, apoptosis_threshold: Option<i32>) -> Self {
         let g_dev = gradient.g_dev;
         let n_cells = g_dev * g_dev;
 
-        // 1. Per-grid-cell classification: each cell gets a CellType from its local gradient value.
+        // 1. Per-grid-cell classification: each cell gets a CellType from its local gradient value,
+        // plus an M7-b dead mark from the same GRN-resolved state (canonical row-major order).
         // For each grid cell, sample the gradient at that position and run the GRN to resolve
         // the attractor state, then classify that state to determine the cell type.
         let mut grid_cell_type: Vec<CellType> = Vec::with_capacity(n_cells);
+        let mut dead: Vec<bool> = Vec::with_capacity(n_cells);
         for z in 0..g_dev {
             for x in 0..g_dev {
                 // Create a singleton gradient with the value at this cell
@@ -173,12 +184,15 @@ impl CellGraph {
                 cell_gspec.sample_x = 0;
                 cell_gspec.sample_z = 0;
                 // Run the GRN with this gradient value and resolve to attractor
-                let (_state, ct, _steps) = crate::grn_resolve(&cell_gradient, &cell_gspec);
+                let (state, ct, _steps) = crate::grn_resolve(&cell_gradient, &cell_gspec);
                 grid_cell_type.push(ct);
+                // M7-b (F3, PINNED): gene-0 expression below threshold ⇒ apoptosis. `None` ⇒ never dead.
+                dead.push(matches!(apoptosis_threshold, Some(t) if state[0] < t));
             }
         }
 
-        // 2. Union-find: connect same-type adjacent cells (4-neighbour), min-index representative.
+        // 2. Union-find: connect same-type adjacent LIVE cells (4-neighbour), min-index representative.
+        // Dead cells are never a union source or target — they stay isolated singletons in `parent`.
         let mut parent: Vec<usize> = (0..n_cells).collect();
 
         fn find(parent: &mut [usize], mut i: usize) -> usize {
@@ -202,34 +216,42 @@ impl CellGraph {
             }
         }
 
-        // Row-major traversal: connect each cell to its right and down neighbors (if same type).
+        // Row-major traversal: connect each LIVE cell to its LIVE right/down neighbors (if same type).
         for z in 0..g_dev {
             for x in 0..g_dev {
                 let idx = z * g_dev + x;
+                if dead[idx] {
+                    continue;
+                }
                 let ct = grid_cell_type[idx];
                 // Right neighbor
                 if x + 1 < g_dev {
                     let right_idx = z * g_dev + (x + 1);
-                    if grid_cell_type[right_idx] == ct {
+                    if !dead[right_idx] && grid_cell_type[right_idx] == ct {
                         union(&mut parent, idx, right_idx);
                     }
                 }
                 // Down neighbor
                 if z + 1 < g_dev {
                     let down_idx = (z + 1) * g_dev + x;
-                    if grid_cell_type[down_idx] == ct {
+                    if !dead[down_idx] && grid_cell_type[down_idx] == ct {
                         union(&mut parent, idx, down_idx);
                     }
                 }
             }
         }
 
-        // 3. Collect modules: each distinct root → one module.
+        // 3. Collect modules: each distinct root among LIVE cells → one module. Dead cells never
+        // reach here (F2/F5: this can legitimately empty out to zero modules — that is a VALID
+        // Phenotype, not a stillbirth; see `Genome::decode`'s E-5b/apoptosis ordering).
         let mut module_id_map: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
         let mut module_type: Vec<CellType> = Vec::new();
         let mut module_cell_count: Vec<i32> = Vec::new();
 
         for idx in 0..n_cells {
+            if dead[idx] {
+                continue;
+            }
             let root = find(&mut parent, idx);
             let ct = grid_cell_type[idx];
 
@@ -665,8 +687,10 @@ impl Genome {
                     return None;
                 }
                 // M7-a: compute the multicellular graph from the morphogen gradient.
-                // This is cold-derived and prod-inert (never consumed in M7-a).
-                let g = CellGraph::from_gradient(&gradient, gspec);
+                // This is cold-derived and prod-inert (never consumed in M7-a/M7-b).
+                // M7-b: apoptosis_threshold=None on every shipped spec ⇒ the pass never marks a
+                // cell dead ⇒ byte-identical to M7-a for all 6 prod configs (golden-NEUTRAL).
+                let g = CellGraph::from_gradient(&gradient, gspec, mspec.apoptosis_threshold);
                 (Some(ct), g)
             }
             _ => (None, CellGraph::empty()), // E-1 trivial projection: no non-phase2 founder is ever seeded with both specs
@@ -789,6 +813,11 @@ impl Genome {
             h = fnv_mix(h, mspec.decay_shift as u64);
             h = fnv_mix(h, mspec.seed_scale as u64);
             h = fnv_mix(h, mspec.stop_threshold as u64);
+            // M7-b: apoptosis_threshold folded Some-gated (mirrors dup_counter above) — `None` on
+            // every shipped spec contributes nothing, so all 6 prod goldens stay byte-identical.
+            if let Some(t) = mspec.apoptosis_threshold {
+                h = fnv_mix(h, t as u64);
+            }
         }
         h
     }
@@ -951,6 +980,7 @@ mod tests {
             decay_shift: 4,
             seed_scale: 4096,
             stop_threshold: 0,
+            apoptosis_threshold: None,
         };
         let gspec = GrnSpec {
             n_genes: 2,
@@ -1007,6 +1037,7 @@ mod tests {
             decay_shift: 4,
             seed_scale: 4096,
             stop_threshold: 0,
+            apoptosis_threshold: None,
         };
         // Flipped-corner bistable fixture (mirrors grn.rs's, initial swapped) → resolves to B.
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 256]);
@@ -1039,6 +1070,7 @@ mod tests {
             decay_shift: 4,
             seed_scale: 4096,
             stop_threshold: 0,
+            apoptosis_threshold: None,
         };
         // grn_spec stays None — only morphogen_spec attached.
         let g = Genome::founder(2).with_specs(None, Some(mspec));
@@ -1084,7 +1116,7 @@ mod tests {
         MorphogenSpec {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
-            seed_scale: 64, stop_threshold: 0,
+            seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
         }
     }
 
@@ -1247,7 +1279,7 @@ mod tests {
         let mspec = MorphogenSpec {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
-            seed_scale: 64, stop_threshold: 0,
+            seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
         };
         let gspec = m7a_dead_drive_gspec();
 
@@ -1268,7 +1300,7 @@ mod tests {
         let mspec = MorphogenSpec {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
-            seed_scale: 64, stop_threshold: 0,
+            seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1292,7 +1324,7 @@ mod tests {
         let mspec = MorphogenSpec {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
-            seed_scale: 64, stop_threshold: 0,
+            seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1325,6 +1357,228 @@ mod tests {
             "non-phase2 genome (no specs) must have empty CellGraph"
         );
         assert_eq!(ph.graph.num_modules(), 0, "empty graph must have zero modules");
+    }
+
+    // ── M7-b: apoptosis-in-decode (golden-NEUTRAL) ──────────────────────────────────────────────
+    //
+    // Adds a death-threshold pass between M7-a's Step 1 classification and Step 2 union-find
+    // labeling: `state[0] < t` (F3, PINNED — gene 0 of the per-cell GRN-resolved state) marks a
+    // cell dead; dead cells are marked IN PLACE (F1, PINNED — `grid_cell_type` is never compacted)
+    // and skipped by both union-find and module collection. `apoptosis_threshold: None` on every
+    // shipped spec means the pass never marks anything dead — byte-identical to M7-a (checked
+    // structurally in the `cli` crate's `m7b_prod_inert_all_goldens`, which asserts every
+    // production config keeps the gate off; the real byte-identity proof is CI's existing golden/
+    // golden_conserved suite staying green, since `None` reproduces M7-a exactly).
+
+    /// M7-b test-only spec builder — same grid/diffusion/decay basis as the M7-a fixtures above,
+    /// parameterized only by the apoptosis gate.
+    fn m7b_mspec(apoptosis_threshold: Option<i32>) -> MorphogenSpec {
+        MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+            apoptosis_threshold,
+        }
+    }
+
+    /// M7-b fixture: the M7-a live-drive genome (size=21, ≥2 modules with apoptosis off) — reused
+    /// so apoptosis tests exercise a grid already known to be spatially non-uniform.
+    fn m7b_live_drive_genome(apoptosis_threshold: Option<i32>) -> Genome {
+        let gspec = m7a_live_drive_gspec();
+        let mspec = m7b_mspec(apoptosis_threshold);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        g.size = 21; // above the E-6 fate boundary — matches m7a_live_drive_produces_multiple_modules
+        g
+    }
+
+    /// Independent per-cell gene-0 state readout — calls the SAME public `morphogen`/`grn_resolve`
+    /// functions `CellGraph::from_gradient` uses internally, so tests can pick a threshold from the
+    /// REAL resolved values instead of hardcoding a guessed magic constant.
+    fn m7b_cell_states(g: &Genome, mspec: &MorphogenSpec, gspec: &GrnSpec) -> Vec<i32> {
+        let gradient = crate::morphogen(g, mspec);
+        let g_dev = mspec.g_dev;
+        let mut out = Vec::with_capacity(g_dev * g_dev);
+        for z in 0..g_dev {
+            for x in 0..g_dev {
+                let grad_val = gradient.at(x, z);
+                let cell_gradient = crate::morphogen::Gradient { g_dev: 1, cells: vec![grad_val] };
+                let mut cell_gspec = gspec.clone();
+                cell_gspec.sample_x = 0;
+                cell_gspec.sample_z = 0;
+                let (state, _ct, _steps) = crate::grn_resolve(&cell_gradient, &cell_gspec);
+                out.push(state[0]);
+            }
+        }
+        out
+    }
+
+    /// A threshold that marks SOME but not ALL of the 16 grid cells dead on the live-drive fixture
+    /// (`min_state + 1`: the minimum-state cell(s) die, the maximum-state cell(s) survive, since
+    /// `min < max` on this spatially non-uniform fixture).
+    fn m7b_partial_threshold() -> i32 {
+        let gspec = m7a_live_drive_gspec();
+        let mspec = m7b_mspec(None);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), Some(mspec));
+        g.size = 21;
+        let states = m7b_cell_states(&g, &mspec, &gspec);
+        let min = *states.iter().min().unwrap();
+        let max = *states.iter().max().unwrap();
+        assert!(min < max, "M7-b fixture must have non-uniform gene-0 states; got {states:?}");
+        min + 1
+    }
+
+    #[test]
+    fn m7b_apoptosis_determinism() {
+        let econ = EconParams::default();
+        let t = m7b_partial_threshold();
+        let g = m7b_live_drive_genome(Some(t));
+        let ph1 = g.decode(&econ).expect("must decode to Some");
+        let ph2 = g.decode(&econ).expect("must decode to Some");
+        assert_eq!(ph1.graph, ph2.graph, "repeated decode() with Some(t) must be byte-identical");
+    }
+
+    #[test]
+    fn m7b_removed_before_labeling() {
+        let econ = EconParams::default();
+        let t = m7b_partial_threshold();
+        let ph_none = m7b_live_drive_genome(None).decode(&econ).expect("must decode to Some");
+        let ph_some = m7b_live_drive_genome(Some(t)).decode(&econ).expect("must decode to Some");
+
+        assert_ne!(
+            ph_none.graph, ph_some.graph,
+            "removing cells must change the labeled graph — proves removal feeds (and precedes) labeling"
+        );
+        let live: i32 = ph_some.graph.module_cell_count.iter().sum();
+        assert!(live > 0 && live < 16, "fixture threshold must produce PARTIAL removal; got {live} live cells");
+    }
+
+    #[test]
+    fn m7b_removal_order_deterministic() {
+        let econ = EconParams::default();
+        let t = m7b_partial_threshold();
+        let gspec = m7a_live_drive_gspec();
+        let mspec = m7b_mspec(Some(t));
+        let g = m7b_live_drive_genome(Some(t));
+        let ph = g.decode(&econ).expect("must decode to Some");
+
+        // Independent reference: re-derive per-cell alive/type from the SAME public functions, then
+        // flood-fill connected components in a REVERSE column-major order — deliberately different
+        // from production's forward row-major union-find traversal — to prove the module partition
+        // is not an artifact of iteration order.
+        let g_dev = mspec.g_dev;
+        let states_and_types: Vec<(i32, CellType)> = {
+            let gradient = crate::morphogen(&g, &mspec);
+            let mut out = Vec::with_capacity(g_dev * g_dev);
+            for z in 0..g_dev {
+                for x in 0..g_dev {
+                    let grad_val = gradient.at(x, z);
+                    let cell_gradient = crate::morphogen::Gradient { g_dev: 1, cells: vec![grad_val] };
+                    let mut cell_gspec = gspec.clone();
+                    cell_gspec.sample_x = 0;
+                    cell_gspec.sample_z = 0;
+                    let (state, ct, _steps) = crate::grn_resolve(&cell_gradient, &cell_gspec);
+                    out.push((state[0], ct));
+                }
+            }
+            out
+        };
+        let alive: Vec<Option<CellType>> = states_and_types
+            .iter()
+            .map(|&(s0, ct)| if s0 < t { None } else { Some(ct) })
+            .collect();
+
+        let mut visited = vec![false; g_dev * g_dev];
+        let mut ref_counts: Vec<i32> = Vec::new();
+        for x in (0..g_dev).rev() {
+            for z in (0..g_dev).rev() {
+                let idx = z * g_dev + x;
+                if visited[idx] || alive[idx].is_none() {
+                    continue;
+                }
+                let ct = alive[idx].unwrap();
+                let mut stack = vec![idx];
+                visited[idx] = true;
+                let mut count = 0;
+                while let Some(cur) = stack.pop() {
+                    count += 1;
+                    let (cz, cx) = (cur / g_dev, cur % g_dev);
+                    let mut neighbors = Vec::new();
+                    if cx + 1 < g_dev { neighbors.push(cz * g_dev + (cx + 1)); }
+                    if cx > 0 { neighbors.push(cz * g_dev + (cx - 1)); }
+                    if cz + 1 < g_dev { neighbors.push((cz + 1) * g_dev + cx); }
+                    if cz > 0 { neighbors.push((cz - 1) * g_dev + cx); }
+                    for n in neighbors {
+                        if !visited[n] && alive[n] == Some(ct) {
+                            visited[n] = true;
+                            stack.push(n);
+                        }
+                    }
+                }
+                ref_counts.push(count);
+            }
+        }
+
+        let mut prod_counts = ph.graph.module_cell_count.clone();
+        prod_counts.sort();
+        ref_counts.sort();
+        assert_eq!(
+            prod_counts, ref_counts,
+            "module-size multiset from an INDEPENDENT reverse-order flood-fill must match production's \
+             canonical row-major union-find — proves the result is order-independent"
+        );
+    }
+
+    #[test]
+    fn m7b_removed_cells_absent_from_modules() {
+        let econ = EconParams::default();
+        let t = m7b_partial_threshold();
+        let gspec = m7a_live_drive_gspec();
+        let mspec = m7b_mspec(Some(t));
+        let g = m7b_live_drive_genome(Some(t));
+        let ph = g.decode(&econ).expect("must decode to Some");
+
+        let states = m7b_cell_states(&g, &mspec, &gspec);
+        let dead_count = states.iter().filter(|&&s0| s0 < t).count() as i32;
+        assert!(dead_count > 0, "fixture threshold must remove >= 1 cell");
+
+        let module_total: i32 = ph.graph.module_cell_count.iter().sum();
+        assert_eq!(
+            module_total, 16 - dead_count,
+            "Σ module_cell_count must equal (grid cells − removed cells); no dead cell may contribute to a module"
+        );
+    }
+
+    #[test]
+    fn m7b_empty_body_valid() {
+        let econ = EconParams::default();
+        // GRN state[0] is a non-negative expression bounded by GRN_EXPR_MAX (grn.rs "σ semantics") —
+        // any threshold strictly above that bound guarantees state[0] < t for EVERY cell.
+        let g = m7b_live_drive_genome(Some(crate::GRN_EXPR_MAX + 1));
+        let ph = g.decode(&econ).expect("F2/F5 PINNED: apoptosis-to-zero must return Some, never None");
+        assert_eq!(ph.graph.num_modules(), 0, "all-dead grid must yield zero modules");
+        assert!(ph.graph.module_cell_count.is_empty());
+        assert!(ph.graph.module_type.is_empty());
+    }
+
+    #[test]
+    fn m7b_e5b_is_sole_stillbirth() {
+        let econ = EconParams::default();
+
+        // (a) E-5b fires BEFORE any graph/apoptosis work: an unviable-size genome returns None
+        // regardless of apoptosis_threshold (even when apoptosis is armed).
+        let mut g_unviable = m7b_live_drive_genome(Some(1));
+        g_unviable.size = SIZE_VIABILITY_FLOOR; // == floor, not > floor ⇒ E-5b fails
+        assert_eq!(
+            g_unviable.decode(&econ), None,
+            "E-5b size-viability gate must return None regardless of apoptosis_threshold"
+        );
+
+        // (b) A genome that PASSES E-5b (size=21, well above the floor) and then apoptoses to zero
+        // must still return Some(empty-graph) — never None (no second stillbirth path).
+        let g_zero = m7b_live_drive_genome(Some(crate::GRN_EXPR_MAX + 1));
+        assert!(is_viable_size(g_zero.size), "fixture must clear E-5b's viability floor (sanity)");
+        let ph = g_zero.decode(&econ).expect("apoptosis-to-zero must never become a second stillbirth path");
+        assert_eq!(ph.graph.num_modules(), 0);
     }
 
     #[test]
@@ -1520,7 +1774,7 @@ mod tests {
         let mspec = MorphogenSpec {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
-            seed_scale: 64, stop_threshold: 0,
+            seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
         };
         
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));

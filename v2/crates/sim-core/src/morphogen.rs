@@ -58,6 +58,11 @@ pub struct MorphogenSpec {
     /// (computed on the integer grid — never a float-ε compare). `0` disables early stop (always runs
     /// the full `n_dev` steps).
     pub stop_threshold: i32,
+    /// **M7-b apoptosis gate.** `None` (default, every shipped spec) disables the pass entirely —
+    /// `CellGraph::from_gradient` is byte-identical to M7-a. `Some(t)`: a per-cell death predicate,
+    /// evaluated on gene 0 of the per-cell GRN-resolved `state` (`state[0] < t`), marks the cell dead
+    /// BEFORE union-find labeling (F3, PINNED — integer-only, no float, no multi-term formula).
+    pub apoptosis_threshold: Option<i32>,
 }
 
 /// The morphogen output: a local, position-indexed integer concentration field (row-major,
@@ -186,6 +191,7 @@ mod tests {
             decay_shift: 4, // ~6.25% decay per step
             seed_scale: 4096,
             stop_threshold: 0, // always run the full 8 steps (deterministic fixed count)
+            apoptosis_threshold: None,
         }
     }
 
