@@ -264,6 +264,71 @@ pub fn predation_config(seed: u64) -> SimConfig {
     }
 }
 
+/// Phase-2 differentiation emergence config (L=2): substrate + fed organics layer.
+///
+/// **E-F/V-1:** multi-layer economy where cell-type differentiation emerges via niche
+/// specialization (frequency-dependent selection). Layer 0 is the substrate (standard); layer 1
+/// is a REGENERATING organics layer (fed with regen_rate=3, world_cap_mult=2) instead of the
+/// decaying excreta-only layer used in default_config.
+///
+/// Reuses `phase2_config`'s exact `MorphogenSpec` + `GrnSpec` (V-1: weaker bistable matrix
+/// + off-center initial), so every founder is seeded with the heritable ontogenesis spec
+/// (cell-type differentiation is driven by the GRN; V-1 mutation flips cell-type fate).
+///
+/// **Emergence mechanism:** Under this 2-layer economy:
+/// - Layer 0 fed naturally (substrate caps from ProcgenWorld, regen_rate=6)
+/// - Layer 1 FED artificially (regen_rate=3, diffuses at α=1/16, caps = world·2)
+/// Agents evolve to specialize: type-A uptake layer 0, type-B uptake layer 1
+/// (driven by cell_type locus in GRN). Selection pressure favors B when layer 1 is abundant
+/// (fed) and B-frequency rises to ~39% equilibrium. When layer 1 is barren (regen_rate=0,
+/// world_cap_mult=0), B collapses to mutation-supply floor (~7–10%).
+///
+/// Acceptance: conservation ledger residual == 0 every tick; differentiation MEASURED via
+/// emergence guard comparing fed vs barren twins with uptake_layer_histogram(2).
+pub fn differentiation_config(seed: u64) -> SimConfig {
+    // Reuse phase2_config's exact morphogen and GRN specs.
+    let mspec = sim_core::MorphogenSpec {
+        g_dev: 4,
+        n_dev: 8,
+        boundary: sim_core::Boundary::Reflecting,
+        diffuse_shift: 3,
+        decay_num: 1,
+        decay_shift: 4,
+        seed_scale: 4096,
+        stop_threshold: 0,
+    };
+    let gspec = sim_core::GrnSpec::new(
+        2,
+        vec![32, -32, -32, 32],
+        vec![0, 0],
+        vec![0, 0],
+        3,
+        12,
+        0,
+        0,
+        vec![144, 112],
+    );
+    // L=2: layer 0 = substrate (standard), layer 1 = fed regenerating layer
+    // (regen_rate=3, α=1/16, world_cap_mult=2).
+    let l1_fed_spec = LayerSpec {
+        regen_rate: 3,
+        flux_alpha_num: 1,
+        flux_alpha_den: 16,
+        flat_cap: 0,
+        world_cap_mult: 2,
+    };
+    SimConfig {
+        n_layers: 2,
+        layer_specs: [L0_SPEC, l1_fed_spec, LayerSpec::default(), LayerSpec::default()],
+        econ: EconParams {
+            morphogen: Some(mspec),
+            grn: Some(gspec),
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
