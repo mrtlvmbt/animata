@@ -1830,7 +1830,7 @@ mod tests {
             let seed = 0x7777_0000 + (i as u64);
             g = g.mutate(seed, 2, false, 4, false, true);
             if let Some(spec) = &g.grn_spec {
-                let mut seen = std::collections::HashSet::new();
+                let mut seen = std::collections::BTreeSet::new();
                 for &id in &spec.gene_ids {
                     assert!(seen.insert(id), "V-3-c: duplicate gene_id {id} at iteration {i}");
                 }
