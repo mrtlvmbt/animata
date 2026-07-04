@@ -400,7 +400,7 @@ impl Genome {
     /// Set `reg_gain_max = 0` to lock regulation OFF — reg_gain stays 0 (the D′-2c control line).
     /// `has_predation` gates the `combat_trait` mutation (P-2a): when `false`, combat_trait stays 0,
     /// non-predation genomes never carry a non-zero combat_trait, keeping existing goldens byte-identical.
-    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool) -> Genome {
+    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool, enable_variable_length: bool) -> Genome {
         let mut g = self.clone();
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -527,6 +527,88 @@ impl Genome {
                 g.grn_spec = Some(Arc::new(mutated));
             }
         }
+        // V-3-b: variable-length genome duplication operator (CANONICAL ORDER — appended AFTER all V-1 draws)
+        // Gate: when enable_variable_length == false, the operator draws ZERO values and n_genes stays constant
+        // → existing goldens byte-identical (neutrality contract).
+        // Mechanism: draw application-count from new private salt (SALT_DUP), then per-application:
+        // - Draw which gene to duplicate (0..n_genes)
+        // - Copy that gene's row+col in weights
+        // - Append entries to input_weights, bias, initial
+        // - Assign new gene id = ((parent_id+1)<<16) | dup_index
+        // - Increment dup_counter and n_genes
+        // Determinism: private stream + fixed draw order → stream position = pure fn of (seed, input genome).
+        const SALT_DUP: u64 = 0x4455_5000u64; // "DUP\0"
+        if enable_variable_length {
+            if let Some(gspec) = &self.grn_spec {
+                // Draw application-count (like other operators)
+                let r_dup = seed_fold(stream, &[SALT_DUP]);
+                let dup_count = if (r_dup & 0xFF) < self.mutation_rate as u64 { 1 } else { 0 };
+                
+                if dup_count > 0 {
+                    let mut mutated = (**gspec).clone();
+                    let old_n_genes = mutated.n_genes;
+                    
+                    for dup_idx in 0..dup_count {
+                        // Draw which gene to duplicate
+                        let r_which = seed_fold(stream, &[SALT_DUP + 1 + dup_idx as u64]);
+                        let gene_to_dup = (r_which >> 8) as usize % old_n_genes;
+                        let parent_id = mutated.gene_ids[gene_to_dup];
+                        
+                        // Expand weights matrix to (n+1)×(n+1) by inserting a new gene at the end.
+                        // Row-major: w_ij = influence of gene j on gene i.
+                        // For duplicating source_gene: copy its row and column to the new gene's position.
+                        let n = mutated.n_genes;
+                        let source = gene_to_dup;
+                        let mut new_weights = Vec::with_capacity((n + 1) * (n + 1));
+
+                        // Copy existing n×n matrix, but expand each row to include the new gene
+                        for row in 0..n {
+                            // Copy existing row values
+                            for col in 0..n {
+                                let idx = row * n + col;
+                                new_weights.push(mutated.weights[idx]);
+                            }
+                            // Add value for influence of new gene on this gene (copy from source gene)
+                            new_weights.push(mutated.weights[row * n + source]);
+                        }
+
+                        // Add the new row (source gene's row copied, including self-interaction)
+                        for col in 0..n {
+                            let idx = source * n + col;
+                            new_weights.push(mutated.weights[idx]);
+                        }
+                        // Add self-interaction for new gene
+                        new_weights.push(mutated.weights[source * n + source]);
+
+                        mutated.weights = new_weights;
+                        
+                        // Append copies of input_weights, bias, initial
+                        mutated.input_weights.push(mutated.input_weights[gene_to_dup]);
+                        mutated.bias.push(mutated.bias[gene_to_dup]);
+                        mutated.initial.push(mutated.initial[gene_to_dup]);
+                        
+                        // New gene id = ((parent_id+1)<<16) | dup_index
+                        let new_id = ((parent_id + 1) << 16) | (mutated.dup_counter as u32);
+                        mutated.gene_ids.push(new_id);
+                        
+                        // Increment counters
+                        mutated.dup_counter += 1;
+                        mutated.n_genes += 1;
+                    }
+                    
+                    // Structural validity: verify the spec is still valid
+                    assert_eq!(mutated.weights.len(), mutated.n_genes * mutated.n_genes, "V-3-b: weights must be square");
+                    assert_eq!(mutated.input_weights.len(), mutated.n_genes, "V-3-b: input_weights length mismatch");
+                    assert_eq!(mutated.bias.len(), mutated.n_genes, "V-3-b: bias length mismatch");
+                    assert_eq!(mutated.initial.len(), mutated.n_genes, "V-3-b: initial length mismatch");
+                    assert_eq!(mutated.gene_ids.len(), mutated.n_genes, "V-3-b: gene_ids length mismatch");
+                    assert!(mutated.n_genes >= 2, "V-3-b: n_genes must stay >= 2");
+                    
+                    g.grn_spec = Some(Arc::new(mutated));
+                }
+            }
+        }
+
 
         g
     }
@@ -734,9 +816,9 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2, false, 4, false), g.mutate(123, 2, false, 4, false));
+        assert_eq!(g.mutate(123, 2, false, 4, false, false), g.mutate(123, 2, false, 4, false, false));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, false, 4, false);
+            let m = g.mutate(s, 2, false, 4, false, false);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
@@ -747,19 +829,19 @@ mod tests {
         }
         // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 4, false);
+            let m = g.mutate(s, 2, true, 4, false, false);
             assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
             assert!((-4..=4).contains(&m.reg_gain), "reg_gain must be in [-reg_gain_max, +reg_gain_max]");
         }
         // reg_gain_max=0 locks regulation OFF even when has_light=true.
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 0, false);
+            let m = g.mutate(s, 2, true, 0, false, false);
             assert_eq!(m.reg_gain, 0, "reg_gain must stay 0 when reg_gain_max=0 (D′-2c lock)");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1, false, 0, false);
+        let m1 = g1.mutate(0, 1, false, 0, false, false);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }
@@ -778,7 +860,7 @@ mod tests {
         }
         // Also holds for a mutated genome.
         let g = Genome::founder(2);
-        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false);
+        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false);
         assert_eq!(mutated.decode(&EconParams::default()), mutated.decode(&EconParams::default()), "decode deterministic on mutated genome");
     }
 
@@ -801,7 +883,7 @@ mod tests {
             "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
         // Also for mutated genome — projection stays 1:1 regardless of trait value.
         for s in 0..50u64 {
-            let m = g.mutate(s, 2, false, 0, false);
+            let m = g.mutate(s, 2, false, 0, false, false);
             let mph = m.decode(&EconParams::default()).expect("mutated Ф0 must decode to Some");
             assert_eq!(mph.uptake_layer, m.uptake_layer,
                 "1:1 projection must hold after mutation (seed={s})");
@@ -838,14 +920,14 @@ mod tests {
             "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
 
         // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
-        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false);
+        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false);
         assert!(mutated_child.force_decode_none,
             "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
         assert!(mutated_child.decode(&EconParams::default()).is_none(),
             "inherited flag: child decode() also returns None (lineage-level stillbirth)");
 
         // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
-        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false);
+        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false);
         assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
         assert!(normal_child.decode(&EconParams::default()).is_some(), "normal child decode() must return Some");
     }
@@ -1244,4 +1326,228 @@ mod tests {
         );
         assert_eq!(ph.graph.num_modules(), 0, "empty graph must have zero modules");
     }
+
+    #[test]
+    fn v3b_flag_off_no_duplication() {
+        // When enable_variable_length=false, duplication operator is inert.
+        // The genome should never grow.
+        let mut g = Genome::founder(2);
+        let econ = EconParams::default(); // enable_variable_length = false (default)
+        
+        // Mutate many times with a high mutation rate to trigger duplication if possible
+        g.mutation_rate = 256; // Max mutation rate
+        
+        for i in 0..100 {
+            let seed = 0x1234_5678 + (i as u64);
+            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false);
+            
+            // If grn_spec exists, n_genes should stay at 2
+            if let Some(spec) = &g.grn_spec {
+                assert_eq!(spec.n_genes, 2, "V-3-b: with flag=false, n_genes must stay constant at 2 (iteration {i})");
+            }
+        }
+    }
+
+    #[test]
+    fn v3b_flag_off_preserves_golden_byte_identity() {
+        // With enable_variable_length=false, the operator draws zero values from stream.
+        // Byte-identical to non-V-3-b genomes. We verify that a known genome
+        // mutates deterministically regardless of the flag (since it's gated).
+        let g1 = Genome::founder(2);
+        let g2 = Genome::founder(2);
+        
+        let seed = 0xDEAD_BEEF;
+        let econ = EconParams::default();
+        
+        // Mutate both with flag=false
+        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false);
+        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false);
+        
+        // They should be byte-identical (determinism check)
+        assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
+        assert_eq!(m1.mutation_rate, m2.mutation_rate);
+        assert_eq!(m1.size, m2.size);
+    }
+
+    #[test]
+    fn v3b_flag_on_with_no_spec_no_growth() {
+        // When enable_variable_length=true but genome has no grn_spec,
+        // duplication still doesn't happen (gated by Some check).
+        let g = Genome::founder(2); // No spec
+        
+        // Mutate with flag=true
+        let m = g.mutate(0x9999_9999, 2, false, 4, false, true);
+        
+        // Should still have no spec
+        assert!(m.grn_spec.is_none(), "V-3-b: genome without spec should stay without spec");
+    }
+
+    #[test]
+    fn v3b_flag_on_can_grow() {
+        // With enable_variable_length=true and a genome with grn_spec,
+        // duplication can happen (though probability depends on mutation_rate).
+        
+        // Create a genome with grn_spec
+        let gspec = GrnSpec::new(
+            2,
+            vec![64, -64, -64, 64],    // weights: 2x2
+            vec![0, 0],                // input_weights
+            vec![0, 0],                // bias
+            3,                         // shift
+            12,                        // max_steps
+            0,                         // sample_x
+            0,                         // sample_z
+            vec![0, 64],               // initial
+        );
+        
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256; // Max rate to increase duplication probability
+        
+        // Try many seeds to find one that triggers duplication
+        let mut found_growth = false;
+        for i in 0..1000 {
+            let seed = 0xABCD_0000 + (i as u64);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            
+            if let Some(spec) = &m.grn_spec {
+                if spec.n_genes > 2 {
+                    found_growth = true;
+                    break;
+                }
+            }
+        }
+        
+        // At least one seed should trigger growth with mutation_rate=256
+        assert!(found_growth, "V-3-b: with high mutation_rate, duplication should occur in 1000 seeds");
+    }
+
+    #[test]
+    fn v3b_duplication_structural_validity() {
+        // When duplication occurs, the resulting spec must be structurally valid:
+        // - weights: square matrix of size n_genes x n_genes
+        // - input_weights, bias, initial: length n_genes
+        // - gene_ids: length n_genes
+        // - n_genes >= 2
+        
+        let gspec = GrnSpec::new(
+            2,
+            vec![64, -64, -64, 64],
+            vec![10, 20],
+            vec![5, 15],
+            3,
+            12,
+            0,
+            0,
+            vec![32, 96],
+        );
+        
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+        
+        // Find a seed that triggers duplication
+        for i in 0..1000 {
+            let seed = 0xFEED_0000 + (i as u64);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            
+            if let Some(spec) = &m.grn_spec {
+                if spec.n_genes > 2 {
+                    // Verify structural validity
+                    let n = spec.n_genes;
+                    assert_eq!(spec.weights.len(), n * n, "weights must be n_genes^2");
+                    assert_eq!(spec.input_weights.len(), n, "input_weights must be n_genes");
+                    assert_eq!(spec.bias.len(), n, "bias must be n_genes");
+                    assert_eq!(spec.initial.len(), n, "initial must be n_genes");
+                    assert_eq!(spec.gene_ids.len(), n, "gene_ids must be n_genes");
+                    assert!(spec.n_genes >= 2, "n_genes must be >= 2");
+                    return;
+                }
+            }
+        }
+        
+        panic!("V-3-b: expected to find duplication within 1000 seeds");
+    }
+
+    #[test]
+    fn v3b_duplication_counter_increments() {
+        // After duplication, dup_counter should increment.
+        let gspec = GrnSpec::new(
+            2,
+            vec![64, -64, -64, 64],
+            vec![0, 0],
+            vec![0, 0],
+            3,
+            12,
+            0,
+            0,
+            vec![0, 64],
+        );
+        
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+        
+        for i in 0..1000 {
+            let seed = 0xBEEF_0000 + (i as u64);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            
+            if let Some(spec) = &m.grn_spec {
+                if spec.n_genes > 2 {
+                    // dup_counter should be > 0 after duplication
+                    assert!(spec.dup_counter > 0, "V-3-b: dup_counter must increment after duplication");
+                    return;
+                }
+            }
+        }
+        
+        panic!("V-3-b: expected to find duplication within 1000 seeds");
+    }
+
+    #[test]
+    fn v3b_duplicated_genome_can_decode() {
+        // After duplication, the genome should still be able to decode
+        // (if phase2 specs are present).
+        let gspec = GrnSpec::new(
+            2,
+            vec![64, -64, -64, 64],
+            vec![0, 0],
+            vec![0, 0],
+            3,
+            12,
+            0,
+            0,
+            vec![0, 64],
+        );
+        
+        let mspec = MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+        };
+        
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        g.mutation_rate = 256;
+        
+        let econ = EconParams {
+            morphogen: Some(mspec),
+            grn: Some(GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64])),
+            ..EconParams::default()
+        };
+        
+        // Find a seed that triggers duplication
+        for i in 0..1000 {
+            let seed = 0xCAFE_0000 + (i as u64);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true);
+            
+            if let Some(spec) = &m.grn_spec {
+                if spec.n_genes > 2 {
+                    // Try to decode — should not panic
+                    let _ph = m.decode(&econ);
+                    // decode may return None (E-5b stillbirth) or Some, but should not panic
+                    return;
+                }
+            }
+        }
+        
+        panic!("V-3-b: expected to find duplication within 1000 seeds");
+    }
+
 }

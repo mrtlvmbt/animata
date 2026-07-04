@@ -227,6 +227,15 @@ pub struct EconParams {
     pub morphogen: Option<MorphogenSpec>,
     /// GRN dynamics spec (E-3). See `morphogen` — both must be `Some` for the chain to run.
     pub grn: Option<GrnSpec>,
+
+    // ── V-3-b: variable-length genome operators (duplication, indel, translocation) ──────────────
+    /// Enable the variable-length genome operators (V-3-b duplication, V-3-c indel, V-3-d translocation).
+    /// `false` (default, all 6 existing production configs) → the operators are inert, draw zero from
+    /// the stream, and n_genes stays constant → trajectories are byte-identical, existing goldens
+    /// un-re-pinned. `true` only on test/research configs with dedicated genome fixtures designed
+    /// to exercise the operators. Determinism: when false, mutate() reads zero values from the
+    /// operator stream → backward-compatible draw positions preserved (§5.2).
+    pub enable_variable_length: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -313,6 +322,8 @@ impl Default for EconParams {
             // E-4a: ontogenesis chain OFF by default — None for all 5 existing configs.
             morphogen: None,
             grn: None,
+            // V-3-b: variable-length operators OFF by default — false for all 6 existing configs.
+            enable_variable_length: false,
         }
     }
 }
