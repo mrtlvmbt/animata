@@ -88,6 +88,7 @@ mod tests {
             initial,
             gene_ids,
             dup_counter: 0,
+            classify_nway: false,
         }
     }
 

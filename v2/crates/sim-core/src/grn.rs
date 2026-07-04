@@ -37,11 +37,16 @@ use crate::morphogen::Gradient;
 /// Discrete cell-type descriptor (E-3's output, E-4's `Phenotype` cache target). A production type,
 /// not test-only. `Mixed` is the exact-integer tie outcome (`state[0] == state[1]`) — deterministic,
 /// never a float-threshold "close enough".
+///
+/// **(#247) `Diff(u8)`**: generalized N-way cell-type index (argmax over `state[0..n_genes]`, gated
+/// by `GrnSpec::classify_nway`). `A`/`B`/`Mixed` remain the default 2-way path — `Diff` is additive,
+/// opt-in substrate (dead in prod this slice, see `GrnSpec::classify_nway`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CellType {
     A,
     B,
     Mixed,
+    Diff(u8),
 }
 
 /// V-3-a: Lineage gene-identifier type. Each gene in a GrnSpec carries a unique, injective,
@@ -101,6 +106,14 @@ pub struct GrnSpec {
     /// have dup_counter = 0 (no duplications yet). Only folded into hash_contribution when
     /// dup_counter != 0 (gated pattern: preserves byte-identity for all V-3-a genomes).
     pub dup_counter: u32,
+    /// **(#247) classify-gen gate.** `false` (default, every shipped config) → `classify` runs the
+    /// EXACT current argmax-of-2 (A/B/Mixed), byte-identical to pre-#247. `true` → `classify` runs
+    /// the generalized N-way argmax over `state[0..n_genes]`, producing `CellType::Diff(idx)`.
+    /// **Substrate this slice**: not a `mutate` target (like `dup_counter`'s gate before V-3-b), set
+    /// only by hand-built test `GrnSpec`s / a future opt-in config/driver. Folded into
+    /// `hash_contribution` ONLY when `true` (mirrors `dup_counter`'s gate) — byte-identical when
+    /// `false`.
+    pub classify_nway: bool,
 }
 
 impl GrnSpec {
@@ -159,6 +172,7 @@ impl GrnSpec {
             initial,
             gene_ids,
             dup_counter: 0, // V-3-a: no duplications yet (founder genomes).
+            classify_nway: false, // (#247) default 2-way path; opt-in only via a hand-built spec.
         }
     }
 }
@@ -193,7 +207,29 @@ pub fn sigma(preact: i64) -> i32 {
 /// production `GrnSpec` should still be built with `n_genes >= 2` (the safety here is defense in
 /// depth, not a substitute for constructing a sane spec).
 /// M7-a: made public for CellGraph's per-grid-cell classification.
-pub fn classify(state: &[i32]) -> CellType {
+///
+/// **(#247) `classify_nway` gate.** `false` → the EXACT pre-#247 argmax-of-2 above, byte-identical.
+/// `true` → argmax over the FULL `state` slice, tie-break = LOWEST index wins (deterministic total
+/// order: the scan only replaces the incumbent on a STRICT `>`, so the first-seen maximum survives
+/// any later tie) → `CellType::Diff(argmax_index as u8)`. `state.len() < 2` keeps the same `Mixed`
+/// fallback regardless of the gate (no meaningful split either way). `argmax_index` is cast to `u8`
+/// — safe because `n_genes` is bounded tiny (≤16, the morphogen bound); this is not a per-tick guard
+/// for arbitrarily large `n_genes`.
+pub fn classify(state: &[i32], classify_nway: bool) -> CellType {
+    if classify_nway {
+        if state.len() < 2 {
+            return CellType::Mixed;
+        }
+        let mut best_idx = 0usize;
+        let mut best_val = state[0];
+        for (i, &v) in state.iter().enumerate().skip(1) {
+            if v > best_val {
+                best_val = v;
+                best_idx = i;
+            }
+        }
+        return CellType::Diff(best_idx as u8);
+    }
     match (state.first(), state.get(1)) {
         (Some(a), Some(b)) => match a.cmp(b) {
             std::cmp::Ordering::Greater => CellType::A,
@@ -239,7 +275,7 @@ pub fn grn_resolve(gradient: &Gradient, spec: &GrnSpec) -> (Vec<i32>, CellType, 
             // N or N+period steps closes the SAME cycle at the SAME `first_idx`, so the resolved
             // minimum is identical regardless of where the step budget happened to stop.
             let resolved = visited[first_idx..].iter().cloned().min().expect("cycle is non-empty");
-            let ct = classify(&resolved);
+            let ct = classify(&resolved, spec.classify_nway);
             return (resolved, ct, step_no);
         }
         visited.push(new_state.clone());
@@ -249,7 +285,7 @@ pub fn grn_resolve(gradient: &Gradient, spec: &GrnSpec) -> (Vec<i32>, CellType, 
     // (documented as not phase-independent for arbitrarily larger budgets); the shipped fixtures are
     // proven (by test) to always close a cycle well within `max_steps`, so this branch is never hit
     // by production-shaped specs.
-    let ct = classify(&state);
+    let ct = classify(&state, spec.classify_nway);
     (state, ct, spec.max_steps)
 }
 
@@ -274,12 +310,12 @@ mod tests {
     /// generalized to `Mixed` (no meaningful split) instead of hard-indexing `state[0]/state[1]`.
     #[test]
     fn classify_is_panic_safe_below_two_genes() {
-        assert_eq!(classify(&[]), CellType::Mixed);
-        assert_eq!(classify(&[42]), CellType::Mixed);
+        assert_eq!(classify(&[], false), CellType::Mixed);
+        assert_eq!(classify(&[42], false), CellType::Mixed);
         // Sanity: n_genes >= 2 still classifies normally.
-        assert_eq!(classify(&[10, 5]), CellType::A);
-        assert_eq!(classify(&[5, 10]), CellType::B);
-        assert_eq!(classify(&[7, 7]), CellType::Mixed);
+        assert_eq!(classify(&[10, 5], false), CellType::A);
+        assert_eq!(classify(&[5, 10], false), CellType::B);
+        assert_eq!(classify(&[7, 7], false), CellType::Mixed);
     }
 
     // ── E-4b-i: validated GrnSpec::new (critic F7 — construction-boundary, not per-tick) ────────
@@ -340,6 +376,7 @@ mod tests {
             initial,
             gene_ids: vec![0, 1],
             dup_counter: 0,
+            classify_nway: false,
         }
     }
 
@@ -425,6 +462,7 @@ mod tests {
             initial: vec![EXPR_MAX / 2, EXPR_MAX / 2], // fixed, neutral start
             gene_ids: vec![0, 1],
             dup_counter: 0,
+            classify_nway: false,
         };
         let hi = grn(&flat_gradient(2, sample_value_hi()), &spec());
         let lo = grn(&flat_gradient(2, sample_value_lo()), &spec());
@@ -459,6 +497,7 @@ mod tests {
             initial: vec![EXPR_MAX, 0],
             gene_ids: vec![0, 1],
             dup_counter: 0,
+            classify_nway: false,
         }
     }
 
@@ -513,6 +552,7 @@ mod tests {
             initial: vec![EXPR_MAX, 0],
             gene_ids: vec![0, 1],
             dup_counter: 0,
+            classify_nway: false,
         };
         let grad = flat_gradient(2, i32::MAX);
         let a = grn_resolve(&grad, &spec);
@@ -538,6 +578,7 @@ mod tests {
             initial: vec![EXPR_MAX],
             gene_ids: vec![0],
             dup_counter: 0,
+            classify_nway: false,
         };
         let out = step(&[EXPR_MAX], i32::MAX as i64, &spec);
         // The clamped accumulator is `acc_bound(1)` (positive ceiling) — sigma of that (deep positive)
@@ -570,6 +611,7 @@ mod tests {
             initial: vec![EXPR_MAX / 2, EXPR_MAX / 2],
             gene_ids: vec![0, 1],
             dup_counter: 0,
+            classify_nway: false,
         };
         let a = grn(&flat_gradient(2, 4096), &spec);
         let b = grn(&flat_gradient(2, -4096), &spec);
@@ -620,6 +662,7 @@ mod tests {
             initial: vec![EXPR_MAX / 2, EXPR_MAX / 2],
             gene_ids: vec![0, 1],
             dup_counter: 0,
+            classify_nway: false,
         };
 
         let gradient = morphogen(&Genome::founder(1), &morph_spec);
@@ -806,5 +849,98 @@ mod tests {
                 .all(|id| *id >= (2 << 16) && *id < (3 << 16)),
             "dup_from_parent_1 ids must be in even higher range"
         );
+    }
+
+    // ── #247 classify-gen: N-way cell-type classification (gated) ──────────────────────────────
+
+    /// `classify_nway=false` must reproduce the EXACT pre-#247 argmax-of-2 for a grid of states,
+    /// including the tie→`Mixed` case and the below-2-genes fallback — byte-identical, so all 6
+    /// production goldens (which never set `classify_nway`) stay un-re-pinned.
+    #[test]
+    fn classifygen_default_byte_identical() {
+        assert_eq!(classify(&[], false), CellType::Mixed);
+        assert_eq!(classify(&[42], false), CellType::Mixed);
+        assert_eq!(classify(&[10, 5], false), CellType::A);
+        assert_eq!(classify(&[5, 10], false), CellType::B);
+        assert_eq!(classify(&[7, 7], false), CellType::Mixed);
+        // Extra genes beyond index 1 must be ignored on the `false` path (byte-identical to the
+        // pre-#247 signature, which never saw them at all).
+        assert_eq!(classify(&[10, 5, 999], false), CellType::A);
+        assert_eq!(classify(&[5, 10, -999], false), CellType::B);
+        assert_eq!(classify(&[7, 7, 1000], false), CellType::Mixed);
+    }
+
+    /// `classify_nway=true` deterministic tie-break: the LOWEST index among tied maxima wins.
+    #[test]
+    fn classifygen_argmax_tiebreak() {
+        assert_eq!(classify(&[10, 10, 10], true), CellType::Diff(0));
+        assert_eq!(classify(&[5, 10, 10, 3], true), CellType::Diff(1));
+        assert_eq!(classify(&[3, 3, 7, 7], true), CellType::Diff(2));
+        // A clean, non-tied argmax still resolves normally under the gate.
+        assert_eq!(classify(&[1, 2, 9, 0], true), CellType::Diff(2));
+        // Below 2 genes: same `Mixed` fallback as the `false` path, regardless of the gate.
+        assert_eq!(classify(&[], true), CellType::Mixed);
+        assert_eq!(classify(&[42], true), CellType::Mixed);
+    }
+
+    /// (F6) A HAND-BUILT `n_genes=3` spec with `classify_nway=true`, driven by 3 distinct gradient
+    /// positions engineered so a DIFFERENT gene argmaxes at each: no gene-to-gene coupling
+    /// (`weights` all zero) isolates each gene's state to `sigma(input_weights[j]*drive +
+    /// bias[j])`. Gene 0/2 are driven oppositely by the gradient (`input_weights = [50, 0, -50]`)
+    /// so an extreme-positive drive saturates gene 0 and an extreme-negative drive saturates gene
+    /// 2; gene 1 is drive-DEAD (`input_weights[1] = 0`) but carries a fixed bias edge
+    /// (`bias = [0, 1024, 0]`) that only wins at the neutral drive=0 position (where genes 0/2 sit
+    /// at the unbiased midpoint). Fails loudly (<3 distinct) if the argmax logic breaks.
+    #[test]
+    fn classifygen_nway_produces_ge3_types() {
+        let mut spec = GrnSpec::new(
+            3,
+            vec![0; 9],
+            vec![50, 0, -50],
+            vec![0, 1024, 0],
+            3,
+            4,
+            0,
+            0,
+            vec![128, 128, 128],
+        );
+        spec.classify_nway = true;
+        let gradient = Gradient { g_dev: 3, cells: vec![-8192, 0, 8192] };
+
+        let mut seen = std::collections::BTreeSet::new();
+        for x in 0..3 {
+            let mut s = spec.clone();
+            s.sample_x = x;
+            let (_state, ct, _steps) = grn_resolve(&gradient, &s);
+            match ct {
+                CellType::Diff(i) => {
+                    seen.insert(i);
+                }
+                other => panic!("expected a Diff(_) cell type under classify_nway=true, got {other:?}"),
+            }
+        }
+        assert!(seen.len() >= 3, "expected >=3 distinct Diff(_) types across the 3 gradient positions, got {seen:?}");
+    }
+
+    /// `classify_nway=true` must be exactly as deterministic as the `false` path (mirrors
+    /// `grn_is_deterministic_across_repeated_calls`).
+    #[test]
+    fn classifygen_determinism() {
+        let mut spec = GrnSpec::new(
+            3,
+            vec![0; 9],
+            vec![50, 0, -50],
+            vec![0, 1024, 0],
+            3,
+            4,
+            0,
+            0,
+            vec![128, 128, 128],
+        );
+        spec.classify_nway = true;
+        let gradient = Gradient { g_dev: 1, cells: vec![8192] };
+        let a = grn_resolve(&gradient, &spec);
+        let b = grn_resolve(&gradient, &spec);
+        assert_eq!(a, b, "same (gradient, spec) with classify_nway=true must produce byte-identical resolution");
     }
 }
