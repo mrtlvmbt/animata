@@ -592,6 +592,23 @@ impl Sim {
         self.world.resource::<ReproEvents>().stillbirths
     }
 
+    /// P-2a: combat_trait population statistics. Returns (max, count_positive, sum) for computing
+    /// mean = sum / population. Golden-NEUTRAL: read-only query, no state mutation.
+    pub fn combat_trait_stats(&mut self) -> (i32, u64, i64) {
+        let mut max = 0i32;
+        let mut count_positive = 0u64;
+        let mut sum = 0i64;
+        let mut q = self.world.query::<&Genome>();
+        for g in q.iter(&self.world) {
+            max = max.max(g.combat_trait);
+            if g.combat_trait > 0 {
+                count_positive += 1;
+                sum += g.combat_trait as i64;
+            }
+        }
+        (max, count_positive, sum)
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }
