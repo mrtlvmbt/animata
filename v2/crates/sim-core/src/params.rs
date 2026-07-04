@@ -1,7 +1,7 @@
 //! Run parameters. `EconParams` are the on-the-shore economy numbers (economy/01); they are a
 //! documented cargo-tunable contract (re-pinning the golden after a change is cheap). All integer.
 
-use crate::{GrnSpec, MergeStrategy, MorphogenSpec};
+use crate::{GrnSpec, MergeStrategy, MorphogenSpec, PredationSpec};
 use bevy_ecs::prelude::Resource;
 
 // ── C-slice death-recycling constants ────────────────────────────────────────────────────────────
@@ -211,6 +211,14 @@ pub struct EconParams {
     /// Photo-machinery expression cost denominator (D′-2a). Must be > 0. See `photo_cost_num`.
     pub photo_cost_den: i64,
 
+    // ── P-2a: predation economy (heritable combat_trait + encounter resolution) ────────────────
+    /// Predation configuration (P-2a). `Some` enables predation encounters: heritable `combat_trait`
+    /// mutation active, deterministic mean-field predation in `stage_predation`. `None` (default) →
+    /// predation inert, `combat_trait` stays 0 in all genomes, stage is a no-op → default_config/l3/
+    /// cprime/dprime trajectories remain byte-identical (the isolation gate; un-re-pinned existing
+    /// goldens are the test). Option-gated exactly like `light`/`mineral_layer` above.
+    pub predation: Option<PredationSpec>,
+
     // ── E-4a: ontogenesis chain opt-in (morphogen → GRN → cell fate) ────────────────────────────
     /// Morphogen reaction-diffusion spec (E-2). `Some` together with `grn` enables the full
     /// `decode` ontogenesis chain; `None` (default, all 5 existing configs) → `decode` stays the
@@ -300,6 +308,8 @@ impl Default for EconParams {
             // Calibrated at ≈9% of day income at threshold gain (NUM=1, DEN=16, n=2 → gain≥8).
             photo_cost_num: 1,
             photo_cost_den: 8,
+            // P-2a: predation OFF by default — None for all 6 existing configs.
+            predation: None,
             // E-4a: ontogenesis chain OFF by default — None for all 5 existing configs.
             morphogen: None,
             grn: None,

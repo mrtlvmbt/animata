@@ -754,6 +754,7 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         stage!("5_metabolism", stage_metabolism),
         stage!("6_interactions", stage_interactions),
         stage!("6b_mineral_feed", stage_mineral_feed),
+        stage!("6c_predation", stage_predation),
         stage!("7_birth_death", stage_birth_death),
         stage!("8_field_scatter", stage_field_scatter),
         stage!("9_observe", stage_observe),

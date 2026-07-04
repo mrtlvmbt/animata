@@ -235,6 +235,35 @@ pub fn phase2_config(seed: u64) -> SimConfig {
     }
 }
 
+/// P-2a predation config (L=3): substrate + organics + detritus (C′-1).
+///
+/// Adds predation encounters to the cprime base (the honest starting point after C′ closes the
+/// reducer niche). Predators = agents with `combat_trait > 0` (emergent from founders with 0).
+/// Encounters are deterministic mean-field (entity-id order, no RNG) with conservation-exact
+/// energy drainage. `detritus_layer=Some(1)` (C′) + `predation=Some(spec)` with efficiency=160
+/// (the P-1 fixture value — known to be conservative and deterministic).
+///
+/// Acceptance: conservation ledger residual == 0 every tick; no population collapse; emergence
+/// MEASURED but NOT tuned (honest null is a finding, like cprime's reducer NULL).
+pub fn predation_config(seed: u64) -> SimConfig {
+    SimConfig {
+        n_layers: 3,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L2_DETRITUS_SPEC, LayerSpec::default()],
+        econ: EconParams {
+            detritus_layer: Some(2),
+            detritus_frac_num: 256, // RECYCLE_DEN = 256 → frac=1.0 full-replace (bootstrap)
+            // P-2a: predation enabled with P-1 fixture parameters (known-conservative spec).
+            predation: Some(sim_core::PredationSpec {
+                bite_shift: 3,             // base bite ≈ prey_energy / 8
+                combat_trait_scale: 1,     // moderate trait influence
+                efficiency_num: 160,       // ~62% efficiency (160/256) — P-1 fixture value
+            }),
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from

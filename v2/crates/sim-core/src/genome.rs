@@ -101,6 +101,14 @@ pub struct Genome {
     /// genomes carry it at 0 forever → 4 existing goldens byte-identical. Range `[−max, +max]`.
     pub reg_gain: i32,
 
+    // ── P-2a: predation combat trait (heritable niche) ─────────────────────────────────────────
+    /// Combat strength locus — the real predation trait decoupled from `size` (P-2a). Range [0, 32];
+    /// founders = 0 (predation is emergent, not ancestral). Mutated ±1 clamped under a DISTINCT salt
+    /// (`SALT_COMBAT`), drawn only when `config.predation.is_some()` — non-predation configs stay
+    /// byte-identical (mutation gate prevents draw, hash gate prevents state inclusion).
+    /// Read by P-1 substrate `resolve_encounter` via `PredationSpec` mapping (P-2a wires it in).
+    pub combat_trait: i32,
+
     // ── V-1: heritable + point-mutable indirect genome (the differentiation PROGRAM) ────────────
     /// The GRN regulatory spec — heritable, per-individual, point-mutated by [`Genome::mutate`].
     /// `None` for the five non-phase2 configs (`EconParams.grn` stays `None` there too — `decode`
@@ -215,6 +223,8 @@ impl Genome {
             // are equidistant from the founder; evolution discovers direction (F7 — no hardcode).
             reg_setpoint: 50,
             reg_gain: 0,
+            // P-2a: combat_trait founder = 0, predation is emergent (not ancestral).
+            combat_trait: 0,
             // Test-only E-1/E-4 injection flag — always false in production.
             #[cfg(test)]
             force_decode_none: false,
@@ -249,7 +259,9 @@ impl Genome {
     /// keeping existing goldens byte-identical.
     /// `reg_gain_max` clamps the reg-gain range to `[−reg_gain_max, +reg_gain_max]` (D′-2b).
     /// Set `reg_gain_max = 0` to lock regulation OFF — reg_gain stays 0 (the D′-2c control line).
-    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32) -> Genome {
+    /// `has_predation` gates the `combat_trait` mutation (P-2a): when `false`, combat_trait stays 0,
+    /// non-predation genomes never carry a non-zero combat_trait, keeping existing goldens byte-identical.
+    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool) -> Genome {
         let mut g = self.clone();
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -301,6 +313,17 @@ impl Genome {
             if (r_gn & 0xFF) < self.mutation_rate as u64 {
                 let delta = ((r_gn >> 8) % 3) as i32 - 1;
                 g.reg_gain = (g.reg_gain + delta).clamp(-reg_gain_max, reg_gain_max);
+            }
+        }
+
+        // P-2a: combat_trait mutates only when predation is enabled. Salt 0x434F_4D42 ("COMB").
+        // Same ±1 pattern as the six Ф0 traits. Non-predation configs: combat_trait stays 0,
+        // existing goldens byte-identical (mutation gate prevents draw, hash gate prevents state).
+        if has_predation {
+            let r = seed_fold(stream, &[0x434F_4D42u64]);
+            if (r & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
+                g.combat_trait = (g.combat_trait + delta).clamp(0, 32);
             }
         }
 
@@ -489,6 +512,12 @@ impl Genome {
             h = fnv_mix(h, self.reg_setpoint as u64);
             h = fnv_mix(h, self.reg_gain as u64);
         }
+        // P-2a: fold combat_trait ONLY when non-zero (same pattern as photo_gain and reg_gain).
+        // Non-predation configs: combat_trait always 0 → not folded → checksums undisturbed,
+        // existing goldens byte-identical. Predation configs: combat_trait>0 → folded (locked).
+        if self.combat_trait != 0 {
+            h = fnv_mix(h, self.combat_trait as u64);
+        }
         // V-1: fold the heritable GRN/morphogen spec by INTEGER CONTENTS, in a FIXED field order —
         // exactly like the existing i32 traits above, never the `Arc` pointer (CoW sharing is
         // transparent to the hash; two lineages with byte-identical spec CONTENTS hash the same
@@ -554,9 +583,9 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2, false, 4), g.mutate(123, 2, false, 4));
+        assert_eq!(g.mutate(123, 2, false, 4, false), g.mutate(123, 2, false, 4, false));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, false, 4);
+            let m = g.mutate(s, 2, false, 4, false);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
@@ -567,19 +596,19 @@ mod tests {
         }
         // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 4);
+            let m = g.mutate(s, 2, true, 4, false);
             assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
             assert!((-4..=4).contains(&m.reg_gain), "reg_gain must be in [-reg_gain_max, +reg_gain_max]");
         }
         // reg_gain_max=0 locks regulation OFF even when has_light=true.
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 0);
+            let m = g.mutate(s, 2, true, 0, false);
             assert_eq!(m.reg_gain, 0, "reg_gain must stay 0 when reg_gain_max=0 (D′-2c lock)");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1, false, 0);
+        let m1 = g1.mutate(0, 1, false, 0, false);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }
@@ -598,7 +627,7 @@ mod tests {
         }
         // Also holds for a mutated genome.
         let g = Genome::founder(2);
-        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4);
+        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false);
         assert_eq!(mutated.decode(&EconParams::default()), mutated.decode(&EconParams::default()), "decode deterministic on mutated genome");
     }
 
@@ -621,7 +650,7 @@ mod tests {
             "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
         // Also for mutated genome — projection stays 1:1 regardless of trait value.
         for s in 0..50u64 {
-            let m = g.mutate(s, 2, false, 0);
+            let m = g.mutate(s, 2, false, 0, false);
             let mph = m.decode(&EconParams::default()).expect("mutated Ф0 must decode to Some");
             assert_eq!(mph.uptake_layer, m.uptake_layer,
                 "1:1 projection must hold after mutation (seed={s})");
@@ -658,14 +687,14 @@ mod tests {
             "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
 
         // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
-        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0);
+        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false);
         assert!(mutated_child.force_decode_none,
             "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
         assert!(mutated_child.decode(&EconParams::default()).is_none(),
             "inherited flag: child decode() also returns None (lineage-level stillbirth)");
 
         // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
-        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0);
+        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false);
         assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
         assert!(normal_child.decode(&EconParams::default()).is_some(), "normal child decode() must return Some");
     }

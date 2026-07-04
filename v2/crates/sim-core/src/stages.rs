@@ -473,6 +473,126 @@ pub fn stage_mineral_feed(
     }
 }
 
+// ── Stage 6c: Predation — deterministic mean-field encounters (P-2a). ──────────────────────────────
+// P-2a WIRE: predation-substrate encounters (P-1, conservation-exact, deterministic). Contacts
+// predators and prey within each cell, deterministic entity-id order, energy conservation guaranteed
+// by `resolve_encounter` invariant. No-op when `config.predation` is None.
+//
+// Determinism (R14): entity-id single-writer ordering, no RNG, mean-field aggregate prey energy.
+// Conservation (R15): predator_gain + dissipated == prey_loss ≤ prey energy (exact integer).
+// Combat trait (P-2a semantic mapping): read from `Genome::combat_trait`, passed via `PredationSpec`.
+pub fn stage_predation(
+    econ: Res<EconParams>,
+    mut ledger: ResMut<EnergyLedger>,
+    field: ResMut<FieldRes>,  // C′: dead prey → detritus or substrate (currently unused in P-2a)
+    mut q: Query<(Entity, &Position, &mut Energy, &Genome)>,
+    mut commands: Commands,
+    #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
+) {
+    // Early exit: no predation configured → stage is a no-op (byte-identical).
+    let spec = match &econ.predation {
+        Some(s) => s,
+        None => return,
+    };
+
+    use crate::predation::resolve_encounter;
+
+    // Gather all entities with their combat_trait, sorted by id.
+    let mut entity_list: Vec<(u64, Entity, Vec2Fixed, i32)> = q.iter()
+        .map(|(e, pos, _, g)| (e.to_bits(), e, pos.0, g.combat_trait))
+        .collect();
+    entity_list.sort_unstable_by_key(|x| x.0);
+
+    // Group by cell, separating predators from prey candidates.
+    let mut cells: std::collections::BTreeMap<usize, (Vec<(u64, Entity, i32)>, Vec<(u64, Entity, i32)>)> =
+        std::collections::BTreeMap::new();
+    for (bits, e, pos, combat) in entity_list {
+        let cell_idx = field.0.cell_index(pos);
+        let entry = cells.entry(cell_idx).or_insert((Vec::new(), Vec::new()));
+        if combat > 0 {
+            entry.0.push((bits, e, combat));
+        } else {
+            entry.1.push((bits, e, combat));
+        }
+    }
+
+    // Process each cell.
+    for (_cell, (mut predators, prey_candidates)) in cells {
+        if predators.is_empty() {
+            continue; // no predators in this cell
+        }
+
+        // Sort predators by entity-id (deterministic processing order).
+        predators.sort_unstable_by_key(|x| x.0);
+
+        // Process each predator in entity-id order.
+        for (_pred_bits, pred_e, pred_combat) in predators {
+            #[cfg(feature = "perf")]
+            { wc.birth_death_iters += 1; }
+
+            // Build prey pool: candidates with strictly lower combat_trait.
+            let prey_pool: Vec<(u64, Entity, i32)> = prey_candidates.iter()
+                .filter(|(_, _, prey_combat)| *prey_combat < pred_combat)
+                .cloned()
+                .collect();
+
+            if prey_pool.is_empty() {
+                continue; // no valid prey for this predator
+            }
+
+            // Aggregate prey current energy (read without mutable borrow).
+            let prey_energy_agg: i64 = prey_pool.iter().map(|(_, prey_e, _)| {
+                q.get(*prey_e).map(|(_, _, energy, _)| energy.0.max(0)).unwrap_or(0)
+            }).sum();
+
+            // Get predator genome for encounter resolution.
+            let pred_genome = {
+                match q.get(pred_e) {
+                    Ok((_, _, _, genome)) => genome.clone(),
+                    Err(_) => continue,
+                }
+            };
+
+            // Resolve encounter: wire combat_trait as the predator's "strength".
+            let mut pred_genome_for_encounter = pred_genome;
+            pred_genome_for_encounter.size = pred_combat;
+            let outcome = resolve_encounter(&pred_genome_for_encounter, prey_energy_agg, spec);
+
+            // Drain prey_loss from prey in entity-id order, handling deaths.
+            let mut remaining_loss = outcome.prey_loss;
+            for (_, prey_e, _) in &prey_pool {
+                if remaining_loss <= 0 {
+                    break;
+                }
+
+                // Get prey's current energy.
+                let prey_current = q.get(*prey_e).map(|(_, _, energy, _)| energy.0).unwrap_or(0);
+                let drained = prey_current.min(remaining_loss);
+                remaining_loss -= drained;
+
+                // Apply drainage.
+                if let Ok((_, _, mut prey_energy, _)) = q.get_mut(*prey_e) {
+                    prey_energy.0 -= drained;
+
+                    // If prey dies, handle death routing (C′ pattern).
+                    if prey_energy.0 <= 0 {
+                        // At death, energy=0, recycled=0 (no detritus from dead prey here).
+                        // Mark for despawn.
+                        commands.entity(*prey_e).despawn();
+                        ledger.lost += prey_energy.0.max(0); // 0
+                    }
+                }
+            }
+
+            // Apply predator gain.
+            if let Ok((_, _, mut pred_energy, _)) = q.get_mut(pred_e) {
+                pred_energy.0 = (pred_energy.0 + outcome.predator_gain).max(0);
+            }
+            ledger.dissipated += outcome.dissipated;
+        }
+    }
+}
+
 // ── Stage 7: BirthDeath — division (energy split) + death, via the command buffer (sync point). ────
 // D′-3a additions: Liebig AND-gate on division (quota ≥ q_mineral), overflow-heat when energy-ready
 // but mineral-poor (ONE site, same sorted loop), and mineral quota recycled on death.
@@ -621,7 +741,7 @@ pub fn stage_birth_death(
             }
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max);
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some());
             let species_c = *species;
 
             // E-1/E-5a/E-5b: decode-seam gate. Ф0 always returns Some; the five existing configs
