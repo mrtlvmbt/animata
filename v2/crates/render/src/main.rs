@@ -11,14 +11,19 @@
 //! R-4 (merged #227): creatures Tier-1 LOD — px_per_m-driven point/sphere/morphology tiers; snapshot
 //! fields `size`/`uptake_layer`; consume R-3 dead-code warnings (render crate out of CI, local verify).
 //!
-//! R-5 (this slice): cube-voxel toggle — a second terrain mesh builder (square columns vs hex prisms),
+//! R-5 (merged #228): cube-voxel toggle — a second terrain mesh builder (square columns vs hex prisms),
 //! runtime key to switch hex↔cube, creature projection follows active layout. Golden-NEUTRAL (render-only).
 //!
-//! OUT of scope here (later R-slices): full HUD/inspector/minimap (R-6).
+//! R-6 (this slice): ProcgenWorld wiring — switches from the legacy `NoiseWorld` (f64 sin, arch-divergent)
+//! to the full integer pipeline (W-1..W-6 reliefs + erosion + biome/edaphic + resource caps), enabling
+//! hex-voxel visualization of the NOW-LIVE rich procedurally-generated world. Neutral read-only snapshot
+//! consumer (render builds the same world the sim uses, no mutation path).
+//!
+//! OUT of scope here (later R-slices): full HUD/inspector/minimap (R-7).
 //!
 //! Not part of the v2 CI workspace (`v2/Cargo.toml`'s `exclude`) — a leaf bin, verified LOCALLY:
-//! `cargo build`/`cargo clippy` from this directory + a manual run (window opens, hex terrain +
-//! creature dots visible, HUD counts advance).
+//! `cargo build`/`cargo clippy` from this directory + a manual run (window opens, ProcgenWorld hex
+//! terrain + creature morphologies visible, HUD counts advance, T-key toggles cube terrain).
 
 mod biome_palette;
 mod camera;
@@ -57,17 +62,17 @@ fn window_conf() -> Conf {
 /// generates).
 const SEED: u64 = 0xA11A_2A11;
 
-// ── Pinned-param contract (critic F3, issue #223 acceptance; R-3 footgun fix) ────────────────────────
+// ── Pinned-param contract (W-6 WIRE: ProcgenWorld; critic F3, issue #223 acceptance; R-6) ──────────
 //
-// The render's `WorldView` MUST resolve to the SAME terrain the sim worker runs on. `NoiseWorld` is a
-// pure function of `(world_dim, hmax, seed)` — `cli::build_sim` constructs it as
-// `NoiseWorld::new(econ.world_dim, HMAX, RESOURCE_BASE, config.seed ^ WORLD_SALT)` (`cli/src/lib.rs`).
-// `HMAX`/`WORLD_SALT` are now `pub` in `cli`, so this file IMPORTS them directly from `cli` rather
-// than duplicating literals. This removes the R-2 footgun where changing `cli`'s consts would silently
-// diverge the rendered terrain from the sim's. `RESOURCE_BASE` is NOT mirrored: `NoiseWorld::height`/
-// `biome`/`is_solid` (the only methods render reads) do not depend on it (only `resource()` does, which
-// the render never calls) — see `world/src/lib.rs`. The values come from `cli::HMAX` and
-// `cli::WORLD_SALT` (visible below as imports).
+// The render's `WorldView` MUST resolve to the SAME terrain the sim worker runs on. `ProcgenWorld` is
+// a pure function of `(world_dim, hmax, resource_base, seed)` — `cli::build_sim` constructs it as
+// `ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT)` (`cli/src/lib.rs`).
+// W-6 wiring makes `HMAX`, `RESOURCE_BASE`, `WORLD_SALT` all `pub` in `cli`, so this file IMPORTS them
+// directly from `cli` rather than duplicating literals. This ensures the render's world matches the sim's
+// — no divergence via stale consts (the R-2 footgun this contract guards). The three-const triple
+// (`HMAX`, `RESOURCE_BASE`, `WORLD_SALT`) are load-bearing for deterministic world gen.
+// (`HMAX`=relief spread, `RESOURCE_BASE`=cap rescale magnitude for biome+edaphic-driven richness,
+// `WORLD_SALT`=seed permutation).
 
 #[macroquad::main(window_conf)]
 async fn main() {
@@ -81,11 +86,12 @@ async fn main() {
     let config = cli::default_config(SEED);
     let world_dim = config.econ.world_dim;
 
-    // The render's OWN WorldView, built ONCE from the SAME (dim, hmax, seed) triple the sim worker
-    // uses — the single source of provenance the pinned-param contract above requires. `resource_base`
-    // is unused by the methods read below, so `0` is a documented don't-care (see the contract note).
-    // R-3 footgun fix: use `cli::HMAX` and `cli::WORLD_SALT` directly (now pub).
-    let world = world::NoiseWorld::new(world_dim, cli::HMAX, 0, config.seed ^ cli::WORLD_SALT);
+    // The render's OWN WorldView, built ONCE from the SAME (dim, hmax, resource_base, seed) tuple the
+    // sim worker uses — the single source of provenance the pinned-param contract above requires.
+    // W-6 WIRE: use `cli::HMAX`, `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The
+    // ProcgenWorld pipeline (integer relief + erosion + biome/edaphic + caps) runs once here and caches
+    // all per-cell fields (height, biome, resource, etc.) — never re-run per frame or per query.
+    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT);
     let hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world);
     let cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world);
 
