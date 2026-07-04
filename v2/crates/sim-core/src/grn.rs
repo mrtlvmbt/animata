@@ -44,12 +44,29 @@ pub enum CellType {
     Mixed,
 }
 
+/// V-3-a: Lineage gene-identifier type. Each gene in a GrnSpec carries a unique, injective,
+/// lineage-derived identifier that supports present base genes (dense 0..n_genes-1) and future
+/// duplicated genes (encoded as parent_gene_id + duplication-counter-derived index). This type
+/// encodes the mapping: for a base gene at index `i`, the id is simply `i`; for future
+/// V-3-b/c duplications, the id will be a compact (parent_id, dup_index) pair. In V-3-a,
+/// all genomes are founders with no duplication, so gene_ids = vec![0, 1, ..., n_genes-1]
+/// exactly (recomputable from n_genes, so NOT hashed separately).
+pub type GeneId = u32;
+
 /// Production GRN configuration — regulatory matrix, gradient sample position, step policy, and the
 /// initial network state. NOT `#[cfg(test)]`: E-3 instantiates this with a test *value*; E-4 reuses
 /// the *type* unchanged when it wires the GRN into `decode` (mirrors E-2's `MorphogenSpec` / F9).
+///
+/// **V-3-a:** Length is self-describing — `n_genes` is the ground truth that determines the
+/// dimensions of all matrix and vector fields (weights, input_weights, bias, initial, gene_ids).
+/// Decode reads the network by `n_genes` (no hardcoded matrix size); the length is data that
+/// evolves via V-3-b/c operators (duplication/indel), not a schema version (which only changes
+/// if the decode ALGORITHM changes, not if individual genomes grow or shrink).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GrnSpec {
     /// Gene count (state dimension). Ф0 fixtures use 2 (the canonical bistable toggle-switch motif).
+    /// V-3-a: all founders/existing genomes have fixed n_genes (no variable-length operators yet).
+    /// Future V-3-b/c will allow n_genes to grow/shrink via duplication/indel.
     pub n_genes: usize,
     /// Regulatory matrix, row-major `n_genes × n_genes`: `weights[j*n_genes+k]` is gene `k`'s
     /// influence on gene `j`'s next state.
@@ -70,6 +87,20 @@ pub struct GrnSpec {
     /// `GrnSpec` values (same matrix, same gradient) is how the multistability tooth drives the
     /// dynamics from "≥2 different initial network states".
     pub initial: Vec<i32>,
+    /// **V-3-a:** Lineage-derived gene identifiers (one per gene). Parallel to the genes in the
+    /// network (length = n_genes). For base/founder genes, gene_ids[i] = i (deterministic,
+    /// recomputable from n_genes). For V-3-b/c duplications, gene_ids[i] will encode the
+    /// (parent_gene_id, dup_index) pair injectively, so no two genes collide by construction.
+    /// This field supports homology detection during alignment (via id matching) and future
+    /// recombination/sexual reproduction (§4 / #41). In V-3-a, all genomes are founders, so
+    /// gene_ids is deterministically 0..n_genes-1; not hashed separately (recomputable).
+    pub gene_ids: Vec<GeneId>,
+    /// **V-3-a:** Monotonic per-genome duplication-event counter (cold field). Incremented by
+    /// the duplication operator (V-3-b) to generate unique dup_index values; used to encode
+    /// derived gene ids as (parent_id, dup_index). In V-3-a, all founders/existing genomes
+    /// have dup_counter = 0 (no duplications yet). Only folded into hash_contribution when
+    /// dup_counter != 0 (gated pattern: preserves byte-identity for all V-3-a genomes).
+    pub dup_counter: u32,
 }
 
 impl GrnSpec {
@@ -82,6 +113,9 @@ impl GrnSpec {
     /// `n_genes < 2` (below that, `classify`'s A/B split is meaningless — see `grn.rs`'s
     /// `classify_is_panic_safe_below_two_genes` for the *runtime* fallback this constructor exists
     /// to make unreachable in practice).
+    ///
+    /// **V-3-a:** automatically synthesizes `gene_ids = 0..n_genes` (base genes) and `dup_counter = 0`
+    /// (no duplications yet). These fields are infrastructure for V-3-b/c variable-length operators.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         n_genes: usize,
@@ -111,7 +145,21 @@ impl GrnSpec {
             initial.len(), n_genes,
             "GrnSpec::new: initial.len() ({}) must equal n_genes ({n_genes})", initial.len()
         );
-        GrnSpec { n_genes, weights, input_weights, bias, shift, max_steps, sample_x, sample_z, initial }
+        // V-3-a: base genes = dense range 0..n_genes (injective by construction, recomputable).
+        let gene_ids = (0..n_genes as GeneId).collect();
+        GrnSpec {
+            n_genes,
+            weights,
+            input_weights,
+            bias,
+            shift,
+            max_steps,
+            sample_x,
+            sample_z,
+            initial,
+            gene_ids,
+            dup_counter: 0, // V-3-a: no duplications yet (founder genomes).
+        }
     }
 }
 
@@ -290,6 +338,8 @@ mod tests {
             sample_x: 0,
             sample_z: 0,
             initial,
+            gene_ids: vec![0, 1],
+            dup_counter: 0,
         }
     }
 
@@ -373,6 +423,8 @@ mod tests {
             sample_x: 0,
             sample_z: 0,
             initial: vec![EXPR_MAX / 2, EXPR_MAX / 2], // fixed, neutral start
+            gene_ids: vec![0, 1],
+            dup_counter: 0,
         };
         let hi = grn(&flat_gradient(2, sample_value_hi()), &spec());
         let lo = grn(&flat_gradient(2, sample_value_lo()), &spec());
@@ -405,6 +457,8 @@ mod tests {
             sample_x: 0,
             sample_z: 0,
             initial: vec![EXPR_MAX, 0],
+            gene_ids: vec![0, 1],
+            dup_counter: 0,
         }
     }
 
@@ -457,6 +511,8 @@ mod tests {
             sample_x: 0,
             sample_z: 0,
             initial: vec![EXPR_MAX, 0],
+            gene_ids: vec![0, 1],
+            dup_counter: 0,
         };
         let grad = flat_gradient(2, i32::MAX);
         let a = grn_resolve(&grad, &spec);
@@ -480,6 +536,8 @@ mod tests {
             sample_x: 0,
             sample_z: 0,
             initial: vec![EXPR_MAX],
+            gene_ids: vec![0],
+            dup_counter: 0,
         };
         let out = step(&[EXPR_MAX], i32::MAX as i64, &spec);
         // The clamped accumulator is `acc_bound(1)` (positive ceiling) — sigma of that (deep positive)
@@ -510,6 +568,8 @@ mod tests {
             sample_x: 0,
             sample_z: 0,
             initial: vec![EXPR_MAX / 2, EXPR_MAX / 2],
+            gene_ids: vec![0, 1],
+            dup_counter: 0,
         };
         let a = grn(&flat_gradient(2, 4096), &spec);
         let b = grn(&flat_gradient(2, -4096), &spec);
@@ -554,6 +614,8 @@ mod tests {
             sample_x: x,
             sample_z: z,
             initial: vec![EXPR_MAX / 2, EXPR_MAX / 2],
+            gene_ids: vec![0, 1],
+            dup_counter: 0,
         };
 
         let gradient = morphogen(&Genome::founder(1), &morph_spec);
@@ -587,5 +649,154 @@ mod tests {
         };
         let gradient = morphogen(&Genome::founder(1), &spec);
         let _ = grn(&gradient, &bistable_spec(vec![EXPR_MAX, 0]));
+    }
+
+    // ── V-3-a: gene-id infrastructure (lineage, injectivity, determinism) ────────────────────────
+
+    /// V-3-a: Base genes must have injective, dense ids in the range 0..n_genes-1.
+    #[test]
+    fn v3a_gene_ids_are_dense_base_range() {
+        let spec = bistable_spec(vec![EXPR_MAX, 0]);
+        assert_eq!(spec.n_genes, 2, "bistable fixture must have n_genes=2");
+        assert_eq!(spec.gene_ids, vec![0, 1], "base genes must have dense ids 0..n_genes-1");
+    }
+
+    /// V-3-a: Gene-ids are injective (no duplicates). In V-3-a, all genomes are founders,
+    /// so ids = 0..n_genes-1 exactly, which is injective by construction.
+    #[test]
+    fn v3a_gene_ids_are_injective_no_duplicates() {
+        let spec = GrnSpec::new(
+            4,
+            vec![1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+            vec![0, 0, 0, 0],
+            vec![0, 0, 0, 0],
+            3,
+            8,
+            0,
+            0,
+            vec![128, 128, 128, 128],
+        );
+        assert_eq!(spec.gene_ids.len(), 4, "gene_ids must have length n_genes");
+        let mut sorted = spec.gene_ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            spec.gene_ids.len(),
+            "gene_ids must be unique (injective)"
+        );
+        assert_eq!(
+            spec.gene_ids,
+            vec![0, 1, 2, 3],
+            "base genes must be exactly 0..n_genes-1 in order"
+        );
+    }
+
+    /// V-3-a: dup_counter defaults to 0 for all founders/existing genomes. Incremented only by
+    /// V-3-b duplication operator; V-3-a touches nothing.
+    #[test]
+    fn v3a_dup_counter_defaults_to_zero() {
+        let spec1 = bistable_spec(vec![EXPR_MAX, 0]);
+        assert_eq!(spec1.dup_counter, 0, "founder genome must have dup_counter=0 (no duplications yet)");
+
+        let spec2 = GrnSpec::new(
+            3,
+            vec![0; 9],
+            vec![0; 3],
+            vec![0; 3],
+            3,
+            8,
+            0,
+            0,
+            vec![100; 3],
+        );
+        assert_eq!(
+            spec2.dup_counter, 0,
+            "any newly-constructed spec must have dup_counter=0"
+        );
+    }
+
+    /// V-3-a: Gene-ids are reproducible — the same n_genes value produces the same id sequence
+    /// across multiple builds/runs (deterministic, not dependent on RNG or runtime state).
+    #[test]
+    fn v3a_gene_ids_are_reproducible_from_n_genes() {
+        let spec_a = GrnSpec::new(
+            5,
+            vec![0; 25],
+            vec![0; 5],
+            vec![0; 5],
+            3,
+            8,
+            0,
+            0,
+            vec![100; 5],
+        );
+        let spec_b = GrnSpec::new(
+            5,
+            vec![1; 25],
+            vec![2; 5],
+            vec![3; 5],
+            4,
+            16,
+            1,
+            2,
+            vec![50; 5],
+        );
+        assert_eq!(
+            spec_a.gene_ids, spec_b.gene_ids,
+            "two specs with the same n_genes must have identical gene_ids (recomputable)"
+        );
+        assert_eq!(spec_a.gene_ids, vec![0, 1, 2, 3, 4], "gene_ids are determined solely by n_genes");
+    }
+
+    /// V-3-a: Future V-3-b duplication encoding is injective. This is a proof-of-concept:
+    /// we demonstrate that a synthetic duplication scheme (parent_id, dup_index) can be encoded
+    /// injectively. V-3-a uses it nowhere (no operator yet); V-3-b will use it.
+    /// The encoding: base genes stay as 0..n_genes-1. A duplicated gene from parent p with
+    /// dup_event_counter d encodes as ((p + 1) << 16) | d, which is injective:
+    /// - Base genes occupy [0, n_genes), always ≤ 2^16 (well under 1 << 16)
+    /// - Duplication ids occupy [1 << 16, ∞), starting where base genes cannot reach
+    /// - Within each parent's dup_index space, ids are unique because parent is encoded in high bits
+    #[test]
+    fn v3a_future_duplication_encoding_is_injective() {
+        // Base genes n_genes=2: ids are 0, 1
+        let base_0: u32 = 0;
+        let base_1: u32 = 1;
+
+        // Synthetic future duplications (V-3-b will compute these; V-3-a only demonstrates injectivity):
+        // parent=0, dup_event_counters 1..5 => ids ((0+1) << 16) | 1..5 = 65536+1..65536+5
+        // parent=1, dup_event_counters 1..5 => ids ((1+1) << 16) | 1..5 = 131072+1..131072+5
+        let dup_from_parent_0: Vec<u32> = (1..=5).map(|d| ((0 + 1) << 16) | d).collect();
+        let dup_from_parent_1: Vec<u32> = (1..=5).map(|d| ((1 + 1) << 16) | d).collect();
+
+        let mut all_ids = vec![base_0, base_1];
+        all_ids.extend(&dup_from_parent_0);
+        all_ids.extend(&dup_from_parent_1);
+
+        let mut sorted = all_ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            all_ids.len(),
+            "all synthetic ids must be unique (injective encoding)"
+        );
+
+        // Verify the ranges don't overlap:
+        // Base: [0, 2)
+        // Dup from parent 0: [65536+1, 65536+6)
+        // Dup from parent 1: [131072+1, 131072+6)
+        assert!(
+            dup_from_parent_0
+                .iter()
+                .all(|id| *id >= (1 << 16) && *id < (2 << 16)),
+            "dup_from_parent_0 ids must be in distinct high-bit range"
+        );
+        assert!(
+            dup_from_parent_1
+                .iter()
+                .all(|id| *id >= (2 << 16) && *id < (3 << 16)),
+            "dup_from_parent_1 ids must be in even higher range"
+        );
     }
 }
