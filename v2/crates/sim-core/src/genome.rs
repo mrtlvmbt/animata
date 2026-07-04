@@ -138,6 +138,10 @@ pub struct CellGraph {
     pub module_type: Vec<CellType>,
     /// Per-module cell count (indexed by ModuleId).
     pub module_cell_count: Vec<i32>,
+    /// M7-c: per-module germ/soma marker (indexed by ModuleId). `germ_threshold=None` (every
+    /// shipped spec) leaves this `vec![false; n_modules]` — all-soma/unmarked, byte-identical to
+    /// M7-b. `Some(t)`: `module_is_germ[mid] == (module_cell_count[mid] <= t)`.
+    pub module_is_germ: Vec<bool>,
 }
 
 impl CellGraph {
@@ -147,6 +151,7 @@ impl CellGraph {
             g_dev: 0,
             module_type: Vec::new(),
             module_cell_count: Vec::new(),
+            module_is_germ: Vec::new(),
         }
     }
 
@@ -161,7 +166,12 @@ impl CellGraph {
     /// `idx = z*g_dev + x`, so compacting would shift indices and corrupt labeling) and are skipped
     /// by both union-find and module collection: a dead cell is never a union representative, never
     /// unioned with a neighbor, and contributes to no module.
-    pub fn from_gradient(gradient: &crate::morphogen::Gradient, gspec: &GrnSpec, apoptosis_threshold: Option<i32>) -> Self {
+    pub fn from_gradient(
+        gradient: &crate::morphogen::Gradient,
+        gspec: &GrnSpec,
+        apoptosis_threshold: Option<i32>,
+        germ_threshold: Option<i32>,
+    ) -> Self {
         let g_dev = gradient.g_dev;
         let n_cells = g_dev * g_dev;
 
@@ -265,10 +275,21 @@ impl CellGraph {
             module_cell_count[mid] += 1;
         }
 
+        // 4. M7-c germ/soma labeling — runs AFTER module collection (needs `module_cell_count`),
+        // on LIVE modules only (dead cells already excluded by Steps 1-3, so germ/soma is
+        // orthogonal to apoptosis). `germ_threshold: None` (every shipped spec) ⇒ all-`false`,
+        // byte-identical to M7-b. `Some(t)` (F4, PINNED — module-level integer, no float, no
+        // morphogen re-traversal): a module is GERM iff its cell count `<= t` (small=germ, large=soma).
+        let module_is_germ: Vec<bool> = match germ_threshold {
+            Some(t) => module_cell_count.iter().map(|&count| count <= t).collect(),
+            None => vec![false; module_type.len()],
+        };
+
         CellGraph {
             g_dev,
             module_type,
             module_cell_count,
+            module_is_germ,
         }
     }
 
@@ -799,7 +820,9 @@ impl Genome {
                 // This is cold-derived and prod-inert (never consumed in M7-a/M7-b).
                 // M7-b: apoptosis_threshold=None on every shipped spec ⇒ the pass never marks a
                 // cell dead ⇒ byte-identical to M7-a for all 6 prod configs (golden-NEUTRAL).
-                let g = CellGraph::from_gradient(&gradient, gspec, mspec.apoptosis_threshold);
+                // M7-c: germ_threshold=None on every shipped spec ⇒ module_is_germ stays all-false
+                // ⇒ byte-identical to M7-b for all 6 prod configs (golden-NEUTRAL).
+                let g = CellGraph::from_gradient(&gradient, gspec, mspec.apoptosis_threshold, mspec.germ_threshold);
                 (Some(ct), g)
             }
             _ => (None, CellGraph::empty()), // E-1 trivial projection: no non-phase2 founder is ever seeded with both specs
@@ -925,6 +948,14 @@ impl Genome {
             // M7-b: apoptosis_threshold folded Some-gated (mirrors dup_counter above) — `None` on
             // every shipped spec contributes nothing, so all 6 prod goldens stay byte-identical.
             if let Some(t) = mspec.apoptosis_threshold {
+                h = fnv_mix(h, t as u64);
+            }
+            // M7-c: germ_threshold folded Some-gated (mirrors apoptosis_threshold above) — `None`
+            // on every shipped spec contributes nothing, so all 6 prod goldens stay byte-identical.
+            // `module_is_germ` VALUES are not separately folded (mirrors module_type/
+            // module_cell_count, which are not folded either — Phenotype/CellGraph stays a cold,
+            // un-hashed derivative; see the `hash_contribution` doc above).
+            if let Some(t) = mspec.germ_threshold {
                 h = fnv_mix(h, t as u64);
             }
         }
@@ -1090,6 +1121,7 @@ mod tests {
             seed_scale: 4096,
             stop_threshold: 0,
             apoptosis_threshold: None,
+            germ_threshold: None,
         };
         let gspec = GrnSpec {
             n_genes: 2,
@@ -1147,6 +1179,7 @@ mod tests {
             seed_scale: 4096,
             stop_threshold: 0,
             apoptosis_threshold: None,
+            germ_threshold: None,
         };
         // Flipped-corner bistable fixture (mirrors grn.rs's, initial swapped) → resolves to B.
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 256]);
@@ -1180,6 +1213,7 @@ mod tests {
             seed_scale: 4096,
             stop_threshold: 0,
             apoptosis_threshold: None,
+            germ_threshold: None,
         };
         // grn_spec stays None — only morphogen_spec attached.
         let g = Genome::founder(2).with_specs(None, Some(mspec));
@@ -1226,6 +1260,7 @@ mod tests {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
+            germ_threshold: None,
         }
     }
 
@@ -1389,6 +1424,7 @@ mod tests {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
+            germ_threshold: None,
         };
         let gspec = m7a_dead_drive_gspec();
 
@@ -1410,6 +1446,7 @@ mod tests {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
+            germ_threshold: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1434,6 +1471,7 @@ mod tests {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
+            germ_threshold: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1487,6 +1525,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0,
             apoptosis_threshold,
+            germ_threshold: None,
         }
     }
 
@@ -1690,6 +1729,141 @@ mod tests {
         assert_eq!(ph.graph.num_modules(), 0);
     }
 
+    // ── M7-c: germ/soma split (golden-NEUTRAL) ──────────────────────────────────────────────────
+    //
+    // Adds a module-level germ/soma marker computed AFTER Step 3 (module collection): a LIVE
+    // module is GERM iff `module_cell_count[mid] <= germ_threshold` (small=germ, large=soma) —
+    // integer-only, PINNED, no float, no morphogen re-traversal. `germ_threshold: None` on every
+    // shipped spec means `module_is_germ` stays all-`false` — byte-identical to M7-b (checked
+    // structurally in the `cli` crate's `m7c_prod_inert_all_goldens`). Dead cells (M7-b apoptosis)
+    // are excluded before Step 3 already runs, so germ/soma partitions only live modules — the two
+    // mechanisms are orthogonal.
+
+    /// M7-c test-only spec builder — same grid/diffusion/decay basis as M7-a/M7-b, parameterized by
+    /// BOTH gates (unlike `m7b_mspec`, which hardcodes `germ_threshold: None`).
+    fn m7c_mspec(apoptosis_threshold: Option<i32>, germ_threshold: Option<i32>) -> MorphogenSpec {
+        MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+            apoptosis_threshold, germ_threshold,
+        }
+    }
+
+    /// M7-c fixture: the M7-a live-drive genome (size=21, ≥2 modules) — reused so germ/soma tests
+    /// exercise a grid already known to produce a multi-module split.
+    fn m7c_live_drive_genome(apoptosis_threshold: Option<i32>, germ_threshold: Option<i32>) -> Genome {
+        let gspec = m7a_live_drive_gspec();
+        let mspec = m7c_mspec(apoptosis_threshold, germ_threshold);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        g.size = 21; // above the E-6 fate boundary — matches m7a_live_drive_produces_multiple_modules
+        g
+    }
+
+    /// A threshold that splits the live-drive fixture's modules into BOTH germ and soma (the
+    /// minimum module cell count on the apoptosis-off baseline graph — picked from the REAL
+    /// resolved module sizes, not a guessed magic constant; asserts the fixture is non-uniform so
+    /// the split is genuinely mixed, not degenerate).
+    fn m7c_partial_threshold() -> i32 {
+        let econ = EconParams::default();
+        let ph = m7c_live_drive_genome(None, None).decode(&econ).expect("must decode to Some");
+        let counts = &ph.graph.module_cell_count;
+        let min = *counts.iter().min().unwrap();
+        let max = *counts.iter().max().unwrap();
+        assert!(min < max, "M7-c fixture must have modules of different sizes; got {counts:?}");
+        min
+    }
+
+    #[test]
+    fn m7c_germ_soma_determinism() {
+        let econ = EconParams::default();
+        let t = m7c_partial_threshold();
+        let g = m7c_live_drive_genome(None, Some(t));
+        let ph1 = g.decode(&econ).expect("must decode to Some");
+        let ph2 = g.decode(&econ).expect("must decode to Some");
+        assert_eq!(ph1.graph, ph2.graph, "same genome + Some(t) must produce identical module_is_germ across repeated decode");
+    }
+
+    #[test]
+    fn m7c_produces_both_types() {
+        let econ = EconParams::default();
+        let t = m7c_partial_threshold();
+        let g = m7c_live_drive_genome(None, Some(t));
+        let ph = g.decode(&econ).expect("must decode to Some");
+
+        assert!(ph.graph.module_is_germ.iter().any(|&is_germ| is_germ), "fixture must yield >= 1 germ module");
+        assert!(ph.graph.module_is_germ.iter().any(|&is_germ| !is_germ), "fixture must yield >= 1 soma module");
+
+        // Cross-check the predicate directly against module_cell_count (module-level, integer).
+        for (i, &count) in ph.graph.module_cell_count.iter().enumerate() {
+            assert_eq!(ph.graph.module_is_germ[i], count <= t, "module {i}: is_germ must equal (cell_count <= threshold)");
+        }
+    }
+
+    #[test]
+    fn m7c_none_all_soma() {
+        let econ = EconParams::default();
+        let g_none = m7c_live_drive_genome(None, None);
+        let ph_none = g_none.decode(&econ).expect("must decode to Some");
+        assert!(ph_none.graph.module_is_germ.iter().all(|&is_germ| !is_germ), "germ_threshold=None must leave every module soma/unmarked");
+
+        // Byte-identical to M7-b for module_type/module_cell_count (only module_is_germ is new).
+        let ph_m7b = m7b_live_drive_genome(None).decode(&econ).expect("must decode to Some");
+        assert_eq!(ph_none.graph.module_type, ph_m7b.graph.module_type, "M7-c must not perturb M7-b's module_type");
+        assert_eq!(ph_none.graph.module_cell_count, ph_m7b.graph.module_cell_count, "M7-c must not perturb M7-b's module_cell_count");
+    }
+
+    #[test]
+    fn m7c_interacts_with_apoptosis() {
+        let econ = EconParams::default();
+        let t_apop = m7b_partial_threshold();
+
+        // Derive a germ threshold from the POST-apoptosis live module sizes (germ/soma runs after
+        // Step 3, on live modules only).
+        let ph_apop_only = m7c_live_drive_genome(Some(t_apop), None).decode(&econ).expect("must decode to Some");
+        let live_counts = ph_apop_only.graph.module_cell_count.clone();
+        let t_germ = *live_counts.iter().min().unwrap();
+
+        let g_both = m7c_live_drive_genome(Some(t_apop), Some(t_germ));
+        let ph = g_both.decode(&econ).expect("must decode to Some");
+
+        // Both labels coexist: module_is_germ is indexed 1:1 with the LIVE modules (dead cells
+        // already excluded, so neither an all-dead nor a partially-dead cell ever appears here).
+        assert_eq!(ph.graph.module_is_germ.len(), ph.graph.module_cell_count.len(), "module_is_germ must be indexed 1:1 with live modules");
+        assert_eq!(ph.graph.module_cell_count, live_counts, "germ_threshold must not perturb apoptosis's live-module partition");
+        for (i, &count) in ph.graph.module_cell_count.iter().enumerate() {
+            assert_eq!(ph.graph.module_is_germ[i], count <= t_germ, "module {i}: predicate must hold on LIVE (post-apoptosis) counts");
+        }
+        let module_total: i32 = ph.graph.module_cell_count.iter().sum();
+        assert!(module_total < 16, "apoptosis must still have removed >= 1 cell from the 16-cell grid");
+    }
+
+    #[test]
+    fn m7c_empty_body_valid() {
+        let econ = EconParams::default();
+        // Every cell apoptosed (see m7b_empty_body_valid) ⇒ zero live modules ⇒ zero germ/zero soma.
+        let g = m7c_live_drive_genome(Some(crate::GRN_EXPR_MAX + 1), Some(0));
+        let ph = g.decode(&econ).expect("all-dead grid must return Some, never a second stillbirth path");
+        assert_eq!(ph.graph.num_modules(), 0, "all-dead grid must yield zero modules");
+        assert!(ph.graph.module_is_germ.is_empty(), "zero modules must yield zero germ/zero soma markers");
+    }
+
+    #[test]
+    fn m7c_degenerate_ok() {
+        let econ = EconParams::default();
+
+        // All-germ: a threshold no module's cell count can exceed.
+        let g_all_germ = m7c_live_drive_genome(None, Some(i32::MAX));
+        let ph_all_germ = g_all_germ.decode(&econ).expect("must decode to Some");
+        assert!(!ph_all_germ.graph.module_is_germ.is_empty(), "sanity: fixture must have >= 1 live module");
+        assert!(ph_all_germ.graph.module_is_germ.iter().all(|&is_germ| is_germ), "an unreachable-high threshold must mark every module germ");
+
+        // All-soma: a threshold no module's (>= 1) cell count can clear.
+        let g_all_soma = m7c_live_drive_genome(None, Some(0));
+        let ph_all_soma = g_all_soma.decode(&econ).expect("must decode to Some");
+        assert!(ph_all_soma.graph.module_is_germ.iter().all(|&is_germ| !is_germ), "threshold=0 must mark every module soma (every module has >= 1 cell)");
+    }
+
     #[test]
     fn v3b_flag_off_no_duplication() {
         // When enable_variable_length=false, duplication operator is inert.
@@ -1884,6 +2058,7 @@ mod tests {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
+            germ_threshold: None,
         };
         
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
@@ -2100,6 +2275,7 @@ mod tests {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
+            germ_threshold: None,
         };
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
         g.mutation_rate = 256;
