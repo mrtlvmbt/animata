@@ -14,16 +14,18 @@
 //! R-5 (merged #228): cube-voxel toggle — a second terrain mesh builder (square columns vs hex prisms),
 //! runtime key to switch hex↔cube, creature projection follows active layout. Golden-NEUTRAL (render-only).
 //!
-//! R-6 (this slice): ProcgenWorld wiring — switches from the legacy `NoiseWorld` (f64 sin, arch-divergent)
+//! R-6 (merged #229): ProcgenWorld wiring — switches from the legacy `NoiseWorld` (f64 sin, arch-divergent)
 //! to the full integer pipeline (W-1..W-6 reliefs + erosion + biome/edaphic + resource caps), enabling
 //! hex-voxel visualization of the NOW-LIVE rich procedurally-generated world. Neutral read-only snapshot
 //! consumer (render builds the same world the sim uses, no mutation path).
 //!
-//! OUT of scope here (later R-slices): full HUD/inspector/minimap (R-7).
+//! R-7 (this slice): Biology coloring — creatures colored by uptake_layer (feeding guild) to visualize
+//! A/B differentiation emergence. Layer 0 (A-guild) = orange; layer 1 (B-guild) = cyan; morphology
+//! reflects cell_type (if available, from E-4 ontogenesis). HUD legend added. Render-only, golden-neutral.
 //!
 //! Not part of the v2 CI workspace (`v2/Cargo.toml`'s `exclude`) — a leaf bin, verified LOCALLY:
 //! `cargo build`/`cargo clippy` from this directory + a manual run (window opens, ProcgenWorld hex
-//! terrain + creature morphologies visible, HUD counts advance, T-key toggles cube terrain).
+//! terrain + colored creatures visible by feeding guild, HUD counts advance, T-key toggles cube terrain).
 
 mod biome_palette;
 mod camera;
@@ -49,7 +51,7 @@ const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 /// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
 fn window_conf() -> Conf {
     Conf {
-        window_title: "animata v2 — render scaffold (R-5 cube-voxel toggle)".to_owned(),
+        window_title: "animata v2 — render scaffold (R-7 biology coloring)".to_owned(),
         window_width: 1024,
         window_height: 768,
         high_dpi: true,
@@ -166,12 +168,14 @@ async fn main() {
                     continue;
                 }
 
-                // Base color by cell_type (used across all tiers).
-                let color = match c.cell_type {
-                    Some(sim_core::CellType::A) => YELLOW,
-                    Some(sim_core::CellType::B) => SKYBLUE,
-                    Some(sim_core::CellType::Mixed) => GREEN,
-                    None => WHITE,
+                // R-7 (biology coloring): Base color by uptake_layer (feeding guild).
+                // Layer 0 (A-guild) = orange/red; layer 1 (B-guild) = cyan/blue; higher layers distinct.
+                // This makes emergence visible: A/B differentiation is the primary visual signal.
+                let color = match c.uptake_layer {
+                    0 => Color::new(1.0, 0.6, 0.2, 1.0), // Orange (A-guild)
+                    1 => Color::new(0.2, 0.8, 1.0, 1.0), // Cyan (B-guild)
+                    2 => Color::new(0.8, 0.2, 1.0, 1.0), // Magenta (layer 2+)
+                    _ => Color::new(0.5, 0.5, 0.5, 1.0), // Gray (undefined layers)
                 };
 
                 // R-4 LOD tier by px_per_m: FAR (point) < MID (sphere) < NEAR (morphology).
@@ -188,8 +192,9 @@ async fn main() {
                     let radius = (size_scale * energy_factor).max(0.08); // Clamp to visible minimum.
                     draw_sphere(creature_pos, radius, None, color);
                 } else {
-                    // ─── NEAR tier: minimal cell-type morphology (shape differentiation) ───────────────
+                    // ─── NEAR tier: minimal cell-type morphology + uptake_layer base color ───────────────
                     // Each cell_type has a small distinctive form, sized by creature's `size`.
+                    // Base color is uptake_layer (feeding guild); morphology reflects cell_type (if available).
                     let size_scale = c.size as f32 / 16.0;
                     let base_size = 0.15 * size_scale;
 
@@ -197,17 +202,21 @@ async fn main() {
                         Some(sim_core::CellType::A) => {
                             // Type A: main body + upper accent sphere (a small top ball).
                             draw_sphere(creature_pos, base_size, None, color);
-                            draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, YELLOW);
+                            // Accent in a brighter shade of the uptake_layer color
+                            let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
+                            draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
                         }
                         Some(sim_core::CellType::B) => {
                             // Type B: main body + side accent sphere (a small offset ball).
                             draw_sphere(creature_pos, base_size, None, color);
-                            draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, SKYBLUE);
+                            let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
+                            draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
                         }
                         Some(sim_core::CellType::Mixed) => {
                             // Type Mixed: main body + front accent sphere (a small forward ball).
                             draw_sphere(creature_pos, base_size, None, color);
-                            draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, GREEN);
+                            let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
+                            draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
                         }
                         None => {
                             // Neutral: single sphere (for non-morphogen configs).
@@ -220,7 +229,7 @@ async fn main() {
         set_default_camera();
 
         egui_macroquad::ui(|ctx| {
-            egui::Window::new("v2 render scaffold — R-5").show(ctx, |ui| {
+            egui::Window::new("v2 render scaffold — R-7 biology coloring").show(ctx, |ui| {
                 match snap.as_ref() {
                     Some(s) => {
                         ui.label(format!("tick: {}", s.tick));
@@ -232,6 +241,12 @@ async fn main() {
                         ui.label("waiting for the sim worker's first tick…");
                     }
                 }
+                ui.separator();
+                ui.label("─ Creature Coloring (uptake_layer / feeding guild) ─");
+                ui.colored_label(egui::Color32::from_rgb(255, 153, 51), "● Orange: Layer 0 (A-guild)");
+                ui.colored_label(egui::Color32::from_rgb(51, 204, 255), "● Cyan: Layer 1 (B-guild)");
+                ui.colored_label(egui::Color32::from_rgb(204, 51, 255), "● Magenta: Layer 2+");
+                ui.separator();
                 ui.label(format!("terrain: {world_dim}×{world_dim}, {} mesh chunks", terrain_chunks.len()));
                 ui.label(format!("chunks drawn: {}/{}", chunks_drawn, terrain_chunks.len()));
                 ui.label(format!(
