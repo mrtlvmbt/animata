@@ -1068,6 +1068,7 @@ mod tests {
             module_cell_count,
             module_is_germ: vec![false; n],
             module_reachable: vec![true; n],
+            module_consortium: (0..n).collect(),
         }
     }
 

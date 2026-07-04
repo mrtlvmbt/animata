@@ -1123,6 +1123,7 @@ mod e1_gate_tests {
             apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![256, 0]);
         EconParams {
