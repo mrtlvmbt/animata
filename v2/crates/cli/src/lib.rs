@@ -217,6 +217,7 @@ pub fn phase2_config(seed: u64) -> SimConfig {
         stop_threshold: 0,
         apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
     };
     // V-1 reposition: weaker bistable matrix + off-center initial — mutation-sensitive-but-stable
     // (see the doc comment above). Validated via GrnSpec::new (F7).
@@ -300,6 +301,7 @@ pub fn differentiation_config(seed: u64) -> SimConfig {
         stop_threshold: 0,
         apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
     };
     let gspec = sim_core::GrnSpec::new(
         2,

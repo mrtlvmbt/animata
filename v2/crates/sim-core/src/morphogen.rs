@@ -69,6 +69,13 @@ pub struct MorphogenSpec {
     /// classified GERM iff `module_cell_count[mid] <= t` (small=germ, large=soma) — a module-level
     /// integer predicate, PINNED, no float, no morphogen re-traversal.
     pub germ_threshold: Option<i32>,
+    /// **M7-d supply-gate.** `None` (default, every shipped spec) disables the pass entirely —
+    /// `CellGraph::from_gradient` leaves `module_reachable` all-`true` (every live module supplied),
+    /// byte-identical to M7-c. `Some(src)` (test-only): `src` is the linear index of the supply
+    /// source cell (`z*g_dev + x`, F1 PINNED); the source MODULE is the module containing that cell.
+    /// Reachability is computed by BFS over the module-adjacency graph reconstructed from LIVE
+    /// 4-neighbors (integer-only, no float, `BTreeSet`/`Vec` only — no Hash*).
+    pub supply_source: Option<i32>,
 }
 
 /// The morphogen output: a local, position-indexed integer concentration field (row-major,
@@ -199,6 +206,7 @@ mod tests {
             stop_threshold: 0, // always run the full 8 steps (deterministic fixed count)
             apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         }
     }
 

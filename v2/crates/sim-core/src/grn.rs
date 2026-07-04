@@ -600,6 +600,7 @@ mod tests {
             stop_threshold: 0,
             apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         // Gene 0 reads the sampled concentration directly; gene 1 is a FIXED threshold reference (no
         // input coupling) tuned (verified empirically) to sit strictly between the near-source and
@@ -650,6 +651,7 @@ mod tests {
             stop_threshold: 1,
             apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         let gradient = morphogen(&Genome::founder(1), &spec);
         let _ = grn(&gradient, &bistable_spec(vec![EXPR_MAX, 0]));
