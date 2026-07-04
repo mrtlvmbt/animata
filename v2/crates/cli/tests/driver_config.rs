@@ -357,8 +357,10 @@ fn driver_emergence_verdict() {
             let ciso = &channel_iso[i];
 
             let floor_ok = !with.collapsed && with.frac >= EMERGE_FLOOR;
-            let margin_abl_ok = !with.collapsed && with.frac >= MARGIN * abl.frac;
-            let margin_ciso_ok = !with.collapsed && with.frac >= MARGIN * ciso.frac;
+            // A COLLAPSED control provides no valid benchmark: `with.frac >= 2*0` would pass vacuously
+            // and void the causal comparison. Require the control population to be viable (F1, code-critic).
+            let margin_abl_ok = !with.collapsed && !abl.collapsed && with.frac >= MARGIN * abl.frac;
+            let margin_ciso_ok = !with.collapsed && !ciso.collapsed && with.frac >= MARGIN * ciso.frac;
             let pass = floor_ok && margin_abl_ok && margin_ciso_ok;
             if pass {
                 seed_pass_count += 1;
