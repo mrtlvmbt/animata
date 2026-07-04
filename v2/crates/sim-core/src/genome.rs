@@ -762,6 +762,70 @@ impl Genome {
             }
         }
 
+        // V-3-d: gene translocation operator (swap two gene positions) — CANONICAL ORDER (appended
+        // AFTER V-3-c indel, so indel's draw positions are unchanged). Gate: enable_variable_length
+        // && grn_spec.is_some(); flag-off or no-spec draws ZERO values → existing goldens
+        // byte-identical. Unlike V-3-b/c, n_genes and dup_counter are UNCHANGED — this is a
+        // length-preserving reordering, not a gene-adding/removing event.
+        //
+        // Mechanism: draw application-count (0-or-1, private salt SALT_TRANS) exactly like V-3-b/c.
+        // If it fires, draw two independent gene indices i, j (SALT_TRANS+1, SALT_TRANS+2) and
+        // SWAP(i,j): exchange gene i and gene j's positions everywhere — weights ROWS AND COLUMNS
+        // (F2 pinned: the SAME permutation π=swap(i,j) on both axes is the load-bearing invariant;
+        // a mismatched row/col permutation corrupts the network and breaks conjugacy) and the
+        // parallel per-gene vectors (input_weights/bias/initial/gene_ids). `i == j` is a no-op (no
+        // allocation, no hash change).
+        //
+        // Effectful, not neutral: state dynamics are conjugate under π (attractor_new ==
+        // π(attractor_old)), but `classify()`'s position-based readout (`state[0]` vs `state[1]`)
+        // can flip the decoded cell-type (A↔B) — see grn.rs. That flip IS the variation this
+        // operator contributes; it is not a bug to be designed away.
+        const SALT_TRANS: u64 = 0x5452_4100u64; // "TRA\0"
+        if enable_variable_length {
+            // Read from `g.grn_spec`, NOT `self.grn_spec` — compose onto whatever V-3-b/c already
+            // produced above, instead of discarding it.
+            if let Some(gspec) = g.grn_spec.clone() {
+                let r_count = seed_fold(stream, &[SALT_TRANS]);
+                let fires = (r_count & 0xFF) < self.mutation_rate as u64;
+                if fires {
+                    let n = gspec.n_genes;
+                    let r_i = seed_fold(stream, &[SALT_TRANS + 1]);
+                    let r_j = seed_fold(stream, &[SALT_TRANS + 2]);
+                    let i = (r_i >> 8) as usize % n;
+                    let j = (r_j >> 8) as usize % n;
+                    if i != j {
+                        let mut mutated = (*gspec).clone();
+
+                        // Swap rows i,j, then columns i,j, of the row-major n×n matrix. Sequential
+                        // row-then-column swap realizes the SAME similarity permutation π=swap(i,j)
+                        // on both axes (row and column swaps commute; the composition is exactly
+                        // `new[π(r)*n+π(c)] = old[r*n+c]`).
+                        for col in 0..n {
+                            mutated.weights.swap(i * n + col, j * n + col);
+                        }
+                        for row in 0..n {
+                            mutated.weights.swap(row * n + i, row * n + j);
+                        }
+                        mutated.input_weights.swap(i, j);
+                        mutated.bias.swap(i, j);
+                        mutated.initial.swap(i, j);
+                        mutated.gene_ids.swap(i, j);
+                        // n_genes, dup_counter unchanged (F5: translocation is not a gene-adding
+                        // or gene-removing event — it reorders, nothing more).
+
+                        assert_eq!(mutated.weights.len(), mutated.n_genes * mutated.n_genes, "V-3-d: weights must be square after translocation");
+                        assert_eq!(mutated.input_weights.len(), mutated.n_genes, "V-3-d: input_weights length mismatch after translocation");
+                        assert_eq!(mutated.bias.len(), mutated.n_genes, "V-3-d: bias length mismatch after translocation");
+                        assert_eq!(mutated.initial.len(), mutated.n_genes, "V-3-d: initial length mismatch after translocation");
+                        assert_eq!(mutated.gene_ids.len(), mutated.n_genes, "V-3-d: gene_ids length mismatch after translocation");
+
+                        g.grn_spec = Some(Arc::new(mutated));
+                    }
+                    // i == j: no-op — leave g.grn_spec as whatever V-3-b/c already produced.
+                }
+            }
+        }
+
         g
     }
 
