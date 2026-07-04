@@ -762,6 +762,70 @@ impl Genome {
             }
         }
 
+        // V-3-d: gene translocation operator (swap two gene positions) — CANONICAL ORDER (appended
+        // AFTER V-3-c indel, so indel's draw positions are unchanged). Gate: enable_variable_length
+        // && grn_spec.is_some(); flag-off or no-spec draws ZERO values → existing goldens
+        // byte-identical. Unlike V-3-b/c, n_genes and dup_counter are UNCHANGED — this is a
+        // length-preserving reordering, not a gene-adding/removing event.
+        //
+        // Mechanism: draw application-count (0-or-1, private salt SALT_TRANS) exactly like V-3-b/c.
+        // If it fires, draw two independent gene indices i, j (SALT_TRANS+1, SALT_TRANS+2) and
+        // SWAP(i,j): exchange gene i and gene j's positions everywhere — weights ROWS AND COLUMNS
+        // (F2 pinned: the SAME permutation π=swap(i,j) on both axes is the load-bearing invariant;
+        // a mismatched row/col permutation corrupts the network and breaks conjugacy) and the
+        // parallel per-gene vectors (input_weights/bias/initial/gene_ids). `i == j` is a no-op (no
+        // allocation, no hash change).
+        //
+        // Effectful, not neutral: state dynamics are conjugate under π (attractor_new ==
+        // π(attractor_old)), but `classify()`'s position-based readout (`state[0]` vs `state[1]`)
+        // can flip the decoded cell-type (A↔B) — see grn.rs. That flip IS the variation this
+        // operator contributes; it is not a bug to be designed away.
+        const SALT_TRANS: u64 = 0x5452_4100u64; // "TRA\0"
+        if enable_variable_length {
+            // Read from `g.grn_spec`, NOT `self.grn_spec` — compose onto whatever V-3-b/c already
+            // produced above, instead of discarding it.
+            if let Some(gspec) = g.grn_spec.clone() {
+                let r_count = seed_fold(stream, &[SALT_TRANS]);
+                let fires = (r_count & 0xFF) < self.mutation_rate as u64;
+                if fires {
+                    let n = gspec.n_genes;
+                    let r_i = seed_fold(stream, &[SALT_TRANS + 1]);
+                    let r_j = seed_fold(stream, &[SALT_TRANS + 2]);
+                    let i = (r_i >> 8) as usize % n;
+                    let j = (r_j >> 8) as usize % n;
+                    if i != j {
+                        let mut mutated = (*gspec).clone();
+
+                        // Swap rows i,j, then columns i,j, of the row-major n×n matrix. Sequential
+                        // row-then-column swap realizes the SAME similarity permutation π=swap(i,j)
+                        // on both axes (row and column swaps commute; the composition is exactly
+                        // `new[π(r)*n+π(c)] = old[r*n+c]`).
+                        for col in 0..n {
+                            mutated.weights.swap(i * n + col, j * n + col);
+                        }
+                        for row in 0..n {
+                            mutated.weights.swap(row * n + i, row * n + j);
+                        }
+                        mutated.input_weights.swap(i, j);
+                        mutated.bias.swap(i, j);
+                        mutated.initial.swap(i, j);
+                        mutated.gene_ids.swap(i, j);
+                        // n_genes, dup_counter unchanged (F5: translocation is not a gene-adding
+                        // or gene-removing event — it reorders, nothing more).
+
+                        assert_eq!(mutated.weights.len(), mutated.n_genes * mutated.n_genes, "V-3-d: weights must be square after translocation");
+                        assert_eq!(mutated.input_weights.len(), mutated.n_genes, "V-3-d: input_weights length mismatch after translocation");
+                        assert_eq!(mutated.bias.len(), mutated.n_genes, "V-3-d: bias length mismatch after translocation");
+                        assert_eq!(mutated.initial.len(), mutated.n_genes, "V-3-d: initial length mismatch after translocation");
+                        assert_eq!(mutated.gene_ids.len(), mutated.n_genes, "V-3-d: gene_ids length mismatch after translocation");
+
+                        g.grn_spec = Some(Arc::new(mutated));
+                    }
+                    // i == j: no-op — leave g.grn_spec as whatever V-3-b/c already produced.
+                }
+            }
+        }
+
         g
     }
 
@@ -2311,6 +2375,356 @@ mod tests {
 
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-c: replay must be seed-deterministic, not run-order-dependent");
+        }
+    }
+
+    // ── V-3-d: translocation operator (gene swap, golden-NEUTRAL, #245) ─────────────────────────
+    //
+    // Independent reference implementation of π = SWAP(i,j) on a `GrnSpec` — built by directly
+    // remapping every (row,col)/index through π, NOT by production's incremental row-then-col swap
+    // (`Genome::mutate`). Used by the structural-equality and conjugacy teeth (F2) to prove the
+    // production swap is the SAME permutation on every axis, via a construction that can't share a
+    // bug with it.
+    fn v3d_manual_swap(spec: &GrnSpec, i: usize, j: usize) -> GrnSpec {
+        let n = spec.n_genes;
+        let pi = |k: usize| if k == i { j } else if k == j { i } else { k };
+        let mut out = spec.clone();
+        for row in 0..n {
+            for col in 0..n {
+                out.weights[row * n + col] = spec.weights[pi(row) * n + pi(col)];
+            }
+        }
+        out.input_weights.swap(i, j);
+        out.bias.swap(i, j);
+        out.initial.swap(i, j);
+        out.gene_ids.swap(i, j);
+        out
+    }
+
+    /// A real i != j translocation REORDERS `gene_ids` (same multiset, different sequence) — unlike
+    /// V-3-b duplication (adds a fresh id) or V-3-c indel (adds/removes an id), which also change
+    /// `n_genes`. Guarding on `n_genes == old_len` alone is NOT enough: a dup THEN a delete can
+    /// round-trip `n_genes` back to its old value while still swapping in a novel id, so this checks
+    /// the id SET is unchanged (rules out dup/indel contamination) and the ORDER differs (a real
+    /// swap happened, not merely a no-op or an untouched clone).
+    fn v3d_is_pure_reorder(candidate: &[u32], original: &[u32]) -> bool {
+        if candidate.len() != original.len() || candidate == original {
+            return false;
+        }
+        let mut c = candidate.to_vec();
+        let mut o = original.to_vec();
+        c.sort();
+        o.sort();
+        c == o
+    }
+
+    #[test]
+    fn v3d_flag_off_no_translocation() {
+        // flag=false → n_genes never changes and gene_ids never permute, even with a grn_spec
+        // attached and max mutation_rate.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        for i in 0..100 {
+            let seed = 0x1A00_0000 + (i as u64);
+            g = g.mutate(seed, 2, false, 4, false, false);
+            if let Some(spec) = &g.grn_spec {
+                assert_eq!(spec.n_genes, 2, "V-3-d: flag=false must keep n_genes constant (iteration {i})");
+                assert_eq!(spec.gene_ids, vec![0, 1], "V-3-d: flag=false must never permute gene_ids (iteration {i})");
+            }
+        }
+    }
+
+    #[test]
+    fn v3d_flag_off_byte_identity() {
+        // With enable_variable_length=false, V-3-d (appended AFTER V-3-c indel) draws zero values —
+        // the mutated genome (including its grn_spec) must be fully deterministic/unperturbed,
+        // proving translocation's presence doesn't move any earlier draw in the fixed order.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let g1 = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), None);
+        let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+
+        let seed = 0xDEAD_BEEF;
+        let m1 = g1.mutate(seed, 2, false, 4, false, false);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false);
+
+        assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
+        assert_eq!(m1.weights, m2.weights);
+        assert_eq!(m1.grn_spec, m2.grn_spec, "V-3-d: flag=false output must be byte-identical");
+        assert_eq!(m1.grn_spec.unwrap().n_genes, 2, "V-3-d: flag=false must never change n_genes");
+    }
+
+    #[test]
+    fn v3d_no_spec_no_op() {
+        // flag=true but grn_spec=None → no-op (Some-gated).
+        let g = Genome::founder(2); // no spec
+        let m = g.mutate(0x2A2A_2A2A, 2, false, 4, false, true);
+        assert!(m.grn_spec.is_none(), "V-3-d: genome without spec must stay without spec");
+    }
+
+    #[test]
+    fn v3d_can_translocate() {
+        // A seed that fires a real i != j swap reverses gene_ids and the parallel per-gene vectors
+        // on an n_genes=2 fixture (the only possible non-identity swap is (0,1)). Low mutation_rate
+        // + a match against the independent `v3d_manual_swap` reference (rather than accepting the
+        // first `gene_ids`-reordered candidate) skips seeds where V-1's point-mutation ALSO fired
+        // alongside translocation — this test wants a translocation-ONLY diff.
+        let gspec0 = GrnSpec::new(2, vec![64, -64, -64, 64], vec![10, 20], vec![1, 2], 3, 12, 0, 0, vec![100, 200]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec0.clone())), None);
+        g.mutation_rate = 4;
+
+        for i in 0..5000u64 {
+            let seed = 0x3A00_0000 + i;
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &m.grn_spec {
+                if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) && **spec == v3d_manual_swap(&gspec0, 0, 1) {
+                    assert_eq!(spec.gene_ids, vec![1, 0], "V-3-d: a real i!=j swap on n_genes=2 must reverse gene_ids");
+                    assert_eq!(spec.input_weights, vec![20, 10], "V-3-d: input_weights must swap with the genes");
+                    assert_eq!(spec.bias, vec![2, 1], "V-3-d: bias must swap with the genes");
+                    assert_eq!(spec.initial, vec![200, 100], "V-3-d: initial must swap with the genes");
+                    return;
+                }
+            }
+        }
+        panic!("V-3-d: expected to find a clean (uncontaminated) translocation within 5000 seeds");
+    }
+
+    #[test]
+    fn v3d_no_op_self_move() {
+        // Mirrors the production private salt (PINNED 0x5452_4100 "TRA\0", grn.rs/genome.rs spec
+        // #245) to locate a seed where translocation's application-count draw fires but i == j — the
+        // self-move branch, which must leave the spec byte-identical to the parent (no allocation).
+        const SALT_TRANS_MIRROR: u64 = 0x5452_4100u64;
+        let gspec0 = GrnSpec::new(2, vec![64, -64, -64, 64], vec![10, 20], vec![5, 15], 3, 12, 0, 0, vec![32, 96]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec0.clone())), None);
+        g.mutation_rate = 8; // low — minimizes V-1/V-3-b/c interference on the found seed
+
+        for i in 0..5000u64 {
+            let seed = 0xB000_0000 + i;
+            let r_count = seed_fold(seed, &[SALT_TRANS_MIRROR]);
+            if (r_count & 0xFF) >= g.mutation_rate as u64 {
+                continue; // translocation didn't fire this seed
+            }
+            let r_i = seed_fold(seed, &[SALT_TRANS_MIRROR + 1]);
+            let r_j = seed_fold(seed, &[SALT_TRANS_MIRROR + 2]);
+            if (r_i >> 8) % 2 != (r_j >> 8) % 2 {
+                continue; // i != j — not the self-move branch
+            }
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &m.grn_spec {
+                if **spec == gspec0 {
+                    return; // self-move fired; spec byte-identical to parent — no-op proven
+                }
+            }
+        }
+        panic!("V-3-d: expected to find a translocation self-move (i==j) no-op within 5000 seeds");
+    }
+
+    #[test]
+    fn v3d_swap_structural_equality() {
+        // THE CRITICAL TOOTH (F2): after a real i != j swap, the resulting GrnSpec must equal the
+        // spec produced by an INDEPENDENT reference remap (`v3d_manual_swap`) — proving the SAME
+        // permutation π hit weights (both axes) and every parallel per-gene vector.
+        const SALT_TRANS_MIRROR: u64 = 0x5452_4100u64;
+        let gspec0 = GrnSpec::new(
+            3,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            vec![10, 20, 30],
+            vec![100, 200, 300],
+            3, 12, 0, 0,
+            vec![1000, 2000, 3000],
+        );
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec0.clone())), None);
+        g.mutation_rate = 4; // low — minimizes V-1/V-3-b/c interference on the found seed
+
+        for i in 0..8000u64 {
+            let seed = 0xD000_0000 + i;
+            let r_count = seed_fold(seed, &[SALT_TRANS_MIRROR]);
+            if (r_count & 0xFF) >= g.mutation_rate as u64 {
+                continue;
+            }
+            let r_i = seed_fold(seed, &[SALT_TRANS_MIRROR + 1]);
+            let r_j = seed_fold(seed, &[SALT_TRANS_MIRROR + 2]);
+            let (ti, tj) = ((r_i >> 8) as usize % 3, (r_j >> 8) as usize % 3);
+            if ti == tj {
+                continue;
+            }
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            let Some(spec) = &m.grn_spec else { continue };
+            if spec.n_genes != 3 {
+                continue; // V-3-b/c also fired this seed — skip (searching for a clean translocation)
+            }
+            let expected = v3d_manual_swap(&gspec0, ti, tj);
+            if **spec == expected {
+                return; // F2 proven: production's row-then-col swap matches the independent π remap
+            }
+            // else: V-1 point-mutation also fired alongside translocation this seed — keep searching.
+        }
+        panic!("V-3-d: expected to find a clean (uncontaminated) i != j translocation within 8000 seeds");
+    }
+
+    #[test]
+    fn v3d_state_conjugacy() {
+        // The translocated spec's resolved attractor must equal π applied to the original spec's
+        // attractor: `grn_resolve(translocated).state == swap(grn_resolve(original).state, i, j)` —
+        // proves the permutation preserves dynamics up to relabeling.
+        const SALT_TRANS_MIRROR: u64 = 0x5452_4100u64;
+        let gspec0 = GrnSpec::new(
+            3,
+            vec![10, -5, 3, 2, 20, -7, -4, 6, 15],
+            vec![8, 1, 0],
+            vec![2, -3, 5],
+            3, 12, 0, 0,
+            vec![64, 128, 32],
+        );
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec0.clone())), None);
+        g.mutation_rate = 4;
+
+        // sample_x=sample_z=0 ⇒ only cells[0] of the gradient matters; the exact value is arbitrary.
+        let gradient = crate::Gradient { g_dev: 1, cells: vec![100] };
+
+        for i in 0..8000u64 {
+            let seed = 0xC000_0000 + i;
+            let r_count = seed_fold(seed, &[SALT_TRANS_MIRROR]);
+            if (r_count & 0xFF) >= g.mutation_rate as u64 {
+                continue;
+            }
+            let r_i = seed_fold(seed, &[SALT_TRANS_MIRROR + 1]);
+            let r_j = seed_fold(seed, &[SALT_TRANS_MIRROR + 2]);
+            let (ti, tj) = ((r_i >> 8) as usize % 3, (r_j >> 8) as usize % 3);
+            if ti == tj {
+                continue;
+            }
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            let Some(spec) = &m.grn_spec else { continue };
+            if spec.n_genes != 3 {
+                continue;
+            }
+            // Verify this candidate is a CLEAN translocation (nothing else fired) via the same
+            // structural-equality reference tooth 6 relies on, before trusting it for conjugacy.
+            let expected_struct = v3d_manual_swap(&gspec0, ti, tj);
+            if **spec != expected_struct {
+                continue;
+            }
+
+            let (orig_state, _orig_ct, _s1) = crate::grn_resolve(&gradient, &gspec0);
+            let (new_state, _new_ct, _s2) = crate::grn_resolve(&gradient, spec);
+            let mut expected_state = orig_state.clone();
+            expected_state.swap(ti, tj);
+            assert_eq!(
+                new_state, expected_state,
+                "V-3-d: translocated attractor must equal π applied to the original attractor (conjugacy)"
+            );
+            return;
+        }
+        panic!("V-3-d: expected to find a clean (uncontaminated) translocation within 8000 seeds");
+    }
+
+    #[test]
+    fn v3d_phenotype_is_effectful() {
+        // A translocation on a bistable spec (initial=[EXPR_MAX,0]) must FLIP the decoded cell_type
+        // (A->B) — confirms translocation is real variation, not a no-op. Reuses the `m7b_mspec`
+        // fixture FUNCTION (PARALLEL-SAFETY: never inline a `MorphogenSpec {...}` literal here).
+        let gspec0 = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![crate::GRN_EXPR_MAX, 0]);
+        let mspec = m7b_mspec(None);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec0.clone())), Some(mspec));
+        g.mutation_rate = 64;
+
+        let econ = EconParams::default();
+        let ph0 = g.decode(&econ).expect("fixture must decode to Some");
+        assert_eq!(ph0.cell_type, Some(CellType::A), "bistable fixture must start at A (pinned)");
+
+        for i in 0..2000u64 {
+            let seed = 0xA000_0000 + i;
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true);
+            if let Some(spec) = &m.grn_spec {
+                if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
+                    let ph = m.decode(&econ).expect("post-translocation genome must decode to Some");
+                    assert_eq!(ph.cell_type, Some(CellType::B), "V-3-d: translocation must flip the decoded cell_type A->B");
+                    return;
+                }
+            }
+        }
+        panic!("V-3-d: expected to find a translocation within 2000 seeds");
+    }
+
+    #[test]
+    fn v3d_structural_validity() {
+        // Post-move: all 4 parallel vectors == n_genes, weights square, n_genes unchanged — across a
+        // run of successive generations exercising V-3-b/c/d together.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        for i in 0..500 {
+            let seed = 0x1D1D_0000 + (i as u64);
+            g = g.mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &g.grn_spec {
+                let n = spec.n_genes;
+                assert_eq!(spec.weights.len(), n * n, "iteration {i}");
+                assert_eq!(spec.input_weights.len(), n, "iteration {i}");
+                assert_eq!(spec.bias.len(), n, "iteration {i}");
+                assert_eq!(spec.initial.len(), n, "iteration {i}");
+                assert_eq!(spec.gene_ids.len(), n, "iteration {i}");
+                assert!(n >= 2, "iteration {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn v3d_gene_ids_injective() {
+        // After any V-3-b/c/d sequence (duplication/indel/translocation composed), gene_ids must
+        // have no duplicates (homology tracking intact — translocation only reorders, never merges).
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        for i in 0..500 {
+            let seed = 0x1E1E_0000 + (i as u64);
+            g = g.mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &g.grn_spec {
+                let mut seen = std::collections::BTreeSet::new();
+                for &id in &spec.gene_ids {
+                    assert!(seen.insert(id), "V-3-d: duplicate gene_id {id} at iteration {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v3d_dup_counter_unchanged() {
+        // A lone translocation (n_genes stays 2, so V-3-b/c did not fire) must not touch dup_counter
+        // — it is not a gene-adding/removing event.
+        let gspec0 = GrnSpec::new(2, vec![64, -64, -64, 64], vec![10, 20], vec![1, 2], 3, 12, 0, 0, vec![100, 200]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec0.clone())), None);
+        g.mutation_rate = 64;
+
+        for i in 0..1000u64 {
+            let seed = 0x1F1F_0000 + i;
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &m.grn_spec {
+                if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
+                    assert_eq!(spec.dup_counter, gspec0.dup_counter, "V-3-d: translocation must not touch dup_counter");
+                    return;
+                }
+            }
+        }
+        panic!("V-3-d: expected to find a translocation within 1000 seeds");
+    }
+
+    #[test]
+    fn v3d_replay_1_vs_n() {
+        // N genomes each mutated with the same seed → identical results (R14 1-vs-N).
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![10, 20], vec![5, 15], 3, 12, 0, 0, vec![32, 96]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        let seed = 0x1234_5A5A;
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true)).collect();
+
+        for m in &results[1..] {
+            assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-d: replay must be seed-deterministic, not run-order-dependent");
         }
     }
 }
