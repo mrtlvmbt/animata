@@ -47,6 +47,32 @@ pub struct PredationSpec {
     /// `gain = bite - dissipated`. This mirrors the feeding inefficiency in the existing energy
     /// economy (R13/R15). Range: 1..=256 (1 = almost all dissipated, 256 = 100% efficient).
     pub efficiency_num: i32,
+
+    /// D-1: gated per-prey size-refuge (Boraas mechanism) — large multicellular prey bodies are
+    /// harder to capture. `None` (every shipped config): bite unchanged, byte-identical to P-2a.
+    /// `Some(spec)`: the bite is scaled down by `spec` as a function of the PREY'S OWN body size
+    /// (see [`SizeRefugeSpec`] / [`resolve_encounter`]). This is the wire only — no shipped config
+    /// turns it on yet (D-2).
+    pub size_refuge: Option<SizeRefugeSpec>,
+}
+
+/// D-1: per-prey size-refuge parameters (Boraas mechanism) — larger prey bodies get a
+/// monotonically smaller bite. Q-format fixed-point, integer-only, no float (mirrors
+/// `PredationSpec`'s `>>8` combat-trait Q-format).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SizeRefugeSpec {
+    /// Fixed-point shift `S` for the refuge Q-format: `bite_eff = (bite << S) / ((1 << S) +
+    /// refuge_k * prey_body_size)`. Larger `shift` gives finer-grained refuge scaling. Documented
+    /// range: 0..=16 (mirrors `combat_trait_scale`'s Q8 magnitude); defensively capped at 32
+    /// inside `resolve_encounter` so `bite << shift` cannot overflow `i64` even on a misconfigured
+    /// spec (bite is bounded by `VALUE_MAX`).
+    pub shift: u32,
+    /// Refuge strength `k`: how strongly a unit of prey body size shrinks the bite. `k=0` ⇒ the
+    /// refuge denominator is always `1 << shift` ⇒ bite unchanged regardless of body size (a
+    /// `Some` spec with `k=0` is inert, distinct from `size_refuge=None`). Larger `k` ⇒ a given
+    /// body size shrinks the bite more. Expected non-negative for the monotone-decreasing
+    /// property (Boraas: bigger body → smaller bite) to hold.
+    pub refuge_k: i32,
 }
 
 /// The outcome of a single predator↔prey encounter under a [`PredationSpec`]. All three fields are
@@ -71,24 +97,36 @@ pub struct Outcome {
 const VALUE_MAX: i64 = 1_000_000;
 
 /// Pure integer predation encounter resolution. Given a predator (energy + combat trait via
-/// `&Genome`), a prey (energy only), and a `spec`, returns the conservation-exact [`Outcome`].
+/// `&Genome`), a prey (energy + body size), and a `spec`, returns the conservation-exact
+/// [`Outcome`].
 ///
 /// **Signature:** reads predator's `combat_trait = predator.size` from `&Genome` (a documented
-/// stand-in; P-2 will map the real semantic combat trait); reads prey's raw `i64` energy. Both
-/// inputs are small, cheap to read. The function is pure: no RNG, no state, no clock. Same inputs
-/// → byte-identical `Outcome`.
+/// stand-in; P-2 will map the real semantic combat trait); reads prey's raw `i64` energy and its
+/// `i64` body size (D-1: `Σ Phenotype.graph.module_cell_count`, clamped `≥1` by the caller — a
+/// non-positive `prey_body_size` here is clamped again defensively). All inputs are small, cheap
+/// to read. The function is pure: no RNG, no state, no clock. Same inputs → byte-identical
+/// `Outcome`.
 ///
 /// **Invariants (load-bearing for R15):**
 /// - `outcome.predator_gain + outcome.dissipated == outcome.prey_loss` (exact integer conservation)
 /// - `outcome.prey_loss ≤ prey_energy` (prey never loses more than it has)
 /// - All three fields ≥ 0 (no negative energy transfers; saturating arithmetic prevents wraps)
 ///
+/// **D-1 size-refuge (gated).** `spec.size_refuge = None` (every shipped config): `prey_body_size`
+/// is unused, bite unchanged — byte-identical to P-2a. `Some(refuge)`: the refuge scales the
+/// PRE-CLAMP bite (after combat-trait scaling, before the `.min(prey_energy)` death-cap), so the
+/// conservation invariants above still hold ∀ inputs: `bite_eff = (bite << shift) / ((1 << shift)
+/// + refuge_k * prey_body_size)` — larger `prey_body_size` ⇒ smaller `bite_eff` (monotone).
+///
 /// **Overflow behavior.** Intermediate accumulators (e.g., `bite * trait_factor`) are computed in
-/// `i64` and clamped to [`VALUE_MAX`] before narrowing. Saturating semantics ensure the result is
-/// detectable (stays within bounds) rather than silently aliasing to wrong values.
+/// `i64` and clamped to [`VALUE_MAX`] before narrowing. The refuge division widens to `i128` (still
+/// integer, still deterministic) so a large `shift` cannot overflow before narrowing back to `i64`.
+/// Saturating semantics ensure the result is detectable (stays within bounds) rather than silently
+/// aliasing to wrong values.
 pub fn resolve_encounter(
     predator: &Genome,
     prey_energy: i64,
+    prey_body_size: i64,
     spec: &PredationSpec,
 ) -> Outcome {
     // Clamp prey energy to valid range (should already be non-negative, but guard against it).
@@ -106,6 +144,24 @@ pub fn resolve_encounter(
     let trait_factor: i64 = 256i64 + (spec.combat_trait_scale as i64 * trait_val);
     let bite_wide: i64 = (base_bite * trait_factor) >> 8;
     let bite = bite_wide.clamp(0, VALUE_MAX);
+
+    // D-1: gated per-prey size-refuge. `None` ⇒ bite unchanged (byte-identical to P-2a).
+    // `Some` ⇒ scale the PRE-CLAMP bite by the prey's own body size (larger body → smaller bite).
+    let bite = match spec.size_refuge {
+        Some(refuge) => {
+            // Defensive cap on `shift`: bite ≤ VALUE_MAX (1e6), so `shift ≤ 32` keeps the i128
+            // numerator far below i128::MAX with headroom to spare — a misconfigured spec cannot
+            // overflow this widened arithmetic.
+            let shift = refuge.shift.min(32);
+            let body = prey_body_size.max(1) as i128; // defensive re-clamp (caller already clamps ≥1)
+            let k = refuge.refuge_k as i128;
+            let numer: i128 = (bite as i128) << shift;
+            let denom: i128 = ((1i128) << shift) + k * body;
+            let denom = denom.max(1); // guard non-positive denominator (misconfigured negative k)
+            (numer / denom).clamp(0, VALUE_MAX as i128) as i64
+        }
+        None => bite,
+    };
 
     // Clamp bite to what prey has available (prey cannot lose more than it carries).
     let actual_bite = bite.min(prey_energy);
@@ -145,7 +201,16 @@ mod tests {
             bite_shift: 3,             // base bite ≈ prey_energy / 8
             combat_trait_scale: 1,     // moderate trait influence
             efficiency_num: 160,       // ~62% efficiency (160/256)
+            size_refuge: None,         // D-1: gated off — byte-identical to pre-D-1
         }
+    }
+
+    /// D-1 fixture — `prod_spec()` with the size-refuge gate turned on, for the refuge-specific
+    /// teeth below. `shift=8, refuge_k=1` — moderate refuge strength.
+    fn prod_spec_with_refuge(shift: u32, refuge_k: i32) -> PredationSpec {
+        let mut spec = prod_spec();
+        spec.size_refuge = Some(SizeRefugeSpec { shift, refuge_k });
+        spec
     }
 
     fn predator_genome(size: i32) -> Genome {
@@ -183,7 +248,7 @@ mod tests {
 
             for prey_eu in prey_energies {
                 let pred = predator_genome(predator_size as i32);
-                let outcome = resolve_encounter(&pred, prey_eu, &spec);
+                let outcome = resolve_encounter(&pred, prey_eu, 1, &spec);
 
                 // Invariant 1: predator_gain + dissipated == prey_loss (exact integer, R15)
                 assert_eq!(
@@ -216,8 +281,8 @@ mod tests {
         let pred = predator_genome(16);
         let prey_eu = 1000i64;
 
-        let out_a = resolve_encounter(&pred, prey_eu, &spec);
-        let out_b = resolve_encounter(&pred, prey_eu, &spec);
+        let out_a = resolve_encounter(&pred, prey_eu, 1, &spec);
+        let out_b = resolve_encounter(&pred, prey_eu, 1, &spec);
 
         assert_eq!(
             out_a, out_b,
@@ -233,10 +298,10 @@ mod tests {
         let pred = predator_genome(16);
         let prey_eu = 1000i64;
 
-        let out_a = resolve_encounter(&pred, prey_eu, &spec);
+        let out_a = resolve_encounter(&pred, prey_eu, 1, &spec);
         let bytes_a = (out_a.predator_gain, out_a.prey_loss, out_a.dissipated);
 
-        let out_b = resolve_encounter(&pred, prey_eu, &spec);
+        let out_b = resolve_encounter(&pred, prey_eu, 1, &spec);
         let bytes_b = (out_b.predator_gain, out_b.prey_loss, out_b.dissipated);
 
         assert_eq!(
@@ -267,7 +332,7 @@ mod tests {
         ];
 
         for prey_eu in test_prey_energies {
-            let out = resolve_encounter(&pred, prey_eu, &spec);
+            let out = resolve_encounter(&pred, prey_eu, 1, &spec);
 
             // Conservation must hold even at saturation edges (R15).
             assert_eq!(
@@ -299,9 +364,9 @@ mod tests {
         let predator_medium = predator_genome(16);
         let predator_large = predator_genome(32);
 
-        let out_small = resolve_encounter(&predator_small, prey_eu, &spec);
-        let out_medium = resolve_encounter(&predator_medium, prey_eu, &spec);
-        let out_large = resolve_encounter(&predator_large, prey_eu, &spec);
+        let out_small = resolve_encounter(&predator_small, prey_eu, 1, &spec);
+        let out_medium = resolve_encounter(&predator_medium, prey_eu, 1, &spec);
+        let out_large = resolve_encounter(&predator_large, prey_eu, 1, &spec);
 
         // Stronger predators (larger size) should gain non-decreasing amounts
         // (all else equal, the gain should not decrease as predator strength increases).
@@ -337,7 +402,7 @@ mod tests {
         // Small prey: the bite will likely exceed available energy
         let small_prey = 10i64;
 
-        let out = resolve_encounter(&pred, small_prey, &spec);
+        let out = resolve_encounter(&pred, small_prey, 1, &spec);
 
         // The prey loses at most what it has
         assert!(out.prey_loss <= small_prey, "bite exceeded prey capacity: {} > {}", out.prey_loss, small_prey);
@@ -366,8 +431,8 @@ mod tests {
         let mut spec_high = prod_spec();
         spec_high.efficiency_num = 230; // ~90% efficiency
 
-        let out_low = resolve_encounter(&pred, prey_eu, &spec_low);
-        let out_high = resolve_encounter(&pred, prey_eu, &spec_high);
+        let out_low = resolve_encounter(&pred, prey_eu, 1, &spec_low);
+        let out_high = resolve_encounter(&pred, prey_eu, 1, &spec_high);
 
         // Both must conserve
         assert_eq!(
@@ -397,7 +462,7 @@ mod tests {
         let spec = prod_spec();
         let pred = predator_genome(32);
 
-        let out = resolve_encounter(&pred, 0, &spec);
+        let out = resolve_encounter(&pred, 0, 1, &spec);
 
         assert_eq!(out.predator_gain, 0);
         assert_eq!(out.prey_loss, 0);
@@ -420,8 +485,8 @@ mod tests {
         let mut spec_conservative = prod_spec();
         spec_conservative.bite_shift = 5; // base bite ≈ prey / 32
 
-        let out_agg = resolve_encounter(&pred, prey_eu, &spec_aggressive);
-        let out_cons = resolve_encounter(&pred, prey_eu, &spec_conservative);
+        let out_agg = resolve_encounter(&pred, prey_eu, 1, &spec_aggressive);
+        let out_cons = resolve_encounter(&pred, prey_eu, 1, &spec_conservative);
 
         // Aggressive spec should result in larger prey loss (or equal)
         assert!(
@@ -434,5 +499,118 @@ mod tests {
         // Both conserve
         assert_eq!(out_agg.predator_gain + out_agg.dissipated, out_agg.prey_loss);
         assert_eq!(out_cons.predator_gain + out_cons.dissipated, out_cons.prey_loss);
+    }
+
+    // ── D-1 (#268): per-prey size-refuge teeth ──────────────────────────────────────────────────
+
+    /// `d1_conservation_R15`: re-prove the conservation invariant with the refuge GATE ON, across
+    /// a grid of predator size × prey energy × prey body size — the refuge scales the pre-clamp
+    /// bite only, so `gain+dissipated==loss ∧ loss≤prey_energy` must still hold exactly ∀ inputs.
+    #[test]
+    fn d1_conservation_r15() {
+        let spec = prod_spec_with_refuge(8, 3);
+
+        for predator_size in [1i32, 8, 16, 32] {
+            for prey_eu in [0i64, 1, 100, 1_000, 10_000] {
+                for body_size in [1i64, 2, 5, 32, 1_000] {
+                    let pred = predator_genome(predator_size);
+                    let outcome = resolve_encounter(&pred, prey_eu, body_size, &spec);
+
+                    assert_eq!(
+                        outcome.predator_gain + outcome.dissipated,
+                        outcome.prey_loss,
+                        "R15 broken (refuge on) at size={predator_size}, prey_eu={prey_eu}, body={body_size}: \
+                         gain={} + dissipated={} != loss={}",
+                        outcome.predator_gain, outcome.dissipated, outcome.prey_loss
+                    );
+                    assert!(
+                        outcome.prey_loss <= prey_eu,
+                        "prey_loss > prey_energy (refuge on) at size={predator_size}, prey_eu={prey_eu}, body={body_size}: {} > {}",
+                        outcome.prey_loss, prey_eu
+                    );
+                    assert!(outcome.predator_gain >= 0 && outcome.prey_loss >= 0 && outcome.dissipated >= 0);
+                }
+            }
+        }
+    }
+
+    /// `d1_refuge_monotone`: larger `prey_body_size` → strictly smaller (or equal, at saturation)
+    /// `bite_eff`, i.e. `prey_loss` is non-increasing in body size, and strictly decreasing over
+    /// the un-saturated range (Boraas: bigger body → harder to capture).
+    #[test]
+    fn d1_refuge_monotone() {
+        let spec = prod_spec_with_refuge(8, 2);
+        let pred = predator_genome(16);
+        let prey_eu = 10_000i64; // large enough that the bite doesn't hit the prey-energy cap
+
+        let bodies = [1i64, 2, 4, 8, 16, 32, 64, 128];
+        let losses: Vec<i64> = bodies
+            .iter()
+            .map(|&b| resolve_encounter(&pred, prey_eu, b, &spec).prey_loss)
+            .collect();
+
+        for w in losses.windows(2) {
+            assert!(
+                w[0] > w[1],
+                "refuge must be strictly monotone-decreasing in body size: losses={:?} (bodies={:?})",
+                losses, bodies
+            );
+        }
+    }
+
+    /// `d1_none_inert`: `size_refuge=None` reproduces the exact pre-D-1 (P-2a) `Outcome` for a
+    /// grid of inputs, regardless of what `prey_body_size` is passed — the gate makes the new
+    /// parameter dead weight when off.
+    #[test]
+    fn d1_none_inert() {
+        let spec = prod_spec(); // size_refuge: None
+
+        for predator_size in [1i32, 16, 32] {
+            for prey_eu in [0i64, 10, 1_000, 10_000] {
+                let pred = predator_genome(predator_size);
+                let baseline = resolve_encounter(&pred, prey_eu, 1, &spec);
+                for body_size in [1i64, 2, 100, 1_000_000] {
+                    let out = resolve_encounter(&pred, prey_eu, body_size, &spec);
+                    assert_eq!(
+                        out, baseline,
+                        "size_refuge=None must ignore prey_body_size entirely: size={predator_size}, \
+                         prey_eu={prey_eu}, body={body_size}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `d1_determinism`: with the refuge gate ON, same inputs still → byte-identical `Outcome`
+    /// across repeated calls (no RNG, no hidden state — the refuge division is pure integer).
+    #[test]
+    fn d1_determinism() {
+        let spec = prod_spec_with_refuge(8, 1);
+        let pred = predator_genome(16);
+
+        let out_a = resolve_encounter(&pred, 1000, 7, &spec);
+        let out_b = resolve_encounter(&pred, 1000, 7, &spec);
+        assert_eq!(out_a, out_b, "determinism broken with refuge on: {:?} vs {:?}", out_a, out_b);
+    }
+
+    /// `d1_empty_body_clamp`: an empty-`CellGraph` / unicell prey (body size 0 or negative from a
+    /// misbehaving caller) is clamped to 1 inside `resolve_encounter` — no divide-by-zero, no
+    /// panic, no anomalous (negative or overflowing) outcome.
+    #[test]
+    fn d1_empty_body_clamp() {
+        let spec = prod_spec_with_refuge(8, 4);
+        let pred = predator_genome(16);
+
+        for body_size in [0i64, -1, -1000] {
+            let out = resolve_encounter(&pred, 1000, body_size, &spec);
+            // Must match the clamped (body=1) result exactly — no divide-by-zero/anomalous value.
+            let clamped = resolve_encounter(&pred, 1000, 1, &spec);
+            assert_eq!(
+                out, clamped,
+                "non-positive prey_body_size={body_size} must clamp to 1: got {:?}, expected {:?}",
+                out, clamped
+            );
+            assert!(out.predator_gain >= 0 && out.prey_loss >= 0 && out.dissipated >= 0);
+        }
     }
 }

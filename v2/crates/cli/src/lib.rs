@@ -261,6 +261,7 @@ pub fn predation_config(seed: u64) -> SimConfig {
                 bite_shift: 3,             // base bite ≈ prey_energy / 8
                 combat_trait_scale: 1,     // moderate trait influence
                 efficiency_num: 160,       // ~62% efficiency (160/256) — P-1 fixture value
+                size_refuge: None,         // D-1: gated off — byte-identical to P-2a
             }),
             ..EconParams::default()
         },

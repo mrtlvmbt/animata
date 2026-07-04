@@ -116,6 +116,7 @@ fn predation_measure_emergence() {
         bite_shift: 31,        // prey_energy >> 31 ≈ 0 for realistic prey energies (10–100)
         combat_trait_scale: 1, // kept same; irrelevant since bite ≈ 0
         efficiency_num: 0,     // zero predator gain → no predator population pressure
+        size_refuge: None,     // D-1: gated off — not this slice's concern
     });
     let mut sim_inert = build_sim(inert_config);
     for _ in 0..HORIZON {
