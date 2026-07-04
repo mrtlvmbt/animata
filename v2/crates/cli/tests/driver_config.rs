@@ -196,3 +196,217 @@ fn d2_set_overrides() {
         );
     }
 }
+
+// ── D-3b (#274) — multicellularity emergence VERDICT ────────────────────────────────────────────
+//
+// Smoke: driver_config runs a short horizon and `Telemetry.multicellular_frac` reads in-range
+// [0, BODY_SIZE_SCALE] — the measurement plumbing the verdict test below depends on is live.
+#[test]
+fn d3b_multicellular_frac_plumbing_smoke() {
+    let mut sim = build_sim(driver_config(SEED));
+    for _ in 0..50 {
+        sim.step();
+    }
+    let tel = sim.telemetry();
+    assert!(
+        (0..=sim_core::BODY_SIZE_SCALE).contains(&tel.multicellular_frac),
+        "multicellular_frac={} must be readable and in [0, {}]",
+        tel.multicellular_frac,
+        sim_core::BODY_SIZE_SCALE
+    );
+}
+
+// ── D-3b emergence verdict experiment ────────────────────────────────────────────────────────────
+// PRE-DECLARED VERDICT CONSTANTS (recorded BEFORE running, per issue #274 — do NOT adjust to flip
+// a NULL to EMERGENCE):
+//   EMERGE_FLOOR   = 128/256 (BODY_SIZE_SCALE) — ≥50% of the live population multicellular.
+//   MARGIN         = 2x — frac(WITH) must beat BOTH controls (ablation, channel-isolation) by ≥ this.
+//   SEED_MAJORITY  = 3/5 — the regime must sustain across at least 3 of 5 seeds.
+//   POP_FLOOR      = 10 — drift-confound guard: a tick counts toward the late-window mean only when
+//                    live population ≥ POP_FLOOR (an extinct run is NOT "reverted to unicellular").
+//   Sweep          = refuge_k ∈ {2, 8, 32, 128}, at driver_config's default c_coord.
+//   Window         = mean over the last min(ticks, 1000) ticks (sustained, not a single snapshot).
+//
+// EMERGENCE iff ∃ refuge_k where frac(WITH) ≥ EMERGE_FLOOR AND frac(WITH) ≥ MARGIN·frac(ABLATION)
+// AND frac(WITH) ≥ MARGIN·frac(CHANNEL-ISOLATION), sustained in ≥ SEED_MAJORITY of 5 seeds. Else
+// NULL — report which sub-condition failed, from the printed regime map.
+//
+// Three arms per (seed, refuge_k):
+//   WITH                predation ON + size-refuge ON at refuge_k          (the driver hypothesis)
+//   ABLATION-predators  predation OFF entirely                             (Boraas control)
+//   CHANNEL-ISOLATION   predation ON, refuge_k=0 (refuge off)              (anti-subsidy control)
+// ABLATION/CHANNEL-ISOLATION don't depend on refuge_k, so each is computed once per seed and reused
+// across the sweep.
+//
+// Configure horizon via env var DRIVER_EMERGENCE_TICKS (default 400 for fast local iteration; cloud
+// dispatch uses 8000 — see scripts/sim-run.sh driver-emergence).
+// Run: cargo test --release -p cli -- driver_emergence_verdict --nocapture --ignored
+// Cloud: scripts/sim-run.sh driver-emergence ticks=8000  (after this PR merges to main)
+
+const EMERGE_FLOOR: i64 = 128; // ×BODY_SIZE_SCALE(256) == 50%
+const MARGIN: i64 = 2;
+const SEED_MAJORITY: usize = 3;
+const POP_FLOOR: i64 = 10;
+const REFUGE_K_SWEEP: [i32; 4] = [2, 8, 32, 128];
+const VERDICT_SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
+
+/// Result of one driver_config arm run: the mean `multicellular_frac` over the valid (pop≥POP_FLOOR)
+/// late-window ticks, the mean population (informational), and whether the run ever collapsed below
+/// POP_FLOOR in the window (extinction — not a measurable multicellular_frac, distinct from reverting
+/// to unicellular dominance).
+struct ArmResult {
+    frac: i64,
+    mean_pop: f64,
+    collapsed: bool,
+}
+
+fn run_driver_arm(
+    seed: u64,
+    ticks: u64,
+    window_start: u64,
+    predators_on: bool,
+    refuge_k: i32,
+) -> ArmResult {
+    let mut cfg = driver_config(seed);
+    if !predators_on {
+        cfg.econ.predation = None; // Boraas control: no predators at all
+    } else {
+        cfg.econ
+            .predation
+            .as_mut()
+            .expect("driver_config always configures predation")
+            .size_refuge
+            .as_mut()
+            .expect("driver_config always configures size_refuge")
+            .refuge_k = refuge_k;
+    }
+    let mut sim = build_sim(cfg);
+    let mut frac_sum: i64 = 0;
+    let mut valid_ticks: i64 = 0;
+    let mut pop_sum: i64 = 0;
+    let mut pop_ticks: i64 = 0;
+    for t in 0..ticks {
+        sim.step();
+        if t >= window_start {
+            let tel = sim.telemetry();
+            pop_sum += tel.population;
+            pop_ticks += 1;
+            if tel.population >= POP_FLOOR {
+                frac_sum += tel.multicellular_frac;
+                valid_ticks += 1;
+            }
+        }
+    }
+    let mean_pop = if pop_ticks > 0 { pop_sum as f64 / pop_ticks as f64 } else { 0.0 };
+    if valid_ticks == 0 {
+        ArmResult { frac: 0, mean_pop, collapsed: true }
+    } else {
+        ArmResult { frac: frac_sum / valid_ticks, mean_pop, collapsed: false }
+    }
+}
+
+/// D-3b emergence verdict: does a non-trivial multicellular body size EMERGE under predation
+/// size-refuge (Boraas/Ratcliff) and REVERT without it? Heavy (3 arms × 4-way sweep × 5 seeds ×
+/// long horizon) — `#[ignore]`d in CI; run explicitly via the `driver-emergence` sim-run scenario.
+#[test]
+#[ignore]
+fn driver_emergence_verdict() {
+    let ticks: u64 = std::env::var("DRIVER_EMERGENCE_TICKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(400);
+    let window_len = ticks.min(1000);
+    let window_start = ticks - window_len;
+
+    println!("\nD-3b emergence verdict: multicellularity under predation size-refuge (Boraas/Ratcliff)");
+    println!(
+        "PRE-DECLARED: EMERGE_FLOOR={:.0}%, MARGIN={MARGIN}x, SEED_MAJORITY={SEED_MAJORITY}/5, POP_FLOOR={POP_FLOOR}",
+        EMERGE_FLOOR as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0
+    );
+    println!(
+        "ticks={ticks}  late-window=[{window_start},{ticks}]  refuge_k sweep={:?}",
+        REFUGE_K_SWEEP
+    );
+
+    // ABLATION-predators / CHANNEL-ISOLATION don't depend on refuge_k — compute once per seed.
+    let ablation: Vec<ArmResult> = VERDICT_SEEDS
+        .iter()
+        .map(|&seed| run_driver_arm(seed, ticks, window_start, false, 0))
+        .collect();
+    let channel_iso: Vec<ArmResult> = VERDICT_SEEDS
+        .iter()
+        .map(|&seed| run_driver_arm(seed, ticks, window_start, true, 0))
+        .collect();
+
+    let mut any_regime_emerges = false;
+    let mut best_k = REFUGE_K_SWEEP[0];
+    let mut best_count = 0usize;
+
+    for &k in &REFUGE_K_SWEEP {
+        println!("{}", "-".repeat(78));
+        println!("refuge_k={k}");
+        println!(
+            "{:<6} {:>12} {:>12} {:>12} {:>10} {:>10}",
+            "seed", "WITH%", "ablation%", "chan-iso%", "with-pop", "result"
+        );
+
+        let mut seed_pass_count = 0usize;
+        for (i, &seed) in VERDICT_SEEDS.iter().enumerate() {
+            let with = run_driver_arm(seed, ticks, window_start, true, k);
+            let abl = &ablation[i];
+            let ciso = &channel_iso[i];
+
+            let floor_ok = !with.collapsed && with.frac >= EMERGE_FLOOR;
+            let margin_abl_ok = !with.collapsed && with.frac >= MARGIN * abl.frac;
+            let margin_ciso_ok = !with.collapsed && with.frac >= MARGIN * ciso.frac;
+            let pass = floor_ok && margin_abl_ok && margin_ciso_ok;
+            if pass {
+                seed_pass_count += 1;
+            }
+
+            let with_pct = with.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+            let abl_pct = abl.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+            let ciso_pct = ciso.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+            let tag = if with.collapsed {
+                "COLLAPSED"
+            } else if pass {
+                "PASS"
+            } else {
+                "fail"
+            };
+            println!(
+                "{:<6} {:>11.1}% {:>11.1}% {:>11.1}% {:>10.1} {:>10}",
+                seed, with_pct, abl_pct, ciso_pct, with.mean_pop, tag
+            );
+        }
+
+        println!("  seeds passing all 3 conditions: {seed_pass_count}/5 (need ≥{SEED_MAJORITY})");
+        if seed_pass_count > best_count {
+            best_count = seed_pass_count;
+            best_k = k;
+        }
+        if seed_pass_count >= SEED_MAJORITY {
+            any_regime_emerges = true;
+        }
+    }
+
+    println!("{}", "-".repeat(78));
+    println!();
+    if any_regime_emerges {
+        println!("DRIVER-EMERGENCE VERDICT: EMERGENCE");
+        println!(
+            "  A refuge_k regime sustains multicellular_frac \u{2265}{EMERGE_FLOOR}/256 and \u{2265}{MARGIN}x both"
+        );
+        println!("  the predator-ablation and channel-isolation controls, in \u{2265}{SEED_MAJORITY}/5 seeds.");
+        println!("  Best regime: refuge_k={best_k} ({best_count}/5 seeds).");
+        println!("  Size-refuge under predation is a genuine driver of multicellularity (Boraas/Ratcliff),");
+        println!("  not a generic predation subsidy — the channel-isolation control rules that out.");
+    } else {
+        println!("DRIVER-EMERGENCE VERDICT: NULL — no refuge_k regime reached SEED_MAJORITY={SEED_MAJORITY}/5.");
+        println!("  Closest regime: refuge_k={best_k} ({best_count}/5 seeds passing all 3 conditions).");
+        println!("  See the regime map above for which sub-condition (floor / vs-ablation margin /");
+        println!("  vs-channel-isolation margin) failed per seed \u{2014} an honest informative finding, not");
+        println!("  tuned to pass. driver_config's calibration was chosen for VIABILITY (D-2), not");
+        println!("  emergence; this sweep is the search D-3 promised, and NULL is a valid outcome.");
+    }
+}
