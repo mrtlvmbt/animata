@@ -23,6 +23,14 @@
 //! A/B differentiation emergence. Layer 0 (A-guild) = orange; layer 1 (B-guild) = cyan; morphology
 //! reflects cell_type (if available, from E-4 ontogenesis). HUD legend added. Render-only, golden-neutral.
 //!
+//! R-8 (this slice, #261): standalone hex-map viewer — `--standalone`/`--no-sim` skips spawning the
+//! sim worker entirely (no `Sim`, no snapshot). Terrain/camera/culling/LOD are already sim-independent
+//! (R-2/R-3/R-6); the only coupling point was the creature snapshot, which was already `Option`-typed
+//! (`SimHandle::latest`) — standalone just keeps that `Option` at `None` for the whole run instead of
+//! populating it from a worker thread. `--seed`/`--dim` are optional overrides (default: current pinned
+//! values); `--dim` only takes effect in standalone (in sim mode it would desync the render's world from
+//! the worker's, breaking the pinned-param contract below).
+//!
 //! Not part of the v2 CI workspace (`v2/Cargo.toml`'s `exclude`) — a leaf bin, verified LOCALLY:
 //! `cargo build`/`cargo clippy` from this directory + a manual run (window opens, ProcgenWorld hex
 //! terrain + colored creatures visible by feeding guild, HUD counts advance, T-key toggles cube terrain).
@@ -51,7 +59,7 @@ const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 /// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
 fn window_conf() -> Conf {
     Conf {
-        window_title: "animata v2 — render scaffold (R-7 biology coloring)".to_owned(),
+        window_title: "animata v2 — render scaffold (R-8 standalone hex-map viewer)".to_owned(),
         window_width: 1024,
         window_height: 768,
         high_dpi: true,
@@ -63,6 +71,37 @@ fn window_conf() -> Conf {
 /// not load-bearing (the sim draws whatever the economy produces; the terrain is whatever this seed
 /// generates).
 const SEED: u64 = 0xA11A_2A11;
+
+/// R-8 (#261): parsed CLI flags. `--standalone`/`--no-sim` are aliases for the same no-sim mode.
+struct CliArgs {
+    standalone: bool,
+    seed: u64,
+    /// Only honoured in standalone mode — see the module doc comment for why.
+    dim_override: Option<i64>,
+}
+
+fn parse_args() -> CliArgs {
+    let mut standalone = false;
+    let mut seed = SEED;
+    let mut dim_override = None;
+
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--standalone" | "--no-sim" => standalone = true,
+            "--seed" => {
+                let v = args.next().expect("--seed requires a value");
+                seed = v.parse().unwrap_or_else(|_| panic!("--seed expects a u64, got {v:?}"));
+            }
+            "--dim" => {
+                let v = args.next().expect("--dim requires a value");
+                dim_override = Some(v.parse().unwrap_or_else(|_| panic!("--dim expects an integer, got {v:?}")));
+            }
+            other => eprintln!("render: ignoring unknown arg {other:?}"),
+        }
+    }
+    CliArgs { standalone, seed, dim_override }
+}
 
 // ── Pinned-param contract (W-6 WIRE: ProcgenWorld; critic F3, issue #223 acceptance; R-6) ──────────
 //
@@ -85,8 +124,16 @@ async fn main() {
     // allocation, not a per-frame cost.
     gl_set_drawcall_buffer_capacity(200_000, 400_000);
 
-    let config = cli::default_config(SEED);
-    let world_dim = config.econ.world_dim;
+    let cli_args = parse_args();
+    let config = cli::default_config(cli_args.seed);
+    // R-8: `--dim` only applies in standalone — in sim mode the worker thread builds its OWN world
+    // from `config.econ.world_dim` (via `cli::build_sim`), so overriding it here alone would desync
+    // the render's terrain from the sim's, breaking the pinned-param contract below.
+    let world_dim = if cli_args.standalone {
+        cli_args.dim_override.unwrap_or(config.econ.world_dim)
+    } else {
+        config.econ.world_dim
+    };
 
     // The render's OWN WorldView, built ONCE from the SAME (dim, hmax, resource_base, seed) tuple the
     // sim worker uses — the single source of provenance the pinned-param contract above requires.
@@ -108,14 +155,19 @@ async fn main() {
     let center = Vec3::new(span_x * 0.5, hex::HEIGHT_SCALE * cli::HMAX as f32 * 0.5, span_z * 0.5);
     let mut camera = IsoCam::new(center, 0.0, world_span * 1.5);
 
-    let handle = driver::spawn(SEED);
+    // R-8: standalone mode spawns NO sim worker — `handle` stays `None` for the run, so `snap` below
+    // stays `None` too (the render loop already tolerated a pre-first-tick `None`; standalone just
+    // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
+    let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
 
     loop {
-        if is_key_pressed(KeyCode::Space) {
-            handle.toggle_pause();
-        }
-        if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-            handle.step_once();
+        if let Some(h) = &handle {
+            if is_key_pressed(KeyCode::Space) {
+                h.toggle_pause();
+            }
+            if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
+                h.step_once();
+            }
         }
         // R-5: Toggle hex↔cube terrain with 'T' key.
         if is_key_pressed(KeyCode::T) {
@@ -124,7 +176,7 @@ async fn main() {
 
         clear_background(Color::from_rgba(18, 18, 22, 255));
 
-        let snap = handle.latest();
+        let snap = handle.as_ref().and_then(|h| h.latest());
 
         // R-3: Update camera input and build frustum.
         camera.update();
@@ -229,7 +281,12 @@ async fn main() {
         set_default_camera();
 
         egui_macroquad::ui(|ctx| {
-            egui::Window::new("v2 render scaffold — R-7 biology coloring").show(ctx, |ui| {
+            let title = if cli_args.standalone {
+                "v2 render scaffold — R-8 standalone hex-map viewer"
+            } else {
+                "v2 render scaffold — R-7 biology coloring"
+            };
+            egui::Window::new(title).show(ctx, |ui| {
                 match snap.as_ref() {
                     Some(s) => {
                         ui.label(format!("tick: {}", s.tick));
@@ -237,37 +294,59 @@ async fn main() {
                         ui.label(format!("species: {}", s.species_count));
                         ui.label(format!("creatures drawn: {}", s.creatures.len()));
                     }
+                    None if cli_args.standalone => {
+                        ui.label("standalone mode — no sim, terrain only");
+                    }
                     None => {
                         ui.label("waiting for the sim worker's first tick…");
                     }
                 }
                 ui.separator();
-                ui.label("─ Creature Coloring (uptake_layer / feeding guild) ─");
-                ui.colored_label(egui::Color32::from_rgb(255, 153, 51), "● Orange: Layer 0 (A-guild)");
-                ui.colored_label(egui::Color32::from_rgb(51, 204, 255), "● Cyan: Layer 1 (B-guild)");
-                ui.colored_label(egui::Color32::from_rgb(204, 51, 255), "● Magenta: Layer 2+");
-                ui.separator();
+                if !cli_args.standalone {
+                    ui.label("─ Creature Coloring (uptake_layer / feeding guild) ─");
+                    ui.colored_label(egui::Color32::from_rgb(255, 153, 51), "● Orange: Layer 0 (A-guild)");
+                    ui.colored_label(egui::Color32::from_rgb(51, 204, 255), "● Cyan: Layer 1 (B-guild)");
+                    ui.colored_label(egui::Color32::from_rgb(204, 51, 255), "● Magenta: Layer 2+");
+                    ui.separator();
+                }
                 ui.label(format!("terrain: {world_dim}×{world_dim}, {} mesh chunks", terrain_chunks.len()));
                 ui.label(format!("chunks drawn: {}/{}", chunks_drawn, terrain_chunks.len()));
-                ui.label(format!(
-                    "terrain: {} (T to toggle)",
-                    if use_cube_terrain { "cube" } else { "hex" }
-                ));
+                ui.label(format!("fps: {}", get_fps()));
                 ui.separator();
-                ui.label("Pan: WASD / arrows / middle-drag");
-                ui.label("Zoom: mouse wheel (clamped 5..200)");
-                ui.label("Rotate: Q/E or ,/. (60° steps)");
-                ui.separator();
-                ui.label(if handle.is_paused() {
-                    "PAUSED — Space to resume"
-                } else {
-                    "running — Space to pause"
-                });
-                ui.label("Right / N: step once while paused");
+                ui.label("Controls: WASD/drag pan · wheel zoom · Q/E rotate · T hex/cube");
+                if let Some(h) = &handle {
+                    ui.separator();
+                    ui.label(if h.is_paused() {
+                        "PAUSED — Space to resume"
+                    } else {
+                        "running — Space to pause"
+                    });
+                    ui.label("Right / N: step once while paused");
+                }
             });
         });
         egui_macroquad::draw();
 
         next_frame().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R-8 teeth: the same world+terrain construction the standalone path uses (no `Sim`, no window)
+    /// must produce non-empty meshes — a headless proxy for "renders terrain with a `None` snapshot
+    /// without panicking," since the full visual check needs a window the CI/agent can't open.
+    #[test]
+    fn standalone_world_builds_nonempty_terrain() {
+        let dim = 64;
+        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT);
+        let hex_chunks = terrain::build_hex_terrain(dim, &world);
+        let cube_chunks = terrain_cube::build_cube_terrain(dim, &world);
+        assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");
+        assert!(!cube_chunks.is_empty(), "cube terrain must produce at least one chunk");
+        assert!(hex_chunks.iter().any(|c| !c.mesh.vertices.is_empty()));
+        assert!(cube_chunks.iter().any(|c| !c.mesh.vertices.is_empty()));
     }
 }
