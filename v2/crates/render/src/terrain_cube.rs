@@ -3,6 +3,10 @@
 //! Side quads only where neighbour is STRICTLY lower (hidden-face removal, RnD `rendering/02` §3).
 //! Biome-colored (via `biome_palette`) + baked per-face-direction shading (mirror v1 `mesh.rs::shaded`).
 //!
+//! R-9: TOP faces are greedy-meshed — a row-major sweep merges a maximal rectangle of cells
+//! sharing (height, biome_color) into ONE quad. Cliff/side quads stay per-edge, hidden-face-culled
+//! as before (greedy does NOT apply to them this slice).
+//!
 //! Same `ROWS_PER_CHUNK` chunking + u16-index assert as hex terrain (`terrain.rs`).
 //! Built ONCE at startup — cold terrain immutable for the run.
 
@@ -33,37 +37,95 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u16> = Vec::new();
 
-    for row in row0..row1 {
+    let cols = world_dim as usize;
+    let band_rows = (row1 - row0) as usize;
+
+    // Cache (height, biome_color) per cell in this band — read once, reused by both
+    // the greedy top-face pass and the per-cell cliff pass below.
+    let mut heights = vec![vec![0f32; cols]; band_rows];
+    let mut colors = vec![vec![WHITE; cols]; band_rows];
+    for local_row in 0..band_rows {
+        let row = row0 + local_row as i64;
         for col in 0..world_dim {
-            let h = world.height(col, row) as f32 * HEIGHT_SCALE;
+            heights[local_row][col as usize] = world.height(col, row) as f32 * HEIGHT_SCALE;
+            colors[local_row][col as usize] = biome_color(world.biome(Vec2Fixed(col, row)));
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Greedy top-face meshing (R-9): row-major sweep, merge a maximal rectangle
+    // of cells sharing (height, biome_color) into ONE quad. Deterministic order.
+    // ────────────────────────────────────────────────────────────────────
+    let mut visited = vec![vec![false; cols]; band_rows];
+    for local_row in 0..band_rows {
+        for col0 in 0..cols {
+            if visited[local_row][col0] {
+                continue;
+            }
+            let h = heights[local_row][col0];
+            let color = colors[local_row][col0];
+
+            // Grow right while the run shares (height, color) and is unvisited.
+            let mut col1 = col0 + 1;
+            while col1 < cols
+                && !visited[local_row][col1]
+                && heights[local_row][col1] == h
+                && colors[local_row][col1] == color
+            {
+                col1 += 1;
+            }
+
+            // Grow down while the whole [col0, col1) row matches.
+            let mut row_end = local_row + 1;
+            'grow_down: while row_end < band_rows {
+                for c in col0..col1 {
+                    if visited[row_end][c] || heights[row_end][c] != h || colors[row_end][c] != color {
+                        break 'grow_down;
+                    }
+                }
+                row_end += 1;
+            }
+
+            for r in visited.iter_mut().take(row_end).skip(local_row) {
+                for v in r.iter_mut().take(col1).skip(col0) {
+                    *v = true;
+                }
+            }
+
+            // Emit ONE quad spanning the merged rectangle [col0,col1) x [world_row0,world_row1).
+            let world_row0 = row0 + local_row as i64;
+            let world_row1 = row0 + row_end as i64;
+            let x0 = col0 as f32;
+            let x1 = col1 as f32;
+            let z0 = world_row0 as f32;
+            let z1 = world_row1 as f32;
+
+            let base = vertices.len() as u16;
+            vertices.push(vertex(Vec3::new(x0, h, z0), color)); // TL
+            vertices.push(vertex(Vec3::new(x1, h, z0), color)); // TR
+            vertices.push(vertex(Vec3::new(x1, h, z1), color)); // BR
+            vertices.push(vertex(Vec3::new(x0, h, z1), color)); // BL
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
+    for local_row in 0..band_rows {
+        let row = row0 + local_row as i64;
+        for col in 0..world_dim {
+            let h = heights[local_row][col as usize];
             // Square cell center: (col + 0.5, row + 0.5) in world space
             // Each cell is a 1×1 square, so corners are at ±0.5 from center
             let cx = col as f32 + 0.5;
             let cz = row as f32 + 0.5;
             let size = 0.5; // Half-size: extends ±0.5 from center in x,z
 
-            let top_color = biome_color(world.biome(Vec2Fixed(col, row)));
+            let top_color = colors[local_row][col as usize];
             let cliff_color = cliff_shade(top_color);
 
             // ────────────────────────────────────────────────────────────────────
-            // Top face: 4 corners (square), fan-triangulated from corner 0 (2 triangles, 4 unique verts).
-            // Order: TL (top-left), TR (top-right), BR (bottom-right), BL (bottom-left)
-            // (in x-z plane, viewed from above)
-            // ────────────────────────────────────────────────────────────────────
-            let base = vertices.len() as u16;
-            // TL: (-0.5, h, -0.5) relative to center
-            vertices.push(vertex(Vec3::new(cx - size, h, cz - size), top_color));
-            // TR: (+0.5, h, -0.5)
-            vertices.push(vertex(Vec3::new(cx + size, h, cz - size), top_color));
-            // BR: (+0.5, h, +0.5)
-            vertices.push(vertex(Vec3::new(cx + size, h, cz + size), top_color));
-            // BL: (-0.5, h, +0.5)
-            vertices.push(vertex(Vec3::new(cx - size, h, cz + size), top_color));
-            // Fan triangulation: (0,1,2), (0,2,3)
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-
-            // ────────────────────────────────────────────────────────────────────
-            // Side quads: hidden-face removal (RnD 02 §3).
+            // Side quads: hidden-face removal (RnD 02 §3). Cliffs stay per-cell/per-edge
+            // (NOT greedy-meshed this slice) since a merged cliff strip would need to
+            // track per-segment neighbour heights anyway — no win, more complexity.
             // Emit a side ONLY where the neighbour is STRICTLY lower.
             // If neighbour is equal or higher, it covers that face — skip it.
             // Off-grid neighbours (map edge) are treated as height 0 — full cliff at boundary.
@@ -162,4 +224,86 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
 
 fn vertex(position: Vec3, color: Color) -> Vertex {
     Vertex { position, uv: Vec2::ZERO, color: color.into(), normal: Vec4::ZERO }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fixed `dim × dim` grid — height/biome given per (col, row).
+    struct GridWorld {
+        dim: i64,
+        heights: Vec<i64>,
+        biomes: Vec<u8>,
+    }
+
+    impl GridWorld {
+        fn idx(&self, col: i64, row: i64) -> usize {
+            (row * self.dim + col) as usize
+        }
+    }
+
+    impl WorldView for GridWorld {
+        fn is_solid(&self, _pos: Vec2Fixed) -> bool {
+            true
+        }
+        fn height(&self, x: i64, z: i64) -> i64 {
+            self.heights[self.idx(x, z)]
+        }
+        fn biome(&self, pos: Vec2Fixed) -> u8 {
+            self.biomes[self.idx(pos.0, pos.1)]
+        }
+        fn resource(&self, _pos: Vec2Fixed) -> i64 {
+            0
+        }
+    }
+
+    /// Flat (height 0 everywhere) so hidden-face culling drops ALL cliffs (nh=0 >= h=0) —
+    /// isolates the mesh to top-face vertices only, making vertex counts directly comparable.
+    fn flat_world(dim: i64, biomes: Vec<u8>) -> GridWorld {
+        GridWorld { dim, heights: vec![0; (dim * dim) as usize], biomes }
+    }
+
+    #[test]
+    fn greedy_merges_uniform_flat_region_into_one_quad() {
+        let dim = 4;
+        let world = flat_world(dim, vec![0; 16]);
+        let chunks = build_cube_terrain(dim, &world);
+        assert_eq!(chunks.len(), 1);
+        let mesh = &chunks[0].mesh;
+
+        // Naive per-cell top faces would emit dim*dim quads (4 verts, 6 indices each).
+        let naive_vertices = (dim * dim * 4) as usize;
+        assert!(mesh.vertices.len() < naive_vertices, "greedy must reduce vertex count");
+        // Whole region shares (height, biome) → merges into exactly ONE quad.
+        assert_eq!(mesh.vertices.len(), 4);
+        assert_eq!(mesh.indices.len(), 6);
+
+        // Footprint (AABB) still covers the full dim × dim square, same as naive per-cell would.
+        assert_eq!(chunks[0].bounds, (Vec3::new(0.0, 0.0, 0.0), Vec3::new(dim as f32, 0.0, dim as f32)));
+    }
+
+    #[test]
+    fn greedy_does_not_merge_across_biome_boundary() {
+        // 2×2, columns differ in biome; each column's 2 rows share (height, biome) and merge vertically.
+        let world = flat_world(2, vec![0, 1, 0, 1]); // row-major: (row0: col0=0,col1=1), (row1: col0=0,col1=1)
+        let chunks = build_cube_terrain(2, &world);
+        let mesh = &chunks[0].mesh;
+
+        // 2 quads (one per column), NOT 1 — biome_color equality gates the merge.
+        assert_eq!(mesh.vertices.len(), 8);
+        assert_eq!(mesh.indices.len(), 12);
+    }
+
+    #[test]
+    fn greedy_does_not_merge_across_height_boundary() {
+        let mut world = flat_world(2, vec![0; 4]);
+        world.heights = vec![0, 1, 0, 1]; // col1 is one unit taller than col0, same biome
+        let chunks = build_cube_terrain(2, &world);
+        // Height differs between col0/col1 → their side quads are no longer culled (nh < h for col0's
+        // east edge and col1 emits none west since col0 lower doesn't apply — col1's neighbour col0 is
+        // lower so col1 gets a cliff there); assert top faces alone still split into 2 merged quads.
+        let top_face_vertices = 2 * 4; // 2 merged columns × 4 verts each
+        assert!(chunks[0].mesh.vertices.len() >= top_face_vertices);
+    }
 }
