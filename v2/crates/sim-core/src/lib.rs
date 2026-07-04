@@ -153,6 +153,10 @@ impl Default for SpeciationState {
     }
 }
 
+/// D-3a: fixed-point scale for the body-size telemetry (`mean_body_size`/`multicellular_frac`).
+/// Same scale as `RECYCLE_DEN`/`metabolism_eff` — one integer multiply-then-divide, no float.
+pub const BODY_SIZE_SCALE: i64 = 256;
+
 /// Read-only telemetry sink (stage 9). Overwritten each tick. The `telemetry` crate derives Price
 /// covariance / diversity from `samples` — keeping that statistics code OUT of the core (R1).
 #[derive(Resource, Default)]
@@ -202,6 +206,20 @@ pub struct Telemetry {
     /// Read-only, never fed to the tick or folded into `state_hash` — the speciation/reproductive-
     /// barrier consumer is deferred to a later phase.
     pub genome_diversity: i64,
+
+    // ── D-3a: body-size telemetry (multicellularity emergence measurable, #272) ─────────────────
+    /// D-3a: mean body size (`Σ Phenotype.graph.module_cell_count`, clamped ≥1 per entity) over the
+    /// live population, entity-id order, fixed-point ×[`BODY_SIZE_SCALE`]. `0` when population is 0.
+    /// Read-only, never fed to the tick or folded into `state_hash`.
+    pub mean_body_size: i64,
+    /// D-3a: max body size over the live population — a raw integer count (NOT fixed-point). `0`
+    /// when population is 0. Read-only, never fed to the tick or folded into `state_hash`.
+    pub max_body_size: i64,
+    /// D-3a: fraction of live entities with body_size > 1 (multicellular), fixed-point
+    /// ×[`BODY_SIZE_SCALE`]. `0` when population is 0. Every non-phase2 config decodes an empty
+    /// `CellGraph` (body_size 1 for all) so this stays 0 there — byte-identical to before D-3a.
+    /// Read-only, never fed to the tick or folded into `state_hash`.
+    pub multicellular_frac: i64,
 }
 
 // ── R-1: render seam (RnD 02 §det-orthogonal, R26/R17/R19/R21) ─────────────────────────────────────
