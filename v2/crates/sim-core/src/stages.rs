@@ -165,7 +165,7 @@ pub fn stage_metabolism(
     clock: Res<SimClock>,
     mut ledger: ResMut<EnergyLedger>,
     mut tel: ResMut<Telemetry>,
-    mut q: Query<(&Genome, &mut Energy)>,
+    mut q: Query<(&Genome, &Phenotype, &mut Energy)>,
 ) {
     let n = econ.metab_period.max(1);
     if !clock.tick.is_multiple_of(n) {
@@ -183,13 +183,17 @@ pub fn stage_metabolism(
     // lump is N-invariant only under this alignment; Sim::new rejects configs that violate it.
     let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
     let mut photo_cost_this_event: i64 = 0;
-    for (g, mut e) in &mut q {
+    for (g, ph, mut e) in &mut q {
+        // M7-e-a: coordination cost on total live body cell count (Σ module_cell_count). 0 for
+        // every non-phase2 genome (empty CellGraph) and inert at c_coord=0 (all shipped configs).
+        let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
         // Charge ×N — a lump standing in for the N base ticks since the last metabolism tick, so the
         // economy stays ≈invariant to N and conservation is exact (R15).
         let base_cost = (econ.base_metab
             + econ.k_size_metab * g.metab_units()
             + econ.k_move_cost * g.move_speed as i64
-            + econ.k_sense_cost * g.sense_range as i64)
+            + econ.k_sense_cost * g.sense_range as i64
+            + econ.c_coord * n_cells)
             * n as i64;
         // D′-2a/2b: photo-machinery expression cost on the EXPRESSED capacity.
         // expressed_capacity returns 0 at night for regulated cells → cost skipped (the D′-2b lever).
@@ -928,10 +932,10 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{monod_demand, stage_sense};
+    use super::{monod_demand, stage_metabolism, stage_sense};
     use crate::{
-        Deposit, FieldRes, FieldStore, Genome, MergeStrategy, Phenotype, Position, Sensors,
-        Vec2Fixed,
+        CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldRes, FieldStore,
+        Genome, MergeStrategy, Phenotype, Position, Sensors, SimClock, Telemetry, Vec2Fixed,
     };
     use bevy_ecs::prelude::*;
 
@@ -1036,5 +1040,128 @@ mod tests {
         let u_half = monod_demand(u_max, km, km);
         assert!(u_half >= u_max / 2 - 1 && u_half <= u_max / 2 + 1,
             "U(Km) must be within 1 of u_max/2={}: got {u_half}", u_max / 2);
+    }
+
+    /// M7-e-a test helper: a `CellGraph` whose only load-bearing field for `stage_metabolism` is
+    /// `module_cell_count` — the other fields are filled with matching-length placeholders (they
+    /// are read by other passes, not by metabolism).
+    fn cellgraph_with_cells(module_cell_count: Vec<i32>) -> CellGraph {
+        let n = module_cell_count.len();
+        CellGraph {
+            g_dev: 0,
+            module_type: vec![CellType::A; n],
+            module_cell_count,
+            module_is_germ: vec![false; n],
+            module_reachable: vec![true; n],
+        }
+    }
+
+    /// Test-only `EconParams` with every metabolic cost zeroed except `c_coord`, so the coordination
+    /// term is the ONLY thing charged — isolates it from `base_metab`/`k_size_metab`/etc.
+    fn coord_only_econ(c_coord: i64) -> EconParams {
+        EconParams {
+            base_metab: 0,
+            k_size_metab: 0,
+            k_move_cost: 0,
+            k_sense_cost: 0,
+            c_coord,
+            metab_period: 1,
+            ..EconParams::default()
+        }
+    }
+
+    fn run_metabolism_once(econ: EconParams, phenotypes: Vec<Phenotype>) -> (Vec<i64>, EnergyLedger) {
+        let mut world = World::new();
+        world.insert_resource(econ);
+        world.insert_resource(SimClock { seed: 0, tick: 0 });
+        world.insert_resource(EnergyLedger::default());
+        world.insert_resource(Telemetry::default());
+
+        let ids: Vec<Entity> = phenotypes
+            .into_iter()
+            .map(|ph| world.spawn((Genome::founder(2), ph, Energy(1_000_000))).id())
+            .collect();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_metabolism);
+        schedule.run(&mut world);
+
+        let energies = ids.iter().map(|&id| world.get::<Energy>(id).unwrap().0).collect();
+        let ledger = *world.resource::<EnergyLedger>();
+        (energies, ledger)
+    }
+
+    /// M7-e teeth (#251): `c_coord * Σ module_cell_count` — a bigger body pays strictly more.
+    #[test]
+    fn m7e_bigger_body_pays_more() {
+        let econ = coord_only_econ(5);
+        let small = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![3]) };
+        let big = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![10]) };
+
+        let (energies, _ledger) = run_metabolism_once(econ, vec![small, big]);
+        let cost_small = 1_000_000 - energies[0];
+        let cost_big = 1_000_000 - energies[1];
+
+        assert_eq!(cost_small, 5 * 3, "small body (N=3): cost must be exactly c_coord*N");
+        assert_eq!(cost_big, 5 * 10, "big body (N=10): cost must be exactly c_coord*N");
+        assert!(cost_big > cost_small, "a larger Σ module_cell_count must be debited strictly more");
+    }
+
+    /// M7-e teeth (#251): with `c_coord > 0`, the energy the entity loses lands EXACTLY in
+    /// `ledger.dissipated` — no energy created or vanished (the R15 conservation identity, scoped
+    /// to this stage: `Σ energy_before == Σ energy_after + ledger.dissipated`).
+    #[test]
+    fn m7e_energy_conserved_r15() {
+        let econ = coord_only_econ(7);
+        let ph = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![4, 2]) };
+        let n_entities = 3;
+        let (energies, ledger) =
+            run_metabolism_once(econ, (0..n_entities).map(|_| ph.clone()).collect());
+
+        let total_before = 1_000_000i64 * n_entities as i64;
+        let total_after: i64 = energies.iter().sum();
+        assert_eq!(
+            total_before, total_after + ledger.dissipated,
+            "energy lost by agents must equal ledger.dissipated exactly (residual 0)"
+        );
+        assert!(ledger.dissipated > 0, "c_coord>0 with non-empty bodies must dissipate something");
+    }
+
+    /// M7-e teeth (#251): the metabolism formula is pure integer arithmetic over `(Genome,
+    /// Phenotype, EconParams)` — replaying the identical inputs through a fresh `World` must
+    /// reproduce the identical energy trajectory and ledger (no hidden RNG/iteration-order leak).
+    #[test]
+    fn m7e_determinism() {
+        let make_inputs = || {
+            let econ = coord_only_econ(9);
+            let phenotypes = vec![
+                Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![5]) },
+                Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1, 1, 1]) },
+            ];
+            (econ, phenotypes)
+        };
+
+        let (econ1, ph1) = make_inputs();
+        let (econ2, ph2) = make_inputs();
+        let (energies1, ledger1) = run_metabolism_once(econ1, ph1);
+        let (energies2, ledger2) = run_metabolism_once(econ2, ph2);
+
+        assert_eq!(energies1, energies2, "replayed energy trajectory must be bit-identical");
+        assert_eq!(ledger1.dissipated, ledger2.dissipated, "replayed dissipated total must be identical");
+    }
+
+    /// M7-e teeth (#251): proves `stage_metabolism` actually READS `Phenotype.graph` — not dead
+    /// code. Two entities share everything except `module_cell_count`; with `c_coord>0` their
+    /// resulting energy must differ. (If the field were unread, both would lose the same amount.)
+    #[test]
+    fn m7e_cellgraph_is_live() {
+        let econ = coord_only_econ(3);
+        let empty = Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty() };
+        let populated = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![6]) };
+
+        let (energies, _ledger) = run_metabolism_once(econ, vec![empty, populated]);
+        assert_eq!(energies[0], 1_000_000, "empty CellGraph (N=0) must be charged nothing extra");
+        assert_eq!(energies[1], 1_000_000 - 3 * 6, "populated CellGraph must be charged c_coord*N");
+        assert_ne!(energies[0], energies[1], "the Phenotype.graph read must be live, not dead code");
     }
 }
