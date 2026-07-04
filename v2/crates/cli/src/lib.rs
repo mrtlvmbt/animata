@@ -338,6 +338,47 @@ pub fn differentiation_config(seed: u64) -> SimConfig {
     }
 }
 
+// D-2 (#270): driver_config's tunable knobs — a starting point for VIABILITY, not tuned for
+// emergence (D-3 sweeps these via `--set c_coord=…`/`--set refuge_k=…`).
+/// Predation bite scale (P-1 fixture value — known-conservative, reused from `predation_config`).
+const DRIVER_BITE_SHIFT: u32 = 3;
+/// Combat-trait influence on bite size (reused from `predation_config`).
+const DRIVER_COMBAT_TRAIT_SCALE: i32 = 1;
+/// Predation metabolic efficiency, ~62% (reused from `predation_config`).
+const DRIVER_EFFICIENCY_NUM: i32 = 160;
+/// Size-refuge Q-format shift (D-1 fixture magnitude).
+const DRIVER_REFUGE_SHIFT: u32 = 8;
+/// Size-refuge strength — moderate (D-1's `d1_refuge_monotone` fixture value).
+const DRIVER_REFUGE_K: i32 = 2;
+/// Coordination cost per live body cell per tick — mild, so a small unicell body (N=1) pays about
+/// as much as `base_metab`, while the largest bodies (`MAX_CELLS=32`) pay a real but non-lethal tax.
+const DRIVER_C_COORD: i64 = 1;
+
+/// D-2 (#270): the multicellular-predation cost↔benefit economy — the experiment substrate D-3
+/// sweeps for body-size emergence. Reuses `phase2_config`'s exact morphogen/GRN specs (bodies can
+/// be multicellular) and adds two opposing forces: predation with a per-prey size-refuge (D-1,
+/// `#268`) as the BENEFIT of a larger body (harder to capture), and `c_coord > 0` (M7-e-a, `#251`)
+/// as the COST (a bigger body pays more coordination tax per tick). Parameters are chosen for
+/// VIABILITY (the population must survive the corridor — see `d2_driver_config_viable`), not
+/// tuned to make a particular body size emerge — that measurement is D-3's job.
+///
+/// Golden-touching but ADDITIVE: `phase2_config` (and the other 5 production configs) are
+/// untouched — `driver_config` is a new, opt-in config, so their goldens stay byte-identical.
+pub fn driver_config(seed: u64) -> SimConfig {
+    let mut cfg = phase2_config(seed);
+    cfg.econ.predation = Some(sim_core::PredationSpec {
+        bite_shift: DRIVER_BITE_SHIFT,
+        combat_trait_scale: DRIVER_COMBAT_TRAIT_SCALE,
+        efficiency_num: DRIVER_EFFICIENCY_NUM,
+        size_refuge: Some(sim_core::SizeRefugeSpec {
+            shift: DRIVER_REFUGE_SHIFT,
+            refuge_k: DRIVER_REFUGE_K,
+        }),
+    });
+    cfg.econ.c_coord = DRIVER_C_COORD;
+    cfg
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
@@ -606,12 +647,42 @@ pub fn apply_overrides(econ: &mut EconParams, sets: &[(String, String)]) -> Resu
                 }
                 econ.reg_gain_max = v;
             }
+            // D-2 (#270): coordination-cost coefficient — sweepable by D-3.
+            "c_coord" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!("error: --set c_coord={v}: must be ≥ 0"));
+                }
+                econ.c_coord = v;
+            }
+            // D-2 (#270): size-refuge strength — sweepable by D-3. Requires `predation` +
+            // `size_refuge` already configured (structural — this key does not turn predation on).
+            // Negative values are rejected here for the same reason as the (debug-only) F1 assert
+            // in `resolve_encounter`: a negative k silently inverts the refuge's monotonicity.
+            "refuge_k" => {
+                let v = p::<i32>(key, val)?;
+                if v < 0 {
+                    return Err(format!(
+                        "error: --set refuge_k={v}: must be ≥ 0 (negative k inverts the size-refuge monotonicity)"
+                    ));
+                }
+                match econ.predation.as_mut().and_then(|spec| spec.size_refuge.as_mut()) {
+                    Some(refuge) => refuge.refuge_k = v,
+                    None => {
+                        return Err(
+                            "error: --set refuge_k=…: this config has no predation.size_refuge \
+                             configured (both `predation` and `size_refuge` must already be `Some`)"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
             _ => {
                 return Err(format!(
                     "error: --set {key}=…: not an overridable calibration knob. \
                      Valid keys: km, u_max, base_metab, c_div, e_cell, k_size_metab, \
                      k_move_cost, k_sense_cost, excrete, recycle_num, speciation_threshold, \
-                     brain_period, metab_period, d0_scaled, pheromone, reg_gain_max."
+                     brain_period, metab_period, d0_scaled, pheromone, reg_gain_max, c_coord, refuge_k."
                 ));
             }
         }
