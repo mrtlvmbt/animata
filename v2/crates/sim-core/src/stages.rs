@@ -916,6 +916,21 @@ pub fn stage_observe(
     tel.field_total = field.0.conserved_total_all();
     // Signal-field metric (R25) — serial total concentration; never feeds the tick.
     tel.signal_total = field.0.signal_total();
+
+    // V-3-e: genome-distance diversity telemetry. Filter to Some(grn_spec) genomes FIRST (entity-id
+    // order, from `ents` above), then mean genome_distance over CONSECUTIVE valid pairs — O(N),
+    // never an all-pairs matrix. 0 for non-phase2 configs (all grn_spec None) or <2 valid genomes.
+    // Read-only: never fed to the tick or folded into state_hash.
+    let valid_specs: Vec<&GrnSpec> = ents.iter().filter_map(|(_, g)| g.grn_spec.as_deref()).collect();
+    tel.genome_diversity = if valid_specs.len() >= 2 {
+        let mut total = 0i64;
+        for w in valid_specs.windows(2) {
+            total += genome_distance(w[0], w[1]);
+        }
+        total / (valid_specs.len() as i64 - 1)
+    } else {
+        0
+    };
 }
 
 // ── Stage 10: Swap — double-buffer swap for Position + Velocity. ───────────────────────────────────
