@@ -2099,7 +2099,7 @@ mod tests {
         let mspec = MorphogenSpec {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
-            seed_scale: 64, stop_threshold: 0,
+            seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
         };
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
         g.mutation_rate = 256;
