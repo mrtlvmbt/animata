@@ -929,17 +929,20 @@ pub fn stage_observe(
     field: Res<FieldRes>,
     repro: Res<ReproEvents>,
     mut tel: ResMut<Telemetry>,
-    q: Query<(Entity, &Genome)>,
+    q: Query<(Entity, &Genome, &Phenotype)>,
 ) {
     tel.samples.clear();
-    let mut ents: Vec<(u64, Genome)> = q.iter().map(|(e, g)| (e.to_bits(), g.clone())).collect();
+    // D-3a: body_size = Σ module_cell_count, clamped ≥1 (empty/non-phase2 CellGraph → 1).
+    let mut ents: Vec<(u64, Genome, i64)> = q.iter()
+        .map(|(e, g, ph)| (e.to_bits(), g.clone(), ph.graph.body_size()))
+        .collect();
     ents.sort_unstable_by_key(|x| x.0);
     // D′-3b: take the income record so we can read it while pushing to tel.samples (avoids
     // borrow conflict). The record will be repopulated by stage_interactions next tick.
     let income_record = std::mem::take(&mut tel.income_record);
     let mut reg_active = 0i64;
     let mut reg_active_day = 0i64;
-    for (bits, g) in &ents {
+    for (bits, g, _body_size) in &ents {
         let offspring = u32::from(repro.parents.contains(bits));
         // D′-3b: read the exact booked integers recorded at stage_interactions.
         // Returns (0, 0) for entities not in the record (founders at tick 0, or non-dprime).
@@ -972,11 +975,17 @@ pub fn stage_observe(
     // Signal-field metric (R25) — serial total concentration; never feeds the tick.
     tel.signal_total = field.0.signal_total();
 
+    // D-3a: body-size telemetry (#272) — integer fixed-point, 0 when population is 0. Every
+    // non-phase2 config decodes an empty CellGraph (body_size 1 for all) → multicellular_frac stays
+    // 0 there, byte-identical to before D-3a.
+    let body_sizes: Vec<i64> = ents.iter().map(|(_, _, bs)| *bs).collect();
+    (tel.mean_body_size, tel.max_body_size, tel.multicellular_frac) = body_size_aggregate(&body_sizes);
+
     // V-3-e: genome-distance diversity telemetry. Filter to Some(grn_spec) genomes FIRST (entity-id
     // order, from `ents` above), then mean genome_distance over CONSECUTIVE valid pairs — O(N),
     // never an all-pairs matrix. 0 for non-phase2 configs (all grn_spec None) or <2 valid genomes.
     // Read-only: never fed to the tick or folded into state_hash.
-    let valid_specs: Vec<&GrnSpec> = ents.iter().filter_map(|(_, g)| g.grn_spec.as_deref()).collect();
+    let valid_specs: Vec<&GrnSpec> = ents.iter().filter_map(|(_, g, _)| g.grn_spec.as_deref()).collect();
     tel.genome_diversity = if valid_specs.len() >= 2 {
         let mut total = 0i64;
         for w in valid_specs.windows(2) {

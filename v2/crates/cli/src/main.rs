@@ -238,9 +238,11 @@ fn run_demo(seed: u64, ticks: u64, do_profile: bool, timelapse_interval: Option<
     {
         let tele = sim.telemetry();
         let rep = compute_with_census(&tele.samples, &tele.species_census, sim.econ().detritus_layer);
+        let (mean_body_size, max_body_size, multicellular_frac) =
+            (tele.mean_body_size, tele.max_body_size, tele.multicellular_frac);
         let resid = sim.conservation_residual();
         println!(
-            "HORIZON tick={ticks} pop={} resid={resid} size_mean={:.4} trait_var_diversity={:.6} shannon={:.6} simpson={:.6}",
+            "HORIZON tick={ticks} pop={} resid={resid} size_mean={:.4} trait_var_diversity={:.6} shannon={:.6} simpson={:.6} mean_body_size={mean_body_size} max_body_size={max_body_size} multicellular_frac={multicellular_frac}",
             rep.population, rep.means[3], rep.diversity, rep.shannon, rep.simpson,
         );
     }

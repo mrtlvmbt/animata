@@ -157,6 +157,14 @@ pub struct CellGraph {
 }
 
 impl CellGraph {
+    /// D-3a (#272): body size — `Σ module_cell_count`, clamped ≥1 (an empty graph, e.g. every
+    /// non-phase2 config's `CellGraph::empty()`, decodes to the unicell floor). Pure integer, no
+    /// float/HashMap — the exact per-entity metric `stage_observe` folds into `Telemetry::
+    /// {mean,max}_body_size`/`multicellular_frac`.
+    pub fn body_size(&self) -> i64 {
+        self.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1)
+    }
+
     /// Empty graph (zero modules, e.g. for non-phase2 configs where the graph is not computed).
     pub fn empty() -> Self {
         CellGraph {
