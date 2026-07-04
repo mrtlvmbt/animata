@@ -1113,6 +1113,7 @@ mod e1_gate_tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4, seed_scale: 4096, stop_threshold: 0,
             apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![256, 0]);
         EconParams {

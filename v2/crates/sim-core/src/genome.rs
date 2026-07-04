@@ -142,6 +142,11 @@ pub struct CellGraph {
     /// shipped spec) leaves this `vec![false; n_modules]` — all-soma/unmarked, byte-identical to
     /// M7-b. `Some(t)`: `module_is_germ[mid] == (module_cell_count[mid] <= t)`.
     pub module_is_germ: Vec<bool>,
+    /// M7-d: per-module supply-reachability marker (indexed by ModuleId). `supply_source=None`
+    /// (every shipped spec) leaves this `vec![true; n_modules]` — all-supplied, byte-identical to
+    /// M7-c. `Some(src)`: `module_reachable[mid]` is `true` iff module `mid` is reachable from the
+    /// source module via the LIVE module-adjacency graph (BFS). Cold — never consumed by a live stage.
+    pub module_reachable: Vec<bool>,
 }
 
 impl CellGraph {
@@ -152,6 +157,7 @@ impl CellGraph {
             module_type: Vec::new(),
             module_cell_count: Vec::new(),
             module_is_germ: Vec::new(),
+            module_reachable: Vec::new(),
         }
     }
 
@@ -171,6 +177,7 @@ impl CellGraph {
         gspec: &GrnSpec,
         apoptosis_threshold: Option<i32>,
         germ_threshold: Option<i32>,
+        supply_source: Option<i32>,
     ) -> Self {
         let g_dev = gradient.g_dev;
         let n_cells = g_dev * g_dev;
@@ -257,6 +264,9 @@ impl CellGraph {
         let mut module_id_map: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
         let mut module_type: Vec<CellType> = Vec::new();
         let mut module_cell_count: Vec<i32> = Vec::new();
+        // M7-d: per-cell module lookup (`None` for dead cells) — reused by Step 5 below to
+        // reconstruct module adjacency without re-running union-find `find`.
+        let mut cell_module: Vec<Option<usize>> = vec![None; n_cells];
 
         for idx in 0..n_cells {
             if dead[idx] {
@@ -273,6 +283,7 @@ impl CellGraph {
             }
             let mid = module_id_map[&root];
             module_cell_count[mid] += 1;
+            cell_module[idx] = Some(mid);
         }
 
         // 4. M7-c germ/soma labeling — runs AFTER module collection (needs `module_cell_count`),
@@ -285,11 +296,75 @@ impl CellGraph {
             None => vec![false; module_type.len()],
         };
 
+        // 5. M7-d supply-gate reachability — runs AFTER germ/soma labeling, on LIVE modules only.
+        // `supply_source: None` (every shipped spec) ⇒ `module_reachable = vec![true; n_modules]`,
+        // byte-identical to M7-c. `Some(src)` (test-only): `src` is the linear index of the supply
+        // source cell (F1, PINNED: `src = z*g_dev + x`); the source MODULE is the module containing
+        // that cell. Module adjacency is RECONSTRUCTED (the union-find `parent` is discarded after
+        // Step 3 — it never recorded cross-module edges) from LIVE cells' 4-neighbors in a fixed
+        // up/down/left/right order, into a `BTreeSet<(ModuleId, ModuleId)>` (no Hash*). Reachability
+        // is a BFS from the source module via a `Vec` queue + `Vec<bool>` visited (no Hash*, no
+        // recursion). An invalid/dead/out-of-range source ⇒ `module_reachable` all-`false`, no panic.
+        let n_modules = module_type.len();
+        let module_reachable: Vec<bool> = match supply_source {
+            None => vec![true; n_modules],
+            Some(src) => {
+                let mut reachable = vec![false; n_modules];
+                let source_mid = usize::try_from(src).ok().filter(|&i| i < n_cells).and_then(|i| cell_module[i]);
+                if let Some(source_mid) = source_mid {
+                    let mut edges: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+                    for z in 0..g_dev {
+                        for x in 0..g_dev {
+                            let idx = z * g_dev + x;
+                            let Some(mid_a) = cell_module[idx] else { continue };
+                            // Fixed neighbor order: up, down, left, right.
+                            let neighbors = [
+                                z.checked_sub(1).map(|nz| nz * g_dev + x),
+                                (z + 1 < g_dev).then(|| (z + 1) * g_dev + x),
+                                x.checked_sub(1).map(|nx| z * g_dev + nx),
+                                (x + 1 < g_dev).then(|| z * g_dev + (x + 1)),
+                            ];
+                            for nidx in neighbors.into_iter().flatten() {
+                                if let Some(mid_b) = cell_module[nidx] {
+                                    if mid_b != mid_a {
+                                        edges.insert((mid_a.min(mid_b), mid_a.max(mid_b)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Adjacency list built from the sorted edge set — neighbors land in ascending order.
+                    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n_modules];
+                    for &(a, b) in &edges {
+                        adjacency[a].push(b);
+                        adjacency[b].push(a);
+                    }
+
+                    reachable[source_mid] = true;
+                    let mut queue: Vec<usize> = vec![source_mid];
+                    let mut head = 0;
+                    while head < queue.len() {
+                        let cur = queue[head];
+                        head += 1;
+                        for &nb in &adjacency[cur] {
+                            if !reachable[nb] {
+                                reachable[nb] = true;
+                                queue.push(nb);
+                            }
+                        }
+                    }
+                }
+                reachable
+            }
+        };
+
         CellGraph {
             g_dev,
             module_type,
             module_cell_count,
             module_is_germ,
+            module_reachable,
         }
     }
 
@@ -886,7 +961,15 @@ impl Genome {
                 // cell dead ⇒ byte-identical to M7-a for all 6 prod configs (golden-NEUTRAL).
                 // M7-c: germ_threshold=None on every shipped spec ⇒ module_is_germ stays all-false
                 // ⇒ byte-identical to M7-b for all 6 prod configs (golden-NEUTRAL).
-                let g = CellGraph::from_gradient(&gradient, gspec, mspec.apoptosis_threshold, mspec.germ_threshold);
+                // M7-d: supply_source=None on every shipped spec ⇒ module_reachable stays all-true
+                // ⇒ byte-identical to M7-c for all 6 prod configs (golden-NEUTRAL).
+                let g = CellGraph::from_gradient(
+                    &gradient,
+                    gspec,
+                    mspec.apoptosis_threshold,
+                    mspec.germ_threshold,
+                    mspec.supply_source,
+                );
                 (Some(ct), g)
             }
             _ => (None, CellGraph::empty()), // E-1 trivial projection: no non-phase2 founder is ever seeded with both specs
@@ -1021,6 +1104,13 @@ impl Genome {
             // un-hashed derivative; see the `hash_contribution` doc above).
             if let Some(t) = mspec.germ_threshold {
                 h = fnv_mix(h, t as u64);
+            }
+            // M7-d: supply_source folded Some-gated (mirrors germ_threshold above) — `None` on
+            // every shipped spec contributes nothing, so all 6 prod goldens stay byte-identical.
+            // `module_reachable` VALUES are not separately folded (mirrors module_is_germ — cold,
+            // un-hashed CellGraph derivative).
+            if let Some(src) = mspec.supply_source {
+                h = fnv_mix(h, src as u64);
             }
         }
         h
@@ -1186,6 +1276,7 @@ mod tests {
             stop_threshold: 0,
             apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         let gspec = GrnSpec {
             n_genes: 2,
@@ -1244,6 +1335,7 @@ mod tests {
             stop_threshold: 0,
             apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         // Flipped-corner bistable fixture (mirrors grn.rs's, initial swapped) → resolves to B.
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 256]);
@@ -1278,6 +1370,7 @@ mod tests {
             stop_threshold: 0,
             apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         // grn_spec stays None — only morphogen_spec attached.
         let g = Genome::founder(2).with_specs(None, Some(mspec));
@@ -1325,6 +1418,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         }
     }
 
@@ -1489,6 +1583,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         let gspec = m7a_dead_drive_gspec();
 
@@ -1511,6 +1606,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1536,6 +1632,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1590,6 +1687,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0,
             apoptosis_threshold,
             germ_threshold: None,
+            supply_source: None,
         }
     }
 
@@ -1811,6 +1909,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0,
             apoptosis_threshold, germ_threshold,
+            supply_source: None,
         }
     }
 
@@ -1926,6 +2025,183 @@ mod tests {
         let g_all_soma = m7c_live_drive_genome(None, Some(0));
         let ph_all_soma = g_all_soma.decode(&econ).expect("must decode to Some");
         assert!(ph_all_soma.graph.module_is_germ.iter().all(|&is_germ| !is_germ), "threshold=0 must mark every module soma (every module has >= 1 cell)");
+    }
+
+    // ── M7-d: supply-gate reachability-at-birth (golden-NEUTRAL) ────────────────────────────────
+    //
+    // Adds a module-level supply-reachability marker computed AFTER germ/soma labeling (Step 5):
+    // BFS from a supply-source module over the LIVE module-adjacency graph, reconstructed from
+    // cell 4-neighbors (the union-find `parent` never recorded cross-module edges, only same-type
+    // unions). `supply_source: None` on every shipped spec means `module_reachable` stays
+    // all-`true` — byte-identical to M7-c (checked structurally in the `cli` crate's
+    // `m7d_prod_inert_all_goldens`). Dead cells (M7-b apoptosis) are excluded before adjacency
+    // reconstruction, so reachability partitions only live modules — orthogonal to germ/soma.
+
+    /// M7-d test-only spec builder — same grid/diffusion/decay basis as M7-a/b/c, parameterized by
+    /// all three gates.
+    fn m7d_mspec(apoptosis_threshold: Option<i32>, germ_threshold: Option<i32>, supply_source: Option<i32>) -> MorphogenSpec {
+        MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+            apoptosis_threshold, germ_threshold, supply_source,
+        }
+    }
+
+    /// M7-d fixture: the M7-a live-drive genome (size=21, 2 modules: a 1-cell corner module + a
+    /// 15-cell module, fully live and grid-adjacent) — reused so the wiring/determinism teeth
+    /// exercise the same production `decode()` path M7-b/M7-c did.
+    fn m7d_live_drive_genome(
+        apoptosis_threshold: Option<i32>,
+        germ_threshold: Option<i32>,
+        supply_source: Option<i32>,
+    ) -> Genome {
+        let gspec = m7a_live_drive_gspec();
+        let mspec = m7d_mspec(apoptosis_threshold, germ_threshold, supply_source);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        g.size = 21; // above the E-6 fate boundary — matches m7a_live_drive_produces_multiple_modules
+        g
+    }
+
+    #[test]
+    fn m7d_reachability_determinism() {
+        let econ = EconParams::default();
+        let g = m7d_live_drive_genome(None, None, Some(0));
+        let ph1 = g.decode(&econ).expect("must decode to Some");
+        let ph2 = g.decode(&econ).expect("must decode to Some");
+        assert_eq!(ph1.graph, ph2.graph, "same genome + Some(src) must produce identical module_reachable across repeated decode");
+    }
+
+    #[test]
+    fn m7d_source_module_reachable() {
+        let econ = EconParams::default();
+        // idx 0 = cell (0,0), the M7-a fixture's 1-cell corner module (discovered first, module 0).
+        let g = m7d_live_drive_genome(None, None, Some(0));
+        let ph = g.decode(&econ).expect("must decode to Some");
+        assert_eq!(ph.graph.module_type.len(), 2, "sanity: fixture must have 2 modules (M7-a baseline)");
+        assert!(ph.graph.module_reachable[0], "the source module must always be reachable");
+        // This fixture is fully live (no apoptosis): the module quotient of a connected live grid
+        // is itself connected, so the OTHER module (the 15-cell block, grid-adjacent to the
+        // corner) must be reachable too.
+        assert!(ph.graph.module_reachable.iter().all(|&r| r), "fully-live grid must yield a fully-connected module graph");
+    }
+
+    #[test]
+    fn m7d_none_all_reachable() {
+        let econ = EconParams::default();
+        let g_none = m7d_live_drive_genome(None, None, None);
+        let ph_none = g_none.decode(&econ).expect("must decode to Some");
+        assert!(ph_none.graph.module_reachable.iter().all(|&r| r), "supply_source=None must leave every module reachable");
+
+        // Byte-identical to M7-c for module_type/module_cell_count/module_is_germ (only
+        // module_reachable is new).
+        let ph_m7c = m7c_live_drive_genome(None, None).decode(&econ).expect("must decode to Some");
+        assert_eq!(ph_none.graph.module_type, ph_m7c.graph.module_type, "M7-d must not perturb M7-c's module_type");
+        assert_eq!(ph_none.graph.module_cell_count, ph_m7c.graph.module_cell_count, "M7-d must not perturb M7-c's module_cell_count");
+        assert_eq!(ph_none.graph.module_is_germ, ph_m7c.graph.module_is_germ, "M7-d must not perturb M7-c's module_is_germ");
+    }
+
+    /// M7-d disconnection fixture: a HAND-BUILT gradient (bypassing the morphogen chain, calling
+    /// `CellGraph::from_gradient` directly) whose row `z=1` is a "cold" wall (drive=0) separating
+    /// row `z=0` (top block, 4 cells) from rows `z=2..3` (bottom block, 8 cells) — apoptosis kills
+    /// the wall, leaving NO live path between the two blocks. Both blocks classify to the SAME
+    /// `CellType::A` (manually traced below), so the split is provably topological (Step 5's
+    /// adjacency reconstruction sees no live neighbor across the dead row), not a type-boundary
+    /// artifact.
+    fn m7d_wall_gradient() -> crate::morphogen::Gradient {
+        crate::morphogen::Gradient {
+            g_dev: 4,
+            cells: vec![
+                10, 10, 10, 10,
+                0, 0, 0, 0,
+                10, 10, 10, 10,
+                10, 10, 10, 10,
+            ],
+        }
+    }
+
+    /// Linear (non-bistable, no internal recurrence) readout: `state[0]` is monotone in the raw
+    /// drive value, so `CellGraph::from_gradient`'s per-cell classification/apoptosis directly
+    /// reflects `m7d_wall_gradient`'s hand-picked values.
+    fn m7d_wall_gspec() -> GrnSpec {
+        GrnSpec::new(2, vec![0, 0, 0, 0], vec![1, 0], vec![0, 0], 0, 1, 0, 0, vec![0, 0])
+    }
+
+    /// The apoptosis threshold that kills exactly the wall row and spares the rest — derived from
+    /// the REAL resolved gene-0 states (mirrors `m7b_partial_threshold`'s min+1 discipline), not a
+    /// guessed magic constant.
+    fn m7d_wall_apoptosis_threshold() -> i32 {
+        let gspec = m7d_wall_gspec();
+        let mut cg = gspec.clone();
+        cg.sample_x = 0;
+        cg.sample_z = 0;
+        let dead_gradient = crate::morphogen::Gradient { g_dev: 1, cells: vec![0] };
+        let live_gradient = crate::morphogen::Gradient { g_dev: 1, cells: vec![10] };
+        let (dead_state, _, _) = crate::grn_resolve(&dead_gradient, &cg);
+        let (live_state, _, _) = crate::grn_resolve(&live_gradient, &cg);
+        assert!(
+            dead_state[0] < live_state[0],
+            "wall fixture must have a genuine state gap to threshold on; got dead={dead_state:?} live={live_state:?}"
+        );
+        dead_state[0] + 1
+    }
+
+    #[test]
+    fn m7d_unreachable_exists() {
+        let gradient = m7d_wall_gradient();
+        let gspec = m7d_wall_gspec();
+        let t = m7d_wall_apoptosis_threshold();
+        // idx 0 = cell (0,0), inside the top (surviving) block.
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(0));
+        assert_eq!(
+            graph.module_type,
+            vec![CellType::A, CellType::A],
+            "sanity: both live blocks classify to the SAME type (disconnection is topological, not type-driven)"
+        );
+        assert_eq!(graph.module_cell_count, vec![4, 8], "sanity: top block 4 cells, bottom block 8 cells (manual trace)");
+        assert_eq!(
+            graph.module_reachable,
+            vec![true, false],
+            "the source module (top, idx 0) is reachable; the wall-severed bottom module is not"
+        );
+    }
+
+    #[test]
+    fn m7d_source_dead_all_unreachable() {
+        let gradient = m7d_wall_gradient();
+        let gspec = m7d_wall_gspec();
+        let t = m7d_wall_apoptosis_threshold();
+        // idx 4 = cell (x=0, z=1), inside the apoptosed wall row -- a genuinely dead source.
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(4));
+        assert_eq!(graph.num_modules(), 2, "sanity: apoptosis must still leave 2 live modules");
+        assert!(graph.module_reachable.iter().all(|&r| !r), "a dead supply source must leave every module unreachable, valid Some, no panic");
+    }
+
+    #[test]
+    fn m7d_interacts_apoptosis_germ() {
+        let gradient = m7d_wall_gradient();
+        let gspec = m7d_wall_gspec();
+        let t_apop = m7d_wall_apoptosis_threshold();
+        // germ_threshold=4: the top module (count=4) is GERM, the bottom module (count=8) is SOMA.
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0));
+        assert_eq!(graph.module_cell_count, vec![4, 8]);
+        assert_eq!(graph.module_is_germ, vec![true, false], "module 0 (count=4) is germ; module 1 (count=8) is soma");
+        assert_eq!(graph.module_reachable, vec![true, false], "reachability must be unaffected by germ/soma labeling");
+
+        // All three gates armed together must still be deterministic.
+        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0));
+        assert_eq!(graph, graph2, "apoptosis + germ + supply must coexist deterministically");
+    }
+
+    #[test]
+    fn m7d_empty_body_valid() {
+        let gradient = m7d_wall_gradient();
+        let gspec = m7d_wall_gspec();
+        // A threshold above every resolved state kills the whole grid (mirrors m7b/m7c's
+        // `GRN_EXPR_MAX + 1` empty-body pattern).
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0));
+        assert_eq!(graph.num_modules(), 0, "all-dead grid must yield zero modules");
+        assert!(graph.module_reachable.is_empty(), "zero modules must yield an empty module_reachable, not a panic");
     }
 
     #[test]
@@ -2123,6 +2399,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
@@ -2340,6 +2617,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
+            supply_source: None,
         };
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
         g.mutation_rate = 256;
