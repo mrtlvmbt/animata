@@ -76,6 +76,14 @@ pub struct MorphogenSpec {
     /// Reachability is computed by BFS over the module-adjacency graph reconstructed from LIVE
     /// 4-neighbors (integer-only, no float, `BTreeSet`/`Vec` only — no Hash*).
     pub supply_source: Option<i32>,
+    /// **M7-f consortium-adhesion gate.** `None` (default, every shipped spec) disables the pass
+    /// entirely — `CellGraph::from_gradient` leaves `module_consortium` as the identity mapping
+    /// (`(0..n_modules).collect()`, each module its own consortium), byte-identical to M7-d.
+    /// `Some(_)` (test-only): ENABLES the pass — two adjacent modules adhere iff they share the
+    /// same germ-status (`module_is_germ[A] == module_is_germ[B]`); adhered pairs are grouped by a
+    /// module-level union-find into `module_consortium`. The numeric value is reserved for future
+    /// boundary-count tuning (out of scope here — `Some(_)` just flips the gate on).
+    pub adhesion_threshold: Option<i32>,
 }
 
 /// The morphogen output: a local, position-indexed integer concentration field (row-major,
@@ -207,6 +215,7 @@ mod tests {
             apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         }
     }
 

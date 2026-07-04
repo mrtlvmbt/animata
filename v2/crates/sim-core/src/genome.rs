@@ -147,6 +147,13 @@ pub struct CellGraph {
     /// M7-c. `Some(src)`: `module_reachable[mid]` is `true` iff module `mid` is reachable from the
     /// source module via the LIVE module-adjacency graph (BFS). Cold — never consumed by a live stage.
     pub module_reachable: Vec<bool>,
+    /// M7-f: per-module consortium root (indexed by ModuleId; values are ModuleId indices in
+    /// `[0, n_modules)`). `adhesion_threshold=None` (every shipped spec) leaves this the identity
+    /// mapping `(0..n_modules).collect()` — each module its own consortium, byte-identical to M7-d.
+    /// `Some(_)`: two adjacent modules with equal `module_is_germ` status are unioned into the same
+    /// consortium (min-index representative, mirrors Step 2's cell union-find). Cold — never
+    /// consumed by a live stage.
+    pub module_consortium: Vec<usize>,
 }
 
 impl CellGraph {
@@ -158,6 +165,7 @@ impl CellGraph {
             module_cell_count: Vec::new(),
             module_is_germ: Vec::new(),
             module_reachable: Vec::new(),
+            module_consortium: Vec::new(),
         }
     }
 
@@ -178,6 +186,7 @@ impl CellGraph {
         apoptosis_threshold: Option<i32>,
         germ_threshold: Option<i32>,
         supply_source: Option<i32>,
+        adhesion_threshold: Option<i32>,
     ) -> Self {
         let g_dev = gradient.g_dev;
         let n_cells = g_dev * g_dev;
@@ -359,12 +368,59 @@ impl CellGraph {
             }
         };
 
+        // 6. M7-f consortium adhesion — runs AFTER Step 5, on LIVE modules only. `adhesion_threshold:
+        // None` (every shipped spec) ⇒ each module is its own consortium (identity), byte-identical
+        // to M7-d. `Some(_)` (test-only): RECOMPUTE module adjacency fresh (F1, PINNED — M7-d's
+        // adjacency set is built only inside its `Some(src)` branch, and every shipped spec has
+        // `supply_source=None`, so there is no ready-made adjacency to reuse in prod) by iterating
+        // LIVE cells row-major and recording each live 4-neighbor pair in a DIFFERENT module into a
+        // `BTreeSet<(ModuleId, ModuleId)>` (no Hash*, mirrors Step 5's edge-collection exactly). Two
+        // adjacent modules ADHERE iff they share the same germ-status
+        // (`module_is_germ[A] == module_is_germ[B]`); adhered pairs are grouped by a SECOND
+        // union-find OVER MODULES, reusing Step 2's `find`/`union` (min-index representative,
+        // deterministic, order-independent).
+        let module_consortium: Vec<usize> = match adhesion_threshold {
+            None => (0..n_modules).collect(),
+            Some(_) => {
+                let mut edges: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
+                for z in 0..g_dev {
+                    for x in 0..g_dev {
+                        let idx = z * g_dev + x;
+                        let Some(mid_a) = cell_module[idx] else { continue };
+                        // Fixed neighbor order: up, down, left, right.
+                        let neighbors = [
+                            z.checked_sub(1).map(|nz| nz * g_dev + x),
+                            (z + 1 < g_dev).then(|| (z + 1) * g_dev + x),
+                            x.checked_sub(1).map(|nx| z * g_dev + nx),
+                            (x + 1 < g_dev).then(|| z * g_dev + (x + 1)),
+                        ];
+                        for nidx in neighbors.into_iter().flatten() {
+                            if let Some(mid_b) = cell_module[nidx] {
+                                if mid_b != mid_a {
+                                    edges.insert((mid_a.min(mid_b), mid_a.max(mid_b)));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let mut consort_parent: Vec<usize> = (0..n_modules).collect();
+                for (a, b) in edges {
+                    if module_is_germ[a] == module_is_germ[b] {
+                        union(&mut consort_parent, a, b);
+                    }
+                }
+                (0..n_modules).map(|i| find(&mut consort_parent, i)).collect()
+            }
+        };
+
         CellGraph {
             g_dev,
             module_type,
             module_cell_count,
             module_is_germ,
             module_reachable,
+            module_consortium,
         }
     }
 
@@ -963,12 +1019,15 @@ impl Genome {
                 // ⇒ byte-identical to M7-b for all 6 prod configs (golden-NEUTRAL).
                 // M7-d: supply_source=None on every shipped spec ⇒ module_reachable stays all-true
                 // ⇒ byte-identical to M7-c for all 6 prod configs (golden-NEUTRAL).
+                // M7-f: adhesion_threshold=None on every shipped spec ⇒ module_consortium stays the
+                // identity mapping ⇒ byte-identical to M7-d for all 6 prod configs (golden-NEUTRAL).
                 let g = CellGraph::from_gradient(
                     &gradient,
                     gspec,
                     mspec.apoptosis_threshold,
                     mspec.germ_threshold,
                     mspec.supply_source,
+                    mspec.adhesion_threshold,
                 );
                 (Some(ct), g)
             }
@@ -1111,6 +1170,13 @@ impl Genome {
             // un-hashed CellGraph derivative).
             if let Some(src) = mspec.supply_source {
                 h = fnv_mix(h, src as u64);
+            }
+            // M7-f: adhesion_threshold folded Some-gated (mirrors supply_source above) — `None` on
+            // every shipped spec contributes nothing, so all 6 prod goldens stay byte-identical.
+            // `module_consortium` VALUES are not separately folded (mirrors module_reachable — cold,
+            // un-hashed CellGraph derivative).
+            if let Some(t) = mspec.adhesion_threshold {
+                h = fnv_mix(h, t as u64);
             }
         }
         h
@@ -1277,6 +1343,7 @@ mod tests {
             apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         let gspec = GrnSpec {
             n_genes: 2,
@@ -1336,6 +1403,7 @@ mod tests {
             apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         // Flipped-corner bistable fixture (mirrors grn.rs's, initial swapped) → resolves to B.
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 256]);
@@ -1371,6 +1439,7 @@ mod tests {
             apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         // grn_spec stays None — only morphogen_spec attached.
         let g = Genome::founder(2).with_specs(None, Some(mspec));
@@ -1419,6 +1488,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         }
     }
 
@@ -1584,6 +1654,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         let gspec = m7a_dead_drive_gspec();
 
@@ -1607,6 +1678,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1633,6 +1705,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -1688,6 +1761,7 @@ mod tests {
             apoptosis_threshold,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         }
     }
 
@@ -1910,6 +1984,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0,
             apoptosis_threshold, germ_threshold,
             supply_source: None,
+            adhesion_threshold: None,
         }
     }
 
@@ -2045,6 +2120,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 64, stop_threshold: 0,
             apoptosis_threshold, germ_threshold, supply_source,
+            adhesion_threshold: None,
         }
     }
 
@@ -2152,7 +2228,7 @@ mod tests {
         let gspec = m7d_wall_gspec();
         let t = m7d_wall_apoptosis_threshold();
         // idx 0 = cell (0,0), inside the top (surviving) block.
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(0));
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(0), None);
         assert_eq!(
             graph.module_type,
             vec![CellType::A, CellType::A],
@@ -2172,7 +2248,7 @@ mod tests {
         let gspec = m7d_wall_gspec();
         let t = m7d_wall_apoptosis_threshold();
         // idx 4 = cell (x=0, z=1), inside the apoptosed wall row -- a genuinely dead source.
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(4));
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(4), None);
         assert_eq!(graph.num_modules(), 2, "sanity: apoptosis must still leave 2 live modules");
         assert!(graph.module_reachable.iter().all(|&r| !r), "a dead supply source must leave every module unreachable, valid Some, no panic");
     }
@@ -2183,13 +2259,13 @@ mod tests {
         let gspec = m7d_wall_gspec();
         let t_apop = m7d_wall_apoptosis_threshold();
         // germ_threshold=4: the top module (count=4) is GERM, the bottom module (count=8) is SOMA.
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0));
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), None);
         assert_eq!(graph.module_cell_count, vec![4, 8]);
         assert_eq!(graph.module_is_germ, vec![true, false], "module 0 (count=4) is germ; module 1 (count=8) is soma");
         assert_eq!(graph.module_reachable, vec![true, false], "reachability must be unaffected by germ/soma labeling");
 
         // All three gates armed together must still be deterministic.
-        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0));
+        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), None);
         assert_eq!(graph, graph2, "apoptosis + germ + supply must coexist deterministically");
     }
 
@@ -2199,9 +2275,149 @@ mod tests {
         let gspec = m7d_wall_gspec();
         // A threshold above every resolved state kills the whole grid (mirrors m7b/m7c's
         // `GRN_EXPR_MAX + 1` empty-body pattern).
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0));
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0), None);
         assert_eq!(graph.num_modules(), 0, "all-dead grid must yield zero modules");
         assert!(graph.module_reachable.is_empty(), "zero modules must yield an empty module_reachable, not a panic");
+    }
+
+    // ── M7-f: consortium adhesion (#252) ─────────────────────────────────────────────────────────
+
+    /// M7-f fixture: a HAND-BUILT gradient (bypassing the morphogen chain, calling
+    /// `CellGraph::from_gradient` directly, mirrors `m7d_wall_gradient`'s discipline) producing
+    /// exactly 3 LIVE modules, all pairwise grid-adjacent:
+    /// - module 0 (`CellType::A`, top-left 2×2 block, 4 cells, drive=10)
+    /// - module 1 (`CellType::B`, the right two columns, 8 cells, drive=-10)
+    /// - module 2 (`CellType::Mixed`, bottom-left 2×2 block, 4 cells, drive=0)
+    ///
+    /// With `m7d_wall_gspec` (linear gene-0 readout, gene-1 pinned at `sigma(0)`): `classify`
+    /// resolves drive=10 to `A` (state0>state1), drive=-10 to `B` (state0<state1), drive=0 to
+    /// `Mixed` (exact tie) — the same monotone reasoning `m7d_wall_apoptosis_threshold` relies on.
+    /// No apoptosis: all 16 cells stay live.
+    fn m7f_adhesion_gradient() -> crate::morphogen::Gradient {
+        crate::morphogen::Gradient {
+            g_dev: 4,
+            #[rustfmt::skip]
+            cells: vec![
+                10, 10, -10, -10,
+                10, 10, -10, -10,
+                 0,  0, -10, -10,
+                 0,  0, -10, -10,
+            ],
+        }
+    }
+
+    /// M7-f fixture: `germ_threshold=4` splits the 3-module grid into germ=[true, false, true]
+    /// (module 0 count=4 <=4, module 1 count=8 >4, module 2 count=4 <=4). Module 1 (soma) is
+    /// adjacent to BOTH module 0 and module 2 but differs in germ-status from both — it must stay
+    /// its own consortium while modules 0 and 2 (same germ-status, also adjacent) merge.
+    fn m7f_adhesion_germ_threshold() -> i32 {
+        4
+    }
+
+    #[test]
+    fn m7f_creates_consortia() {
+        let gradient = m7f_adhesion_gradient();
+        let gspec = m7d_wall_gspec();
+        let graph = CellGraph::from_gradient(
+            &gradient,
+            &gspec,
+            None,
+            Some(m7f_adhesion_germ_threshold()),
+            None,
+            Some(1),
+        );
+        assert_eq!(graph.module_type, vec![CellType::A, CellType::B, CellType::Mixed], "sanity: 3 distinct modules");
+        assert_eq!(graph.module_cell_count, vec![4, 8, 4], "sanity: manually-traced module sizes");
+        assert_eq!(graph.module_is_germ, vec![true, false, true], "sanity: germ_threshold=4 splits germ=[T,F,T]");
+
+        assert_eq!(
+            graph.module_consortium[0], graph.module_consortium[2],
+            "modules 0 and 2 are adjacent and share germ-status (both true) — must share a consortium root"
+        );
+        assert_ne!(
+            graph.module_consortium[1], graph.module_consortium[0],
+            "module 1 is adjacent to both 0 and 2 but differs in germ-status from both — must stay its own consortium"
+        );
+    }
+
+    #[test]
+    fn m7f_adhesion_determinism() {
+        let gradient = m7f_adhesion_gradient();
+        let gspec = m7d_wall_gspec();
+        let g1 = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1));
+        let g2 = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1));
+        assert_eq!(g1, g2, "same gradient + Some(_) must produce identical module_consortium across repeated calls");
+    }
+
+    #[test]
+    fn m7f_none_identity() {
+        let gradient = m7f_adhesion_gradient();
+        let gspec = m7d_wall_gspec();
+        let graph_off = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, None);
+        assert_eq!(
+            graph_off.module_consortium,
+            (0..graph_off.num_modules()).collect::<Vec<usize>>(),
+            "adhesion_threshold=None must leave module_consortium as the identity mapping"
+        );
+
+        let graph_on = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1));
+        assert_eq!(graph_off.module_type, graph_on.module_type, "M7-f must not perturb module_type");
+        assert_eq!(graph_off.module_cell_count, graph_on.module_cell_count, "M7-f must not perturb module_cell_count");
+        assert_eq!(graph_off.module_is_germ, graph_on.module_is_germ, "M7-f must not perturb module_is_germ");
+        assert_eq!(graph_off.module_reachable, graph_on.module_reachable, "M7-f must not perturb module_reachable");
+        assert_ne!(
+            graph_off.module_consortium, graph_on.module_consortium,
+            "sanity: this fixture must actually change grouping when adhesion is armed"
+        );
+    }
+
+    // `m7f_prod_inert_all_goldens` (the exhaustive 6-config sweep against the real shipped configs)
+    // lives in `cli`'s `tests/m7f_adhesion.rs` — it needs the production config builders, which are
+    // defined in that crate (mirrors `m7d_prod_inert_all_goldens`'s placement).
+
+    #[test]
+    fn m7f_interacts_apoptosis_germ_supply() {
+        let gradient = m7d_wall_gradient();
+        let gspec = m7d_wall_gspec();
+        let t_apop = m7d_wall_apoptosis_threshold();
+        // All four gates armed: apoptosis kills the wall row, germ_threshold=4 splits germ=[T,F],
+        // supply_source=0 makes only the top module reachable, adhesion_threshold=Some(_) arms
+        // the consortium pass. The wall severs LIVE adjacency between the two surviving modules,
+        // so Step 6 finds no edge to union regardless of germ-status — both stay their own.
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), Some(1));
+        assert_eq!(graph.module_cell_count, vec![4, 8], "sanity: same wall-fixture module sizes as M7-d");
+        assert_eq!(graph.module_is_germ, vec![true, false], "sanity: germ_threshold=4 still splits germ=[T,F]");
+        assert_eq!(graph.module_reachable, vec![true, false], "sanity: wall still severs reachability");
+        assert_eq!(
+            graph.module_consortium,
+            vec![0, 1],
+            "wall severs live adjacency — no edge exists to union, both modules stay their own consortium"
+        );
+
+        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), Some(1));
+        assert_eq!(graph, graph2, "all four gates (apoptosis+germ+supply+adhesion) must coexist deterministically");
+    }
+
+    #[test]
+    fn m7f_empty_body_valid() {
+        let gradient = m7d_wall_gradient();
+        let gspec = m7d_wall_gspec();
+        // A threshold above every resolved state kills the whole grid (mirrors m7b/m7c/m7d's
+        // `GRN_EXPR_MAX + 1` empty-body pattern).
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0), Some(1));
+        assert_eq!(graph.num_modules(), 0, "all-dead grid must yield zero modules");
+        assert!(graph.module_consortium.is_empty(), "zero modules must yield an empty module_consortium, not a panic");
+    }
+
+    #[test]
+    fn m7f_single_module() {
+        // Uniform grid: every cell resolves to the SAME CellType (drive=10 everywhere) → union-find
+        // collapses the whole grid into exactly 1 module (mirrors M7-a's baseline reasoning).
+        let gradient = crate::morphogen::Gradient { g_dev: 4, cells: vec![10; 16] };
+        let gspec = m7d_wall_gspec();
+        let graph = CellGraph::from_gradient(&gradient, &gspec, None, None, None, Some(1));
+        assert_eq!(graph.num_modules(), 1, "sanity: uniform grid must collapse to 1 module");
+        assert_eq!(graph.module_consortium, vec![0], "a singleton module must be its own (trivial) consortium");
     }
 
     #[test]
@@ -2400,6 +2616,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
@@ -2618,6 +2835,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None,
             supply_source: None,
+            adhesion_threshold: None,
         };
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
         g.mutation_rate = 256;
