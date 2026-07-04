@@ -495,12 +495,17 @@ fn is_viable_size(size: i32) -> bool {
 /// (clamped into `[0, n_layers)` — degenerate `n_layers <= 1` configs never route here in practice,
 /// but the clamp keeps the function total); an exact-tie `Mixed` resolution falls back to the raw
 /// genome value (no differentiation signal to act on). Never a float threshold.
+///
+/// **(#247, F5, PINNED) `Diff(i)` mapping**: `(i as i32) % n_layers.max(1)` — integer, deterministic,
+/// always in `[0, n_layers)` (the `.max(1)` guards the degenerate `n_layers == 0` case, same as the
+/// `max_layer` guard above).
 fn cell_type_uptake_layer(cell_type: CellType, genome_fallback: i32, n_layers: usize) -> i32 {
     let max_layer = (n_layers.max(1) - 1) as i32;
     match cell_type {
         CellType::A => 0,
         CellType::B => 1.min(max_layer),
         CellType::Mixed => genome_fallback,
+        CellType::Diff(i) => (i as i32) % (n_layers.max(1) as i32),
     }
 }
 
@@ -1141,6 +1146,12 @@ impl Genome {
             if gspec.dup_counter != 0 {
                 h = fnv_mix(h, gspec.dup_counter as u64);
             }
+            // (#247) classify_nway gated: fold only when true (mirrors dup_counter's gate above) —
+            // every shipped config has classify_nway=false, so this folds nothing → 6 goldens
+            // byte-identical. A hand-built classify_nway=true spec locks the mode into the hash.
+            if gspec.classify_nway {
+                h = fnv_mix(h, 1u64);
+            }
         }
         if let Some(mspec) = &self.morphogen_spec {
             h = fnv_mix(h, mspec.g_dev as u64);
@@ -1357,6 +1368,7 @@ mod tests {
             initial: vec![256, 0],
             gene_ids: vec![0, 1],
             dup_counter: 0,
+            classify_nway: false,
         };
         let econ = EconParams::default();
 
@@ -3222,5 +3234,93 @@ mod tests {
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-d: replay must be seed-deterministic, not run-order-dependent");
         }
+    }
+
+    // ── #247 classify-gen: N-way cell-type classification (gated) ──────────────────────────────
+
+    /// (F5, PINNED) `Diff(i) => i % n_layers.max(1)` — integer, deterministic, always in `[0,
+    /// n_layers)`; `A`/`B`/`Mixed` stay exactly as before #247 (regression sanity).
+    #[test]
+    fn classifygen_uptake_mapping() {
+        assert_eq!(cell_type_uptake_layer(CellType::Diff(0), 7, 3), 0);
+        assert_eq!(cell_type_uptake_layer(CellType::Diff(1), 7, 3), 1);
+        assert_eq!(cell_type_uptake_layer(CellType::Diff(2), 7, 3), 2);
+        assert_eq!(cell_type_uptake_layer(CellType::Diff(3), 7, 3), 0, "wraps modulo n_layers");
+        assert_eq!(cell_type_uptake_layer(CellType::Diff(5), 7, 3), 2);
+        // Degenerate n_layers=0 must not panic (guarded by `.max(1)`).
+        assert_eq!(cell_type_uptake_layer(CellType::Diff(4), 7, 0), 0);
+        // Sanity: A/B/Mixed routing is unperturbed by #247.
+        assert_eq!(cell_type_uptake_layer(CellType::A, 7, 3), 0);
+        assert_eq!(cell_type_uptake_layer(CellType::B, 7, 3), 1);
+        assert_eq!(cell_type_uptake_layer(CellType::Mixed, 7, 3), 7);
+    }
+
+    /// Hand-built `n_genes=3`, `classify_nway=true` spec (mirrors `grn.rs`'s
+    /// `classifygen_nway_produces_ge3_types` fixture): no gene coupling (`weights` all zero), gene
+    /// 0/2 driven oppositely by the gradient, gene 1 drive-dead with a fixed bias edge that only
+    /// wins at drive=0.
+    fn classifygen_nway_gspec() -> GrnSpec {
+        let mut spec = GrnSpec::new(3, vec![0; 9], vec![50, 0, -50], vec![0, 1024, 0], 3, 4, 0, 0, vec![128, 128, 128]);
+        spec.classify_nway = true;
+        spec
+    }
+
+    #[test]
+    fn classifygen_union_find_groups_nway() {
+        // Top-left 2×2 (drive=8192) -> Diff(0); top-right 2×2 (drive=-8192) -> Diff(2);
+        // bottom 2×4 (drive=0) -> Diff(1), one connected 8-cell module.
+        let gradient = crate::morphogen::Gradient {
+            g_dev: 4,
+            #[rustfmt::skip]
+            cells: vec![
+                 8192,  8192, -8192, -8192,
+                 8192,  8192, -8192, -8192,
+                    0,     0,     0,     0,
+                    0,     0,     0,     0,
+            ],
+        };
+        let gspec = classifygen_nway_gspec();
+        let graph = CellGraph::from_gradient(&gradient, &gspec, None, None, None, None);
+
+        assert_eq!(graph.num_modules(), 3, "3 distinct Diff(_) blocks must yield exactly 3 modules");
+        let mut counts: Vec<(u8, i32)> = graph
+            .module_type
+            .iter()
+            .zip(graph.module_cell_count.iter())
+            .map(|(t, &c)| match t {
+                CellType::Diff(i) => (*i, c),
+                other => panic!("expected Diff(_), got {other:?}"),
+            })
+            .collect();
+        counts.sort();
+        assert_eq!(
+            counts,
+            vec![(0, 4), (1, 8), (2, 4)],
+            "union-find must group same-Diff(i) adjacent cells into one module, not merge distinct types nor split a same-type block"
+        );
+    }
+
+    /// `classify_nway` folds into `hash_contribution` ONLY when `true` (mirrors `dup_counter`'s
+    /// gate) — `false` must be a byte-identical no-op, `true` must lock the mode into the hash.
+    #[test]
+    fn classifygen_hash_gated() {
+        let gspec = e6_gspec();
+        assert!(!gspec.classify_nway, "sanity: the e6 fixture must default to classify_nway=false");
+
+        let g_false = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), Some(e6_mspec()));
+        let h_false = g_false.hash_contribution(0);
+
+        let mut gspec_true = gspec.clone();
+        gspec_true.classify_nway = true;
+        let g_true = Genome::founder(2).with_specs(Some(Arc::new(gspec_true)), Some(e6_mspec()));
+        let h_true = g_true.hash_contribution(0);
+        assert_ne!(h_false, h_true, "classify_nway=true must fold into hash_contribution (locks the mode)");
+
+        // Toggling back to false must reproduce the ORIGINAL hash exactly — proves the gate
+        // contributes NOTHING when false (not merely a fixed offset every genome shares).
+        let mut gspec_false_again = gspec.clone();
+        gspec_false_again.classify_nway = false;
+        let g_false_again = Genome::founder(2).with_specs(Some(Arc::new(gspec_false_again)), Some(e6_mspec()));
+        assert_eq!(g_false_again.hash_contribution(0), h_false, "classify_nway=false must be a byte-identical no-op fold");
     }
 }
