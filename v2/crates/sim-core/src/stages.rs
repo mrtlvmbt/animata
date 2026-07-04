@@ -477,19 +477,28 @@ pub fn stage_mineral_feed(
     }
 }
 
-// ── Stage 6c: Predation — deterministic mean-field encounters (P-2a). ──────────────────────────────
+// ── Stage 6c: Predation — deterministic mean-field encounters (P-2a) + D-1 per-prey size-refuge. ───
 // P-2a WIRE: predation-substrate encounters (P-1, conservation-exact, deterministic). Contacts
 // predators and prey within each cell, deterministic entity-id order, energy conservation guaranteed
 // by `resolve_encounter` invariant. No-op when `config.predation` is None.
 //
-// Determinism (R14): entity-id single-writer ordering, no RNG, mean-field aggregate prey energy.
-// Conservation (R15): predator_gain + dissipated == prey_loss ≤ prey energy (exact integer).
+// D-1 (#268): `&Phenotype` added (read-only) so `resolve_encounter` can read the prey's own body
+// size (`Σ Phenotype.graph.module_cell_count`, clamped ≥1). `spec.size_refuge = None` (every
+// shipped config): the mean-field AGGREGATE path below is UNCHANGED — byte-identical to P-2a.
+// `Some(refuge)`: switches to a PER-PREY path (each prey resolved individually against its own
+// energy + body size, not the pool aggregate) — required because the refuge distinguishes a
+// large-bodied prey from a unicell that a pooled aggregate cannot.
+//
+// Determinism (R14): entity-id single-writer ordering, no RNG, mean-field aggregate prey energy
+// (or per-prey entity-id order under the D-1 refuge gate).
+// Conservation (R15): predator_gain + dissipated == prey_loss ≤ prey energy (exact integer), in
+// both paths (re-proven per-prey by `resolve_encounter`'s own invariant, applied once per prey).
 // Combat trait (P-2a semantic mapping): read from `Genome::combat_trait`, passed via `PredationSpec`.
 pub fn stage_predation(
     econ: Res<EconParams>,
     mut ledger: ResMut<EnergyLedger>,
     field: ResMut<FieldRes>,  // C′: dead prey → detritus or substrate (currently unused in P-2a)
-    mut q: Query<(Entity, &Position, &mut Energy, &Genome)>,
+    mut q: Query<(Entity, &Position, &mut Energy, &Genome, &Phenotype)>,
     mut commands: Commands,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
@@ -503,7 +512,7 @@ pub fn stage_predation(
 
     // Gather all entities with their combat_trait, sorted by id.
     let mut entity_list: Vec<(u64, Entity, Vec2Fixed, i32)> = q.iter()
-        .map(|(e, pos, _, g)| (e.to_bits(), e, pos.0, g.combat_trait))
+        .map(|(e, pos, _, g, _)| (e.to_bits(), e, pos.0, g.combat_trait))
         .collect();
     entity_list.sort_unstable_by_key(|x| x.0);
 
@@ -544,15 +553,10 @@ pub fn stage_predation(
                 continue; // no valid prey for this predator
             }
 
-            // Aggregate prey current energy (read without mutable borrow).
-            let prey_energy_agg: i64 = prey_pool.iter().map(|(_, prey_e, _)| {
-                q.get(*prey_e).map(|(_, _, energy, _)| energy.0.max(0)).unwrap_or(0)
-            }).sum();
-
             // Get predator genome for encounter resolution.
             let pred_genome = {
                 match q.get(pred_e) {
-                    Ok((_, _, _, genome)) => genome.clone(),
+                    Ok((_, _, _, genome, _)) => genome.clone(),
                     Err(_) => continue,
                 }
             };
@@ -560,7 +564,54 @@ pub fn stage_predation(
             // Resolve encounter: wire combat_trait as the predator's "strength".
             let mut pred_genome_for_encounter = pred_genome;
             pred_genome_for_encounter.size = pred_combat;
-            let outcome = resolve_encounter(&pred_genome_for_encounter, prey_energy_agg, spec);
+
+            if spec.size_refuge.is_some() {
+                // D-1 PER-PREY path: each prey resolved individually against its own energy and
+                // body size, in entity-id order (deterministic, R14) — NOT a pool aggregate.
+                for (_, prey_e, _) in &prey_pool {
+                    let (prey_energy_val, prey_body_size) = match q.get(*prey_e) {
+                        Ok((_, _, energy, _, ph)) => {
+                            let body: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
+                            (energy.0.max(0), body.max(1))
+                        }
+                        Err(_) => continue,
+                    };
+                    if prey_energy_val <= 0 {
+                        continue;
+                    }
+
+                    let outcome = resolve_encounter(
+                        &pred_genome_for_encounter,
+                        prey_energy_val,
+                        prey_body_size,
+                        spec,
+                    );
+
+                    if let Ok((_, _, mut prey_energy, _, _)) = q.get_mut(*prey_e) {
+                        prey_energy.0 -= outcome.prey_loss;
+                        if prey_energy.0 <= 0 {
+                            // At death, energy=0, recycled=0 (no detritus from dead prey here).
+                            commands.entity(*prey_e).despawn();
+                            ledger.lost += prey_energy.0.max(0); // 0
+                        }
+                    }
+                    if let Ok((_, _, mut pred_energy, _, _)) = q.get_mut(pred_e) {
+                        pred_energy.0 = (pred_energy.0 + outcome.predator_gain).max(0);
+                    }
+                    ledger.dissipated += outcome.dissipated;
+                }
+                continue;
+            }
+
+            // AGGREGATE path (size_refuge=None, byte-identical to pre-D-1 P-2a): one encounter
+            // resolved against the pooled prey energy, then drained across the pool in entity-id
+            // order. `prey_body_size` is unused by `resolve_encounter` when `size_refuge=None`, so
+            // the placeholder `1` below has no effect on the outcome.
+            let prey_energy_agg: i64 = prey_pool.iter().map(|(_, prey_e, _)| {
+                q.get(*prey_e).map(|(_, _, energy, _, _)| energy.0.max(0)).unwrap_or(0)
+            }).sum();
+
+            let outcome = resolve_encounter(&pred_genome_for_encounter, prey_energy_agg, 1, spec);
 
             // Drain prey_loss from prey in entity-id order, handling deaths.
             let mut remaining_loss = outcome.prey_loss;
@@ -570,12 +621,12 @@ pub fn stage_predation(
                 }
 
                 // Get prey's current energy.
-                let prey_current = q.get(*prey_e).map(|(_, _, energy, _)| energy.0).unwrap_or(0);
+                let prey_current = q.get(*prey_e).map(|(_, _, energy, _, _)| energy.0).unwrap_or(0);
                 let drained = prey_current.min(remaining_loss);
                 remaining_loss -= drained;
 
                 // Apply drainage.
-                if let Ok((_, _, mut prey_energy, _)) = q.get_mut(*prey_e) {
+                if let Ok((_, _, mut prey_energy, _, _)) = q.get_mut(*prey_e) {
                     prey_energy.0 -= drained;
 
                     // If prey dies, handle death routing (C′ pattern).
@@ -589,7 +640,7 @@ pub fn stage_predation(
             }
 
             // Apply predator gain.
-            if let Ok((_, _, mut pred_energy, _)) = q.get_mut(pred_e) {
+            if let Ok((_, _, mut pred_energy, _, _)) = q.get_mut(pred_e) {
                 pred_energy.0 = (pred_energy.0 + outcome.predator_gain).max(0);
             }
             ledger.dissipated += outcome.dissipated;
@@ -947,7 +998,8 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{monod_demand, stage_metabolism, stage_sense};
+    use super::{monod_demand, stage_metabolism, stage_predation, stage_sense};
+    use crate::predation::{PredationSpec, SizeRefugeSpec};
     use crate::{
         CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldRes, FieldStore,
         Genome, MergeStrategy, Phenotype, Position, Sensors, SimClock, Telemetry, Vec2Fixed,
@@ -1179,5 +1231,154 @@ mod tests {
         assert_eq!(energies[0], 1_000_000, "empty CellGraph (N=0) must be charged nothing extra");
         assert_eq!(energies[1], 1_000_000 - 3 * 6, "populated CellGraph must be charged c_coord*N");
         assert_ne!(energies[0], energies[1], "the Phenotype.graph read must be live, not dead code");
+    }
+
+    // ── D-1 (#268): stage_predation per-prey size-refuge ────────────────────────────────────────
+
+    /// Single-cell `FieldStore` stub — `cell_index` always returns 0, so every spawned entity
+    /// collides in the one predation cell. `stage_predation` never calls the other methods.
+    struct SingleCellFieldStub;
+    impl FieldStore for SingleCellFieldStub {
+        fn m_field(&self) -> i64 { 1 }
+        fn cell_index(&self, _pos: Vec2Fixed) -> usize { 0 }
+        fn cell_morton(&self, _pos: Vec2Fixed) -> u32 { 0 }
+        fn check_meta(&self, _expected_m_field: i64) -> Result<(), String> { Ok(()) }
+        fn conserved_at(&self, _pos: Vec2Fixed, _layer: usize) -> i64 { 0 }
+        fn conserved_gradient(&self, _pos: Vec2Fixed, _range: i64, _layer: usize) -> (i64, i64) { (0, 0) }
+        fn conserved_take(&mut self, _pos: Vec2Fixed, _amount: i64, _layer: usize) -> i64 { 0 }
+        fn deposit_conserved(&mut self, _cell: usize, _amount: i64, _layer: usize) {}
+        fn conserved_total(&self, _layer: usize) -> i64 { 0 }
+        fn conserved_total_all(&self) -> i64 { 0 }
+        fn conserved_hash(&self) -> u64 { 0 }
+        fn signal_total(&self) -> f32 { 0.0 }
+        fn signal_hash(&self) -> u64 { 0 }
+        fn signal_all_finite(&self) -> bool { true }
+        fn commit_merge(&mut self, _batches: &[Vec<Deposit>], _strategy: MergeStrategy) {}
+        fn solve(&mut self) -> i64 { 0 }
+    }
+
+    fn predation_genome(combat_trait: i32) -> Genome {
+        let mut g = Genome::founder(1);
+        g.combat_trait = combat_trait;
+        g
+    }
+
+    /// Runs `stage_predation` once over hand-spawned (predator, prey...) entities and returns the
+    /// resulting `(Energy, Phenotype)` snapshot per entity id (in spawn order) plus the ledger.
+    fn run_predation_once(
+        spec: PredationSpec,
+        predator_energy: i64,
+        prey: Vec<(i64, Phenotype)>, // (energy, phenotype) per prey
+    ) -> (i64, Vec<i64>, EnergyLedger) {
+        let mut world = World::new();
+        world.insert_resource(EconParams { predation: Some(spec), ..EconParams::default() });
+        world.insert_resource(FieldRes(Box::new(SingleCellFieldStub)));
+        world.insert_resource(EnergyLedger::default());
+
+        let pred_id = world
+            .spawn((
+                Position(Vec2Fixed(0, 0)),
+                Energy(predator_energy),
+                predation_genome(16),
+                Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty() },
+            ))
+            .id();
+
+        let prey_ids: Vec<Entity> = prey
+            .into_iter()
+            .map(|(energy, ph)| {
+                world
+                    .spawn((
+                        Position(Vec2Fixed(0, 0)),
+                        Energy(energy),
+                        predation_genome(0), // combat_trait=0 < predator's 16 → valid prey
+                        ph,
+                    ))
+                    .id()
+            })
+            .collect();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_predation);
+        schedule.run(&mut world);
+
+        let pred_energy = world.get::<Energy>(pred_id).map(|e| e.0).unwrap_or(0);
+        let prey_energies = prey_ids.iter().map(|&id| world.get::<Energy>(id).map(|e| e.0).unwrap_or(0)).collect();
+        let ledger = *world.resource::<EnergyLedger>();
+        (pred_energy, prey_energies, ledger)
+    }
+
+    /// `d1_per_prey_not_aggregate`: with the refuge gate ON, two prey with EQUAL starting energy
+    /// but DIFFERENT body size must lose DIFFERENT amounts (the small-bodied prey loses more) —
+    /// proving the encounter is resolved per-prey, not against a pooled aggregate (which would
+    /// give both prey the same per-capita drain regardless of body size).
+    #[test]
+    fn d1_per_prey_not_aggregate() {
+        let spec = PredationSpec {
+            bite_shift: 3,
+            combat_trait_scale: 1,
+            efficiency_num: 160,
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4 }),
+        };
+        let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
+        let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
+
+        let (_pred_energy, prey_energies, _ledger) = run_predation_once(
+            spec,
+            1_000_000,
+            vec![(10_000, small_body), (10_000, big_body)],
+        );
+
+        let loss_small = 10_000 - prey_energies[0];
+        let loss_big = 10_000 - prey_energies[1];
+        assert!(
+            loss_small > loss_big,
+            "small-bodied prey must lose MORE than an equal-energy large-bodied prey under the \
+             refuge gate (per-prey, not aggregate): loss_small={loss_small}, loss_big={loss_big}"
+        );
+        assert!(loss_big > 0, "the large-bodied prey must still lose something (refuge shrinks, doesn't zero, the bite)");
+    }
+
+    /// `d1_prod_inert_all_goldens` (stage-level half): `size_refuge=None` must stay BLIND to prey
+    /// body size — swapping which prey (by entity-id / spawn order) carries the small vs. big body
+    /// must not change the per-entity-id outcome, proving `Phenotype.graph` is never read on this
+    /// path (the aggregate mean-field flow drains prey strictly in entity-id order up to each
+    /// prey's own energy, so a body-size-aware path would make the two runs below diverge).
+    /// (The other half of this tooth — the 6 checksum goldens — is verified by the unmodified
+    /// golden test suite, since no shipped config sets `size_refuge` to anything but `None`.)
+    #[test]
+    fn d1_none_ignores_body_size() {
+        let spec = PredationSpec {
+            bite_shift: 3,
+            combat_trait_scale: 1,
+            efficiency_num: 160,
+            size_refuge: None,
+        };
+        let small = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
+        let big = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
+
+        // Run A: first-spawned prey is small-bodied, second is big-bodied.
+        let (pred_a, prey_a, ledger_a) =
+            run_predation_once(spec, 1_000_000, vec![(10_000, small()), (10_000, big())]);
+        // Run B: swapped — first-spawned prey is big-bodied, second is small-bodied. Energies and
+        // spawn order (hence entity ids) are otherwise identical.
+        let (pred_b, prey_b, ledger_b) =
+            run_predation_once(spec, 1_000_000, vec![(10_000, big()), (10_000, small())]);
+
+        assert_eq!(
+            prey_a, prey_b,
+            "size_refuge=None must be blind to prey body size: swapping small/big bodies between \
+             the same two entity-id slots must not change the per-slot drain (got {:?} vs {:?})",
+            prey_a, prey_b
+        );
+        assert_eq!(pred_a, pred_b, "predator gain must also be unaffected by the body-size swap");
+        assert_eq!(ledger_a.dissipated, ledger_b.dissipated, "dissipated total must also be unaffected");
+
+        // R15 sanity on run A: no energy created or destroyed across the stage.
+        assert_eq!(
+            pred_a + ledger_a.dissipated + prey_a.iter().sum::<i64>(),
+            1_000_000 + 10_000 + 10_000,
+            "R15: no energy created or destroyed across the stage"
+        );
     }
 }
