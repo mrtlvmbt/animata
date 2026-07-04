@@ -631,6 +631,115 @@ impl Genome {
             }
         }
 
+        // V-3-c: variable-length genome indel operator (insert-gene / delete-gene) — CANONICAL ORDER
+        // (appended AFTER V-3-b duplication, so duplication's draw positions are unchanged — §5.2
+        // stream hygiene). Gate: enable_variable_length && grn_spec.is_some(); flag-off or no-spec
+        // draws ZERO values → existing goldens byte-identical (neutrality contract).
+        // Mechanism: draw application-count (0-or-1, private salt SALT_INDEL) exactly like V-3-b's
+        // SALT_DUP. If it fires, a bit of that SAME draw picks insert vs delete (no extra draw spent
+        // on the coin, so the flag-off/no-spec paths still cost zero draws):
+        // - Insert (grow n→n+1): append a NOVEL, ZERO-initialized gene at position n (F1 pinned — no
+        //   content draw at all, unlike duplication's paralog copy). New id =
+        //   `NOVEL_GENE_ID_TAG | dup_counter` — high-bit-tagged, deliberately NOT duplication's
+        //   `(parent_id+1)<<16` shift (F2 note: avoids duplication's shallow-chain overflow risk by
+        //   construction). `dup_counter += 1` (a gene-ADDING event), `n_genes += 1`.
+        // - Delete (shrink n→n-1): draw `gene_to_delete = (r_which >> 8) % n_genes` from a SECOND draw
+        //   at `SALT_INDEL + 1` (F3/F6 pinned — fixed position immediately after the application-count
+        //   draw). Remove row/col `gene_to_delete` from `weights` (row-major stride preserved) and the
+        //   matching entry from `input_weights`/`bias`/`initial`/`gene_ids`. `n_genes -= 1`;
+        //   `dup_counter` UNCHANGED (F5 note — the counter tracks gene-ADDING events only, so it
+        //   stays a monotonic lineage-history flag even across later shrinkage).
+        //   Floor: `n_genes >= 2` (the `grn.rs` classify floor) — a delete drawn at `n_genes == 2` is
+        //   a no-op (the second draw is skipped entirely; the genome stays the parent's clone).
+        const SALT_INDEL: u64 = 0x494E_4445u64; // "INDE"
+        const NOVEL_GENE_ID_TAG: u32 = 0x8000_0000;
+        if enable_variable_length {
+            // Read from `g.grn_spec`, NOT `self.grn_spec` — `g` already carries V-3-b's result (if
+            // duplication fired above), so indel composes onto it instead of silently discarding it.
+            if let Some(gspec) = g.grn_spec.clone() {
+                let gspec = &gspec;
+                let r_count = seed_fold(stream, &[SALT_INDEL]);
+                let fires = (r_count & 0xFF) < self.mutation_rate as u64;
+                if fires {
+                    let is_delete = ((r_count >> 8) & 1) == 1;
+                    let n = gspec.n_genes;
+                    if is_delete {
+                        if n > 2 {
+                            let r_which = seed_fold(stream, &[SALT_INDEL + 1]);
+                            let gene_to_delete = (r_which >> 8) as usize % n;
+                            let mut mutated = (**gspec).clone();
+
+                            // Remove row/col `gene_to_delete` from the row-major n×n matrix,
+                            // preserving stride for the remaining (n-1)×(n-1).
+                            let mut new_weights = Vec::with_capacity((n - 1) * (n - 1));
+                            for row in 0..n {
+                                if row == gene_to_delete {
+                                    continue;
+                                }
+                                for col in 0..n {
+                                    if col == gene_to_delete {
+                                        continue;
+                                    }
+                                    new_weights.push(mutated.weights[row * n + col]);
+                                }
+                            }
+                            mutated.weights = new_weights;
+                            mutated.input_weights.remove(gene_to_delete);
+                            mutated.bias.remove(gene_to_delete);
+                            mutated.initial.remove(gene_to_delete);
+                            mutated.gene_ids.remove(gene_to_delete);
+                            mutated.n_genes -= 1;
+                            // dup_counter unchanged (F5): delete is not a gene-adding event.
+
+                            assert_eq!(mutated.weights.len(), mutated.n_genes * mutated.n_genes, "V-3-c: weights must be square after delete");
+                            assert_eq!(mutated.input_weights.len(), mutated.n_genes, "V-3-c: input_weights length mismatch after delete");
+                            assert_eq!(mutated.bias.len(), mutated.n_genes, "V-3-c: bias length mismatch after delete");
+                            assert_eq!(mutated.initial.len(), mutated.n_genes, "V-3-c: initial length mismatch after delete");
+                            assert_eq!(mutated.gene_ids.len(), mutated.n_genes, "V-3-c: gene_ids length mismatch after delete");
+                            assert!(mutated.n_genes >= 2, "V-3-c: n_genes must stay >= 2 after delete");
+
+                            g.grn_spec = Some(Arc::new(mutated));
+                        }
+                        // n <= 2: floor no-op — leave g.grn_spec as the parent's cloned Arc, untouched.
+                    } else {
+                        let mut mutated = (**gspec).clone();
+
+                        // Append a zero row + zero column at position n (F1 pinned — no content draw).
+                        let mut new_weights = Vec::with_capacity((n + 1) * (n + 1));
+                        for row in 0..n {
+                            for col in 0..n {
+                                new_weights.push(mutated.weights[row * n + col]);
+                            }
+                            new_weights.push(0); // new gene's influence on existing gene `row`
+                        }
+                        // New gene's own row: influenced by all genes (including itself) = 0.
+                        new_weights.extend(std::iter::repeat_n(0, n + 1));
+                        mutated.weights = new_weights;
+
+                        mutated.input_weights.push(0);
+                        mutated.bias.push(0);
+                        mutated.initial.push(0);
+
+                        // Novel (parentless) gene id — high-bit-tagged, NOT duplication's `(parent_id+1)<<16`
+                        // shift (F2): disjoint from both the base range `0..n_genes` and every duplication id.
+                        let new_id = NOVEL_GENE_ID_TAG | mutated.dup_counter;
+                        mutated.gene_ids.push(new_id);
+
+                        mutated.dup_counter += 1; // gene-ADDING event (F5).
+                        mutated.n_genes += 1;
+
+                        assert_eq!(mutated.weights.len(), mutated.n_genes * mutated.n_genes, "V-3-c: weights must be square after insert");
+                        assert_eq!(mutated.input_weights.len(), mutated.n_genes, "V-3-c: input_weights length mismatch after insert");
+                        assert_eq!(mutated.bias.len(), mutated.n_genes, "V-3-c: bias length mismatch after insert");
+                        assert_eq!(mutated.initial.len(), mutated.n_genes, "V-3-c: initial length mismatch after insert");
+                        assert_eq!(mutated.gene_ids.len(), mutated.n_genes, "V-3-c: gene_ids length mismatch after insert");
+                        assert!(mutated.n_genes >= 2, "V-3-c: n_genes must stay >= 2 after insert");
+
+                        g.grn_spec = Some(Arc::new(mutated));
+                    }
+                }
+            }
+        }
 
         g
     }
@@ -1804,4 +1913,228 @@ mod tests {
         panic!("V-3-b: expected to find duplication within 1000 seeds");
     }
 
+    #[test]
+    fn v3c_flag_off_no_indel() {
+        // flag=false → n_genes must never grow/shrink, even with a grn_spec attached and max
+        // mutation_rate.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        for i in 0..100 {
+            let seed = 0x1111_0000 + (i as u64);
+            g = g.mutate(seed, 2, false, 4, false, false);
+            if let Some(spec) = &g.grn_spec {
+                assert_eq!(spec.n_genes, 2, "V-3-c: flag=false must keep n_genes constant (iteration {i})");
+            }
+        }
+    }
+
+    #[test]
+    fn v3c_flag_off_byte_identity() {
+        // With enable_variable_length=false, V-3-c (appended AFTER V-3-b) draws zero values —
+        // the mutated genome (including its grn_spec) must be fully deterministic/unperturbed,
+        // proving indel's presence doesn't move any earlier draw in the fixed order.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let g1 = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), None);
+        let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+
+        let seed = 0xDEAD_BEEF;
+        let m1 = g1.mutate(seed, 2, false, 4, false, false);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false);
+
+        assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
+        assert_eq!(m1.weights, m2.weights);
+        assert_eq!(m1.grn_spec, m2.grn_spec, "V-3-c: flag=false output must be byte-identical");
+        assert_eq!(m1.grn_spec.unwrap().n_genes, 2, "V-3-c: flag=false must never change n_genes");
+    }
+
+    #[test]
+    fn v3c_no_spec_no_indel() {
+        // flag=true but grn_spec=None → no length change (Some-gated).
+        let g = Genome::founder(2); // no spec
+        let m = g.mutate(0x2222_2222, 2, false, 4, false, true);
+        assert!(m.grn_spec.is_none(), "V-3-c: genome without spec must stay without spec");
+    }
+
+    #[test]
+    fn v3c_can_insert() {
+        // A seed that fires insert grows n_genes by exactly 1; structural invariant holds.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        // NOT 256 ("always fires"): V-3-b duplication shares this same mutation_rate gate, so a
+        // maxed rate makes duplication fire on EVERY call too, chaining with indel and never
+        // leaving n_genes at exactly 3 from insert alone. A partial rate gives seeds where
+        // duplication skips and indel-insert alone fires.
+        g.mutation_rate = 64;
+
+        for i in 0..1000 {
+            let seed = 0x3333_0000 + (i as u64);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &m.grn_spec {
+                // n_genes==3 alone doesn't prove indel-insert fired — V-3-b duplication also grows
+                // n_genes by 1 (with a NON-zero paralog copy). Distinguish by the novel gene's id:
+                // indel-insert tags it with the high bit (0x8000_0000), duplication never does.
+                if spec.n_genes == 3 && spec.gene_ids[2] & 0x8000_0000 != 0 {
+                    // Grew by exactly 1; the appended gene (last row/col) must be all-zero (F1).
+                    let n = spec.n_genes;
+                    assert_eq!(spec.weights.len(), n * n);
+                    assert_eq!(spec.input_weights.len(), n);
+                    assert_eq!(spec.bias.len(), n);
+                    assert_eq!(spec.initial.len(), n);
+                    assert_eq!(spec.gene_ids.len(), n);
+                    for col in 0..n {
+                        assert_eq!(spec.weights[(n - 1) * n + col], 0, "V-3-c: new gene's row must be zero");
+                    }
+                    for row in 0..n {
+                        assert_eq!(spec.weights[row * n + (n - 1)], 0, "V-3-c: new gene's column must be zero");
+                    }
+                    assert_eq!(spec.input_weights[n - 1], 0);
+                    assert_eq!(spec.bias[n - 1], 0);
+                    assert_eq!(spec.initial[n - 1], 0);
+                    return;
+                }
+            }
+        }
+        panic!("V-3-c: expected to find an insert within 1000 seeds");
+    }
+
+    #[test]
+    fn v3c_can_delete() {
+        // A seed that fires delete shrinks n_genes by exactly 1; structural invariant holds.
+        let gspec = GrnSpec::new(
+            3,
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9],
+            vec![10, 20, 30],
+            vec![1, 2, 3],
+            3, 12, 0, 0,
+            vec![40, 50, 60],
+        );
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        // Partial rate — see v3c_can_insert's comment: at 256 duplication would also always fire,
+        // so n_genes would never settle at exactly 2 from a lone delete.
+        g.mutation_rate = 64;
+
+        for i in 0..1000 {
+            let seed = 0x4444_0000 + (i as u64);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &m.grn_spec {
+                if spec.n_genes == 2 {
+                    let n = spec.n_genes;
+                    assert_eq!(spec.weights.len(), n * n);
+                    assert_eq!(spec.input_weights.len(), n);
+                    assert_eq!(spec.bias.len(), n);
+                    assert_eq!(spec.initial.len(), n);
+                    assert_eq!(spec.gene_ids.len(), n);
+                    return;
+                }
+            }
+        }
+        panic!("V-3-c: expected to find a delete within 1000 seeds");
+    }
+
+    #[test]
+    fn v3c_delete_floor() {
+        // At n_genes==2 (the classify floor), a drawn delete is a no-op — n_genes must never
+        // drop below 2, across any seed.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        for i in 0..1000 {
+            let seed = 0x5555_0000 + (i as u64);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &m.grn_spec {
+                assert!(spec.n_genes >= 2, "V-3-c: n_genes must never breach the floor (iteration {i})");
+            }
+        }
+    }
+
+    #[test]
+    fn v3c_structural_validity() {
+        // Post-indel: all 5 vectors == n_genes, weights square, no panic — across a run of
+        // successive generations exercising both insert and delete.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        for i in 0..500 {
+            let seed = 0x6666_0000 + (i as u64);
+            g = g.mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &g.grn_spec {
+                let n = spec.n_genes;
+                assert_eq!(spec.weights.len(), n * n, "iteration {i}");
+                assert_eq!(spec.input_weights.len(), n, "iteration {i}");
+                assert_eq!(spec.bias.len(), n, "iteration {i}");
+                assert_eq!(spec.initial.len(), n, "iteration {i}");
+                assert_eq!(spec.gene_ids.len(), n, "iteration {i}");
+                assert!(n >= 2, "iteration {i}");
+            }
+        }
+    }
+
+    #[test]
+    fn v3c_gene_ids_injective() {
+        // After any indel sequence, gene_ids must have no duplicates (homology tracking intact).
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        for i in 0..500 {
+            let seed = 0x7777_0000 + (i as u64);
+            g = g.mutate(seed, 2, false, 4, false, true);
+            if let Some(spec) = &g.grn_spec {
+                let mut seen = std::collections::BTreeSet::new();
+                for &id in &spec.gene_ids {
+                    assert!(seen.insert(id), "V-3-c: duplicate gene_id {id} at iteration {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn v3c_post_indel_decodes() {
+        // A post-indel genome must still decode() to Some(Phenotype) or a clean None — never panic.
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64]);
+        let mspec = MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0,
+        };
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        g.mutation_rate = 256;
+
+        let econ = EconParams {
+            morphogen: Some(mspec),
+            grn: Some(GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 64])),
+            ..EconParams::default()
+        };
+
+        for i in 0..1000 {
+            let seed = 0x8888_0000 + (i as u64);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true);
+            if let Some(spec) = &m.grn_spec {
+                if spec.n_genes != 2 {
+                    let _ph = m.decode(&econ); // must not panic; Some or None both fine
+                    return;
+                }
+            }
+        }
+        panic!("V-3-c: expected to find an indel within 1000 seeds");
+    }
+
+    #[test]
+    fn v3c_replay_1_vs_n() {
+        // N genomes each mutated with the same seed → identical results (R14 1-vs-N).
+        let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![10, 20], vec![5, 15], 3, 12, 0, 0, vec![32, 96]);
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
+        g.mutation_rate = 256;
+
+        let seed = 0x9999_9999;
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true)).collect();
+
+        for m in &results[1..] {
+            assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-c: replay must be seed-deterministic, not run-order-dependent");
+        }
+    }
 }
