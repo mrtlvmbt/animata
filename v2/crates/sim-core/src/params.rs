@@ -236,6 +236,15 @@ pub struct EconParams {
     /// to exercise the operators. Determinism: when false, mutate() reads zero values from the
     /// operator stream → backward-compatible draw positions preserved (§5.2).
     pub enable_variable_length: bool,
+
+    // ── M7-e: multicellular coordination-cost sink ────────────────────────────────────────────────
+    /// Coordination cost per live body cell per tick (M7-e-a). Charged as `c_coord · N` inside the
+    /// metabolism bracket (`N = Σ module_cell_count`, the total live body cell count from
+    /// `Phenotype.graph`), same per-tick lump as `base_metab`/`k_size_metab`/etc. Default `0`
+    /// (all 6 existing production configs) → the term adds nothing → byte-identical goldens; the
+    /// `Phenotype.graph` read is live (wired) but inert. `c_coord > 0` (calibration + viability
+    /// verification + re-pin) is M7-e-b, not this slice.
+    pub c_coord: i64,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -324,6 +333,8 @@ impl Default for EconParams {
             grn: None,
             // V-3-b: variable-length operators OFF by default — false for all 6 existing configs.
             enable_variable_length: false,
+            // M7-e: coordination cost OFF by default — 0 for all 6 existing configs (neutral wire).
+            c_coord: 0,
         }
     }
 }
