@@ -157,6 +157,24 @@ impl Default for SpeciationState {
 /// Same scale as `RECYCLE_DEN`/`metabolism_eff` — one integer multiply-then-divide, no float.
 pub const BODY_SIZE_SCALE: i64 = 256;
 
+/// D-3a (#272): pure integer aggregate over a population's per-entity `CellGraph::body_size()`
+/// values — `(mean_body_size, max_body_size, multicellular_frac)`, mean/frac fixed-point ×
+/// [`BODY_SIZE_SCALE`], max a raw count. `(0, 0, 0)` when `sizes` is empty (population 0). Order-
+/// independent (sum/max/count are commutative), so entity-id ordering upstream is for the OTHER
+/// telemetry this shares a pass with (genome_diversity), not required by this fn itself. Extracted
+/// as a standalone fn so `stage_observe`'s wiring and the arithmetic itself are both directly
+/// unit-testable (`cli` crate's `d3a_body_size.rs`).
+pub fn body_size_aggregate(sizes: &[i64]) -> (i64, i64, i64) {
+    if sizes.is_empty() {
+        return (0, 0, 0);
+    }
+    let n = sizes.len() as i64;
+    let sum: i64 = sizes.iter().sum();
+    let max = *sizes.iter().max().unwrap();
+    let count_multicellular = sizes.iter().filter(|&&s| s > 1).count() as i64;
+    (sum * BODY_SIZE_SCALE / n, max, count_multicellular * BODY_SIZE_SCALE / n)
+}
+
 /// Read-only telemetry sink (stage 9). Overwritten each tick. The `telemetry` crate derives Price
 /// covariance / diversity from `samples` — keeping that statistics code OUT of the core (R1).
 #[derive(Resource, Default)]
@@ -651,6 +669,17 @@ impl Sim {
             }
         }
         (max_size, count_multicellular)
+    }
+
+    /// D-3a (#272): independent cross-check probe for `Telemetry::{mean,max}_body_size`/
+    /// `multicellular_frac` — a fresh query returning every live entity's `CellGraph::body_size()`
+    /// (unordered; `body_size_aggregate` is order-independent). Unlike `body_size_stats` (D-2,
+    /// unclamped — built to detect ">1 ever happens", where a non-phase2 empty graph correctly reads
+    /// 0), this clamps to match D-3a's telemetry definition (empty graph → body_size 1). Test-only
+    /// verification helper: read-only, no state mutation, not used in the deterministic tick loop.
+    pub fn body_size_probe(&mut self) -> Vec<i64> {
+        let mut q = self.world.query::<&Phenotype>();
+        q.iter(&self.world).map(|ph| ph.graph.body_size()).collect()
     }
 
     pub fn tick(&self) -> u64 {
