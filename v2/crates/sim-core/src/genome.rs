@@ -688,6 +688,15 @@ impl Genome {
                 h = fnv_mix(h, v as u64);
             }
             h = fnv_mix(h, gspec.n_genes as u64);
+            // V-3-a: dup_counter gated (fold only when non-zero). In V-3-a, all genomes have
+            // dup_counter=0 (no duplication operator yet), so this folds nothing → existing goldens
+            // byte-identical. V-3-b will fold dup_counter>0 to lock mutations that incremented it.
+            // gene_ids are recomputable from n_genes for base genes (0..n_genes-1), so not folded
+            // (would waste hash budget; the lineage-derived ids are infrastructure for future
+            // homology-driven operators, not a separate state to lock).
+            if gspec.dup_counter != 0 {
+                h = fnv_mix(h, gspec.dup_counter as u64);
+            }
         }
         if let Some(mspec) = &self.morphogen_spec {
             h = fnv_mix(h, mspec.g_dev as u64);
@@ -871,6 +880,8 @@ mod tests {
             sample_x: 0,
             sample_z: 0,
             initial: vec![256, 0],
+            gene_ids: vec![0, 1],
+            dup_counter: 0,
         };
         let econ = EconParams::default();
 
