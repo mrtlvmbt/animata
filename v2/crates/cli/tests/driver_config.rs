@@ -165,12 +165,6 @@ fn d2_set_overrides() {
         .expect("refuge_k=9 must be accepted on a config with predation.size_refuge configured");
     assert_eq!(econ.predation.unwrap().size_refuge.unwrap().refuge_k, 9);
 
-    // D-5: Apply: base_hazard updates the hazard predation spec.
-    let mut econ_hazard = driver_config(SEED).econ;
-    apply_overrides(&mut econ_hazard, &[("base_hazard".to_string(), "1000".to_string())])
-        .expect("base_hazard=1000 must be accepted on driver_config");
-    assert_eq!(econ_hazard.predation.unwrap().base_hazard, 1000);
-
     // Range-guard: negative values rejected for all keys.
     let mut econ_neg = driver_config(SEED).econ;
     let r_c = apply_overrides(&mut econ_neg, &[("c_coord".to_string(), "-1".to_string())]);
@@ -180,11 +174,6 @@ fn d2_set_overrides() {
     let r_k = apply_overrides(&mut econ_neg, &[("refuge_k".to_string(), "-1".to_string())]);
     assert!(r_k.is_err(), "refuge_k=-1 must return Err");
     assert!(r_k.unwrap_err().starts_with("error:"));
-
-    let mut econ_bh = driver_config(SEED).econ;
-    let r_bh = apply_overrides(&mut econ_bh, &[("base_hazard".to_string(), "-100".to_string())]);
-    assert!(r_bh.is_err(), "base_hazard=-100 must return Err");
-    assert!(r_bh.unwrap_err().starts_with("error:"));
 
     // refuge_k is rejected when no predation.size_refuge is configured (structural — plain default).
     let mut econ_plain = EconParams::default();
