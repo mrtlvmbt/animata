@@ -339,9 +339,12 @@ pub fn differentiation_config(seed: u64) -> SimConfig {
 }
 
 // D-2 (#270): driver_config's tunable knobs — a starting point for VIABILITY, not tuned for
-// emergence (D-3 sweeps these via `--set c_coord=…`/`--set refuge_k=…`).
-/// Predation bite scale (P-1 fixture value — known-conservative, reused from `predation_config`).
-const DRIVER_BITE_SHIFT: u32 = 3;
+// emergence (D-3/V-5 sweep these via `--set c_coord=…`/`--set refuge_k=…`/`--set bite_shift=…`).
+/// V-5 (#278): lowered from the P-1 fixture value 3→1 — round-2 emergence returned NULL because
+/// `bite_shift=3` (1/8 of prey energy) was a minor tax, recoverable, giving the size-refuge no
+/// fitness gradient to exploit. `bite_shift=1` (half the prey's energy per encounter) is a real,
+/// size-selective mortality. Sweepable via `--set bite_shift=…`; searched by `driver_emergence_verdict`.
+const DRIVER_BITE_SHIFT: u32 = 1;
 /// Combat-trait influence on bite size (reused from `predation_config`).
 const DRIVER_COMBAT_TRAIT_SCALE: i32 = 1;
 /// Predation metabolic efficiency, ~62% (reused from `predation_config`).
@@ -684,12 +687,35 @@ pub fn apply_overrides(econ: &mut EconParams, sets: &[(String, String)]) -> Resu
                     }
                 }
             }
+            // V-5 (#278): bite_shift — predation bite strength, sweepable by the emergence verdict.
+            // Requires `predation` already configured (structural — this key does not turn
+            // predation on, mirrors `refuge_k`'s relationship to `size_refuge`).
+            "bite_shift" => {
+                let v = p::<u32>(key, val)?;
+                if v > 10 {
+                    return Err(format!(
+                        "error: --set bite_shift={v}: must be in [0, 10] (predation.rs's documented \
+                         range — 0 ⇒ can bite the entire prey, 10 ⇒ tiny bites)"
+                    ));
+                }
+                match econ.predation.as_mut() {
+                    Some(spec) => spec.bite_shift = v,
+                    None => {
+                        return Err(
+                            "error: --set bite_shift=…: this config has no predation configured \
+                             (predation must already be `Some`)"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
             _ => {
                 return Err(format!(
                     "error: --set {key}=…: not an overridable calibration knob. \
                      Valid keys: km, u_max, base_metab, c_div, e_cell, k_size_metab, \
                      k_move_cost, k_sense_cost, excrete, recycle_num, speciation_threshold, \
-                     brain_period, metab_period, d0_scaled, pheromone, reg_gain_max, c_coord, refuge_k."
+                     brain_period, metab_period, d0_scaled, pheromone, reg_gain_max, c_coord, \
+                     refuge_k, bite_shift."
                 ));
             }
         }
