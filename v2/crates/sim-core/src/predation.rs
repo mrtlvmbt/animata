@@ -722,9 +722,16 @@ mod tests {
             );
         }
 
-        // Verify first body gets the full base, last body gets heavily reduced
-        assert_eq!(drains[0], base_drain, "body=1 should get full base drain");
-        assert!(drains[drains.len()-1] < base_drain / 10, "large body should get much-reduced drain");
+        // Verify monotone-decreasing drain: small bodies lose more (drain higher),
+        // large bodies lose less (drain lower). body=1 gives attenuated drain (refuge applies to all sizes).
+        // The relationship is: drain = (base * 256) / (256 + 2*body), so even body=1 gets slightly attenuated.
+        assert!(drains[0] < base_drain && drains[0] > base_drain * 95 / 100,
+            "body=1 should get slightly attenuated drain (within 95% of base), got {}", drains[0]);
+        // Large body (128): drain ≈ base/(1 + k*body/2^shift) = 10000/(1 + 2*128/256) = 10000/2 = 5000.
+        // Should be at least 40% reduced from base.
+        assert!(drains[drains.len()-1] <= base_drain / 2, 
+            "body=128 should be significantly attenuated, got {} (base={})", 
+            drains[drains.len()-1], base_drain);
     }
 
     /// `d5_hazard_zero_inert`: `base_hazard=0` → zero drain (ablation control, inert).

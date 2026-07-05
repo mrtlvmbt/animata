@@ -1140,7 +1140,7 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
 #[cfg(test)]
 mod tests {
     use super::{monod_demand, stage_metabolism, stage_predation, stage_sense};
-    use crate::predation::{PredationSpec, SizeRefugeSpec};
+    use crate::predation::{PredationMode, PredationSpec, SizeRefugeSpec};
     use crate::{
         CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldRes, FieldStore,
         Genome, MergeStrategy, Phenotype, Position, Sensors, SimClock, Telemetry, Vec2Fixed,

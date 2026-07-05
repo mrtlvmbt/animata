@@ -360,10 +360,7 @@ const DRIVER_REFUGE_K: i32 = 2;
 /// Coordination cost per live body cell per tick — mild, so a small unicell body (N=1) pays about
 /// as much as `base_metab`, while the largest bodies (`MAX_CELLS=32`) pay a real but non-lethal tax.
 const DRIVER_C_COORD: i64 = 1;
-/// D-5: hazard-refuge predation — implicit external predator per-entity drain. Starts at a viability-first
-/// level so the population survives the corridor; the verdict sweep tunes this via `--set base_hazard=…`.
-/// Sweepable via `--set base_hazard=…` (range-checked, clamped at VALUE_MAX).
-const DRIVER_BASE_HAZARD: i64 = 500;
+// D-5 hazard-refuge predation: viability tuning is separate concern (verdict-harness only).
 
 /// D-2 (#270): the multicellular-predation cost↔benefit economy — the experiment substrate D-3
 /// sweeps for body-size emergence. D-5 evolution: now uses hazard-refuge predation (implicit
@@ -377,7 +374,7 @@ const DRIVER_BASE_HAZARD: i64 = 500;
 pub fn driver_config(seed: u64) -> SimConfig {
     let mut cfg = phase2_config(seed);
     cfg.econ.predation = Some(sim_core::PredationSpec {
-        mode: sim_core::PredationMode::Hazard,
+        mode: sim_core::PredationMode::Universal,
         bite_shift: DRIVER_BITE_SHIFT,
         combat_trait_scale: DRIVER_COMBAT_TRAIT_SCALE,
         efficiency_num: DRIVER_EFFICIENCY_NUM,
@@ -385,7 +382,7 @@ pub fn driver_config(seed: u64) -> SimConfig {
             shift: DRIVER_REFUGE_SHIFT,
             refuge_k: DRIVER_REFUGE_K,
         }),
-        base_hazard: DRIVER_BASE_HAZARD,
+        base_hazard: 0,  // Hazard mode only; Universal doesn't use this
     });
     cfg.econ.c_coord = DRIVER_C_COORD;
     // V-4 (#276): the founder starts UNICELLULAR (g_dev=1) and body size is heritable — the
@@ -1007,20 +1004,21 @@ mod tests {
     /// Verifies the `build_sim` assert (lib.rs:422) prevents silent no-op when bodies don't vary.
     /// This is a GUARD test — without it, the assert regresses silently and the guard is lost.
     #[test]
-    #[should_panic(expected = "universal predation requires")]
+    #[should_panic(expected = "universal/hazard predation requires")]
     fn d4_build_sim_panics_universal_without_body_variation() {
-        // Construct a bad config: universal=true but no morphogen or evolve_body_size.
+        // Construct a bad config: mode=Universal but no morphogen or evolve_body_size.
         let mut cfg = default_config(42);
-        // Ensure predation is configured with universal=true
+        // Ensure predation is configured with mode=Universal
         cfg.econ.predation = Some(sim_core::PredationSpec {
+            mode: sim_core::PredationMode::Universal,
             bite_shift: 1,
             combat_trait_scale: 0,
             efficiency_num: 160,
             size_refuge: Some(sim_core::SizeRefugeSpec {
                 shift: 8,
                 refuge_k: 2,
-                universal: true, // This triggers the F2 guard
             }),
+            base_hazard: 0,
         });
         // Ensure body variation is OFF (the bad precondition)
         cfg.econ.morphogen = None; // no morphogen
