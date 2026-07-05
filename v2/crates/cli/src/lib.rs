@@ -431,6 +431,15 @@ pub fn build_sim(config: SimConfig) -> Sim {
                     config.econ.morphogen.is_some(),
                     config.econ.evolve_body_size
                 );
+                // D-5 (subsystem-reviewer F7): Hazard drains via the refuge Q-format, so it needs a
+                // size_refuge — otherwise `stage_predation`'s Hazard branch silently no-ops (drain=0)
+                // instead of a loud misconfiguration. driver_config always sets it; guard the type gap.
+                if matches!(pred_spec.mode, PredationMode::Hazard) {
+                    assert!(
+                        pred_spec.size_refuge.is_some(),
+                        "hazard predation requires size_refuge=Some (the refuge Q-format attenuates the drain)"
+                    );
+                }
             }
             PredationMode::CombatSplit => {}
         }
