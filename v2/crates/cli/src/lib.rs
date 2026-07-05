@@ -4,7 +4,7 @@
 
 use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
-use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
+use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, PredationMode, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
 use world::ProcgenWorld;
 
 /// Fixed timestep dt = 1/64 s, integer microseconds (the loop driver does no float).
@@ -258,10 +258,12 @@ pub fn predation_config(seed: u64) -> SimConfig {
             detritus_frac_num: 256, // RECYCLE_DEN = 256 → frac=1.0 full-replace (bootstrap)
             // P-2a: predation enabled with P-1 fixture parameters (known-conservative spec).
             predation: Some(sim_core::PredationSpec {
+                mode: sim_core::PredationMode::CombatSplit,
                 bite_shift: 3,             // base bite ≈ prey_energy / 8
                 combat_trait_scale: 1,     // moderate trait influence
                 efficiency_num: 160,       // ~62% efficiency (160/256) — P-1 fixture value
                 size_refuge: None,         // D-1: gated off — byte-identical to P-2a
+                base_hazard: 0,            // D-5: inert
             }),
             ..EconParams::default()
         },
@@ -355,31 +357,36 @@ const DRIVER_EFFICIENCY_NUM: i32 = 160;
 const DRIVER_REFUGE_SHIFT: u32 = 8;
 /// Size-refuge strength — moderate (D-1's `d1_refuge_monotone` fixture value).
 const DRIVER_REFUGE_K: i32 = 2;
+/// D-5: hazard-refuge predation — implicit external predator per-entity drain. Starts at a viability-first
+/// level so the population survives the corridor; the verdict sweep tunes this via `--set base_hazard=…`.
+/// Sweepable via `--set base_hazard=…` (range-checked, clamped at VALUE_MAX).
+const DRIVER_BASE_HAZARD: i64 = 10;
 /// Coordination cost per live body cell per tick — mild, so a small unicell body (N=1) pays about
 /// as much as `base_metab`, while the largest bodies (`MAX_CELLS=32`) pay a real but non-lethal tax.
 const DRIVER_C_COORD: i64 = 1;
+// D-5 hazard-refuge predation: viability tuning is separate concern (verdict-harness only).
 
 /// D-2 (#270): the multicellular-predation cost↔benefit economy — the experiment substrate D-3
-/// sweeps for body-size emergence. Reuses `phase2_config`'s exact morphogen/GRN specs (bodies can
-/// be multicellular) and adds two opposing forces: predation with a per-prey size-refuge (D-1,
-/// `#268`) as the BENEFIT of a larger body (harder to capture), and `c_coord > 0` (M7-e-a, `#251`)
-/// as the COST (a bigger body pays more coordination tax per tick). Parameters are chosen for
-/// VIABILITY (the population must survive the corridor — see `d2_driver_config_viable`), not
-/// tuned to make a particular body size emerge — that measurement is D-3's job.
+/// sweeps for body-size emergence. D-5 evolution: now uses hazard-refuge predation (implicit
+/// external predator, per-entity per-tick drain) as a CONDITIONAL size-benefit (harder bodies drain
+/// less) instead of D-4's ubiquitous predator-prey model. Cost is `c_coord > 0` (M7-e-a, `#251`).
+/// Parameters are chosen for VIABILITY (the population must survive the corridor), not
+/// tuned to make a particular body size emerge — that measurement is the verdict's job.
 ///
 /// Golden-touching but ADDITIVE: `phase2_config` (and the other 5 production configs) are
 /// untouched — `driver_config` is a new, opt-in config, so their goldens stay byte-identical.
 pub fn driver_config(seed: u64) -> SimConfig {
     let mut cfg = phase2_config(seed);
     cfg.econ.predation = Some(sim_core::PredationSpec {
+        mode: sim_core::PredationMode::Hazard,
         bite_shift: DRIVER_BITE_SHIFT,
         combat_trait_scale: DRIVER_COMBAT_TRAIT_SCALE,
         efficiency_num: DRIVER_EFFICIENCY_NUM,
         size_refuge: Some(sim_core::SizeRefugeSpec {
             shift: DRIVER_REFUGE_SHIFT,
             refuge_k: DRIVER_REFUGE_K,
-            universal: true, // D-4: ubiquitous size-selective predation (Boraas mechanism)
         }),
+        base_hazard: DRIVER_BASE_HAZARD,
     });
     cfg.econ.c_coord = DRIVER_C_COORD;
     // V-4 (#276): the founder starts UNICELLULAR (g_dev=1) and body size is heritable — the
@@ -412,18 +419,29 @@ pub fn build_sim(config: SimConfig) -> Sim {
         config.econ.n_energy_layers = config.n_layers;
     }
 
-    // D-4 (F2): universal predation requires varying body sizes to be meaningful — guard this
-    // at setup (cheap, loud) rather than silently producing zero predation downstream.
+    // D-4/D-5 (F2): universal and hazard predation modes require varying body sizes to be meaningful
+    // — guard this at setup (cheap, loud) rather than silently producing zero predation downstream.
     if let Some(pred_spec) = &config.econ.predation {
-        if let Some(refuge) = pred_spec.size_refuge {
-            if refuge.universal {
+        use sim_core::PredationMode;
+        match pred_spec.mode {
+            PredationMode::Universal | PredationMode::Hazard => {
                 assert!(
                     config.econ.morphogen.is_some() && config.econ.evolve_body_size,
-                    "universal predation requires morphogen=Some AND evolve_body_size=true; got morphogen={}, evolve_body_size={}",
+                    "universal/hazard predation requires morphogen=Some AND evolve_body_size=true; got morphogen={}, evolve_body_size={}",
                     config.econ.morphogen.is_some(),
                     config.econ.evolve_body_size
                 );
+                // D-5 (subsystem-reviewer F7): Hazard drains via the refuge Q-format, so it needs a
+                // size_refuge — otherwise `stage_predation`'s Hazard branch silently no-ops (drain=0)
+                // instead of a loud misconfiguration. driver_config always sets it; guard the type gap.
+                if matches!(pred_spec.mode, PredationMode::Hazard) {
+                    assert!(
+                        pred_spec.size_refuge.is_some(),
+                        "hazard predation requires size_refuge=Some (the refuge Q-format attenuates the drain)"
+                    );
+                }
             }
+            PredationMode::CombatSplit => {}
         }
     }
     let econ = config.econ.clone();
@@ -727,13 +745,49 @@ pub fn apply_overrides(econ: &mut EconParams, sets: &[(String, String)]) -> Resu
                     }
                 }
             }
+            // D-5 (#284): base_hazard — hazard predation drain, sweepable for channel-isolation.
+            // Requires `predation` configured in Hazard mode (structural — this key does not turn
+            // predation on). Range-checked: must be non-negative and ≤ VALUE_MAX (1e6).
+            "base_hazard" => {
+                let v = p::<i64>(key, val)?;
+                if v < 0 {
+                    return Err(format!(
+                        "error: --set base_hazard={v}: must be ≥ 0 (negative drain is non-viable)"
+                    ));
+                }
+                let value_max = 1_000_000i64; // predation.rs VALUE_MAX
+                if v > value_max {
+                    return Err(format!(
+                        "error: --set base_hazard={v}: must be ≤ {value_max} (VALUE_MAX in predation.rs)"
+                    ));
+                }
+                match econ.predation.as_mut() {
+                    Some(spec) => {
+                        if spec.mode != sim_core::PredationMode::Hazard {
+                            return Err(
+                                "error: --set base_hazard=…: this config's predation mode is not Hazard \
+                                 (base_hazard only applies to hazard-refuge predation)"
+                                    .to_string(),
+                            );
+                        }
+                        spec.base_hazard = v;
+                    }
+                    None => {
+                        return Err(
+                            "error: --set base_hazard=…: this config has no predation configured \
+                             (predation must already be `Some` and mode=Hazard)"
+                                .to_string(),
+                        );
+                    }
+                }
+            }
             _ => {
                 return Err(format!(
                     "error: --set {key}=…: not an overridable calibration knob. \
                      Valid keys: km, u_max, base_metab, c_div, e_cell, k_size_metab, \
                      k_move_cost, k_sense_cost, excrete, recycle_num, speciation_threshold, \
                      brain_period, metab_period, d0_scaled, pheromone, reg_gain_max, c_coord, \
-                     refuge_k, bite_shift."
+                     refuge_k, bite_shift, base_hazard."
                 ));
             }
         }
@@ -963,20 +1017,21 @@ mod tests {
     /// Verifies the `build_sim` assert (lib.rs:422) prevents silent no-op when bodies don't vary.
     /// This is a GUARD test — without it, the assert regresses silently and the guard is lost.
     #[test]
-    #[should_panic(expected = "universal predation requires")]
+    #[should_panic(expected = "universal/hazard predation requires")]
     fn d4_build_sim_panics_universal_without_body_variation() {
-        // Construct a bad config: universal=true but no morphogen or evolve_body_size.
+        // Construct a bad config: mode=Hazard but no morphogen or evolve_body_size.
         let mut cfg = default_config(42);
-        // Ensure predation is configured with universal=true
+        // Ensure predation is configured with mode=Hazard
         cfg.econ.predation = Some(sim_core::PredationSpec {
+            mode: sim_core::PredationMode::Hazard,
             bite_shift: 1,
             combat_trait_scale: 0,
             efficiency_num: 160,
             size_refuge: Some(sim_core::SizeRefugeSpec {
                 shift: 8,
                 refuge_k: 2,
-                universal: true, // This triggers the F2 guard
             }),
+            base_hazard: 0,
         });
         // Ensure body variation is OFF (the bad precondition)
         cfg.econ.morphogen = None; // no morphogen
