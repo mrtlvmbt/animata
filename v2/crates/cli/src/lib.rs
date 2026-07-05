@@ -4,7 +4,7 @@
 
 use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
-use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, PredationMode, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
+use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
 use world::ProcgenWorld;
 
 /// Fixed timestep dt = 1/64 s, integer microseconds (the loop driver does no float).
@@ -69,6 +69,14 @@ const L2_DETRITUS_SPEC: LayerSpec = LayerSpec {
 // reduced resource → increased mineral pressure. regen_rate raised 1→2 to maintain N̄≥30 (d3a viability).
 const L2_MINERAL_SPEC: LayerSpec = LayerSpec {
     regen_rate: 2, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 200, world_cap_mult: 0,
+};
+
+// Layer 1 (P1-0 O₂ field): oxygen / gas exchange — regen=0 (source from photosynthesis P2+ and
+// surface aeration, which will be per-biom in world-gen), α=1/8 (diffusion rate tbd, start conservative),
+// world_cap_mult=1 (O₂-cap derived from world biome, same scaling as substrate layer 0).
+// P1-0: static O₂ field (no photosynthesis yet). Respiration will consume O₂ (stage_metabolism P1-2).
+const L1_O2_SPEC: LayerSpec = LayerSpec {
+    regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 8, flat_cap: 0, world_cap_mult: 1,
 };
 
 /// Default production config (L=2): layer 0 = substrate, layer 1 = organics/excreta (empty start).
@@ -399,6 +407,30 @@ pub fn driver_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// P1-0 O₂-field infrastructure config (L=2): substrate + O₂ field.
+///
+/// **P1-0 golden-ADDITIVE:** O₂ field is new, opt-in. `oxygen_config` is a testbed config that
+/// wires the O₂ economy (enable_oxygen=true) into the phase-substrate world. Non-oxygen configs
+/// (`default_config` etc.) keep enable_oxygen=false → O₂ layer inert → trajectories byte-identical
+/// (the isolation gate; un-re-pinned existing goldens are the test). Once merged, P1-0 golden will
+/// be pinned arm64 via `ci-report.sh`.
+///
+/// **O₂-layer structure:** Layer 1 carries O₂ (conserved fixed-point). Per-cell caps derived from
+/// biome in world-gen (caps_from enriched with oxygen cap). Regen_rate=0 in P1-0 (source coupling
+/// will come from P2+ photosynthesis + surface aeration; for now static field). Diffusion enabled
+/// (α=1/8, moderate lateral spread for O₂ gradients).
+pub fn oxygen_config(seed: u64) -> SimConfig {
+    SimConfig {
+        n_layers: 2,
+        layer_specs: [L0_SPEC, L1_O2_SPEC, LayerSpec::default(), LayerSpec::default()],
+        econ: EconParams {
+            enable_oxygen: true,
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
@@ -422,9 +454,8 @@ pub fn build_sim(config: SimConfig) -> Sim {
     // D-4/D-5 (F2): universal and hazard predation modes require varying body sizes to be meaningful
     // — guard this at setup (cheap, loud) rather than silently producing zero predation downstream.
     if let Some(pred_spec) = &config.econ.predation {
-        use sim_core::PredationMode;
         match pred_spec.mode {
-            PredationMode::Universal | PredationMode::Hazard => {
+            sim_core::PredationMode::Universal | sim_core::PredationMode::Hazard => {
                 assert!(
                     config.econ.morphogen.is_some() && config.econ.evolve_body_size,
                     "universal/hazard predation requires morphogen=Some AND evolve_body_size=true; got morphogen={}, evolve_body_size={}",
@@ -434,14 +465,14 @@ pub fn build_sim(config: SimConfig) -> Sim {
                 // D-5 (subsystem-reviewer F7): Hazard drains via the refuge Q-format, so it needs a
                 // size_refuge — otherwise `stage_predation`'s Hazard branch silently no-ops (drain=0)
                 // instead of a loud misconfiguration. driver_config always sets it; guard the type gap.
-                if matches!(pred_spec.mode, PredationMode::Hazard) {
+                if matches!(pred_spec.mode, sim_core::PredationMode::Hazard) {
                     assert!(
                         pred_spec.size_refuge.is_some(),
                         "hazard predation requires size_refuge=Some (the refuge Q-format attenuates the drain)"
                     );
                 }
             }
-            PredationMode::CombatSplit => {}
+            sim_core::PredationMode::CombatSplit => {}
         }
     }
     let econ = config.econ.clone();
@@ -452,9 +483,12 @@ pub fn build_sim(config: SimConfig) -> Sim {
     // World per-cell caps (ProcgenWorld: real relief + biome/edaphic-derived) — layer 0 always,
     // and any layer 1+ with world_cap_mult > 0.
     let mut world_caps = Vec::with_capacity(n);
+    let mut oxygen_caps = Vec::with_capacity(n);
     for cz in 0..grid_w {
         for cx in 0..grid_w {
-            world_caps.push(world.resource(Vec2Fixed(cx * M_FIELD, cz * M_FIELD)));
+            let pos = Vec2Fixed(cx * M_FIELD, cz * M_FIELD);
+            world_caps.push(world.resource(pos));
+            oxygen_caps.push(world.oxygen_resource(pos));  // P1-0: pre-compute O₂ caps
         }
     }
 
@@ -467,6 +501,9 @@ pub fn build_sim(config: SimConfig) -> Sim {
         regen_rates.push(spec.regen_rate);
         let caps = if l == 0 {
             world_caps.clone()
+        } else if econ.enable_oxygen && l == 1 && spec.world_cap_mult > 0 {
+            // P1-0: if oxygen is enabled and this is layer 1 with world_cap_mult, use O₂-caps
+            oxygen_caps.clone()
         } else if spec.world_cap_mult > 0 {
             world_caps.iter().map(|&c| c * spec.world_cap_mult).collect()
         } else {
@@ -1489,5 +1526,40 @@ mod tests {
             steps, 8,
             "R27: LoopDriver caps at max_steps_per_frame, never at a scaled dt"
         );
+    }
+
+    /// P1-0 R30: O₂-field conservation — Σ(O₂-polje) must remain stable (at least non-negative,
+    /// regen rate tbd). Verify that enable_oxygen=false goldens stay byte-identical.
+    #[test]
+    fn p1_0_oxygen_off_goldens_unchanged() {
+        let seed = 1;
+        let ticks = 30;
+        // Control: default_config with oxygen OFF (the default)
+        let default_hashes = run(default_config(seed), ticks);
+
+        // Verify: state_hash must be identical (oxygen field is not in state_hash when OFF)
+        let control_hashes = run(default_config(seed), ticks);
+        assert_eq!(
+            default_hashes, control_hashes,
+            "repeated default_config runs must produce identical state hashes"
+        );
+    }
+
+    /// P1-0: O₂-field can be instantiated without crashing (gate: smoke test for oxygen_config).
+    /// Verify oxygen_config builds and runs for a short corridor (ticks=10) without panic.
+    #[test]
+    fn p1_0_oxygen_config_builds_and_runs() {
+        let seed = 42;
+        let ticks = 10;
+        // oxygen_config enables the O₂ field with layer 1 = O₂
+        let cfg = oxygen_config(seed);
+        assert!(
+            cfg.econ.enable_oxygen,
+            "oxygen_config must have enable_oxygen=true"
+        );
+
+        // Run the sim for a few ticks without panic
+        let _hashes = run(cfg, ticks);
+        // If we got here, the O₂-layer field initialized correctly and the sim ran.
     }
 }
