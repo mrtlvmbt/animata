@@ -56,9 +56,14 @@ pub struct PredationSpec {
     pub size_refuge: Option<SizeRefugeSpec>,
 }
 
-/// D-1: per-prey size-refuge parameters (Boraas mechanism) — larger prey bodies get a
+/// D-1 & D-4: per-prey size-refuge parameters (Boraas mechanism) — larger prey bodies get a
 /// monotonically smaller bite. Q-format fixed-point, integer-only, no float (mirrors
 /// `PredationSpec`'s `>>8` combat-trait Q-format).
+///
+/// **D-4 universal mode:** when `universal=true`, the cell-loop mode changes from `combat_trait`
+/// split to universal predation: ANY entity may eat a strictly-smaller-bodied neighbour in its cell
+/// (Boraas ubiquitous, size-selective predation). This field only exists when `size_refuge=Some(_)`,
+/// so the invalid state `universal=true + no refuge` is **unrepresentable by type**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeRefugeSpec {
     /// Fixed-point shift `S` for the refuge Q-format: `bite_eff = (bite << S) / ((1 << S) +
@@ -73,6 +78,13 @@ pub struct SizeRefugeSpec {
     /// body size shrinks the bite more. Expected non-negative for the monotone-decreasing
     /// property (Boraas: bigger body → smaller bite) to hold.
     pub refuge_k: i32,
+    /// D-4: opt-in universal predation mode. `false` (default, all test fixtures): entity-split by
+    /// `combat_trait > 0` (predator vs prey); byte-identical to P-2a/D-1. `true` (driver_config only):
+    /// ubiquitous size-selective predation (all entities are potential predators of strictly
+    /// smaller-bodied neighbours). The flag lives **here** (not in `PredationSpec`) so
+    /// `universal=true + size_refuge=None` is **unconstructable** — invalid states guarded by the
+    /// type system, not runtime checks.
+    pub universal: bool,
 }
 
 /// The outcome of a single predator↔prey encounter under a [`PredationSpec`]. All three fields are
@@ -212,10 +224,11 @@ mod tests {
     }
 
     /// D-1 fixture — `prod_spec()` with the size-refuge gate turned on, for the refuge-specific
-    /// teeth below. `shift=8, refuge_k=1` — moderate refuge strength.
+    /// teeth below. `shift=8, refuge_k=1` — moderate refuge strength. D-4: `universal=false` (default,
+    /// preserves combat-trait split).
     fn prod_spec_with_refuge(shift: u32, refuge_k: i32) -> PredationSpec {
         let mut spec = prod_spec();
-        spec.size_refuge = Some(SizeRefugeSpec { shift, refuge_k });
+        spec.size_refuge = Some(SizeRefugeSpec { shift, refuge_k, universal: false });
         spec
     }
 
