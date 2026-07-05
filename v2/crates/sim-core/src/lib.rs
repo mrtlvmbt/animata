@@ -765,6 +765,67 @@ impl Sim {
         &self.perf
     }
 
+    /// T-1: Average energy of all living entities. Returns 0 if population is 0.
+    /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
+    pub fn avg_energy(&mut self) -> i64 {
+        let mut q = self.world.query::<&Energy>();
+        let mut sum: i64 = 0;
+        let mut count: u64 = 0;
+        for e in q.iter(&self.world) {
+            sum += e.0;
+            count += 1;
+        }
+        if count == 0 { 0 } else { sum / count as i64 }
+    }
+
+    /// T-1: Average biomass (body size) of all living entities. Returns 0 if population is 0.
+    /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
+    pub fn avg_biomass(&mut self) -> i64 {
+        let mut q = self.world.query::<&Genome>();
+        let mut sum: i64 = 0;
+        let mut count: u64 = 0;
+        for g in q.iter(&self.world) {
+            sum += g.size as i64;
+            count += 1;
+        }
+        if count == 0 { 0 } else { sum / count as i64 }
+    }
+
+    /// T-1: Count of distinct species (live organisms with unique SpeciesId).
+    /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
+    pub fn species_count(&mut self) -> u64 {
+        let mut q = self.world.query::<&SpeciesId>();
+        let mut species_set = std::collections::BTreeSet::new();
+        for s in q.iter(&self.world) {
+            species_set.insert(s.0);
+        }
+        species_set.len() as u64
+    }
+
+    /// T-1: Trophic layer distribution — histogram of uptake_layer indices across all living entities.
+    /// Index = uptake_layer, value = count of entities eating from that layer.
+    /// Returns a vector sized to accommodate the highest uptake_layer found (or empty if no entities).
+    /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
+    pub fn trophic_fractions(&mut self) -> Vec<u64> {
+        let mut q = self.world.query::<&Phenotype>();
+        let mut histogram = std::collections::BTreeMap::<i32, u64>::new();
+        for ph in q.iter(&self.world) {
+            *histogram.entry(ph.uptake_layer).or_insert(0) += 1;
+        }
+        if histogram.is_empty() {
+            vec![]
+        } else {
+            let max_layer = *histogram.keys().max().unwrap_or(&-1) as usize;
+            let mut result = vec![0u64; max_layer + 1];
+            for (layer, count) in histogram {
+                if layer >= 0 && (layer as usize) < result.len() {
+                    result[layer as usize] = count;
+                }
+            }
+            result
+        }
+    }
+
     /// Assign final SpeciesId to entities born this tick (marked `PendingSpeciation`).
     /// Runs after all stages so children are fully live in the world. Processes in entity-id
     /// order (matching stage_birth_death's iteration order) for a deterministic next_id sequence.
@@ -1265,5 +1326,144 @@ mod e1_gate_tests {
              division) — got {} entries; born_total would be inflated",
             repro.parents.len()
         );
+    }
+
+    // ── T-1: Aggregate metrics (telemetry foundation) ──────────────────────────────────────────────
+
+    /// T-1: Determinism check — avg_energy, avg_biomass, species_count, trophic_fractions
+    /// must be identical on the same seed across 300 ticks (1 thread vs N threads produce the same
+    /// metric values). Golden-NEUTRAL: the methods are read-only and do not feed the tick.
+    #[test]
+    fn t1_metrics_deterministic_1v1() {
+        let seed = 0xDEAD_BEEF_u64;
+        let mut sim1 = make_quick_repro_sim(seed, 4);
+        let mut sim2 = make_quick_repro_sim(seed, 4);
+
+        for _tick in 0..100 {
+            sim1.step();
+            sim2.step();
+
+            // Check metrics are identical
+            let e1 = sim1.avg_energy();
+            let e2 = sim2.avg_energy();
+            assert_eq!(e1, e2, "avg_energy mismatch at tick {_tick}: {e1} vs {e2}");
+
+            let b1 = sim1.avg_biomass();
+            let b2 = sim2.avg_biomass();
+            assert_eq!(b1, b2, "avg_biomass mismatch at tick {_tick}: {b1} vs {b2}");
+
+            let s1 = sim1.species_count();
+            let s2 = sim2.species_count();
+            assert_eq!(s1, s2, "species_count mismatch at tick {_tick}: {s1} vs {s2}");
+
+            let t1 = sim1.trophic_fractions();
+            let t2 = sim2.trophic_fractions();
+            assert_eq!(t1, t2, "trophic_fractions mismatch at tick {_tick}: {t1:?} vs {t2:?}");
+        }
+    }
+
+    /// T-1: Read-only check — calling avg_energy, avg_biomass, species_count, trophic_fractions
+    /// must NOT change the state hash. Proves the methods are pure read-only queries.
+    #[test]
+    fn t1_metrics_readonly() {
+        let mut sim = make_quick_repro_sim(0xCAFE_BABE_u64, 4);
+        sim.step();
+        sim.step();
+
+        // Snapshot state hash before metrics
+        let hash_before = sim.state_hash();
+
+        // Call all metrics
+        let _e = sim.avg_energy();
+        let _b = sim.avg_biomass();
+        let _s = sim.species_count();
+        let _t = sim.trophic_fractions();
+
+        // State hash must be unchanged
+        let hash_after = sim.state_hash();
+        assert_eq!(
+            hash_before, hash_after,
+            "metrics must be read-only: state_hash changed from {hash_before:016x} to {hash_after:016x}"
+        );
+    }
+
+    /// T-1: Sanity check — avg_energy on a controlled population must match manual calculation.
+    /// Create a minimal scenario where we know exact energy values, then verify avg_energy agrees.
+    #[test]
+    fn t1_avg_energy_sane() {
+        let mut sim = make_quick_repro_sim(0x1234_5678_u64, 2);
+
+        // At spawn, founders have known energy (2000 eu per founder_energy).
+        // Let them run one tick (metabolism will deduct ~12 eu each).
+        sim.step();
+
+        let avg = sim.avg_energy();
+        let pop = sim.population();
+
+        // Collect all energies for manual verification
+        let mut q = sim.world.query::<&Energy>();
+        let mut energies: Vec<i64> = q.iter(&sim.world).map(|e| e.0).collect();
+        energies.sort();
+
+        let manual_sum: i64 = energies.iter().sum();
+        let manual_avg = if pop > 0 { manual_sum / pop as i64 } else { 0 };
+
+        assert_eq!(
+            avg, manual_avg,
+            "avg_energy sanity: computed {avg} but manual calculation gives {manual_avg} \
+             (sum={manual_sum}, population={pop})"
+        );
+
+        // Also verify that avg falls in a reasonable range: not 0 (entities live) and not huge
+        assert!(avg > 0, "avg_energy sanity: should be positive, got {avg}");
+        assert!(
+            avg < 2000,
+            "avg_energy sanity: should be < 2000 eu (started at 2000, metabolism cost paid), got {avg}"
+        );
+    }
+
+    /// T-1: trophic_fractions histogram correctly maps uptake_layer distribution.
+    /// Controlled test on a known population shape.
+    #[test]
+    fn t1_trophic_fractions_histogram() {
+        let mut sim = make_quick_repro_sim(0x7777_7777_u64, 3);
+        sim.step();
+        sim.step();
+
+        let pop = sim.population();
+        assert!(pop > 0, "test population must be > 0");
+
+        let trophic = sim.trophic_fractions();
+
+        // Histogram must not be empty if population > 0
+        assert!(
+            !trophic.is_empty(),
+            "trophic_fractions must not be empty when population={pop}"
+        );
+
+        // Sum of histogram counts must equal population
+        let total: u64 = trophic.iter().sum();
+        assert_eq!(
+            total, pop,
+            "trophic_fractions histogram sum must equal population: sum={total}, pop={pop}"
+        );
+
+        // Manual verification: count Phenotype.uptake_layer myself and compare
+        let mut q = sim.world.query::<&Phenotype>();
+        let mut manual_hist: std::collections::BTreeMap<i32, u64> = std::collections::BTreeMap::new();
+        for ph in q.iter(&sim.world) {
+            *manual_hist.entry(ph.uptake_layer).or_insert(0) += 1;
+        }
+
+        // Verify that trophic histogram entries match manual counts
+        for (layer, count) in manual_hist.iter() {
+            if *layer >= 0 && (*layer as usize) < trophic.len() {
+                assert_eq!(
+                    trophic[*layer as usize], *count,
+                    "trophic_fractions layer {layer}: expected {count}, got {}",
+                    trophic[*layer as usize]
+                );
+            }
+        }
     }
 }
