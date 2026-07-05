@@ -4,6 +4,37 @@
 use crate::{GrnSpec, MergeStrategy, MorphogenSpec, PredationSpec};
 use bevy_ecs::prelude::Resource;
 
+// ── Conserved field layer identifiers (P1-0 ШВ-1) ────────────────────────────────────────────────
+
+/// Conserved field layer IDs — type-safe layer semantics for redox-tower (ШВ-1). Used as a bridge
+/// between semantic enum and usize array indices at the FieldStore boundary (P1-0: `layer: usize` →
+/// `FieldId` enums for O₂/NO₃/SO₄). Internal implementation stays i64-indexed for speed.
+/// - Layer 0: **Substrate** — primary energy source (ProcgenWorld-derived per-cell caps, all configs).
+/// - Layer 1: **Organics/Excreta** — metabolic waste (energy-layer, all configs with L≥2).
+/// - Layer 2: **Oxygen** — first conserved redox-acceptor (P1-0+, ШВ-1). Biom-derived O₂-caps.
+///   Excluded from n_energy_layers to prevent contamination by agent excretion (non-energy layer).
+/// - Layer 3: **Nitrate** — secondary acceptor (P5+, reserved).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum FieldId {
+    /// Layer 0: substrate (primary energy source, all configs).
+    Substrate = 0,
+    /// Layer 1: organics/excreta (metabolic byproducts, energy-layer when present).
+    Organics = 1,
+    /// Layer 2: O₂ (first conserved redox-acceptor, P1-0+, non-energy layer excluded from mutation).
+    Oxygen = 2,
+    /// Layer 3: NO₃⁻ (secondary acceptor, P5+, reserved).
+    Nitrate = 3,
+}
+
+impl FieldId {
+    /// Convert to layer array index for FieldStore internal buffers.
+    #[inline]
+    pub const fn as_usize(self) -> usize {
+        self as u8 as usize
+    }
+}
+
 // ── C-slice death-recycling constants ────────────────────────────────────────────────────────────
 
 /// Bit-mask for the `d0` background-death RNG draw. `D0_MASK = 2^20 − 1`.
@@ -219,6 +250,15 @@ pub struct EconParams {
     /// goldens are the test). Option-gated exactly like `light`/`mineral_layer` above.
     pub predation: Option<PredationSpec>,
 
+    // ── P1-0: O₂ conserved-field infrastructure (no respiration yet) ────────────────────────────
+    /// O₂-field infrastructure (P1-0, ШВ-1). `true` enables the conserved O₂ resource layer
+    /// (respiration sink P1-1, photosynthesis source P2+), biom-derived O₂-caps from world-gen.
+    /// `false` (default, all 5 existing production configs + l3_config) → O₂ layer inert,
+    /// trajectories byte-identical (the isolation gate; un-re-pinned existing goldens are the test).
+    /// When `true`, `n_layers` and `layer_specs` must include O₂-layer entry (via `oxygen_config`).
+    /// Option-gated exactly like `light`/`mineral_layer` above.
+    pub enable_oxygen: bool,
+
     // ── E-4a: ontogenesis chain opt-in (morphogen → GRN → cell fate) ────────────────────────────
     /// Morphogen reaction-diffusion spec (E-2). `Some` together with `grn` enables the full
     /// `decode` ontogenesis chain; `None` (default, all 5 existing configs) → `decode` stays the
@@ -336,6 +376,8 @@ impl Default for EconParams {
             photo_cost_den: 8,
             // P-2a: predation OFF by default — None for all 6 existing configs.
             predation: None,
+            // P1-0: O₂-field economy OFF by default — false for all 5 existing configs + l3 (byte-identical).
+            enable_oxygen: false,
             // E-4a: ontogenesis chain OFF by default — None for all 5 existing configs.
             morphogen: None,
             grn: None,

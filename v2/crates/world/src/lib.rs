@@ -7,7 +7,7 @@
 //! the golden stays per-arch (arm64) only because of the sim's UNRELATED f32 signal field.
 
 use sim_core::{Vec2Fixed, WorldView};
-use gen::caps::{classify_and_caps, CAP_MAX, FinalBiome};
+use gen::caps::{classify_and_caps, CAP_MAX, FinalBiome, oxygen_cap_from};
 
 /// W-1..W-6 world-gen pipeline stage home (see the module doc).
 pub mod gen;
@@ -26,6 +26,9 @@ pub struct ProcgenWorld {
     /// Resource, ALREADY rescaled into the `resource_base`-comparable magnitude at build time (see
     /// `rescale_cap`'s doc) — W-6b Phase A decouple: independent of height/is_solid, driven by caps alone.
     resource: Vec<i64>,
+    /// O₂ resource cap per cell (P1-0 ШВ-1) — derived from biome via `oxygen_cap_from`, rescaled
+    /// into the same `resource_base`-comparable magnitude for layer-management consistency. Static field.
+    oxygen_resource: Vec<i64>,
     /// Surface material per cell (W-4's `ErosionState.surface_material`), exposed for richness
     /// testing (critic F2: assert Bedrock material is actually exposed, not just slope-driven Rock).
     surface_material: Vec<u8>,
@@ -80,11 +83,17 @@ impl ProcgenWorld {
         }
 
         let mut resource = Vec::with_capacity(n);
+        let mut oxygen_resource = Vec::with_capacity(n);
         for i in 0..n {
             // W-6b Phase A: decouple — resource is independent of solid_level (height-based passability).
             // Barrenness is already in caps (Rock base 0, Bedrock mult 0); rescale floors every cell to >=1.
             let r = rescale_cap(fields.caps[i], resource_base);
             resource.push(r);
+
+            // P1-0: O₂ resource cap — biome-derived, rescaled for consistency with substrate.
+            let o2_raw = oxygen_cap_from(fields.final_biome[i]);
+            let o2_rescaled = rescale_cap(o2_raw, resource_base);
+            oxygen_resource.push(o2_rescaled);
         }
 
         let max_resource = *resource.iter().max().unwrap_or(&0);
@@ -118,7 +127,7 @@ impl ProcgenWorld {
             solid_frac_final * 100.0
         );
 
-        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, surface_material: fields.surface_material }
+        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, surface_material: fields.surface_material }
     }
 
     fn wrap(&self, v: i64) -> i64 {
@@ -128,6 +137,13 @@ impl ProcgenWorld {
     fn idx(&self, x: i64, z: i64) -> usize {
         let (x, z) = (self.wrap(x), self.wrap(z));
         (z * self.dim + x) as usize
+    }
+}
+
+impl ProcgenWorld {
+    /// O₂ resource cap at a position (P1-0 ШВ-1). Returns rescaled O₂-cap for the biome at `pos`.
+    pub fn oxygen_resource(&self, pos: Vec2Fixed) -> i64 {
+        self.oxygen_resource[self.idx(pos.0, pos.1)]
     }
 }
 

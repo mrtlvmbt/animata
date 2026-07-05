@@ -155,6 +155,27 @@ fn biome_base_cap(b: FinalBiome) -> i64 {
     }
 }
 
+/// Per-`FinalBiome` base O₂ capacity (P1-0, ШВ-1). Aerated/surface biomes have high O₂; anaerobic/
+/// deep biomes have zero. Integer fixed-point (same scale as substrate caps). Non-negative and
+/// bounded to `[0, CAP_MAX]` for consistency with substrate.
+fn oxygen_base_cap(b: FinalBiome) -> i64 {
+    match b {
+        // Aerated surface biomes: high O₂ capacity (well-oxygenated)
+        FinalBiome::TropicalRainforest | FinalBiome::TemperateRainforest => 250,
+        FinalBiome::TemperateForest | FinalBiome::BorealForest => 240,
+        FinalBiome::TemperateGrassland | FinalBiome::Savanna => 230,
+        FinalBiome::Fertile => 220,
+        // Wetland: waterlogged but oxygenated (higher than Rock, lower than upland)
+        FinalBiome::Wetland => 150,
+        FinalBiome::Floodplain => 180,
+        // Transition biomes: lower O₂ availability
+        FinalBiome::Tundra => 200,  // Cold, thin soils, but aerated
+        FinalBiome::Desert | FinalBiome::Dune => 180,  // Arid, sparse life, but O₂-available surface
+        // Anaerobic/impenetrable: no O₂
+        FinalBiome::Rock => 0,
+    }
+}
+
 /// Per-`MaterialId` cap multiplier (numerator/denominator — integer-domain, never a float scale).
 fn material_mult(m: MaterialId) -> (i64, i64) {
     match m {
@@ -175,6 +196,14 @@ pub fn caps_from(biome: FinalBiome, moisture: i64, material: MaterialId) -> i64 
     let (mnum, mden) = material_mult(material);
     let raw = (base + moisture_bonus) * mnum / mden;
     raw.clamp(0, CAP_MAX)
+}
+
+/// Pure integer per-cell O₂ cap (P1-0 ШВ-1): derived from biome only (no moisture/material bonus
+/// for now — static O₂ field in P1; dynamic source coupling comes P2+ from photosynthesis + surface
+/// aeration). Returns O₂ capacity clamped to `[0, CAP_MAX]`. Material is ignored for O₂
+/// (rock/bedrock still have zero O₂ via `oxygen_base_cap`).
+pub fn oxygen_cap_from(biome: FinalBiome) -> i64 {
+    oxygen_base_cap(biome).clamp(0, CAP_MAX)
 }
 
 /// The full W-5 output over a `dim × dim` grid (mirrors W-3/W-4's state shape, critic F5): the
