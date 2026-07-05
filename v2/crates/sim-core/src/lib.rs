@@ -175,6 +175,32 @@ pub fn body_size_aggregate(sizes: &[i64]) -> (i64, i64, i64) {
     (sum * BODY_SIZE_SCALE / n, max, count_multicellular * BODY_SIZE_SCALE / n)
 }
 
+/// DL-0 (#298): pure integer aggregate over a population's per-entity germ/soma cell counts.
+/// Takes per-entity (germ_cells, soma_cells) pairs and returns (germ_fraction, mean_germ, mean_soma).
+/// `germ_fraction` = germ/(germ+soma), fixed-point × [`BODY_SIZE_SCALE`]; others are raw counts.
+/// Returns (0, 0, 0) when population is empty. Integer-only, deterministic, read-only — never fed
+/// to state_hash or any conserved value. Extracted as a standalone fn so telemetry wiring and
+/// arithmetic are directly unit-testable.
+pub fn germ_soma_aggregate(pairs: &[(i64, i64)]) -> (i64, i64, i64) {
+    if pairs.is_empty() {
+        return (0, 0, 0);
+    }
+    let n = pairs.len() as i64;
+    let total_germ: i64 = pairs.iter().map(|(g, _)| g).sum();
+    let total_soma: i64 = pairs.iter().map(|(_, s)| s).sum();
+    let total_cells = total_germ + total_soma;
+
+    let germ_fraction = if total_cells > 0 {
+        total_germ * BODY_SIZE_SCALE / total_cells
+    } else {
+        0
+    };
+    let mean_germ = total_germ / n;
+    let mean_soma = total_soma / n;
+
+    (germ_fraction, mean_germ, mean_soma)
+}
+
 /// Read-only telemetry sink (stage 9). Overwritten each tick. The `telemetry` crate derives Price
 /// covariance / diversity from `samples` — keeping that statistics code OUT of the core (R1).
 #[derive(Resource, Default)]
@@ -680,6 +706,30 @@ impl Sim {
     pub fn body_size_probe(&mut self) -> Vec<i64> {
         let mut q = self.world.query::<&Phenotype>();
         q.iter(&self.world).map(|ph| ph.graph.body_size()).collect()
+    }
+
+    /// DL-0 (#298): germ/soma census aggregates. Returns (germ_fraction, mean_germ, mean_soma).
+    /// Golden-NEUTRAL: read-only `&self`, integer-only. `germ_fraction` is fixed-point ×
+    /// [`BODY_SIZE_SCALE`]; means are raw cell counts per entity. (0, 0, 0) when population is 0.
+    /// Never fed to state_hash or the tick. Test-only verification helper.
+    pub fn germ_soma_census(&self) -> (i64, i64, i64) {
+        let mut pairs = Vec::new();
+        for e in self.world.iter_entities() {
+            if let Some(phenotype) = e.get::<Phenotype>() {
+                let mut germ: i64 = 0;
+                let mut soma: i64 = 0;
+                for (mid, is_germ) in phenotype.graph.module_is_germ.iter().enumerate() {
+                    let count = phenotype.graph.module_cell_count[mid] as i64;
+                    if *is_germ {
+                        germ += count;
+                    } else {
+                        soma += count;
+                    }
+                }
+                pairs.push((germ, soma));
+            }
+        }
+        germ_soma_aggregate(&pairs)
     }
 
     pub fn tick(&self) -> u64 {
@@ -1264,6 +1314,119 @@ mod e1_gate_tests {
             "real stillbirth: ReproEvents.parents must be EMPTY (no offspring flag on a miscarried \
              division) — got {} entries; born_total would be inflated",
             repro.parents.len()
+        );
+    }
+
+    // ── DL-0 (#298): germ/soma census tests ──────────────────────────────────────────────────────
+
+    /// DL-0: manual census of germ/soma on a small, hand-constructed simulation matches
+    /// `Sim::germ_soma_census()`. Creates a phase2-shaped sim with a single founder, steps once
+    /// (to ensure the chain is live), then reads both the manual count (via direct Phenotype
+    /// iteration) and the method result. Asserts equality.
+    #[test]
+    fn dl0_census_matches_manual() {
+        let mut sim = make_phase2_shaped_sim_no_d0(SEED_E1, 1);
+        sim.step();
+
+        // Manual census: iterate entities directly.
+        let mut manual_germ: i64 = 0;
+        let mut manual_soma: i64 = 0;
+        let mut count = 0i64;
+        for e in sim.world.iter_entities() {
+            if let Some(phenotype) = e.get::<Phenotype>() {
+                let mut entity_germ: i64 = 0;
+                let mut entity_soma: i64 = 0;
+                for (mid, is_germ) in phenotype.graph.module_is_germ.iter().enumerate() {
+                    let c = phenotype.graph.module_cell_count[mid] as i64;
+                    if *is_germ {
+                        entity_germ += c;
+                    } else {
+                        entity_soma += c;
+                    }
+                }
+                manual_germ += entity_germ;
+                manual_soma += entity_soma;
+                count += 1;
+            }
+        }
+
+        let (germ_frac, mean_germ, mean_soma) = sim.germ_soma_census();
+
+        // Verify via manual aggregate.
+        let total = manual_germ + manual_soma;
+        let expected_frac = if total > 0 {
+            manual_germ * BODY_SIZE_SCALE / total
+        } else {
+            0
+        };
+        let expected_mean_germ = if count > 0 { manual_germ / count } else { 0 };
+        let expected_mean_soma = if count > 0 { manual_soma / count } else { 0 };
+
+        assert_eq!(
+            germ_frac, expected_frac,
+            "dl0_census_matches_manual: germ_fraction mismatch: got {germ_frac}, expected {expected_frac}"
+        );
+        assert_eq!(
+            mean_germ, expected_mean_germ,
+            "dl0_census_matches_manual: mean_germ mismatch: got {mean_germ}, expected {expected_mean_germ}"
+        );
+        assert_eq!(
+            mean_soma, expected_mean_soma,
+            "dl0_census_matches_manual: mean_soma mismatch: got {mean_soma}, expected {expected_mean_soma}"
+        );
+    }
+
+    /// DL-0: when `germ_threshold=None` (all modules are soma), germ_fraction must be 0 with no panic
+    /// or division-by-zero. Uses the shipped default config (every config has `germ_threshold=None`).
+    #[test]
+    fn dl0_all_soma_when_threshold_none() {
+        let mut sim = make_quick_repro_sim_no_d0(SEED_E1, 1);
+        sim.step();
+
+        let (germ_frac, mean_germ, _mean_soma) = sim.germ_soma_census();
+
+        // With germ_threshold=None, all modules are soma (module_is_germ all false).
+        assert_eq!(
+            germ_frac, 0,
+            "dl0_all_soma: germ_fraction must be 0 when germ_threshold=None; got {germ_frac}"
+        );
+        assert_eq!(
+            mean_germ, 0,
+            "dl0_all_soma: mean_germ must be 0 when germ_threshold=None; got {mean_germ}"
+        );
+    }
+
+    /// DL-0: determinism — same seed, same configuration produces identical germ_soma_census output.
+    /// Runs the sim for a short trajectory, computes census, and verifies it's reproducible.
+    #[test]
+    fn dl0_deterministic() {
+        let seed = 0xDEAD_BEEF;
+
+        // First run.
+        let mut sim1 = make_phase2_shaped_sim_no_d0(seed, 1);
+        for _ in 0..5 {
+            sim1.step();
+        }
+        let (germ_frac1, mean_germ1, mean_soma1) = sim1.germ_soma_census();
+
+        // Second run (same seed).
+        let mut sim2 = make_phase2_shaped_sim_no_d0(seed, 1);
+        for _ in 0..5 {
+            sim2.step();
+        }
+        let (germ_frac2, mean_germ2, mean_soma2) = sim2.germ_soma_census();
+
+        assert_eq!(
+            germ_frac1, germ_frac2,
+            "dl0_deterministic: germ_fraction mismatch between runs: {germ_frac1} vs {germ_frac2}"
+        );
+        assert_eq!(
+            mean_germ1, mean_germ2,
+            "dl0_deterministic: mean_germ mismatch between runs: {mean_germ1} vs {mean_germ2}"
+        );
+        assert_eq!(
+            mean_soma1, mean_soma2,
+            "dl0_deterministic: mean_soma mismatch between runs: {mean_soma1} vs {mean_soma2}"
         );
     }
 }
