@@ -870,6 +870,7 @@ impl LoopDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim_core::FieldId;
 
     // ── #179 apply_overrides tests ────────────────────────────────────────────────────────────────
 
@@ -1580,5 +1581,20 @@ mod tests {
             let residual = sim.conservation_residual();
             assert_eq!(residual, 0, "ENERGY CONSERVATION VIOLATED: residual={}", residual);
         }
+    }
+
+    #[test]
+    fn p1_0_oxygen_field_mass_conserved() {
+        // R30: O₂ conserved-поле сохраняет МАССУ под диффузией.
+        // regen_rate=0 (L1_O2_SPEC) + нет потребления в P1-0 → Σ(O₂) инвариантна тик-к-тику;
+        // диффузия (flux_alpha=1/8) только перераспределяет.
+        let cfg = oxygen_config(42);
+        let mut sim = build_sim(cfg);
+        let o2 = FieldId::Oxygen.as_usize();
+        let t0 = sim.field_layer_total(o2);
+        assert!(t0 > 0, "O₂-поле должно быть инициализировано из world-caps (t0={t0})");
+        for _ in 0..100 { sim.step(); }
+        let t100 = sim.field_layer_total(o2);
+        assert_eq!(t0, t100, "R30 VIOLATED: O₂-масса не сохранена: t0={t0} t100={t100}");
     }
 }
