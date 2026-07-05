@@ -263,6 +263,25 @@ pub struct CreatureDot {
     pub uptake_layer: i32,
 }
 
+/// T-2: Snapshot of life statistics — population-level metrics collected from live entities.
+/// Integer-only, observational (never fed to state_hash or tick). Golden-NEUTRAL.
+#[derive(Clone, Debug, Default)]
+pub struct LifeStats {
+    /// Tick at which this snapshot was captured.
+    pub tick: u64,
+    /// Total number of living entities (matches RenderSnapshot.population type).
+    pub population: i64,
+    /// Average energy of all living entities. 0 if population is 0.
+    pub avg_energy: i64,
+    /// Average body size (biomass) of all living entities. 0 if population is 0.
+    pub avg_biomass: i64,
+    /// Count of distinct species (live organisms with unique SpeciesId).
+    pub species_count: u64,
+    /// Trophic layer distribution — count of entities feeding from each layer.
+    /// Index = uptake_layer, value = count. Empty if no entities.
+    pub trophic_fractions: Vec<u64>,
+}
+
 /// R-1 render seam: an OWNED, read-only copy of per-entity render state, produced by
 /// [`Sim::observe_render`]. Holds no borrow into the `Sim` — the render thread can read it while the
 /// worker steps the next tick. Terrain is read separately via `WorldView` (R-2).
@@ -273,6 +292,8 @@ pub struct RenderSnapshot {
     /// Live species count — the other aggregate the R-1 HUD shows (from [`Telemetry::species_count`]).
     pub species_count: u64,
     pub creatures: Vec<CreatureDot>,
+    /// T-2: Population-level life statistics (golden-NEUTRAL, observational).
+    pub life: Option<LifeStats>,
 }
 
 #[cfg(feature = "perf")]
@@ -726,11 +747,29 @@ impl Sim {
             .collect();
         creatures.sort_unstable_by_key(|c| c.id);
         let tel = self.world.resource::<Telemetry>();
+        let tick = self.world.resource::<SimClock>().tick;
+        let population = tel.population;
+
+        // T-2: Collect life statistics (golden-NEUTRAL, observational).
+        let life = if population > 0 {
+            Some(LifeStats {
+                tick,
+                population,
+                avg_energy: self.avg_energy(),
+                avg_biomass: self.avg_biomass(),
+                species_count: self.species_count(),
+                trophic_fractions: self.trophic_fractions(),
+            })
+        } else {
+            None
+        };
+
         RenderSnapshot {
-            tick: self.world.resource::<SimClock>().tick,
-            population: tel.population,
+            tick,
+            population,
             species_count: tel.species_count,
             creatures,
+            life,
         }
     }
 
@@ -767,37 +806,40 @@ impl Sim {
 
     /// T-1: Average energy of all living entities. Returns 0 if population is 0.
     /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
-    pub fn avg_energy(&mut self) -> i64 {
-        let mut q = self.world.query::<&Energy>();
+    pub fn avg_energy(&self) -> i64 {
         let mut sum: i64 = 0;
         let mut count: u64 = 0;
-        for e in q.iter(&self.world) {
-            sum += e.0;
-            count += 1;
+        for e in self.world.iter_entities() {
+            if let Some(energy) = e.get::<Energy>() {
+                sum += energy.0;
+                count += 1;
+            }
         }
         if count == 0 { 0 } else { sum / count as i64 }
     }
 
     /// T-1: Average biomass (body size) of all living entities. Returns 0 if population is 0.
     /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
-    pub fn avg_biomass(&mut self) -> i64 {
-        let mut q = self.world.query::<&Genome>();
+    pub fn avg_biomass(&self) -> i64 {
         let mut sum: i64 = 0;
         let mut count: u64 = 0;
-        for g in q.iter(&self.world) {
-            sum += g.size as i64;
-            count += 1;
+        for e in self.world.iter_entities() {
+            if let Some(genome) = e.get::<Genome>() {
+                sum += genome.size as i64;
+                count += 1;
+            }
         }
         if count == 0 { 0 } else { sum / count as i64 }
     }
 
     /// T-1: Count of distinct species (live organisms with unique SpeciesId).
     /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
-    pub fn species_count(&mut self) -> u64 {
-        let mut q = self.world.query::<&SpeciesId>();
+    pub fn species_count(&self) -> u64 {
         let mut species_set = std::collections::BTreeSet::new();
-        for s in q.iter(&self.world) {
-            species_set.insert(s.0);
+        for e in self.world.iter_entities() {
+            if let Some(species) = e.get::<SpeciesId>() {
+                species_set.insert(species.0);
+            }
         }
         species_set.len() as u64
     }
@@ -806,11 +848,12 @@ impl Sim {
     /// Index = uptake_layer, value = count of entities eating from that layer.
     /// Returns a vector sized to accommodate the highest uptake_layer found (or empty if no entities).
     /// Read-only query; not fed to state hash or tick. Golden-NEUTRAL.
-    pub fn trophic_fractions(&mut self) -> Vec<u64> {
-        let mut q = self.world.query::<&Phenotype>();
+    pub fn trophic_fractions(&self) -> Vec<u64> {
         let mut histogram = std::collections::BTreeMap::<i32, u64>::new();
-        for ph in q.iter(&self.world) {
-            *histogram.entry(ph.uptake_layer).or_insert(0) += 1;
+        for e in self.world.iter_entities() {
+            if let Some(phenotype) = e.get::<Phenotype>() {
+                *histogram.entry(phenotype.uptake_layer).or_insert(0) += 1;
+            }
         }
         if histogram.is_empty() {
             vec![]
@@ -1465,5 +1508,92 @@ mod e1_gate_tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn t2_lifestats_matches_metrics() {
+        let mut sim = make_quick_repro_sim(0x1234_5678_u64, 3);
+        sim.step();
+        sim.step();
+
+        let pop = sim.population();
+        assert!(pop > 0, "test population must be > 0");
+
+        // Collect metrics directly
+        let avg_e = sim.avg_energy();
+        let avg_b = sim.avg_biomass();
+        let sp_count = sim.species_count();
+        let trophic = sim.trophic_fractions();
+
+        // Get snapshot and verify life stats match
+        let snapshot = sim.observe_render();
+        assert!(snapshot.life.is_some(), "life stats must be present when population > 0");
+
+        let life = snapshot.life.unwrap();
+        assert_eq!(life.population, pop as i64, "life.population must match sim.population()");
+        assert_eq!(life.avg_energy, avg_e, "life.avg_energy must match sim.avg_energy()");
+        assert_eq!(life.avg_biomass, avg_b, "life.avg_biomass must match sim.avg_biomass()");
+        assert_eq!(life.species_count, sp_count, "life.species_count must match sim.species_count()");
+        assert_eq!(life.trophic_fractions, trophic, "life.trophic_fractions must match sim.trophic_fractions()");
+    }
+
+    #[test]
+    fn t2_lifestats_deterministic() {
+        // Same seed should produce identical LifeStats across runs.
+        let mut sim1 = make_quick_repro_sim(0xABCD_1234_u64, 3);
+        let mut sim2 = make_quick_repro_sim(0xABCD_1234_u64, 3);
+
+        for _ in 0..5 {
+            sim1.step();
+            sim2.step();
+        }
+
+        let snap1 = sim1.observe_render();
+        let snap2 = sim2.observe_render();
+
+        assert_eq!(snap1.tick, snap2.tick, "ticks must match");
+        assert_eq!(snap1.population, snap2.population, "populations must match");
+
+        match (&snap1.life, &snap2.life) {
+            (Some(l1), Some(l2)) => {
+                assert_eq!(l1.tick, l2.tick, "life.tick must match");
+                assert_eq!(l1.population, l2.population, "life.population must match");
+                assert_eq!(l1.avg_energy, l2.avg_energy, "life.avg_energy must be deterministic");
+                assert_eq!(l1.avg_biomass, l2.avg_biomass, "life.avg_biomass must be deterministic");
+                assert_eq!(l1.species_count, l2.species_count, "life.species_count must be deterministic");
+                assert_eq!(l1.trophic_fractions, l2.trophic_fractions, "life.trophic_fractions must be deterministic");
+            }
+            _ => panic!("both snapshots must have life stats when population > 0"),
+        }
+    }
+
+    #[test]
+    fn t2_lifestats_empty_pop() {
+        let mut sim = make_quick_repro_sim(0x9876_5432_u64, 0); // 0 founders
+        sim.step();
+        sim.step();
+
+        let snapshot = sim.observe_render();
+        assert_eq!(snapshot.population, 0, "population must be 0");
+        assert!(snapshot.life.is_none(), "life stats must be None when population = 0");
+    }
+
+    #[test]
+    fn t2_observe_render_readonly() {
+        let mut sim = make_quick_repro_sim(0xFEDC_BA98_u64, 3);
+        sim.step();
+
+        // Capture state before observe_render
+        let pop_before = sim.population();
+        let tick_before = sim.tick();
+
+        // Call observe_render (it is &self, not &mut self)
+        let snapshot = sim.observe_render();
+
+        // Verify that observe_render did not mutate the sim
+        assert_eq!(sim.population(), pop_before, "observe_render must not mutate population");
+        assert_eq!(sim.tick(), tick_before, "observe_render must not mutate tick");
+        assert_eq!(snapshot.tick, tick_before, "snapshot.tick must match sim.tick()");
+        assert_eq!(snapshot.population, pop_before as i64, "snapshot.population must match sim.population()");
     }
 }
