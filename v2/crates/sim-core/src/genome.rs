@@ -471,7 +471,6 @@ impl CellGraph {
 ///
 /// NOT folded into `hash_contribution`: phenotype is a deterministic cold derivative of the
 /// genome that is already in the hash; double-hashing is redundant (plan §2/§6, R19).
-#[derive(bevy_ecs::prelude::Component, Clone, Debug, PartialEq, Eq)]
 /// P1-1: respiratory pathway phenotype — decoded from `Genome::respiratory_pathway` gene.
 /// PURE function of genome, no field-reads or RNG. Cold-cached at entity birth.
 /// Encodes redox-acceptor strategy: primary electron acceptor (O₂, NO₃), fallback layers,
@@ -498,7 +497,7 @@ pub struct RespiratoryPathway {
     pub aerobe_cost_x256: i16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(bevy_ecs::prelude::Component, Clone, Debug, PartialEq, Eq)]
 pub struct Phenotype {
     /// Layer index the entity will eat from (direct copy of `Genome::uptake_layer` for Ф0).
     pub uptake_layer: i32,
