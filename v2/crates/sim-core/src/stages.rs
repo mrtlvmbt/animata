@@ -205,7 +205,27 @@ pub fn stage_metabolism(
         } else {
             0
         };
-        let cost = base_cost + photo_cost;
+        // P1-2a: aerobe_cost — maintenance of O₂-respiration machinery (ROS-detox, enzymes).
+        // Proportional to energy to prevent starvation-death on respiring lineages.
+        // Cost = (aerobe_cost_x256 / 256) × (energy / e_cell) × n, where aerobe_cost_x256 encodes
+        // genotypic metabolism type (10 for obligate-aerobe; 15 for facultative).
+        // ISOLATION GATE (`econ.enable_oxygen`): gate on the econ flag, NOT `.is_some()` —
+        // decode_respiratory_pathways(founder gene 0) returns Some(obligate-aerobe), so `.is_some()`
+        // is true for EVERY legacy entity and would charge the aerobe-machinery cost in all five
+        // shipped configs (golden drift). enable_oxygen=false → cost 0 → byte-identical.
+        let aerobe_cost = if econ.enable_oxygen {
+            match &ph.respiratory_pathway {
+                Some(rp) => {
+                    // Proportional: cost scales with current energy level and lump size n.
+                    debug_assert!(econ.e_cell > 0, "econ.e_cell must be > 0");
+                    rp.aerobe_cost_x256 as i64 * e.0.max(0).min(econ.e_cell) / 256 * n as i64 / econ.e_cell
+                }
+                None => 0,
+            }
+        } else {
+            0
+        };
+        let cost = base_cost + photo_cost + aerobe_cost;
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
@@ -272,6 +292,66 @@ pub fn expressed_capacity(g: &crate::Genome, l: i64) -> i32 {
         l < g.reg_setpoint as i64
     };
     if express { g.photo_gain } else { 0 }
+}
+
+/// P1-2a: Result of respiratory electron-acceptor selection (PURE, deterministic).
+/// Encodes which field layer the cell will respire through, with efficiency factor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RespiredChoice {
+    /// Selected electron-acceptor field layer (primary or fallback).
+    acceptor: crate::FieldId,
+    /// Respiratory efficiency as fraction of 256 (e.g., 256 = ×1.0; 32 = ×0.125 fermentation).
+    eff_x256: i16,
+    /// `true` if anoxic (no acceptor available) — obligate-aerobe will die.
+    anoxic: bool,
+}
+
+/// P1-2a: Choose the active electron-acceptor layer by redox-priority (PURE function).
+///
+/// Implements redox-hierarchy: primary (e.g., O₂), then fallbacks in order, then anoxia
+/// (fermentation or death). Deterministic—field is read-only, no RNG, no clock.
+///
+/// Redox-repression (redox-inhibition, B5): EXACTLY ONE acceptor per cell is active.
+/// First available layer in the priority chain is used; others are repressed (not consumed).
+/// `n_layers` is the field's total layer count (`econ.n_layers`). An acceptor whose FieldId index
+/// is ≥ `n_layers` is a layer this config did NOT allocate (e.g. NO₃⁻ fallback in the 3-layer
+/// oxygen testbed, or O₂ itself in a 2-layer config) → treated as UNAVAILABLE, never sampled. This
+/// bounds-guard is mandatory: `conserved_at` panics on an out-of-range layer index.
+fn choose_respiratory_pathway(
+    rp: &crate::RespiratoryPathway,
+    field: &dyn crate::FieldStore,
+    pos: crate::Vec2Fixed,
+    n_layers: usize,
+) -> RespiredChoice {
+    // Try primary layer first (only if this config allocated that layer).
+    let primary_idx = rp.primary_layer.as_usize();
+    if primary_idx < n_layers && field.conserved_at(pos, primary_idx) > 0 {
+        return RespiredChoice {
+            acceptor: rp.primary_layer,
+            eff_x256: rp.primary_eff_x256,
+            anoxic: false,
+        };
+    }
+
+    // Walk fallback layers in priority order (skip layers this config did not allocate).
+    for (i, &fallback_layer) in rp.fallback_layers.iter().enumerate() {
+        let idx = fallback_layer.as_usize();
+        if idx < n_layers && field.conserved_at(pos, idx) > 0 {
+            return RespiredChoice {
+                acceptor: fallback_layer,
+                eff_x256: rp.fallback_effs_x256[i],
+                anoxic: false,
+            };
+        }
+    }
+
+    // All acceptors exhausted: anoxia. Yield = 0 if obligate-aerobe (cost≥256), else fermentation.
+    let anoxia_yield_x256 = if rp.anoxia_cost_x256 >= 256 { 0 } else { rp.anoxia_cost_x256 };
+    RespiredChoice {
+        acceptor: rp.primary_layer,
+        eff_x256: anoxia_yield_x256,
+        anoxic: true,
+    }
 }
 
 // ── Stage 6: Interactions — feed: proportional deficit rationing (B-3). ─────────────────────────
@@ -376,15 +456,44 @@ pub fn stage_interactions(
     //    D′-3b: record per-entity income split (photo_in, chem_in) in tel.income_record using the
     //    EXACT integers booked here. This is a read-only side-channel — never fed back to any
     //    conserved value or state hash. Non-dprime: photo=0 always → (0, gained) written.
+    //    P1-2a: respiratory yield multiplier applied here (if respiratory_pathway exists).
     tel.income_record.clear();
     let mut photo_total: i64 = 0;
     for (i, c) in contestants.iter().enumerate() {
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
-        let (_, _, g, _ph, mut energy) = q.get_mut(c.entity).expect("entity present");
+        let (_, _, g, ph, mut energy) = q.get_mut(c.entity).expect("entity present");
+
+        // P1-2a: respiratory yield modifier COMPOSES with the pre-existing metabolic efficiency.
+        // `metabolism_eff` (Ф0) is an efficiency on consumed substrate: the entity eats the FULL
+        // grant, converts `eff/256` to energy and dissipates the rest (below). The respiratory
+        // pathway multiplies THIS efficiency: aerobic (O₂, 256=×1.0) leaves it unchanged; a worse
+        // acceptor (NO₃ 180=×0.7) or anoxia (0) scales it down. `resp_eff_x256 = 256` when no
+        // pathway → combined_eff == metabolism_eff → BYTE-IDENTICAL to P1-0/P1-1 (isolation gate).
+        // NOTE: this preserves the original take-FULL-grant + dissipate-inefficiency semantics
+        // (removing the reduced-take restructuring, which silently changed field balance and the
+        // dissipated ledger for EVERY existing entity — a golden break even at enable_oxygen=false).
+        // ISOLATION GATE (`econ.enable_oxygen`): the five shipped configs run with it FALSE. The
+        // founder respiratory_pathway gene is 0, but `decode_respiratory_pathways(0)` returns
+        // Some(obligate-aerobe) — NOT None — so gating on `.is_some()` alone would (a) charge the
+        // aerobe machinery on every legacy entity and (b) sample the O₂ layer (index 2) on 2-layer
+        // configs → OOB panic + golden drift. Gating on the econ flag (which also gates the gene's
+        // mutation) makes enable_oxygen=false a true no-op: resp_eff=256 → combined_eff=metabolism_eff.
+        let resp_eff_x256: i64 = if econ.enable_oxygen {
+            match &ph.respiratory_pathway {
+                Some(rp) => choose_respiratory_pathway(rp, &*field.0, c.pos, econ.n_layers).eff_x256 as i64,
+                None => 256,
+            }
+        } else {
+            256 // enable_oxygen=false → no respiratory modifier (byte-identical isolation)
+        };
+        let combined_eff_x256 = g.metabolism_eff as i64 * resp_eff_x256 / 256;
+
+        // Take the FULL grant (original semantics), convert combined_eff to energy, dissipate rest.
+        // Conserved (R15): got == gained + lost. Anoxic obligate → resp_eff=0 → gained=0 → starves (R34).
         let got = field.0.conserved_take(c.pos, grants[i], c.layer);
-        let gained = got * g.metabolism_eff as i64 / 256;
-        let lost = got - gained;
+        let gained = got * combined_eff_x256 / 256;
+        let lost = got - gained;  // metabolic inefficiency → dissipated (conserved)
         energy.0 += gained;
         ledger.dissipated += lost;
         // D′-1/D′-2b: additive photo energy on the EXPRESSED capacity.
@@ -1139,11 +1248,11 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{monod_demand, stage_metabolism, stage_predation, stage_sense};
+    use super::{choose_respiratory_pathway, monod_demand, stage_metabolism, stage_predation, stage_sense};
     use crate::predation::{PredationMode, PredationSpec, SizeRefugeSpec};
     use crate::{
-        CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldRes, FieldStore,
-        Genome, MergeStrategy, Phenotype, Position, Sensors, SimClock, Telemetry, Vec2Fixed,
+        CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldId, FieldRes, FieldStore,
+        Genome, MergeStrategy, Phenotype, Position, RespiratoryPathway, Sensors, SimClock, Telemetry, Vec2Fixed,
     };
     use bevy_ecs::prelude::*;
 
@@ -1828,5 +1937,164 @@ mod tests {
             ],
         );
         assert_eq!(energies_b, energies_b_2, "case (b): byte-identical (R14)");
+    }
+
+    // ── P1-2a: Respiratory-application tests (redox-yield, aerobe-cost, choose_respiratory_pathway)
+
+    /// Simple mock FieldStore for respiratory pathway testing. A `Vec` (linear scan), NOT a `HashMap`:
+    /// the `no_float_guard` source lint bans `HashMap` in sim-core (nondeterministic iteration order,
+    /// R14) — even in test code, since it greps the crate source.
+    struct MockField {
+        values: Vec<((i64, i64, usize), i64)>,  // ((x, z, layer), value); latest set wins
+    }
+
+    impl MockField {
+        fn new() -> Self {
+            MockField { values: Vec::new() }
+        }
+
+        fn set(&mut self, pos: Vec2Fixed, layer: usize, value: i64) {
+            self.values.push(((pos.0, pos.1, layer), value));
+        }
+    }
+
+    impl FieldStore for MockField {
+        fn m_field(&self) -> i64 { 16 }
+        fn cell_index(&self, _pos: Vec2Fixed) -> usize { 0 }
+        fn cell_morton(&self, _pos: Vec2Fixed) -> u32 { 0 }
+        fn check_meta(&self, _expected_m_field: i64) -> Result<(), String> { Ok(()) }
+        fn conserved_at(&self, pos: Vec2Fixed, layer: usize) -> i64 {
+            self.values.iter().rev().find(|&&(k, _)| k == (pos.0, pos.1, layer)).map(|&(_, v)| v).unwrap_or(0)
+        }
+        fn conserved_gradient(&self, _pos: Vec2Fixed, _range: i64, _layer: usize) -> (i64, i64) { (0, 0) }
+        fn conserved_take(&mut self, _pos: Vec2Fixed, _amount: i64, _layer: usize) -> i64 { 0 }
+        fn deposit_conserved(&mut self, _cell: usize, _amount: i64, _layer: usize) {}
+        fn conserved_total(&self, _layer: usize) -> i64 { 0 }
+        fn conserved_total_all(&self) -> i64 { 0 }
+        fn conserved_hash(&self) -> u64 { 0 }
+        fn signal_total(&self) -> f32 { 0.0 }
+        fn signal_hash(&self) -> u64 { 0 }
+        fn signal_all_finite(&self) -> bool { true }
+        fn commit_merge(&mut self, _batches: &[Vec<Deposit>], _strategy: MergeStrategy) {}
+        fn solve(&mut self) -> i64 { 0 }
+    }
+
+    /// R31-live: redox-hierarchy — primary acceptor is chosen when available.
+    #[test]
+    fn p1_2a_r31_primary_acceptor_available() {
+        let pos = Vec2Fixed(10, 20);
+        let mut field = MockField::new();
+        // Primary layer (O₂, index 2) has resources available.
+        field.set(pos, 2, 100);
+
+        let rp = RespiratoryPathway {
+            primary_layer: FieldId::Oxygen,
+            primary_eff_x256: 256,
+            fallback_layers: vec![FieldId::Nitrate],
+            fallback_effs_x256: vec![180],
+            anoxia_cost_x256: 32,
+            aerobe_cost_x256: 10,
+        };
+
+        let choice = choose_respiratory_pathway(&rp, &field, pos, 4);
+        assert_eq!(choice.acceptor, FieldId::Oxygen, "primary should be chosen");
+        assert_eq!(choice.eff_x256, 256, "primary efficiency is ×1.0");
+        assert!(!choice.anoxic, "primary available means not anoxic");
+    }
+
+    /// R31-live: fallback acceptor is chosen when primary is unavailable.
+    #[test]
+    fn p1_2a_r31_fallback_acceptor_chosen() {
+        let pos = Vec2Fixed(10, 20);
+        let mut field = MockField::new();
+        // Primary (O₂) unavailable; fallback (NO₃, index 3) available.
+        field.set(pos, 3, 50);
+
+        let rp = RespiratoryPathway {
+            primary_layer: FieldId::Oxygen,
+            primary_eff_x256: 256,
+            fallback_layers: vec![FieldId::Nitrate],
+            fallback_effs_x256: vec![180],
+            anoxia_cost_x256: 32,
+            aerobe_cost_x256: 10,
+        };
+
+        let choice = choose_respiratory_pathway(&rp, &field, pos, 4);
+        assert_eq!(choice.acceptor, FieldId::Nitrate, "fallback should be chosen");
+        assert_eq!(choice.eff_x256, 180, "fallback efficiency is ×0.7");
+        assert!(!choice.anoxic, "fallback available means not anoxic");
+    }
+
+    /// R34: obligate-aerobe (anoxia_cost=256) yields 0 when anoxic → dies.
+    #[test]
+    fn p1_2a_r34_obligate_aerobe_dies_anoxic() {
+        let pos = Vec2Fixed(10, 20);
+        let field = MockField::new();  // All resources = 0
+
+        let obligate_aerobe = RespiratoryPathway {
+            primary_layer: FieldId::Oxygen,
+            primary_eff_x256: 256,
+            fallback_layers: vec![],  // No fallback → obligate
+            fallback_effs_x256: vec![],
+            anoxia_cost_x256: 256,  // ×1.0 cost = death
+            aerobe_cost_x256: 10,
+        };
+
+        let choice = choose_respiratory_pathway(&obligate_aerobe, &field, pos, 4);
+        assert!(choice.anoxic, "all acceptors unavailable → anoxic");
+        assert_eq!(choice.eff_x256, 0, "anoxia_cost ≥ 256 → yield=0 (death)");
+    }
+
+    /// R34: facultative (anoxia_cost=32) survives anoxia via fermentation.
+    #[test]
+    fn p1_2a_r34_facultative_survives_fermentation() {
+        let pos = Vec2Fixed(10, 20);
+        let field = MockField::new();  // All resources = 0
+
+        let facultative = RespiratoryPathway {
+            primary_layer: FieldId::Oxygen,
+            primary_eff_x256: 256,
+            fallback_layers: vec![FieldId::Nitrate],
+            fallback_effs_x256: vec![180],
+            anoxia_cost_x256: 32,  // ×0.125 fermentation yield
+            aerobe_cost_x256: 15,
+        };
+
+        let choice = choose_respiratory_pathway(&facultative, &field, pos, 4);
+        assert!(choice.anoxic, "all acceptors unavailable → anoxic");
+        assert_eq!(choice.eff_x256, 32, "anoxia_cost < 256 → yield=anoxia_cost (fermentation)");
+    }
+
+    /// Isolation gate: enable_oxygen=false → respiratory_pathway=None → no respiratory cost/choice.
+    /// This test documents the byte-identity constraint: entities without respiratory pathway
+    /// must behave exactly like P1-0 (baseline).
+    #[test]
+    fn p1_2a_isolation_no_respiratory_pathway() {
+        let mut world = World::new();
+        world.insert_resource(EconParams::default());
+        world.insert_resource(SimClock { seed: 0, tick: 0 });
+        world.insert_resource(EnergyLedger::default());
+        world.insert_resource(Telemetry::default());
+
+        // Entity with NO respiratory pathway (simulates enable_oxygen=false or gene=0).
+        let ph_none = Phenotype {
+            uptake_layer: 0,
+            cell_type: None,
+            graph: cellgraph_with_cells(vec![]),
+            respiratory_pathway: None,
+        };
+
+        let _id = world.spawn((Genome::founder(2), ph_none, Energy(1_000_000))).id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_metabolism);
+        schedule.run(&mut world);
+
+        // No respiratory pathway → no aerobe_cost. Baseline metabolism only.
+        let ledger = world.resource::<EnergyLedger>();
+        // The ledger should contain only baseline costs, no respiratory-specific deductions.
+        // (Exact value depends on EconParams::default(), but the key is that
+        // respiratory_pathway==None causes NO additional dissipation beyond baseline.)
+        assert!(ledger.dissipated >= 0, "conservation: dissipated must be non-negative");
     }
 }

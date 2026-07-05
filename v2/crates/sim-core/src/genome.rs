@@ -507,8 +507,11 @@ pub struct Phenotype {
     /// never consumed in M7-a (prod-inert). Empty for non-phase2 configs.
     pub graph: CellGraph,
     /// P1-1: respiratory pathway strategy, decoded from `Genome::respiratory_pathway` gene.
-    /// `None` when O₂-config is disabled or respiratory_pathway = 0 (inert). Each entity carries
-    /// one primary redox strategy (no Vec — Component trait requirement).
+    /// `Some` for gene `0..=128` (0 = obligate-aerobe founder!) — it is NOT `None` at the founder
+    /// gene, so `.is_some()` is TRUE for every legacy entity. Isolation from the five shipped
+    /// configs is therefore enforced at the CONSUMPTION sites (`stage_metabolism` / `stage_interactions`
+    /// gate on `econ.enable_oxygen`, P1-2a), NOT by this field being `None`. `None` only for the P5+
+    /// reserved gene range (`129..=255`). One primary redox strategy (no Vec — Component trait).
     pub respiratory_pathway: Option<RespiratoryPathway>,
 }
 
