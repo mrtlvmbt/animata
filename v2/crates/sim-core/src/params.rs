@@ -10,20 +10,21 @@ use bevy_ecs::prelude::Resource;
 /// between semantic enum and usize array indices at the FieldStore boundary (P1-0: `layer: usize` →
 /// `FieldId` enums for O₂/NO₃/SO₄). Internal implementation stays i64-indexed for speed.
 /// - Layer 0: **Substrate** — primary energy source (ProcgenWorld-derived per-cell caps, all configs).
-/// - Layer 1: **Oxygen** — first conserved redox-acceptor (P1-0+, ШВ-1). Biom-derived O₂-caps.
-/// - Layer 2: **Nitrate** — secondary acceptor (P5+, reserved).
-/// - Layer 3: **Sulfate** — tertiary acceptor (P5+, reserved).
+/// - Layer 1: **Organics/Excreta** — metabolic waste (energy-layer, all configs with L≥2).
+/// - Layer 2: **Oxygen** — first conserved redox-acceptor (P1-0+, ШВ-1). Biom-derived O₂-caps.
+///   Excluded from n_energy_layers to prevent contamination by agent excretion (non-energy layer).
+/// - Layer 3: **Nitrate** — secondary acceptor (P5+, reserved).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FieldId {
     /// Layer 0: substrate (primary energy source, all configs).
     Substrate = 0,
-    /// Layer 1: O₂ (first conserved redox-acceptor, P1-0+).
-    Oxygen = 1,
-    /// Layer 2: NO₃⁻ (secondary acceptor, P5+).
-    Nitrate = 2,
-    /// Layer 3: SO₄²⁻ (tertiary acceptor, P5+).
-    Sulfate = 3,
+    /// Layer 1: organics/excreta (metabolic byproducts, energy-layer when present).
+    Organics = 1,
+    /// Layer 2: O₂ (first conserved redox-acceptor, P1-0+, non-energy layer excluded from mutation).
+    Oxygen = 2,
+    /// Layer 3: NO₃⁻ (secondary acceptor, P5+, reserved).
+    Nitrate = 3,
 }
 
 impl FieldId {

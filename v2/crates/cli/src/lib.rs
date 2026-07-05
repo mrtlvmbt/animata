@@ -71,10 +71,11 @@ const L2_MINERAL_SPEC: LayerSpec = LayerSpec {
     regen_rate: 2, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 200, world_cap_mult: 0,
 };
 
-// Layer 1 (P1-0 O₂ field): oxygen / gas exchange — regen=0 (source from photosynthesis P2+ and
-// surface aeration, which will be per-biom in world-gen), α=1/8 (diffusion rate tbd, start conservative),
+// Layer 2 (P1-0 O₂ field): oxygen / gas exchange — regen=0 (source from photosynthesis P2+ and
+// surface aeration, which will be per-biom in world-gen), α=1/8 (diffusion rate, conservative),
 // world_cap_mult=1 (O₂-cap derived from world biome, same scaling as substrate layer 0).
 // P1-0: static O₂ field (no photosynthesis yet). Respiration will consume O₂ (stage_metabolism P1-2).
+// Non-energy layer (excluded from n_energy_layers) to prevent contamination by agent excretion.
 const L1_O2_SPEC: LayerSpec = LayerSpec {
     regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 8, flat_cap: 0, world_cap_mult: 1,
 };
@@ -415,14 +416,15 @@ pub fn driver_config(seed: u64) -> SimConfig {
 /// (the isolation gate; un-re-pinned existing goldens are the test). Once merged, P1-0 golden will
 /// be pinned arm64 via `ci-report.sh`.
 ///
-/// **O₂-layer structure:** Layer 1 carries O₂ (conserved fixed-point). Per-cell caps derived from
+/// **O₂-layer structure:** Layer 0=substrate (energy), Layer 1=organics/excreta (energy),
+/// Layer 2=O₂ (non-energy, excluded from mutation via n_energy_layers=2). Per-cell caps derived from
 /// biome in world-gen (caps_from enriched with oxygen cap). Regen_rate=0 in P1-0 (source coupling
 /// will come from P2+ photosynthesis + surface aeration; for now static field). Diffusion enabled
-/// (α=1/8, moderate lateral spread for O₂ gradients).
+/// (α=1/8, moderate lateral spread for O₂ gradients). Isolated from excretion via n_energy_layers.
 pub fn oxygen_config(seed: u64) -> SimConfig {
     SimConfig {
-        n_layers: 2,
-        layer_specs: [L0_SPEC, L1_O2_SPEC, LayerSpec::default(), LayerSpec::default()],
+        n_layers: 3,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L1_O2_SPEC, LayerSpec::default()],
         econ: EconParams {
             enable_oxygen: true,
             ..EconParams::default()
@@ -442,11 +444,15 @@ pub fn build_sim(config: SimConfig) -> Sim {
     // B-2: sync econ.n_layers = config.n_layers so stage_birth_death can clamp layer-trait mutations.
     // D′-3a: if mineral_layer is set, n_energy_layers = mineral_layer index (genomes can only
     // target layers 0..mineral_layer; mineral is exclusively accessed via stage_mineral_feed).
+    // P1-0: if enable_oxygen is true and O₂ is on a non-energy layer, n_energy_layers must exclude it.
     // For all other configs, n_energy_layers == n_layers (backward-compatible).
     let mut config = config;
     config.econ.n_layers = config.n_layers;
     if let Some(min_l) = config.econ.mineral_layer {
         config.econ.n_energy_layers = min_l; // exclude mineral layer from genome mutation range
+    } else if config.econ.enable_oxygen {
+        // P1-0: O₂ is on layer 2 (non-energy); agents can only uptake/excrete layers 0-1
+        config.econ.n_energy_layers = 2;
     } else {
         config.econ.n_energy_layers = config.n_layers;
     }
@@ -501,8 +507,8 @@ pub fn build_sim(config: SimConfig) -> Sim {
         regen_rates.push(spec.regen_rate);
         let caps = if l == 0 {
             world_caps.clone()
-        } else if econ.enable_oxygen && l == 1 && spec.world_cap_mult > 0 {
-            // P1-0: if oxygen is enabled and this is layer 1 with world_cap_mult, use O₂-caps
+        } else if econ.enable_oxygen && l == 2 && spec.world_cap_mult > 0 {
+            // P1-0: if oxygen is enabled and this is layer 2 (O₂) with world_cap_mult, use O₂-caps
             oxygen_caps.clone()
         } else if spec.world_cap_mult > 0 {
             world_caps.iter().map(|&c| c * spec.world_cap_mult).collect()
@@ -1552,7 +1558,7 @@ mod tests {
     fn p1_0_oxygen_config_builds_and_runs() {
         let seed = 42;
         let ticks = 10;
-        // oxygen_config enables the O₂ field with layer 1 = O₂
+        // oxygen_config enables the O₂ field with layer 2 = O₂ (non-energy layer, excluded from mutation)
         let cfg = oxygen_config(seed);
         assert!(
             cfg.econ.enable_oxygen,
@@ -1572,7 +1578,8 @@ mod tests {
     fn p1_0_oxygen_field_conserves() {
         let cfg = oxygen_config(42);
         let mut sim = build_sim(cfg);
-        assert_eq!(sim.econ().n_layers, 2, "oxygen_config must have n_layers=2");
+        assert_eq!(sim.econ().n_layers, 3, "oxygen_config must have n_layers=3 (substrate + organics + O₂)");
+        assert_eq!(sim.econ().n_energy_layers, 2, "oxygen_config must have n_energy_layers=2 (O₂ excluded from mutation)");
         assert!(sim.econ().enable_oxygen, "oxygen_config must have enable_oxygen=true");
 
         // Smoke test: run 100 ticks without panic, conservation holds via ledger.
