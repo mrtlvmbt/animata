@@ -269,8 +269,8 @@ pub struct CreatureDot {
 pub struct LifeStats {
     /// Tick at which this snapshot was captured.
     pub tick: u64,
-    /// Total number of living entities.
-    pub population: u64,
+    /// Total number of living entities (matches RenderSnapshot.population type).
+    pub population: i64,
     /// Average energy of all living entities. 0 if population is 0.
     pub avg_energy: i64,
     /// Average body size (biomass) of all living entities. 0 if population is 0.
@@ -754,7 +754,7 @@ impl Sim {
         let life = if population > 0 {
             Some(LifeStats {
                 tick,
-                population: population as u64,
+                population,
                 avg_energy: self.avg_energy(),
                 avg_biomass: self.avg_biomass(),
                 species_count: self.species_count(),
@@ -1594,6 +1594,6 @@ mod e1_gate_tests {
         assert_eq!(sim.population(), pop_before, "observe_render must not mutate population");
         assert_eq!(sim.tick(), tick_before, "observe_render must not mutate tick");
         assert_eq!(snapshot.tick, tick_before, "snapshot.tick must match sim.tick()");
-        assert_eq!(snapshot.population, pop_before, "snapshot.population must match sim.population()");
+        assert_eq!(snapshot.population, pop_before as i64, "snapshot.population must match sim.population()");
     }
 }
