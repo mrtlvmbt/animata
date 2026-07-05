@@ -1194,7 +1194,7 @@ mod tests {
             .spawn((
                 Position(Vec2Fixed(0, 0)),
                 founder.clone(),
-                Phenotype { uptake_layer: 0, cell_type: None, graph: crate::CellGraph::empty() },
+                Phenotype { uptake_layer: 0, cell_type: None, graph: crate::CellGraph::empty(), respiratory_pathway: None },
                 Sensors::default(),
             ))
             .id();
@@ -1205,7 +1205,7 @@ mod tests {
             .spawn((
                 Position(Vec2Fixed(0, 0)),
                 founder,
-                Phenotype { uptake_layer: 1, cell_type: None, graph: crate::CellGraph::empty() },
+                Phenotype { uptake_layer: 1, cell_type: None, graph: crate::CellGraph::empty(), respiratory_pathway: None },
                 Sensors::default(),
             ))
             .id();
@@ -1304,8 +1304,8 @@ mod tests {
     #[test]
     fn m7e_bigger_body_pays_more() {
         let econ = coord_only_econ(5);
-        let small = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![3]) };
-        let big = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![10]) };
+        let small = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![3]), respiratory_pathway: None };
+        let big = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![10]), respiratory_pathway: None };
 
         let (energies, _ledger) = run_metabolism_once(econ, vec![small, big]);
         let cost_small = 1_000_000 - energies[0];
@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn m7e_energy_conserved_r15() {
         let econ = coord_only_econ(7);
-        let ph = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![4, 2]) };
+        let ph = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![4, 2]), respiratory_pathway: None };
         let n_entities = 3;
         let (energies, ledger) =
             run_metabolism_once(econ, (0..n_entities).map(|_| ph.clone()).collect());
@@ -1344,8 +1344,8 @@ mod tests {
         let make_inputs = || {
             let econ = coord_only_econ(9);
             let phenotypes = vec![
-                Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![5]) },
-                Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1, 1, 1]) },
+                Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![5]), respiratory_pathway: None },
+                Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1, 1, 1]), respiratory_pathway: None },
             ];
             (econ, phenotypes)
         };
@@ -1365,8 +1365,8 @@ mod tests {
     #[test]
     fn m7e_cellgraph_is_live() {
         let econ = coord_only_econ(3);
-        let empty = Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty() };
-        let populated = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![6]) };
+        let empty = Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty(), respiratory_pathway: None };
+        let populated = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![6]), respiratory_pathway: None };
 
         let (energies, _ledger) = run_metabolism_once(econ, vec![empty, populated]);
         assert_eq!(energies[0], 1_000_000, "empty CellGraph (N=0) must be charged nothing extra");
@@ -1430,6 +1430,7 @@ mod tests {
                             uptake_layer: 0,
                             cell_type: None,
                             graph: cellgraph_with_cells(body_cells.into_iter().map(|x| x as i32).collect()),
+                            respiratory_pathway: None,
                         },
                     ))
                     .id()
@@ -1463,7 +1464,7 @@ mod tests {
                 Position(Vec2Fixed(0, 0)),
                 Energy(predator_energy),
                 predation_genome(16),
-                Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty() },
+                Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty(), respiratory_pathway: None },
             ))
             .id();
 
@@ -1505,8 +1506,8 @@ mod tests {
             size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4 }),
             base_hazard: 0,
         };
-        let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
-        let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
+        let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]), respiratory_pathway: None };
+        let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]), respiratory_pathway: None };
 
         let (_pred_energy, prey_energies, _ledger) = run_predation_once(
             spec,
@@ -1541,8 +1542,8 @@ mod tests {
             size_refuge: None,
             base_hazard: 0,
         };
-        let small = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
-        let big = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
+        let small = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]), respiratory_pathway: None };
+        let big = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]), respiratory_pathway: None };
 
         // Run A: first-spawned prey is small-bodied, second is big-bodied.
         let (pred_a, prey_a, ledger_a) =
@@ -1669,7 +1670,7 @@ mod tests {
         };
 
         // Three entities all with EMPTY CellGraph (module_cell_count = []), so all body clamp to 1.
-        let empty_graph = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![]) };
+        let empty_graph = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![]), respiratory_pathway: None };
 
         let (pred_energy, prey_energies, ledger) = run_predation_once(
             spec,
@@ -1707,8 +1708,8 @@ mod tests {
             base_hazard: 0,
         };
 
-        let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
-        let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
+        let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]), respiratory_pathway: None };
+        let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]), respiratory_pathway: None };
 
         let (_pred_energy, prey_energies, _ledger) = run_predation_once(
             spec,

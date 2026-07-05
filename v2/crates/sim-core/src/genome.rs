@@ -1174,9 +1174,9 @@ impl Genome {
             None => self.uptake_layer,
         };
         // P1-1: decode respiratory strategy PURE — no field-reads, no RNG, no clock (deterministic).
-        let respiratory_pathways = decode_respiratory_pathways(self);
-        
-        Some(Phenotype { uptake_layer, cell_type, graph, respiratory_pathways })
+        let respiratory_pathway = decode_respiratory_pathways(self);
+
+        Some(Phenotype { uptake_layer, cell_type, graph, respiratory_pathway })
     }
 
     /// E-5b: `true` iff a `decode(econ)` call on this genome returns `None` because of the REAL
@@ -3488,7 +3488,7 @@ mod tests {
         let mut saw_change = false;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_0000u64 + gen; // "GDEV" salt already inside mutate(); vary seed
-            g = g.mutate(seed, 2, false, 4, false, false, true);
+            g = g.mutate(seed, 2, false, 4, false, false, true, false);
             let gd = g.morphogen_spec.expect("spec must survive mutation").g_dev;
             assert!((1..=4).contains(&gd), "g_dev must stay clamped to [1,4], got {gd} at generation {gen}");
             if gd != 1 {
@@ -3514,7 +3514,7 @@ mod tests {
         // Disjoint-stream check: same seed/genome, flag on vs off, every OTHER field must agree.
         let base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(1)));
         let seed = 0xDEAD_BEEF_1234u64;
-        let on = base.clone().mutate(seed, 2, false, 4, false, false, true);
+        let on = base.clone().mutate(seed, 2, false, 4, false, false, true, false);
         let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false);
         assert_eq!(on.metabolism_eff, off.metabolism_eff);
         assert_eq!(on.move_speed, off.move_speed);
@@ -3564,7 +3564,7 @@ mod tests {
             let mut lineage = start.clone();
             let mut trajectory = Vec::new();
             for gen in 0..32u64 {
-                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, false, 4, false, false, true);
+                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, false, 4, false, false, true, false);
                 trajectory.push(lineage.morphogen_spec.unwrap().g_dev);
             }
             trajectory
