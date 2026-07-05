@@ -245,6 +245,14 @@ pub struct EconParams {
     /// `Phenotype.graph` read is live (wired) but inert. `c_coord > 0` (calibration + viability
     /// verification + re-pin) is M7-e-b, not this slice.
     pub c_coord: i64,
+
+    // ── V-4: evolvable developmental grid (body-size axis) ──────────────────────────────────────
+    /// Enable heritable mutation of `morphogen_spec.g_dev` (V-4, #276) — the unicellular↔
+    /// multicellular body-size axis. `false` (default, all existing production configs) → `mutate()`
+    /// draws zero values from the `SALT_GDEV` stream → g_dev never changes → byte-identical goldens.
+    /// `true` only on `driver_config` (the emergence testbed), gated additionally on
+    /// `morphogen_spec.is_some()` in `Genome::mutate`.
+    pub evolve_body_size: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -335,6 +343,9 @@ impl Default for EconParams {
             enable_variable_length: false,
             // M7-e: coordination cost OFF by default — 0 for all 6 existing configs (neutral wire).
             c_coord: 0,
+            // V-4: body-size axis OFF by default — false for all existing configs (driver_config
+            // opts in explicitly).
+            evolve_body_size: false,
         }
     }
 }
