@@ -43,7 +43,7 @@ fn phase2_founder_genome() -> Genome {
 /// measured flip is attributable to the spec, not a coincidental size change.
 fn mutant_sample(founder: &Genome, stream: u64) -> (bool, Option<CellType>) {
     let econ = phase2_config(SEED).econ;
-    let mut child = founder.mutate(stream, 2, false, 0, false, false, false);
+    let mut child = founder.mutate(stream, 2, false, 0, false, false, false, false);
     child.size = founder.size;
     let spec_changed = child.grn_spec != founder.grn_spec;
     let fate = child.decode(&econ).and_then(|ph| ph.cell_type);
@@ -58,7 +58,7 @@ fn v1_mutated_genome_decode_is_bit_deterministic() {
     let founder = phase2_founder_genome();
     let econ = phase2_config(SEED).econ;
     for stream in [0x1234_5678u64, 0xDEAD_BEEF, 0xA11A_2A11, 42, 1_000_003] {
-        let mut child = founder.mutate(stream, 2, false, 0, false, false, false);
+        let mut child = founder.mutate(stream, 2, false, 0, false, false, false, false);
         child.size = founder.size;
         let a = child.decode(&econ);
         let b = child.decode(&econ);
@@ -78,7 +78,7 @@ fn v1_no_mutation_child_inherits_parents_exact_fate() {
     let mut no_mutate_parent = founder.clone();
     no_mutate_parent.mutation_rate = 0;
     for stream in [0x1234_5678u64, 0xDEAD_BEEF, 7, 999] {
-        let child = no_mutate_parent.mutate(stream, 2, false, 0, false, false, false);
+        let child = no_mutate_parent.mutate(stream, 2, false, 0, false, false, false, false);
         assert_eq!(
             child.grn_spec, no_mutate_parent.grn_spec,
             "mutation_rate=0 must leave the GRN spec byte-identical (no draw ever fires) at stream={stream}"

@@ -109,6 +109,16 @@ pub struct Genome {
     /// Read by P-1 substrate `resolve_encounter` via `PredationSpec` mapping (P-2a wires it in).
     pub combat_trait: i32,
 
+    // ── P1-1: respiratory pathway gene (redox-strategy selector) ──────────────────────────────
+    /// Respiratory strategy selector — encodes the choice of primary and fallback electron acceptors
+    /// (redox hierarchy O₂ > NO₃⁻ > fermentation). `0` → obligate aerobe (O₂ only); `65..=128` →
+    /// facultative (O₂ primary, NO₃⁻ fallback); higher ranges reserved for P5+ diversification.
+    /// Founders = 0 (obligate aerobe). Mutated ±1 clamped only when O₂-config is enabled
+    /// (`enable_oxygen=true`) — non-O₂ configs stay at 0 forever, existing goldens byte-identical
+    /// (mutation gate prevents draw, hash gate prevents state inclusion). Range [0, 255].
+    /// Decode to Phenotype.respiratory_pathways (PURE, no field-reads).
+    pub respiratory_pathway: i32,
+
     // ── V-1: heritable + point-mutable indirect genome (the differentiation PROGRAM) ────────────
     /// The GRN regulatory spec — heritable, per-individual, point-mutated by [`Genome::mutate`].
     /// `None` for the five non-phase2 configs (`EconParams.grn` stays `None` there too — `decode`
@@ -461,6 +471,32 @@ impl CellGraph {
 ///
 /// NOT folded into `hash_contribution`: phenotype is a deterministic cold derivative of the
 /// genome that is already in the hash; double-hashing is redundant (plan §2/§6, R19).
+/// P1-1: respiratory pathway phenotype — decoded from `Genome::respiratory_pathway` gene.
+/// PURE function of genome, no field-reads or RNG. Cold-cached at entity birth.
+/// Encodes redox-acceptor strategy: primary electron acceptor (O₂, NO₃), fallback layers,
+/// metabolic costs (obligate-aerobe ×1.0; facultative ×0.7; obligate-anaerobe ×0.125).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RespiratoryPathway {
+    /// Primary electron acceptor field (e.g., O₂ or NO₃⁻), decoded from `respiratory_pathway` gene.
+    /// Used to read electron-acceptor availability from the field layer during metabolism.
+    pub primary_layer: crate::FieldId,
+    /// Efficiency factor for primary acceptor, as a fraction of 256 (integer Q1.8).
+    /// E.g., 256 = ×1.0 (O₂); 180 = ×0.7 (NO₃⁻).
+    pub primary_eff_x256: i16,
+    /// Fallback electron acceptor layers (in redox-priority order), if primary unavailable.
+    /// E.g., [NO₃⁻] for facultative, [] for obligate.
+    pub fallback_layers: Vec<crate::FieldId>,
+    /// Efficiency factors for fallback layers (parallel Vec to fallback_layers).
+    pub fallback_effs_x256: Vec<i16>,
+    /// Metabolic cost when in anoxia (all layers unavailable), as fraction of 256.
+    /// E.g., 256 = death (×1.0, unsustainable); 32 = fermentation (×0.125).
+    pub anoxia_cost_x256: i16,
+    /// Genoic metabolic cost of maintaining O₂-respiration machinery (ROS-detoxification, etc.),
+    /// as a fraction of 256, multiplied by the entity's current energy (proportional cost).
+    /// E.g., 10 = ×(10/256) = −3.9% per tick (obligate-aerobe); 15 = −5.9% (facultative).
+    pub aerobe_cost_x256: i16,
+}
+
 #[derive(bevy_ecs::prelude::Component, Clone, Debug, PartialEq, Eq)]
 pub struct Phenotype {
     /// Layer index the entity will eat from (direct copy of `Genome::uptake_layer` for Ф0).
@@ -470,6 +506,10 @@ pub struct Phenotype {
     /// M7-a: multicellular graph-body COLD representation. Computed from the morphogen grid;
     /// never consumed in M7-a (prod-inert). Empty for non-phase2 configs.
     pub graph: CellGraph,
+    /// P1-1: respiratory pathway strategy, decoded from `Genome::respiratory_pathway` gene.
+    /// `None` when O₂-config is disabled or respiratory_pathway = 0 (inert). Each entity carries
+    /// one primary redox strategy (no Vec — Component trait requirement).
+    pub respiratory_pathway: Option<RespiratoryPathway>,
 }
 
 
@@ -497,6 +537,48 @@ pub(crate) const SIZE_VIABILITY_FLOOR: i32 = 3;
 /// take `_ => None` for `cell_type` and never call this, so they can never produce a stillbirth.
 fn is_viable_size(size: i32) -> bool {
     size > SIZE_VIABILITY_FLOOR
+}
+
+/// P1-1: Decode respiratory strategy from genome gene (PURE function, no field-reads/RNG/clock).
+/// Maps the 8-bit `respiratory_pathway` genotype to an `Option<RespiratoryPathway>` phenotype
+/// encoding the redox-acceptor hierarchy (O₂ > NO₃⁻ > fermentation). Integer-deterministic.
+///
+/// Gene ranges (redox-priority order):
+/// - `0..=64`: obligate aerobe (O₂ only; anoxia cost = 256 = death; aerobe_cost = 10 = −3.9%).
+/// - `65..=128`: facultative (O₂ primary + NO₃⁻ fallback; anoxia = fermentation cost 32 = −12.5%;
+///   aerobe_cost = 15 = −5.9% — more expensive than obligate due to enzyme maintenance).
+/// - `129..=192`: reserved for P5+ redox diversification (NO₃⁻-primary, etc.).
+/// - `193..=255`: reserved for P5+ (obligate-anaerobe, etc.).
+/// - Gene=0 encodes the obligate-aerobe founder phenotype (byte-identical to P1-0 when disabled).
+fn decode_respiratory_pathways(genome: &Genome) -> Option<RespiratoryPathway> {
+    let rtype = genome.respiratory_pathway;
+
+    match rtype {
+        // Obligate aerobe: O₂ primary, no fallback, death in anoxia.
+        0..=64 => {
+            Some(RespiratoryPathway {
+                primary_layer: crate::FieldId::Oxygen,
+                primary_eff_x256: 256,                 // ×1.0 efficiency
+                fallback_layers: vec![],               // no fallback → obligate
+                fallback_effs_x256: vec![],
+                anoxia_cost_x256: 256,                 // ×1.0 cost (unsustainable → death)
+                aerobe_cost_x256: 10,                  // ×(10/256) = −3.9% ROS-protection cost
+            })
+        }
+        // Facultative: O₂ primary + NO₃⁻ fallback, survives anoxia via fermentation.
+        65..=128 => {
+            Some(RespiratoryPathway {
+                primary_layer: crate::FieldId::Oxygen,
+                primary_eff_x256: 256,                 // ×1.0 (O₂)
+                fallback_layers: vec![crate::FieldId::Nitrate],
+                fallback_effs_x256: vec![180],         // ×(180/256) = ×0.7 (NO₃⁻ ~70% efficiency)
+                anoxia_cost_x256: 32,                  // ×(32/256) = ×0.125 fermentation (2 ATP)
+                aerobe_cost_x256: 15,                  // ×(15/256) = −5.9% (dual enzyme sets)
+            })
+        }
+        // Reserved for P5+ (NO₃⁻-primary, obligate-anaerobe, etc.) — returns None (inert) for now.
+        _ => None,
+    }
 }
 
 /// Exact-integer `CellType` → `uptake_layer` decision (E-4b-i). `A` eats layer 0; `B` eats layer 1
@@ -551,6 +633,8 @@ impl Genome {
             reg_gain: 0,
             // P-2a: combat_trait founder = 0, predation is emergent (not ancestral).
             combat_trait: 0,
+            // P1-1: respiratory_pathway founder = 0 (obligate aerobe); evolution brings up strategy.
+            respiratory_pathway: 0,
             // Test-only E-1/E-4 injection flag — always false in production.
             #[cfg(test)]
             force_decode_none: false,
@@ -587,7 +671,9 @@ impl Genome {
     /// Set `reg_gain_max = 0` to lock regulation OFF — reg_gain stays 0 (the D′-2c control line).
     /// `has_predation` gates the `combat_trait` mutation (P-2a): when `false`, combat_trait stays 0,
     /// non-predation genomes never carry a non-zero combat_trait, keeping existing goldens byte-identical.
-    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool, enable_variable_length: bool, evolve_body_size: bool) -> Genome {
+    /// `enable_oxygen` gates the `respiratory_pathway` mutation (P1-1): when `false`, respiratory_pathway
+    /// stays 0, non-O₂ genomes never carry a non-zero respiratory_pathway, keeping existing goldens byte-identical.
+    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool, enable_variable_length: bool, evolve_body_size: bool, enable_oxygen: bool) -> Genome {
         let mut g = self.clone();
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -650,6 +736,18 @@ impl Genome {
             if (r & 0xFF) < self.mutation_rate as u64 {
                 let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
                 g.combat_trait = (g.combat_trait + delta).clamp(0, 32);
+            }
+        }
+
+        // P1-1: respiratory_pathway mutates only when O₂-config is enabled. Salt 0x5245_5350 ("RESP").
+        // RNG-salt position: AFTER combat_trait (0x434F_4D42), BEFORE GRN (0x4752_4E57+).
+        // Same ±1 pattern. Non-O₂ configs: respiratory_pathway stays 0, existing goldens byte-identical
+        // (mutation gate prevents draw, hash gate prevents state inclusion).
+        if enable_oxygen {
+            let r = seed_fold(stream, &[0x5245_5350u64]);
+            if (r & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
+                g.respiratory_pathway = (g.respiratory_pathway + delta).clamp(0, 255);
             }
         }
 
@@ -1075,7 +1173,10 @@ impl Genome {
             Some(ct) => cell_type_uptake_layer(ct, self.uptake_layer, econ.n_layers),
             None => self.uptake_layer,
         };
-        Some(Phenotype { uptake_layer, cell_type, graph })
+        // P1-1: decode respiratory strategy PURE — no field-reads, no RNG, no clock (deterministic).
+        let respiratory_pathway = decode_respiratory_pathways(self);
+
+        Some(Phenotype { uptake_layer, cell_type, graph, respiratory_pathway })
     }
 
     /// E-5b: `true` iff a `decode(econ)` call on this genome returns `None` because of the REAL
@@ -1136,6 +1237,12 @@ impl Genome {
         // existing goldens byte-identical. Predation configs: combat_trait>0 → folded (locked).
         if self.combat_trait != 0 {
             h = fnv_mix(h, self.combat_trait as u64);
+        }
+        // P1-1: fold respiratory_pathway ONLY when non-zero (same pattern as photo_gain, reg_gain, combat_trait).
+        // Non-O₂ configs: respiratory_pathway always 0 → not folded → checksums undisturbed,
+        // existing goldens byte-identical. O₂ configs: respiratory_pathway>0 → folded (locked).
+        if self.respiratory_pathway != 0 {
+            h = fnv_mix(h, self.respiratory_pathway as u64);
         }
         // V-1: fold the heritable GRN/morphogen spec by INTEGER CONTENTS, in a FIXED field order —
         // exactly like the existing i32 traits above, never the `Arc` pointer (CoW sharing is
@@ -1244,9 +1351,9 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2, false, 4, false, false, false), g.mutate(123, 2, false, 4, false, false, false));
+        assert_eq!(g.mutate(123, 2, false, 4, false, false, false, false), g.mutate(123, 2, false, 4, false, false, false, false));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, false, 4, false, false, false);
+            let m = g.mutate(s, 2, false, 4, false, false, false, false);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
@@ -1257,19 +1364,19 @@ mod tests {
         }
         // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 4, false, false, false);
+            let m = g.mutate(s, 2, true, 4, false, false, false, false);
             assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
             assert!((-4..=4).contains(&m.reg_gain), "reg_gain must be in [-reg_gain_max, +reg_gain_max]");
         }
         // reg_gain_max=0 locks regulation OFF even when has_light=true.
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 0, false, false, false);
+            let m = g.mutate(s, 2, true, 0, false, false, false, false);
             assert_eq!(m.reg_gain, 0, "reg_gain must stay 0 when reg_gain_max=0 (D′-2c lock)");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1, false, 0, false, false, false);
+        let m1 = g1.mutate(0, 1, false, 0, false, false, false, false);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }
@@ -1288,7 +1395,7 @@ mod tests {
         }
         // Also holds for a mutated genome.
         let g = Genome::founder(2);
-        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false, false);
+        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false, false, false);
         assert_eq!(mutated.decode(&EconParams::default()), mutated.decode(&EconParams::default()), "decode deterministic on mutated genome");
     }
 
@@ -1311,7 +1418,7 @@ mod tests {
             "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
         // Also for mutated genome — projection stays 1:1 regardless of trait value.
         for s in 0..50u64 {
-            let m = g.mutate(s, 2, false, 0, false, false, false);
+            let m = g.mutate(s, 2, false, 0, false, false, false, false);
             let mph = m.decode(&EconParams::default()).expect("mutated Ф0 must decode to Some");
             assert_eq!(mph.uptake_layer, m.uptake_layer,
                 "1:1 projection must hold after mutation (seed={s})");
@@ -1348,14 +1455,14 @@ mod tests {
             "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
 
         // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
-        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false);
+        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false);
         assert!(mutated_child.force_decode_none,
             "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
         assert!(mutated_child.decode(&EconParams::default()).is_none(),
             "inherited flag: child decode() also returns None (lineage-level stillbirth)");
 
         // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
-        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false);
+        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false);
         assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
         assert!(normal_child.decode(&EconParams::default()).is_some(), "normal child decode() must return Some");
     }
@@ -2472,7 +2579,7 @@ mod tests {
         
         for i in 0..100 {
             let seed = 0x1234_5678 + (i as u64);
-            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false);
+            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false);
             
             // If grn_spec exists, n_genes should stay at 2
             if let Some(spec) = &g.grn_spec {
@@ -2493,8 +2600,8 @@ mod tests {
         let econ = EconParams::default();
         
         // Mutate both with flag=false
-        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false);
-        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false);
+        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false);
+        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false);
         
         // They should be byte-identical (determinism check)
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
@@ -2509,7 +2616,7 @@ mod tests {
         let g = Genome::founder(2); // No spec
         
         // Mutate with flag=true
-        let m = g.mutate(0x9999_9999, 2, false, 4, false, true, false);
+        let m = g.mutate(0x9999_9999, 2, false, 4, false, true, false, false);
         
         // Should still have no spec
         assert!(m.grn_spec.is_none(), "V-3-b: genome without spec should stay without spec");
@@ -2540,7 +2647,7 @@ mod tests {
         let mut found_growth = false;
         for i in 0..1000 {
             let seed = 0xABCD_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -2580,7 +2687,7 @@ mod tests {
         // Find a seed that triggers duplication
         for i in 0..1000 {
             let seed = 0xFEED_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -2620,7 +2727,7 @@ mod tests {
         
         for i in 0..1000 {
             let seed = 0xBEEF_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -2671,7 +2778,7 @@ mod tests {
         // Find a seed that triggers duplication
         for i in 0..1000 {
             let seed = 0xCAFE_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -2696,7 +2803,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1111_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false);
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-c: flag=false must keep n_genes constant (iteration {i})");
             }
@@ -2713,8 +2820,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false);
+        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false);
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -2726,7 +2833,7 @@ mod tests {
     fn v3c_no_spec_no_indel() {
         // flag=true but grn_spec=None → no length change (Some-gated).
         let g = Genome::founder(2); // no spec
-        let m = g.mutate(0x2222_2222, 2, false, 4, false, true, false);
+        let m = g.mutate(0x2222_2222, 2, false, 4, false, true, false, false);
         assert!(m.grn_spec.is_none(), "V-3-c: genome without spec must stay without spec");
     }
 
@@ -2743,7 +2850,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x3333_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &m.grn_spec {
                 // n_genes==3 alone doesn't prove indel-insert fired — V-3-b duplication also grows
                 // n_genes by 1 (with a NON-zero paralog copy). Distinguish by the novel gene's id:
@@ -2790,7 +2897,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x4444_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes == 2 {
                     let n = spec.n_genes;
@@ -2816,7 +2923,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x5555_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &m.grn_spec {
                 assert!(spec.n_genes >= 2, "V-3-c: n_genes must never breach the floor (iteration {i})");
             }
@@ -2833,7 +2940,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x6666_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &g.grn_spec {
                 let n = spec.n_genes;
                 assert_eq!(spec.weights.len(), n * n, "iteration {i}");
@@ -2855,7 +2962,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x7777_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &g.grn_spec {
                 let mut seen = std::collections::BTreeSet::new();
                 for &id in &spec.gene_ids {
@@ -2888,7 +2995,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x8888_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false);
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes != 2 {
                     let _ph = m.decode(&econ); // must not panic; Some or None both fine
@@ -2907,7 +3014,7 @@ mod tests {
         g.mutation_rate = 256;
 
         let seed = 0x9999_9999;
-        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false)).collect();
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false)).collect();
 
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-c: replay must be seed-deterministic, not run-order-dependent");
@@ -2964,7 +3071,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1A00_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false);
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-d: flag=false must keep n_genes constant (iteration {i})");
                 assert_eq!(spec.gene_ids, vec![0, 1], "V-3-d: flag=false must never permute gene_ids (iteration {i})");
@@ -2982,8 +3089,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false);
+        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false);
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -2995,7 +3102,7 @@ mod tests {
     fn v3d_no_spec_no_op() {
         // flag=true but grn_spec=None → no-op (Some-gated).
         let g = Genome::founder(2); // no spec
-        let m = g.mutate(0x2A2A_2A2A, 2, false, 4, false, true, false);
+        let m = g.mutate(0x2A2A_2A2A, 2, false, 4, false, true, false, false);
         assert!(m.grn_spec.is_none(), "V-3-d: genome without spec must stay without spec");
     }
 
@@ -3012,7 +3119,7 @@ mod tests {
 
         for i in 0..5000u64 {
             let seed = 0x3A00_0000 + i;
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) && **spec == v3d_manual_swap(&gspec0, 0, 1) {
                     assert_eq!(spec.gene_ids, vec![1, 0], "V-3-d: a real i!=j swap on n_genes=2 must reverse gene_ids");
@@ -3047,7 +3154,7 @@ mod tests {
             if (r_i >> 8) % 2 != (r_j >> 8) % 2 {
                 continue; // i != j — not the self-move branch
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &m.grn_spec {
                 if **spec == gspec0 {
                     return; // self-move fired; spec byte-identical to parent — no-op proven
@@ -3086,7 +3193,7 @@ mod tests {
             if ti == tj {
                 continue;
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             let Some(spec) = &m.grn_spec else { continue };
             if spec.n_genes != 3 {
                 continue; // V-3-b/c also fired this seed — skip (searching for a clean translocation)
@@ -3132,7 +3239,7 @@ mod tests {
             if ti == tj {
                 continue;
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             let Some(spec) = &m.grn_spec else { continue };
             if spec.n_genes != 3 {
                 continue;
@@ -3173,7 +3280,7 @@ mod tests {
 
         for i in 0..2000u64 {
             let seed = 0xA000_0000 + i;
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false);
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
                     let ph = m.decode(&econ).expect("post-translocation genome must decode to Some");
@@ -3195,7 +3302,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x1D1D_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &g.grn_spec {
                 let n = spec.n_genes;
                 assert_eq!(spec.weights.len(), n * n, "iteration {i}");
@@ -3218,7 +3325,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x1E1E_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &g.grn_spec {
                 let mut seen = std::collections::BTreeSet::new();
                 for &id in &spec.gene_ids {
@@ -3238,7 +3345,7 @@ mod tests {
 
         for i in 0..1000u64 {
             let seed = 0x1F1F_0000 + i;
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false);
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
                     assert_eq!(spec.dup_counter, gspec0.dup_counter, "V-3-d: translocation must not touch dup_counter");
@@ -3257,7 +3364,7 @@ mod tests {
         g.mutation_rate = 256;
 
         let seed = 0x1234_5A5A;
-        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false)).collect();
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false)).collect();
 
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-d: replay must be seed-deterministic, not run-order-dependent");
@@ -3381,7 +3488,7 @@ mod tests {
         let mut saw_change = false;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_0000u64 + gen; // "GDEV" salt already inside mutate(); vary seed
-            g = g.mutate(seed, 2, false, 4, false, false, true);
+            g = g.mutate(seed, 2, false, 4, false, false, true, false);
             let gd = g.morphogen_spec.expect("spec must survive mutation").g_dev;
             assert!((1..=4).contains(&gd), "g_dev must stay clamped to [1,4], got {gd} at generation {gen}");
             if gd != 1 {
@@ -3400,15 +3507,15 @@ mod tests {
         g.mutation_rate = 256;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_1111u64 + gen;
-            g = g.mutate(seed, 2, false, 4, false, false, false);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false);
             assert_eq!(g.morphogen_spec.unwrap().g_dev, 1, "flag off: g_dev must never change (generation {gen})");
         }
 
         // Disjoint-stream check: same seed/genome, flag on vs off, every OTHER field must agree.
         let base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(1)));
         let seed = 0xDEAD_BEEF_1234u64;
-        let on = base.clone().mutate(seed, 2, false, 4, false, false, true);
-        let off = base.clone().mutate(seed, 2, false, 4, false, false, false);
+        let on = base.clone().mutate(seed, 2, false, 4, false, false, true, false);
+        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false);
         assert_eq!(on.metabolism_eff, off.metabolism_eff);
         assert_eq!(on.move_speed, off.move_speed);
         assert_eq!(on.sense_range, off.sense_range);
@@ -3457,7 +3564,7 @@ mod tests {
             let mut lineage = start.clone();
             let mut trajectory = Vec::new();
             for gen in 0..32u64 {
-                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, false, 4, false, false, true);
+                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, false, 4, false, false, true, false);
                 trajectory.push(lineage.morphogen_spec.unwrap().g_dev);
             }
             trajectory
@@ -3472,5 +3579,112 @@ mod tests {
         let g1 = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(1)));
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(2)));
         assert_ne!(g1.hash_contribution(0), g2.hash_contribution(0), "g_dev=1 vs g_dev=2 must hash differently (already Some-gated fold)");
+    }
+
+    // ── R31: respiratory-genes decode (P1-1) ──────────────────────────────────────────────────────
+    /// R31 (a): founder respiratory_pathway must be 0 (obligate aerobe).
+    #[test]
+    fn p1_respiratory_founder_zero() {
+        let g = Genome::founder(2);
+        assert_eq!(g.respiratory_pathway, 0, "founder respiratory_pathway must be 0 (obligate aerobe)");
+    }
+
+    /// R31 (b): respiratory_pathway mutates only when enable_oxygen=true; stays 0 when false.
+    #[test]
+    fn p1_respiratory_mutation_gated_by_enable_oxygen() {
+        let mut g = Genome::founder(2);
+        g.mutation_rate = 256; // Force every mutation to attempt
+
+        // With enable_oxygen=false, respiratory_pathway must stay 0 (no mutation draw).
+        for seed in 0..100u64 {
+            let m = g.mutate(seed, 2, false, 4, false, false, false, false); // enable_oxygen=false
+            assert_eq!(m.respiratory_pathway, 0, "with enable_oxygen=false, respiratory_pathway must not mutate (seed={seed})");
+        }
+
+        // With enable_oxygen=true, respiratory_pathway can mutate (at least some seeds must change it).
+        let mut mutated_count = 0;
+        for seed in 0..1000u64 {
+            let m = g.mutate(seed, 2, false, 4, false, false, false, true); // enable_oxygen=true
+            if m.respiratory_pathway != 0 {
+                mutated_count += 1;
+            }
+        }
+        assert!(mutated_count > 0, "with enable_oxygen=true and mutation_rate=256, respiratory_pathway must mutate in at least some seeds (got {mutated_count}/1000)");
+    }
+
+    /// R31 (c): decode_respiratory_pathways() is PURE — deterministic, no field/RNG/clock reads.
+    #[test]
+    fn p1_respiratory_decode_pure_deterministic() {
+        let econ = EconParams::default();
+        let mut g = Genome::founder(2);
+
+        // Set respiratory_pathway to test different genotypes
+        for rtype in [0, 32, 65, 96, 128, 192, 255] {
+            g.respiratory_pathway = rtype;
+
+            // Calling decode twice must produce byte-identical Phenotype.respiratory_pathway
+            let ph1 = g.decode(&econ).expect("decode must return Some");
+            let ph2 = g.decode(&econ).expect("decode must return Some");
+            assert_eq!(
+                ph1.respiratory_pathway, ph2.respiratory_pathway,
+                "decode_respiratory_pathways must be byte-identical on repeated calls (rtype={rtype})"
+            );
+        }
+    }
+
+    /// R31 (d): redox-hierarchy decoding — different rtype values decode to correct strategies.
+    #[test]
+    fn p1_respiratory_redox_hierarchy() {
+        let econ = EconParams::default();
+        let mut g = Genome::founder(2);
+
+        // rtype in [0..=64] → obligate aerobe (O₂ only, no fallback, anoxia_cost=256)
+        g.respiratory_pathway = 0;
+        let ph0 = g.decode(&econ).expect("rtype=0 must decode");
+        assert!(ph0.respiratory_pathway.is_some(), "rtype=0 must decode to Some (obligate)");
+        let rp0 = ph0.respiratory_pathway.as_ref().expect("rtype=0");
+        assert_eq!(rp0.primary_layer, crate::FieldId::Oxygen, "obligate must have O₂ primary");
+        assert_eq!(rp0.fallback_layers.len(), 0, "obligate must have no fallback");
+        assert_eq!(rp0.anoxia_cost_x256, 256, "obligate anoxia_cost must be 256 (death)");
+        assert_eq!(rp0.aerobe_cost_x256, 10, "obligate aerobe_cost must be 10 (−3.9%)");
+
+        g.respiratory_pathway = 64;
+        let ph64 = g.decode(&econ).expect("rtype=64 must decode");
+        assert_eq!(ph64.respiratory_pathway, ph0.respiratory_pathway, "rtype=64 must equal rtype=0 (both obligate)");
+
+        // rtype in [65..=128] → facultative (O₂ primary + NO₃ fallback, anoxia_cost=32 fermentation)
+        g.respiratory_pathway = 65;
+        let ph65 = g.decode(&econ).expect("rtype=65 must decode");
+        assert!(ph65.respiratory_pathway.is_some(), "rtype=65 must decode to Some (facultative)");
+        let rp65 = ph65.respiratory_pathway.as_ref().expect("rtype=65");
+        assert_eq!(rp65.primary_layer, crate::FieldId::Oxygen, "facultative must have O₂ primary");
+        assert_eq!(rp65.fallback_layers, vec![crate::FieldId::Nitrate], "facultative must have NO₃ fallback");
+        assert_eq!(rp65.fallback_effs_x256[0], 180, "NO₃ efficiency must be 180 (×0.7)");
+        assert_eq!(rp65.anoxia_cost_x256, 32, "facultative anoxia_cost must be 32 (fermentation)");
+        assert_eq!(rp65.aerobe_cost_x256, 15, "facultative aerobe_cost must be 15 (−5.9%)");
+
+        g.respiratory_pathway = 128;
+        let ph128 = g.decode(&econ).expect("rtype=128 must decode");
+        assert_eq!(ph128.respiratory_pathway, ph65.respiratory_pathway, "rtype=128 must equal rtype=65 (both facultative)");
+
+        // rtype > 128 → reserved for P5+, returns None (inert) for now
+        g.respiratory_pathway = 192;
+        let ph192 = g.decode(&econ).expect("rtype=192 must decode");
+        assert!(ph192.respiratory_pathway.is_none(), "rtype=192 must decode to None (reserved for P5+)");
+    }
+
+    /// R31 (e): hash_contribution folds respiratory_pathway when non-zero (byte-identical when 0).
+    #[test]
+    fn p1_respiratory_hash_gated() {
+        let g0 = Genome::founder(2);
+        assert_eq!(g0.respiratory_pathway, 0, "founder must have respiratory_pathway=0");
+
+        // Hash with rtype=0 must not include respiratory_pathway in the fold.
+        // Create an otherwise-identical genome with rtype=1.
+        let mut g1 = g0.clone();
+        g1.respiratory_pathway = 1;
+
+        // Hash should differ because respiratory_pathway is now non-zero (folded).
+        assert_ne!(g0.hash_contribution(0), g1.hash_contribution(0), "rtype=0 vs rtype=1 must hash differently (respiratory_pathway is folded when non-zero)");
     }
 }
