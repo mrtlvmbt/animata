@@ -216,7 +216,7 @@ fn d3b_multicellular_frac_plumbing_smoke() {
     );
 }
 
-// ── D-3b emergence verdict experiment ────────────────────────────────────────────────────────────
+// ── D-3b/V-5 emergence verdict experiment ────────────────────────────────────────────────────────
 // PRE-DECLARED VERDICT CONSTANTS (recorded BEFORE running, per issue #274 — do NOT adjust to flip
 // a NULL to EMERGENCE):
 //   EMERGE_FLOOR   = 128/256 (BODY_SIZE_SCALE) — ≥50% of the live population multicellular.
@@ -224,19 +224,25 @@ fn d3b_multicellular_frac_plumbing_smoke() {
 //   SEED_MAJORITY  = 3/5 — the regime must sustain across at least 3 of 5 seeds.
 //   POP_FLOOR      = 10 — drift-confound guard: a tick counts toward the late-window mean only when
 //                    live population ≥ POP_FLOOR (an extinct run is NOT "reverted to unicellular").
-//   Sweep          = refuge_k ∈ {2, 8, 32, 128}, at driver_config's default c_coord.
+//   Sweep          = bite_shift ∈ {3, 2, 1, 0}, at a FIXED refuge_k=128 (V-5 #278: round-2 showed
+//                    refuge_k inert at the swept values, so it is fixed here at its strongest, and
+//                    DRIVER STRENGTH — the bite — is the swept axis instead) and driver_config's
+//                    default c_coord.
 //   Window         = mean over the last min(ticks, 1000) ticks (sustained, not a single snapshot).
 //
-// EMERGENCE iff ∃ refuge_k where frac(WITH) ≥ EMERGE_FLOOR AND frac(WITH) ≥ MARGIN·frac(ABLATION)
+// EMERGENCE iff ∃ bite_shift where frac(WITH) ≥ EMERGE_FLOOR AND frac(WITH) ≥ MARGIN·frac(ABLATION)
 // AND frac(WITH) ≥ MARGIN·frac(CHANNEL-ISOLATION), sustained in ≥ SEED_MAJORITY of 5 seeds. Else
 // NULL — report which sub-condition failed, from the printed regime map.
 //
-// Three arms per (seed, refuge_k):
-//   WITH                predation ON + size-refuge ON at refuge_k          (the driver hypothesis)
-//   ABLATION-predators  predation OFF entirely                             (Boraas control)
-//   CHANNEL-ISOLATION   predation ON, refuge_k=0 (refuge off)              (anti-subsidy control)
-// ABLATION/CHANNEL-ISOLATION don't depend on refuge_k, so each is computed once per seed and reused
-// across the sweep.
+// Three arms per (seed, bite_shift):
+//   WITH                predation ON + size-refuge ON at FIXED_REFUGE_K, bite_shift=bs (hypothesis)
+//   ABLATION-predators  predation OFF entirely                                    (Boraas control)
+//   CHANNEL-ISOLATION   predation ON, refuge_k=0, bite_shift=bs (refuge off, same bite strength as
+//                       WITH)                                              (anti-subsidy control)
+// ABLATION doesn't depend on bite_shift (no predation at all) — computed once per seed and reused
+// across the sweep. CHANNEL-ISOLATION must track WITH's bite_shift (same predation strength, only
+// refuge differs) to isolate the refuge's own effect rather than confounding two varying knobs — so
+// it is recomputed per sweep value.
 //
 // Configure horizon via env var DRIVER_EMERGENCE_TICKS (default 400 for fast local iteration; cloud
 // dispatch uses 8000 — see scripts/sim-run.sh driver-emergence).
@@ -247,7 +253,10 @@ const EMERGE_FLOOR: i64 = 128; // ×BODY_SIZE_SCALE(256) == 50%
 const MARGIN: i64 = 2;
 const SEED_MAJORITY: usize = 3;
 const POP_FLOOR: i64 = 10;
-const REFUGE_K_SWEEP: [i32; 4] = [2, 8, 32, 128];
+/// V-5 (#278): refuge_k fixed at the strongest value from the round-2 sweep — round-2 showed
+/// refuge_k inert, so this sweep searches driver STRENGTH (bite_shift) instead.
+const FIXED_REFUGE_K: i32 = 128;
+const BITE_SHIFT_SWEEP: [u32; 4] = [3, 2, 1, 0];
 const VERDICT_SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
 
 /// Result of one driver_config arm run: the mean `multicellular_frac` over the valid (pop≥POP_FLOOR)
@@ -266,15 +275,19 @@ fn run_driver_arm(
     window_start: u64,
     predators_on: bool,
     refuge_k: i32,
+    bite_shift: u32,
 ) -> ArmResult {
     let mut cfg = driver_config(seed);
     if !predators_on {
         cfg.econ.predation = None; // Boraas control: no predators at all
     } else {
-        cfg.econ
+        let spec = cfg
+            .econ
             .predation
             .as_mut()
-            .expect("driver_config always configures predation")
+            .expect("driver_config always configures predation");
+        spec.bite_shift = bite_shift;
+        spec
             .size_refuge
             .as_mut()
             .expect("driver_config always configures size_refuge")
@@ -318,41 +331,44 @@ fn driver_emergence_verdict() {
     let window_len = ticks.min(1000);
     let window_start = ticks - window_len;
 
-    println!("\nD-3b emergence verdict: multicellularity under predation size-refuge (Boraas/Ratcliff)");
+    println!("\nD-3b/V-5 emergence verdict: multicellularity under predation size-refuge (Boraas/Ratcliff)");
     println!(
         "PRE-DECLARED: EMERGE_FLOOR={:.0}%, MARGIN={MARGIN}x, SEED_MAJORITY={SEED_MAJORITY}/5, POP_FLOOR={POP_FLOOR}",
         EMERGE_FLOOR as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0
     );
     println!(
-        "ticks={ticks}  late-window=[{window_start},{ticks}]  refuge_k sweep={:?}",
-        REFUGE_K_SWEEP
+        "ticks={ticks}  late-window=[{window_start},{ticks}]  fixed refuge_k={FIXED_REFUGE_K}  bite_shift sweep={:?}",
+        BITE_SHIFT_SWEEP
     );
 
-    // ABLATION-predators / CHANNEL-ISOLATION don't depend on refuge_k — compute once per seed.
+    // ABLATION-predators doesn't depend on bite_shift (no predation at all) — compute once per seed.
     let ablation: Vec<ArmResult> = VERDICT_SEEDS
         .iter()
-        .map(|&seed| run_driver_arm(seed, ticks, window_start, false, 0))
-        .collect();
-    let channel_iso: Vec<ArmResult> = VERDICT_SEEDS
-        .iter()
-        .map(|&seed| run_driver_arm(seed, ticks, window_start, true, 0))
+        .map(|&seed| run_driver_arm(seed, ticks, window_start, false, 0, 0))
         .collect();
 
     let mut any_regime_emerges = false;
-    let mut best_k = REFUGE_K_SWEEP[0];
+    let mut best_bs = BITE_SHIFT_SWEEP[0];
     let mut best_count = 0usize;
 
-    for &k in &REFUGE_K_SWEEP {
+    for &bs in &BITE_SHIFT_SWEEP {
         println!("{}", "-".repeat(78));
-        println!("refuge_k={k}");
+        println!("bite_shift={bs}");
         println!(
             "{:<6} {:>12} {:>12} {:>12} {:>10} {:>10}",
             "seed", "WITH%", "ablation%", "chan-iso%", "with-pop", "result"
         );
 
+        // CHANNEL-ISOLATION matches this bite_shift (same predation strength as WITH, refuge off)
+        // so the control isolates the refuge's effect, not a confound of two varying knobs.
+        let channel_iso: Vec<ArmResult> = VERDICT_SEEDS
+            .iter()
+            .map(|&seed| run_driver_arm(seed, ticks, window_start, true, 0, bs))
+            .collect();
+
         let mut seed_pass_count = 0usize;
         for (i, &seed) in VERDICT_SEEDS.iter().enumerate() {
-            let with = run_driver_arm(seed, ticks, window_start, true, k);
+            let with = run_driver_arm(seed, ticks, window_start, true, FIXED_REFUGE_K, bs);
             let abl = &ablation[i];
             let ciso = &channel_iso[i];
 
@@ -385,7 +401,7 @@ fn driver_emergence_verdict() {
         println!("  seeds passing all 3 conditions: {seed_pass_count}/5 (need ≥{SEED_MAJORITY})");
         if seed_pass_count > best_count {
             best_count = seed_pass_count;
-            best_k = k;
+            best_bs = bs;
         }
         if seed_pass_count >= SEED_MAJORITY {
             any_regime_emerges = true;
@@ -397,18 +413,44 @@ fn driver_emergence_verdict() {
     if any_regime_emerges {
         println!("DRIVER-EMERGENCE VERDICT: EMERGENCE");
         println!(
-            "  A refuge_k regime sustains multicellular_frac \u{2265}{EMERGE_FLOOR}/256 and \u{2265}{MARGIN}x both"
+            "  A bite_shift regime (at fixed refuge_k={FIXED_REFUGE_K}) sustains multicellular_frac \u{2265}{EMERGE_FLOOR}/256 and \u{2265}{MARGIN}x both"
         );
         println!("  the predator-ablation and channel-isolation controls, in \u{2265}{SEED_MAJORITY}/5 seeds.");
-        println!("  Best regime: refuge_k={best_k} ({best_count}/5 seeds).");
+        println!("  Best regime: bite_shift={best_bs} ({best_count}/5 seeds).");
         println!("  Size-refuge under predation is a genuine driver of multicellularity (Boraas/Ratcliff),");
         println!("  not a generic predation subsidy — the channel-isolation control rules that out.");
     } else {
-        println!("DRIVER-EMERGENCE VERDICT: NULL — no refuge_k regime reached SEED_MAJORITY={SEED_MAJORITY}/5.");
-        println!("  Closest regime: refuge_k={best_k} ({best_count}/5 seeds passing all 3 conditions).");
+        println!("DRIVER-EMERGENCE VERDICT: NULL — no bite_shift regime reached SEED_MAJORITY={SEED_MAJORITY}/5.");
+        println!("  Closest regime: bite_shift={best_bs} ({best_count}/5 seeds passing all 3 conditions), fixed refuge_k={FIXED_REFUGE_K}.");
         println!("  See the regime map above for which sub-condition (floor / vs-ablation margin /");
         println!("  vs-channel-isolation margin) failed per seed \u{2014} an honest informative finding, not");
-        println!("  tuned to pass. driver_config's calibration was chosen for VIABILITY (D-2), not");
-        println!("  emergence; this sweep is the search D-3 promised, and NULL is a valid outcome.");
+        println!("  tuned to pass. V-5 (#278) strengthened the bite (default bite_shift 3\u{2192}1) and swept");
+        println!("  the bite axis at refuge_k fixed to its strongest value; NULL here means bite strength");
+        println!("  was not the bottleneck either \u{2014} predation prevalence is the next probe (out of scope).");
+    }
+}
+
+/// `v5_verdict_sweeps_bite_shift` (#278): fast, NOT `#[ignore]`d liveness check that the sweep
+/// infra (`run_driver_arm`) genuinely varies with `bite_shift` at a fixed `refuge_k` and runs to
+/// completion without panicking — the actual 8000-tick verdict is `driver_emergence_verdict`
+/// (heavy, `#[ignore]`d, dispatched via `scripts/sim-run.sh driver-emergence`). This just proves
+/// the extended sweep compiles, runs, and its stats are readable (a short regime-map slice).
+#[test]
+fn v5_verdict_sweeps_bite_shift() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+    const TICKS: u64 = 200;
+    const WINDOW_START: u64 = 100;
+    let seed = VERDICT_SEEDS[0];
+
+    println!("v5_verdict_sweeps_bite_shift smoke (ticks={TICKS}, fixed refuge_k={FIXED_REFUGE_K}):");
+    for &bs in &BITE_SHIFT_SWEEP {
+        let with = run_driver_arm(seed, TICKS, WINDOW_START, true, FIXED_REFUGE_K, bs);
+        println!(
+            "  bite_shift={bs}: frac={} mean_pop={:.1} collapsed={}",
+            with.frac, with.mean_pop, with.collapsed
+        );
+        assert!(with.mean_pop >= 0.0, "bite_shift={bs} produced a nonsensical negative mean_pop");
     }
 }
