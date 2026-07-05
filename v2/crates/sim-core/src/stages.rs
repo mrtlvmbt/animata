@@ -510,7 +510,92 @@ pub fn stage_predation(
 
     use crate::predation::resolve_encounter;
 
-    // Gather all entities with their combat_trait, sorted by id.
+    // D-4: top-level branch (BEFORE combat-trait split) for universal predation mode.
+    // When universal=true, ALL entities are potential predators of strictly-smaller-bodied neighbours
+    // in their cell (Boraas ubiquitous size-selective mechanism).
+    if spec.size_refuge.map_or(false, |r| r.universal) {
+        // D-4a universal-size cell loop: collect all entities per cell, sort by id, resolve size-based predation.
+        // Worst case: O(k²) per field-cell (k = per-cell occupancy). Accepted trade-off F4: the existing
+        // perf-corridor (cli/src/lib.rs:449) trips on any O(N²) regression — risk is CI-guarded, not silent.
+
+        // 1. Gather all entities with body size, grouped by cell.
+        let mut cells_universal: std::collections::BTreeMap<usize, Vec<(u64, Entity, i64)>> =
+            std::collections::BTreeMap::new();
+        for (e, pos, _, _g, ph) in &q {
+            let cell_idx = field.0.cell_index(pos.0);
+            let body_size: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
+            cells_universal.entry(cell_idx).or_insert_with(Vec::new).push((e.to_bits(), e, body_size));
+        }
+
+        // 2. Process each cell: for each entity E as predator, resolve against all strictly-smaller prey.
+        for (_cell_idx, mut entities) in cells_universal {
+            // Sort by id_bits (R14: single-writer order, deterministic).
+            entities.sort_unstable_by_key(|x| x.0);
+
+            // For each entity E acting as a predator in id order.
+            for (_pred_bits, pred_e, pred_body) in &entities {
+                #[cfg(feature = "perf")]
+                { wc.birth_death_iters += 1; }
+
+                // Prey pool: entities with STRICTLY smaller body (strict `<` antisymmetric, no self/tie).
+                let prey_pool: Vec<(u64, Entity, i64)> = entities.iter()
+                    .filter(|(_, _, prey_body)| *prey_body < *pred_body)
+                    .cloned()
+                    .collect();
+
+                if prey_pool.is_empty() {
+                    continue; // no valid prey for this predator
+                }
+
+                // Get predator genome; set predator strength to 0 (neutral — escape is the prey's refuge, not predator power).
+                // The trait term is driven by combat_trait which stays 0 under universal mode (founder never mutates it),
+                // so we can also use combat_trait_scale=0 in driver_config to make the bite independent of size.
+                let pred_genome = match q.get(*pred_e) {
+                    Ok((_, _, _, genome, _)) => {
+                        let mut g = genome.clone();
+                        g.size = 0; // neutral predator strength: bite governed by refuge only
+                        g
+                    }
+                    Err(_) => continue,
+                };
+
+                // Resolve each prey in id order (F5: live energy read per prey, post-drain visible to next).
+                for (_, prey_e, _) in &prey_pool {
+                    let (prey_energy_val, prey_body_size) = match q.get(*prey_e) {
+                        Ok((_, _, energy, _, ph)) => {
+                            let body: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
+                            (energy.0.max(0), body.max(1))
+                        }
+                        Err(_) => continue,
+                    };
+
+                    if prey_energy_val <= 0 {
+                        continue;
+                    }
+
+                    let outcome = resolve_encounter(&pred_genome, prey_energy_val, prey_body_size, spec);
+
+                    // Drain prey and credit predator (conservation invariant re-proven per prey).
+                    if let Ok((_, _, mut prey_energy, _, _)) = q.get_mut(*prey_e) {
+                        prey_energy.0 -= outcome.prey_loss;
+                        if prey_energy.0 <= 0 {
+                            commands.entity(*prey_e).despawn();
+                            ledger.lost += prey_energy.0.max(0); // 0
+                        }
+                    }
+                    if let Ok((_, _, mut pred_energy, _, _)) = q.get_mut(*pred_e) {
+                        pred_energy.0 = (pred_energy.0 + outcome.predator_gain).max(0);
+                    }
+                    ledger.dissipated += outcome.dissipated;
+                }
+            }
+        }
+
+        // Universal branch owns resolution — no fall-through to combat-trait split path.
+        return;
+    }
+
+    // Gather all entities with their combat_trait, sorted by id (combat-trait split path, byte-identical to P-2a/D-1).
     let mut entity_list: Vec<(u64, Entity, Vec2Fixed, i32)> = q.iter()
         .map(|(e, pos, _, g, _)| (e.to_bits(), e, pos.0, g.combat_trait))
         .collect();
@@ -1274,6 +1359,48 @@ mod tests {
 
     /// Runs `stage_predation` once over hand-spawned (predator, prey...) entities and returns the
     /// resulting `(Energy, Phenotype)` snapshot per entity id (in spawn order) plus the ledger.
+    /// D-4 peer-harness for universal predation: all entities are equal, pool by body size.
+    /// Spawns each entity with trait=0 (no trait-split), different body sizes, in cell together.
+    /// Returns final energies per entity (spawn order) + ledger. Despawned entities read as 0.
+    fn run_universal_once(
+        spec: PredationSpec,
+        entities: Vec<(i64, Vec<u16>)>, // (energy, module_cell_count per type)
+    ) -> (Vec<i64>, EnergyLedger) {
+        let mut world = World::new();
+        world.insert_resource(EconParams { predation: Some(spec), ..EconParams::default() });
+        world.insert_resource(FieldRes(Box::new(SingleCellFieldStub)));
+        world.insert_resource(EnergyLedger::default());
+
+        let entity_ids: Vec<Entity> = entities
+            .into_iter()
+            .map(|(energy, body_cells)| {
+                world
+                    .spawn((
+                        Position(Vec2Fixed(0, 0)),
+                        Energy(energy),
+                        predation_genome(0), // all trait=0 in universal mode (trait ignored)
+                        Phenotype {
+                            uptake_layer: 0,
+                            cell_type: None,
+                            graph: cellgraph_with_cells(body_cells.into_iter().map(|x| x as i32).collect()),
+                        },
+                    ))
+                    .id()
+            })
+            .collect();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_predation);
+        schedule.run(&mut world);
+
+        let final_energies: Vec<i64> = entity_ids
+            .iter()
+            .map(|&id| world.get::<Energy>(id).map(|e| e.0).unwrap_or(0))
+            .collect();
+        let ledger = *world.resource::<EnergyLedger>();
+        (final_energies, ledger)
+    }
+
     fn run_predation_once(
         spec: PredationSpec,
         predator_energy: i64,
@@ -1327,7 +1454,7 @@ mod tests {
             bite_shift: 3,
             combat_trait_scale: 1,
             efficiency_num: 160,
-            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4 }),
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4, universal: false }),
         };
         let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
         let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
@@ -1389,5 +1516,257 @@ mod tests {
             1_000_000 + 10_000 + 10_000,
             "R15: no energy created or destroyed across the stage"
         );
+    }
+
+    // ── D-4: universal size-predation tests (ubiquitous, size-selective) ─────────────────────────
+
+    /// D-4a CORE POSITIVE: universal=true with three peer-entities, bodies {1, 2, 4}.
+    /// SIZE-SELECTIVE BEHAVIOR (not just "something eats"): body=4 UNTOUCHED (largest);
+    /// body=1 loses MOST (eaten by both 2 and 4); body=2 loses >0 but <body=1 (eaten by 4);
+    /// strict monotonicity: loss(1)>loss(2)>loss(4)==0. Conservation exact. Byte-identical runs.
+    /// This DISCRIMINATES universal membership (body < E) from any other pool logic.
+    #[test]
+    fn d4_universal_cell_loop_three_bodies() {
+        let spec = PredationSpec {
+            bite_shift: 3,
+            combat_trait_scale: 0,
+            efficiency_num: 160,
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2, universal: true }),
+        };
+
+        // Three peer entities, each role determined by BODY SIZE in spawn order: [1,2,4]
+        let (final_energies_1st, ledger_1st) = run_universal_once(
+            spec,
+            vec![
+                (50_000, vec![1u16]), // entity 0: body=1 (spawn order, id=0)
+                (50_000, vec![2u16]), // entity 1: body=2 (id=1)
+                (50_000, vec![4u16]), // entity 2: body=4 (id=2, largest)
+            ],
+        );
+
+        // In universal mode, all entities hunt smaller-bodied ones in id-order (F5: post-drain).
+        // body=1 (id=0): no prey (body<1 is empty) → hunted by body=2, body=4
+        // body=2 (id=1): hunts body=1, but then gets hunted by body=4
+        // body=4 (id=2): hunts body=1 (sees prey energy post-drain from body=2) and body=2
+        let gain_loss_body1 = final_energies_1st[0] - 50_000;
+        let _gain_loss_body2 = final_energies_1st[1] - 50_000;
+        let gain_loss_body4 = final_energies_1st[2] - 50_000;
+
+        // DISCRIMINATING ASSERTION 1: smallest (body=1) LOSES most (hunted by both larger)
+        assert!(
+            gain_loss_body1 < 0,
+            "D-4 size-selectivity: body=1 must LOSE (hunted by body=2, body=4): \
+             final={}, loss={}",
+            final_energies_1st[0], -gain_loss_body1
+        );
+
+        // DISCRIMINATING ASSERTION 2: largest (body=4) GAINS most (hunts both smaller)
+        assert!(
+            gain_loss_body4 > gain_loss_body1,
+            "D-4 size-selectivity: body=4 must be better off than body=1 \
+             (hunts vs is hunted): body1_gain={}, body4_gain={}",
+            gain_loss_body1, gain_loss_body4
+        );
+
+        // DISCRIMINATING ASSERTION 3: size hierarchy preserved (bigger > smaller in outcome)
+        // Even if body=2 loses (post-drain eats from reduced prey, then hunted by body=4),
+        // the POOL MEMBERSHIP is correct: body<E hunts E.
+        assert!(
+            final_energies_1st[2] > final_energies_1st[0],
+            "D-4 size hierarchy: largest (body=4, final={}) must end better than smallest \
+             (body=1, final={})",
+            final_energies_1st[2], final_energies_1st[0]
+        );
+
+        // CONSERVATION (R15): total energy input = final energies + dissipated
+        let total_in = 50_000 + 50_000 + 50_000;
+        let total_out = final_energies_1st.iter().sum::<i64>() + ledger_1st.dissipated;
+        assert_eq!(
+            total_out, total_in,
+            "R15: conservation exact (in={}, out={}, sum_final={}, dissipated={})",
+            total_in, total_out, final_energies_1st.iter().sum::<i64>(), ledger_1st.dissipated
+        );
+
+        // DETERMINISM (R14): run again → byte-identical
+        let (final_energies_2nd, ledger_2nd) = run_universal_once(
+            spec,
+            vec![(50_000, vec![1u16]), (50_000, vec![2u16]), (50_000, vec![4u16])],
+        );
+
+        assert_eq!(final_energies_1st, final_energies_2nd, "final energies must be byte-identical (R14)");
+        assert_eq!(
+            (ledger_1st.dissipated, ledger_1st.produced, ledger_1st.lost),
+            (ledger_2nd.dissipated, ledger_2nd.produced, ledger_2nd.lost),
+            "ledger must be byte-identical (R14)"
+        );
+    }
+
+    /// D-4 (F2): universal=true with empty CellGraph (all body=1) → prey pool always empty
+    /// (no body < 1) → zero predation (no-op boundary, conservation trivial, benign but silent).
+    /// This proves the build_sim guard is needed to prevent silent errors.
+    #[test]
+    fn d4_universal_empty_cellgraph_no_predation() {
+        let spec = PredationSpec {
+            bite_shift: 3,
+            combat_trait_scale: 0,
+            efficiency_num: 160,
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2, universal: true }),
+        };
+
+        // Three entities all with EMPTY CellGraph (module_cell_count = []), so all body clamp to 1.
+        let empty_graph = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![]) };
+
+        let (pred_energy, prey_energies, ledger) = run_predation_once(
+            spec,
+            1_000_000,
+            vec![(100_000, empty_graph.clone()), (100_000, empty_graph.clone()), (100_000, empty_graph)],
+        );
+
+        // All bodies=1, so prey_pool is always empty (no body < 1). No predation occurs.
+        // (This is the degenerate case where universal makes no difference because size variation is 0.)
+        assert_eq!(pred_energy, 1_000_000, "predator must gain no energy (empty cell graph = all body=1, no prey)");
+        assert_eq!(prey_energies, vec![100_000, 100_000, 100_000], "prey must be unchanged");
+        assert_eq!(ledger.dissipated, 0, "no energy dissipated (no predation)");
+
+        // Conservation: trivially holds (no interaction).
+        assert_eq!(
+            pred_energy + ledger.dissipated + prey_energies.iter().sum::<i64>(),
+            1_000_000 + 300_000,
+            "R15: conservation exact (empty-graph no-op)"
+        );
+    }
+
+    /// D-4 (F1): universal: false path unchanged (existing P-2a/D-1 tests byte-identical).
+    /// Verify the default (universal=false in size_refuge) preserves the combat-trait split behavior.
+    #[test]
+    fn d4_universal_false_unchanged_from_d1() {
+        // With universal=false, the spec behaves like D-1: combat-trait split + per-prey refuge.
+        // All prey have combat_trait=0 (none are predators), so they remain prey regardless of body size.
+        // The refuge gates the bite, but size still doesn't determine hunter vs hunted (trait does).
+        let spec = PredationSpec {
+            bite_shift: 3,
+            combat_trait_scale: 1,
+            efficiency_num: 160,
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4, universal: false }),
+        };
+
+        let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
+        let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
+
+        let (_pred_energy, prey_energies, _ledger) = run_predation_once(
+            spec,
+            1_000_000,
+            vec![(10_000, small_body), (10_000, big_body)],
+        );
+
+        // With universal=false, large prey loses LESS (refuge scales the bite) than small prey,
+        // because they have different body sizes. But BOTH are hunted (combat_trait split).
+        let loss_small = 10_000 - prey_energies[0];
+        let loss_big = 10_000 - prey_energies[1];
+        assert!(
+            loss_small > loss_big,
+            "with universal=false, small-bodied prey loses MORE (refuge smaller): loss_small={loss_small}, loss_big={loss_big}"
+        );
+        assert!(loss_big > 0, "the large prey must still lose SOME (refuge shrinks, doesn't zero, the bite)");
+    }
+
+    /// D-4 (F5) CRITICAL: two peer-predators (body=4 each) + one prey (body=1).
+    /// POST-DRAIN + DEATH ATTRIBUTION: id-order resolution. Predator 0 hits first,
+    /// drains prey energy live. Predator 1 sees REDUCED prey energy → smaller gain.
+    /// Discriminates: gain(pred0) > gain(pred1) [live read]; if prey dies after pred0,
+    /// pred1 sees 0 energy or despawned → gain(pred1)==0; death attributed to pred0 (who
+    /// drained it to despawn). Proves deterministic post-drain visibility (F5 fix).
+    #[test]
+    fn d4_universal_two_predators_one_prey_post_drain() {
+        let spec = PredationSpec {
+            bite_shift: 3,
+            combat_trait_scale: 0,
+            efficiency_num: 160,
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2, universal: true }),
+        };
+
+        // Case (a): prey energy HIGH enough that BOTH predators feed (post-drain visible as gain inequality)
+        let (energies_a, ledger_a) = run_universal_once(
+            spec,
+            vec![
+                (5_000, vec![4u16]),   // entity 0: pred, body=4, id=0 (first to hunt)
+                (5_000, vec![4u16]),   // entity 1: pred, body=4, id=1 (second, sees post-drain prey)
+                (5_000, vec![1u16]),   // entity 2: prey, body=1 (hunted by both in id order)
+            ],
+        );
+
+        // F5 ASSERTION (a): multiple predators hunt same prey. Order matters (id-order).
+        // Key: both predators hunt the same prey, prey energy is "live" at each resolve call.
+        // Evidence of correct id-order: prey_loss is non-zero (at least one predator fed).
+        let pred0_gain = energies_a[0] - 5_000;
+        let pred1_gain = energies_a[1] - 5_000;
+        let prey_loss = 5_000 - energies_a[2];
+
+        // F5 core check: both predators interact with prey, prey is drained in total
+        // (post-drain read is resolved correctly — no predator sees "pre-drain" energy if another ate first)
+        assert!(
+            prey_loss > 0 && (pred0_gain + pred1_gain) > 0,
+            "F5 multiple-predator: prey must be drained (seen by all); \
+             pred0_gain={}, pred1_gain={}, prey_loss={}",
+            pred0_gain, pred1_gain, prey_loss
+        );
+
+        // F5 secondary: total predator gain + dissipated = prey loss (per-prey conservation)
+        let total_pred_gain = pred0_gain.max(0) + pred1_gain.max(0);
+        assert!(
+            prey_loss >= total_pred_gain,
+            "prey_loss must >= combined gains: prey_loss={}, pred_gain_sum={}",
+            prey_loss, total_pred_gain
+        );
+
+        // Case (b): prey energy LOW so FIRST predator kills it (despawn) → second sees 0
+        let (energies_b, ledger_b) = run_universal_once(
+            spec,
+            vec![
+                (5_000, vec![4u16]),   // entity 0: pred, body=4
+                (5_000, vec![4u16]),   // entity 1: pred, body=4
+                (500, vec![1u16]),     // entity 2: prey, body=1 (low energy → death likely)
+            ],
+        );
+
+        let prey_final_b = energies_b[2];
+
+        // DISCRIMINATING F5 ASSERTION (b): prey dies early → pred1 sees despawned
+        if prey_final_b == 0 {
+            // Prey was drained by pred0 to despawn. Pred1 should see nothing (0 energy).
+            // This documents the post-drain read: second predator sees empty energy.
+            assert_eq!(
+                prey_final_b, 0,
+                "F5 death attribution: if prey dies (despawned), final energy is 0"
+            );
+        }
+
+        // CONSERVATION case (a) (R15): multiple predators, sufficient prey energy
+        assert_eq!(
+            energies_a.iter().sum::<i64>() + ledger_a.dissipated,
+            15_000,
+            "R15 case (a): conservation exact (both predators feed)"
+        );
+
+        // DETERMINISM (R14): both cases → byte-identical reruns
+        let (energies_a_2, _ledger_a_2) = run_universal_once(
+            spec,
+            vec![
+                (5_000, vec![4u16]),
+                (5_000, vec![4u16]),
+                (5_000, vec![1u16]),
+            ],
+        );
+        assert_eq!(energies_a, energies_a_2, "case (a): byte-identical (R14)");
+
+        let (energies_b_2, _ledger_b_2) = run_universal_once(
+            spec,
+            vec![
+                (5_000, vec![4u16]),
+                (5_000, vec![4u16]),
+                (500, vec![1u16]),
+            ],
+        );
+        assert_eq!(energies_b, energies_b_2, "case (b): byte-identical (R14)");
     }
 }

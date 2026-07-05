@@ -345,8 +345,10 @@ pub fn differentiation_config(seed: u64) -> SimConfig {
 /// fitness gradient to exploit. `bite_shift=1` (half the prey's energy per encounter) is a real,
 /// size-selective mortality. Sweepable via `--set bite_shift=…`; searched by `driver_emergence_verdict`.
 const DRIVER_BITE_SHIFT: u32 = 1;
-/// Combat-trait influence on bite size (reused from `predation_config`).
-const DRIVER_COMBAT_TRAIT_SCALE: i32 = 1;
+/// Combat-trait influence on bite size. D-4: set to 0 (neutral predator strength) — under universal
+/// predation, the Boraas mechanism (prey escapes by size growth) is the fitness gradient, not predator
+/// power. Bite is governed by `DRIVER_BITE_SHIFT` and the prey's own `size_refuge`.
+const DRIVER_COMBAT_TRAIT_SCALE: i32 = 0;
 /// Predation metabolic efficiency, ~62% (reused from `predation_config`).
 const DRIVER_EFFICIENCY_NUM: i32 = 160;
 /// Size-refuge Q-format shift (D-1 fixture magnitude).
@@ -376,6 +378,7 @@ pub fn driver_config(seed: u64) -> SimConfig {
         size_refuge: Some(sim_core::SizeRefugeSpec {
             shift: DRIVER_REFUGE_SHIFT,
             refuge_k: DRIVER_REFUGE_K,
+            universal: true, // D-4: ubiquitous size-selective predation (Boraas mechanism)
         }),
     });
     cfg.econ.c_coord = DRIVER_C_COORD;
@@ -407,6 +410,21 @@ pub fn build_sim(config: SimConfig) -> Sim {
         config.econ.n_energy_layers = min_l; // exclude mineral layer from genome mutation range
     } else {
         config.econ.n_energy_layers = config.n_layers;
+    }
+
+    // D-4 (F2): universal predation requires varying body sizes to be meaningful — guard this
+    // at setup (cheap, loud) rather than silently producing zero predation downstream.
+    if let Some(pred_spec) = &config.econ.predation {
+        if let Some(refuge) = pred_spec.size_refuge {
+            if refuge.universal {
+                assert!(
+                    config.econ.morphogen.is_some() && config.econ.evolve_body_size,
+                    "universal predation requires morphogen=Some AND evolve_body_size=true; got morphogen={}, evolve_body_size={}",
+                    config.econ.morphogen.is_some(),
+                    config.econ.evolve_body_size
+                );
+            }
+        }
     }
     let econ = config.econ.clone();
     let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT);
@@ -902,6 +920,71 @@ mod tests {
         // 0.0 is valid (turns off pheromone)
         let r_ok = apply_overrides(&mut econ, &[("pheromone".to_string(), "0.0".to_string())]);
         assert!(r_ok.is_ok(), "pheromone=0.0 must be accepted");
+    }
+
+    /// D-4 (V-5 F3): --set bite_shift is whitelisted and validates correctly.
+    /// The `bite_shift` handler exists in apply_overrides (§lib.rs:711–729); this test confirms
+    /// the unit mechanism works (structural: requires predation already configured, like refuge_k).
+    #[test]
+    fn d4_set_bite_shift_is_whitelisted() {
+        // Test on driver_config (which has predation configured with size_refuge).
+        let cfg = driver_config(42);
+
+        // Valid: bite_shift ∈ [0, 10]
+        let mut econ = cfg.econ.clone();
+        let r0 = apply_overrides(&mut econ, &[("bite_shift".to_string(), "0".to_string())]);
+        assert!(r0.is_ok(), "--set bite_shift=0 must be accepted");
+        assert_eq!(econ.predation.unwrap().bite_shift, 0);
+
+        let mut econ = cfg.econ.clone();
+        let r1 = apply_overrides(&mut econ, &[("bite_shift".to_string(), "1".to_string())]);
+        assert!(r1.is_ok(), "--set bite_shift=1 must be accepted");
+        assert_eq!(econ.predation.unwrap().bite_shift, 1);
+
+        let mut econ = cfg.econ.clone();
+        let r10 = apply_overrides(&mut econ, &[("bite_shift".to_string(), "10".to_string())]);
+        assert!(r10.is_ok(), "--set bite_shift=10 must be accepted");
+        assert_eq!(econ.predation.unwrap().bite_shift, 10);
+
+        // Invalid: bite_shift > 10
+        let mut econ = cfg.econ.clone();
+        let r11 = apply_overrides(&mut econ, &[("bite_shift".to_string(), "11".to_string())]);
+        assert!(r11.is_err(), "--set bite_shift=11 must return Err");
+        assert!(r11.unwrap_err().starts_with("error:"));
+
+        // Structural: requires predation configured
+        let mut econ_no_pred = EconParams::default();
+        let r_no_pred = apply_overrides(&mut econ_no_pred, &[("bite_shift".to_string(), "1".to_string())]);
+        assert!(r_no_pred.is_err(), "--set bite_shift on non-predation config must return Err");
+        assert!(r_no_pred.unwrap_err().contains("no predation configured"));
+    }
+
+    /// D-4 (F2) BUILD-PANIC: universal=true without morphogen/evolve_body_size → loud startup panic.
+    /// Verifies the `build_sim` assert (lib.rs:422) prevents silent no-op when bodies don't vary.
+    /// This is a GUARD test — without it, the assert regresses silently and the guard is lost.
+    #[test]
+    #[should_panic(expected = "universal predation requires")]
+    fn d4_build_sim_panics_universal_without_body_variation() {
+        // Construct a bad config: universal=true but no morphogen or evolve_body_size.
+        let mut cfg = default_config(42);
+        // Ensure predation is configured with universal=true
+        cfg.econ.predation = Some(sim_core::PredationSpec {
+            bite_shift: 1,
+            combat_trait_scale: 0,
+            efficiency_num: 160,
+            size_refuge: Some(sim_core::SizeRefugeSpec {
+                shift: 8,
+                refuge_k: 2,
+                universal: true, // This triggers the F2 guard
+            }),
+        });
+        // Ensure body variation is OFF (the bad precondition)
+        cfg.econ.morphogen = None; // no morphogen
+        cfg.econ.evolve_body_size = false; // no body evolution
+
+        // This MUST panic due to the F2 guard in build_sim (line ~422)
+        // The expected message matches the assert in build_sim.
+        let _sim = build_sim(cfg);
     }
 
     // ── #186 D′-2c tests ─────────────────────────────────────────────────────────────────────────
