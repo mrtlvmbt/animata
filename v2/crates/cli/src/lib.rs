@@ -959,6 +959,34 @@ mod tests {
         assert!(r_no_pred.unwrap_err().contains("no predation configured"));
     }
 
+    /// D-4 (F2) BUILD-PANIC: universal=true without morphogen/evolve_body_size → loud startup panic.
+    /// Verifies the `build_sim` assert (lib.rs:422) prevents silent no-op when bodies don't vary.
+    /// This is a GUARD test — without it, the assert regresses silently and the guard is lost.
+    #[test]
+    #[should_panic(expected = "universal predation requires")]
+    fn d4_build_sim_panics_universal_without_body_variation() {
+        // Construct a bad config: universal=true but no morphogen or evolve_body_size.
+        let mut cfg = default_config(42);
+        // Ensure predation is configured with universal=true
+        cfg.econ.predation = Some(sim_core::PredationSpec {
+            bite_shift: 1,
+            combat_trait_scale: 0,
+            efficiency_num: 160,
+            size_refuge: Some(sim_core::SizeRefugeSpec {
+                shift: 8,
+                refuge_k: 2,
+                universal: true, // This triggers the F2 guard
+            }),
+        });
+        // Ensure body variation is OFF (the bad precondition)
+        cfg.econ.morphogen = None; // no morphogen
+        cfg.econ.evolve_body_size = false; // no body evolution
+
+        // This MUST panic due to the F2 guard in build_sim (line ~422)
+        // The expected message matches the assert in build_sim.
+        let _sim = build_sim(cfg);
+    }
+
     // ── #186 D′-2c tests ─────────────────────────────────────────────────────────────────────────
 
     /// Smoke: reg-activity telemetry fields are computed and bounded correctly.
