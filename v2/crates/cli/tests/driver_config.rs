@@ -254,9 +254,10 @@ fn d3b_multicellular_frac_plumbing_smoke() {
 // to isolate the refuge's own effect rather than confounding two varying knobs — so it is recomputed
 // per sweep value.
 //
-// Intermediate-persistence readout (informational): late-window mean body size and drift-flatness
-// (|mean(2nd half) - mean(1st half)| < epsilon) — verifies whether size is stable (selection) or
-// drifting.
+// Intermediate-persistence readout (informational, #288 FIX): late-window mean body size and drift-flatness,
+// expressed in cell counts. Body size and drift are stored internally in ×BODY_SIZE_SCALE units; this
+// readout converts to cells (divide by BODY_SIZE_SCALE=256) for interpretability. Checks: size ∈ [1, 0.9·MAX_CELLS]
+// cells, drift < 0.5 cells (epsilon). Verifies whether intermediate-body selection is stable or drifting.
 //
 // Configure horizon via env var DRIVER_EMERGENCE_TICKS (default 400 for fast local iteration; cloud
 // dispatch uses 8000 — see scripts/sim-run.sh driver-emergence).
@@ -273,6 +274,14 @@ const FIXED_REFUGE_K_HAZARD: i32 = 128;
 /// =50 is collapse; sweep [10,20,30,45] probes the selective band.
 const BASE_HAZARD_SWEEP: [i64; 4] = [10, 20, 30, 45];
 const VERDICT_SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
+
+/// Intermediate-persistence readout thresholds (#288): expressed in cell counts.
+/// BODY_SIZE_INTERMEDIATE_MIN = 1 cell (below: unicellular refuge).
+/// BODY_SIZE_INTERMEDIATE_MAX = 0.9 * MAX_CELLS ≈ 28.8 cells (intermediate-multicellular range).
+/// DRIFT_EPSILON_CELLS = 0.5 cells (max permitted drift between 1st & 2nd half of window to be "stable").
+const BODY_SIZE_INTERMEDIATE_MIN: f64 = 1.0;
+const BODY_SIZE_INTERMEDIATE_MAX: f64 = 0.9 * 32.0; // MAX_CELLS = 32
+const DRIFT_EPSILON_CELLS: f64 = 0.5;
 
 /// Result of one driver_config arm run: the mean `multicellular_frac` over the valid (pop≥POP_FLOOR)
 /// late-window ticks, the mean population, the mean body size, and whether the run ever collapsed.
@@ -470,17 +479,22 @@ fn driver_emergence_verdict() {
             } else {
                 "fail"
             };
-            // Intermediate-persistence readout: body size range (1, <0.9·MAX_CELLS=29) and drift-flat check (drift < 0.5).
-            let size_in_range = with.mean_body_size > 1.0 && with.mean_body_size < 0.9 * 32.0; // MAX_CELLS=32
-            let drift_flat = with.body_size_drift < 0.5;
+            // #288 FIX: intermediate-persistence readout in cell counts.
+            // Convert from ×BODY_SIZE_SCALE units to cells by dividing by BODY_SIZE_SCALE.
+            let body_size_cells = with.mean_body_size / sim_core::BODY_SIZE_SCALE as f64;
+            let drift_cells = with.body_size_drift / sim_core::BODY_SIZE_SCALE as f64;
+            
+            let size_in_range = (BODY_SIZE_INTERMEDIATE_MIN..=BODY_SIZE_INTERMEDIATE_MAX).contains(&body_size_cells);
+            let drift_flat = drift_cells < DRIFT_EPSILON_CELLS;
             let persist_note = if size_in_range && drift_flat { "✓" } else { "·" };
             println!(
                 "{:<6} {:>11.1}% {:>11.1}% {:>11.1}% {:>9.1} {:>7.2} {:>8}",
-                seed, with_pct, abl_pct, ciso_pct, with.mean_body_size, with.body_size_drift, tag
+                seed, with_pct, abl_pct, ciso_pct, body_size_cells, drift_cells, tag
             );
             if !persist_note.eq("✓") && !with.collapsed {
-                println!("       (body_size={:.1} in (1,29)? {}, drift={:.2} <0.5? {})",
-                    with.mean_body_size, size_in_range, with.body_size_drift, drift_flat);
+                println!("       (body_size={:.2} cells in ({:.1},{:.1})? {}, drift={:.3} <{} cells? {})",
+                    body_size_cells, BODY_SIZE_INTERMEDIATE_MIN, BODY_SIZE_INTERMEDIATE_MAX, size_in_range, 
+                    drift_cells, DRIFT_EPSILON_CELLS, drift_flat);
             }
         }
 
