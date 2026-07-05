@@ -6,20 +6,24 @@ use bevy_ecs::prelude::Resource;
 
 // ── Conserved field layer identifiers (P1-0 ШВ-1) ────────────────────────────────────────────────
 
-/// Conserved field layer IDs — type-safe layer semantics. Used as a bridge between semantic enum
-/// and usize array indices at the FieldStore boundary (P1-0 migration: `layer: usize` → `FieldId`
-/// enums for O₂/NO₃/SO₄, internal implementation stays i64-indexed for speed).
+/// Conserved field layer IDs — type-safe layer semantics for redox-tower (ШВ-1). Used as a bridge
+/// between semantic enum and usize array indices at the FieldStore boundary (P1-0: `layer: usize` →
+/// `FieldId` enums for O₂/NO₃/SO₄). Internal implementation stays i64-indexed for speed.
+/// - Layer 0: **Substrate** — primary energy source (ProcgenWorld-derived per-cell caps, all configs).
+/// - Layer 1: **Oxygen** — first conserved redox-acceptor (P1-0+, ШВ-1). Biom-derived O₂-caps.
+/// - Layer 2: **Nitrate** — secondary acceptor (P5+, reserved).
+/// - Layer 3: **Sulfate** — tertiary acceptor (P5+, reserved).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FieldId {
-    /// Layer 0: substrate (primary energy source, ProcgenWorld-derived per-cell caps).
+    /// Layer 0: substrate (primary energy source, all configs).
     Substrate = 0,
-    /// Layer 1: organics/excreta / O₂ / alternative (config-dependent).
-    Layer1 = 1,
-    /// Layer 2: detritus/mineral/resource (config-dependent).
-    Layer2 = 2,
-    /// Layer 3: reserved for future use.
-    Layer3 = 3,
+    /// Layer 1: O₂ (first conserved redox-acceptor, P1-0+).
+    Oxygen = 1,
+    /// Layer 2: NO₃⁻ (secondary acceptor, P5+).
+    Nitrate = 2,
+    /// Layer 3: SO₄²⁻ (tertiary acceptor, P5+).
+    Sulfate = 3,
 }
 
 impl FieldId {
@@ -245,10 +249,10 @@ pub struct EconParams {
     /// goldens are the test). Option-gated exactly like `light`/`mineral_layer` above.
     pub predation: Option<PredationSpec>,
 
-    // ── P1-0: O₂ field + gas exchange (respiratory systems) ────────────────────────────────────
-    /// O₂-field economy (P1-0, ШВ-1). `true` enables the conserved O₂ resource layer (respiration
-    /// sink, photosynthesis source P2+), biom-derived O₂-caps from world-gen. `false` (default, all
-    /// 5 existing production configs + l3_config) → O₂ layer inert, no respiration mechanic,
+    // ── P1-0: O₂ conserved-field infrastructure (no respiration yet) ────────────────────────────
+    /// O₂-field infrastructure (P1-0, ШВ-1). `true` enables the conserved O₂ resource layer
+    /// (respiration sink P1-1, photosynthesis source P2+), biom-derived O₂-caps from world-gen.
+    /// `false` (default, all 5 existing production configs + l3_config) → O₂ layer inert,
     /// trajectories byte-identical (the isolation gate; un-re-pinned existing goldens are the test).
     /// When `true`, `n_layers` and `layer_specs` must include O₂-layer entry (via `oxygen_config`).
     /// Option-gated exactly like `light`/`mineral_layer` above.

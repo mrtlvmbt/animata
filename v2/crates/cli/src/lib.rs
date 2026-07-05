@@ -1562,4 +1562,23 @@ mod tests {
         let _hashes = run(cfg, ticks);
         // If we got here, the O₂-layer field initialized correctly and the sim ran.
     }
+
+    /// P1-0 R30: O₂-field conservation gate (smoke test).
+    /// Verify that with enable_oxygen=true, the O₂ field initializes and runs without panic.
+    /// Full conservation test is deferred to P1-2 (when respiration mechanics wire in consumption
+    /// and the ledger balance becomes the true conservation proxy).
+    #[test]
+    fn p1_0_oxygen_field_conserves() {
+        let cfg = oxygen_config(42);
+        let mut sim = build_sim(cfg);
+        assert_eq!(sim.econ().n_layers, 2, "oxygen_config must have n_layers=2");
+        assert!(sim.econ().enable_oxygen, "oxygen_config must have enable_oxygen=true");
+
+        // Smoke test: run 100 ticks without panic, conservation holds via ledger.
+        for _ in 0..100 {
+            sim.step();
+            let residual = sim.conservation_residual();
+            assert_eq!(residual, 0, "ENERGY CONSERVATION VIOLATED: residual={}", residual);
+        }
+    }
 }
