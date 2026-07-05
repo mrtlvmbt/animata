@@ -226,33 +226,37 @@ fn d3b_multicellular_frac_plumbing_smoke() {
     );
 }
 
-// ── D-4 (#281) emergence verdict experiment — universal size-predation ──────────────────────────
-// PRE-DECLARED VERDICT CONSTANTS (recorded BEFORE running, per issue #281 — do NOT adjust to flip
+// ── D-5 (#286) emergence verdict experiment — hazard-refuge predation ────────────────────────────
+// PRE-DECLARED VERDICT CONSTANTS (recorded BEFORE running, per issue #286 — do NOT adjust to flip
 // a NULL to EMERGENCE):
 //   EMERGE_FLOOR   = 128/256 (BODY_SIZE_SCALE) — ≥50% of the live population multicellular.
 //   MARGIN         = 2x — frac(WITH) must beat BOTH controls (ablation, channel-isolation) by ≥ this.
 //   SEED_MAJORITY  = 3/5 — the regime must sustain across at least 3 of 5 seeds.
 //   POP_FLOOR      = 10 — drift-confound guard: a tick counts toward the late-window mean only when
 //                    live population ≥ POP_FLOOR (an extinct run is NOT "reverted to unicellular").
-//   Sweep          = bite_shift ∈ {3, 2, 1, 0}, at a FIXED refuge_k=128 (D-4 #281: round-2 showed
-//                    refuge_k inert at the swept values, so it is fixed here at its strongest, and
-//                    DRIVER STRENGTH — the bite — is the swept axis instead) and driver_config's
-//                    default c_coord.
+//   Sweep          = base_hazard ∈ {10, 20, 30, 45} (D-5 #285: hazard mode replaces CombatSplit;
+//                    base_hazard is the per-tick drain, attenuated by size-refuge. Sweep brackets
+//                    viable→collapse: base_hazard=10 is viable without collapse, =45 approaches
+//                    collapse; fixed refuge_k=FIXED_REFUGE_K_HAZARD and driver_config's default c_coord).
 //   Window         = mean over the last min(ticks, 1000) ticks (sustained, not a single snapshot).
 //
-// EMERGENCE iff ∃ bite_shift where frac(WITH) ≥ EMERGE_FLOOR AND frac(WITH) ≥ MARGIN·frac(ABLATION)
+// EMERGENCE iff ∃ base_hazard where frac(WITH) ≥ EMERGE_FLOOR AND frac(WITH) ≥ MARGIN·frac(ABLATION)
 // AND frac(WITH) ≥ MARGIN·frac(CHANNEL-ISOLATION), sustained in ≥ SEED_MAJORITY of 5 seeds. Else
 // NULL — report which sub-condition failed, from the printed regime map.
 //
-// Three arms per (seed, bite_shift):
-//   WITH                predation ON + size-refuge ON at FIXED_REFUGE_K, bite_shift=bs (hypothesis)
+// Three arms per (seed, base_hazard):
+//   WITH                hazard mode + size-refuge ON at FIXED_REFUGE_K_HAZARD, base_hazard=bh (hypothesis)
 //   ABLATION-predators  predation OFF entirely                                    (Boraas control)
-//   CHANNEL-ISOLATION   predation ON, refuge_k=0, bite_shift=bs (refuge off, same bite strength as
-//                       WITH)                                              (anti-subsidy control)
-// ABLATION doesn't depend on bite_shift (no predation at all) — computed once per seed and reused
-// across the sweep. CHANNEL-ISOLATION must track WITH's bite_shift (same predation strength, only
-// refuge differs) to isolate the refuge's own effect rather than confounding two varying knobs — so
-// it is recomputed per sweep value.
+//   CHANNEL-ISOLATION   hazard mode, refuge_k=0 (refuge off, same base_hazard as WITH),
+//                       body-independent drain → selective effect isolated (anti-subsidy control)
+// ABLATION doesn't depend on base_hazard (no predation at all) — computed once per seed and reused
+// across the sweep. CHANNEL-ISOLATION must track WITH's base_hazard (same drain, only refuge differs)
+// to isolate the refuge's own effect rather than confounding two varying knobs — so it is recomputed
+// per sweep value.
+//
+// Intermediate-persistence readout (informational): late-window mean body size and drift-flatness
+// (|mean(2nd half) - mean(1st half)| < epsilon) — verifies whether size is stable (selection) or
+// drifting.
 //
 // Configure horizon via env var DRIVER_EMERGENCE_TICKS (default 400 for fast local iteration; cloud
 // dispatch uses 8000 — see scripts/sim-run.sh driver-emergence).
@@ -263,19 +267,20 @@ const EMERGE_FLOOR: i64 = 128; // ×BODY_SIZE_SCALE(256) == 50%
 const MARGIN: i64 = 2;
 const SEED_MAJORITY: usize = 3;
 const POP_FLOOR: i64 = 10;
-/// D-4 (#281): refuge_k fixed at the strongest value from the round-2 sweep — round-2 showed
-/// refuge_k inert, so this sweep searches driver STRENGTH (bite_shift) instead.
-const FIXED_REFUGE_K: i32 = 128;
-const BITE_SHIFT_SWEEP: [u32; 4] = [3, 2, 1, 0];
+/// D-5 (#286): refuge_k fixed for hazard-refuge mode — per-entity size-dependent drain attenuation.
+const FIXED_REFUGE_K_HAZARD: i32 = 128;
+/// D-5 (#286): base_hazard sweep bracketing viable→collapse. Calibration: base_hazard=10 is viable,
+/// =50 is collapse; sweep [10,20,30,45] probes the selective band.
+const BASE_HAZARD_SWEEP: [i64; 4] = [10, 20, 30, 45];
 const VERDICT_SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
 
 /// Result of one driver_config arm run: the mean `multicellular_frac` over the valid (pop≥POP_FLOOR)
-/// late-window ticks, the mean population (informational), and whether the run ever collapsed below
-/// POP_FLOOR in the window (extinction — not a measurable multicellular_frac, distinct from reverting
-/// to unicellular dominance).
+/// late-window ticks, the mean population, the mean body size, and whether the run ever collapsed.
 struct ArmResult {
     frac: i64,
     mean_pop: f64,
+    mean_body_size: f64,
+    body_size_drift: f64, // |mean(2nd half) - mean(1st half)| of body size in window
     collapsed: bool,
 }
 
@@ -285,7 +290,7 @@ fn run_driver_arm(
     window_start: u64,
     predators_on: bool,
     refuge_k: i32,
-    bite_shift: u32,
+    base_hazard: i64,
 ) -> ArmResult {
     let mut cfg = driver_config(seed);
     if !predators_on {
@@ -296,7 +301,9 @@ fn run_driver_arm(
             .predation
             .as_mut()
             .expect("driver_config always configures predation");
-        spec.bite_shift = bite_shift;
+        // D-5: switch to Hazard mode and set base_hazard + refuge_k (gated to mode=Hazard).
+        spec.mode = sim_core::PredationMode::Hazard;
+        spec.base_hazard = base_hazard;
         spec
             .size_refuge
             .as_mut()
@@ -308,28 +315,70 @@ fn run_driver_arm(
     let mut valid_ticks: i64 = 0;
     let mut pop_sum: i64 = 0;
     let mut pop_ticks: i64 = 0;
+    let mut body_size_sum: f64 = 0.0;
+    let mut body_size_ticks: usize = 0;
+    // Split the window into halves for drift calculation.
+    let window_len = (ticks - window_start) as usize;
+    let mut body_size_first_half: Vec<f64> = Vec::new();
+    let mut body_size_second_half: Vec<f64> = Vec::new();
+    let mid_point = window_start + (window_len as u64 / 2);
+
     for t in 0..ticks {
         sim.step();
         if t >= window_start {
             let tel = sim.telemetry();
             pop_sum += tel.population;
             pop_ticks += 1;
+            // Accumulate body size stats (informational, even if collapsed).
+            let body_size = tel.mean_body_size as f64;
+            if t < mid_point {
+                body_size_first_half.push(body_size);
+            } else {
+                body_size_second_half.push(body_size);
+            }
             if tel.population >= POP_FLOOR {
                 frac_sum += tel.multicellular_frac;
                 valid_ticks += 1;
+                body_size_sum += body_size;
+                body_size_ticks += 1;
             }
         }
     }
     let mean_pop = if pop_ticks > 0 { pop_sum as f64 / pop_ticks as f64 } else { 0.0 };
-    if valid_ticks == 0 {
-        ArmResult { frac: 0, mean_pop, collapsed: true }
+    let mean_body_size =
+        if body_size_ticks > 0 { body_size_sum / body_size_ticks as f64 } else { 0.0 };
+
+    // Compute drift: |mean(2nd half) - mean(1st half)|.
+    let drift = if !body_size_first_half.is_empty() && !body_size_second_half.is_empty() {
+        let mean_first = body_size_first_half.iter().sum::<f64>() / body_size_first_half.len() as f64;
+        let mean_second =
+            body_size_second_half.iter().sum::<f64>() / body_size_second_half.len() as f64;
+        (mean_second - mean_first).abs()
     } else {
-        ArmResult { frac: frac_sum / valid_ticks, mean_pop, collapsed: false }
+        0.0
+    };
+
+    if valid_ticks == 0 {
+        ArmResult {
+            frac: 0,
+            mean_pop,
+            mean_body_size,
+            body_size_drift: drift,
+            collapsed: true,
+        }
+    } else {
+        ArmResult {
+            frac: frac_sum / valid_ticks,
+            mean_pop,
+            mean_body_size,
+            body_size_drift: drift,
+            collapsed: false,
+        }
     }
 }
 
-/// D-4 (#281) emergence verdict: under universal size-predation, does multicellularity EMERGE as a
-/// refuge-specific mechanism (channel-isolation control) or as a generic predation side-effect?
+/// D-5 (#286) emergence verdict: under hazard-refuge predation, does multicellularity EMERGE as a
+/// size-defense mechanism (refuge-specific) or as a generic predation side-effect?
 /// Heavy (3 arms × 4-way sweep × 5 seeds × long horizon) — `#[ignore]`d in CI; run explicitly
 /// via the `driver-emergence` sim-run scenario.
 #[test]
@@ -342,43 +391,43 @@ fn driver_emergence_verdict() {
     let window_len = ticks.min(1000);
     let window_start = ticks - window_len;
 
-    println!("\nD-4 (#281) emergence verdict: multicellularity under universal size-predation (Boraas/Ratcliff)");
+    println!("\nD-5 (#286) emergence verdict: multicellularity under hazard-refuge predation (Boraas/Ratcliff)");
     println!(
         "PRE-DECLARED: EMERGE_FLOOR={:.0}%, MARGIN={MARGIN}x, SEED_MAJORITY={SEED_MAJORITY}/5, POP_FLOOR={POP_FLOOR}",
         EMERGE_FLOOR as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0
     );
     println!(
-        "ticks={ticks}  late-window=[{window_start},{ticks}]  fixed refuge_k={FIXED_REFUGE_K}  bite_shift sweep={:?}",
-        BITE_SHIFT_SWEEP
+        "ticks={ticks}  late-window=[{window_start},{ticks}]  fixed refuge_k={FIXED_REFUGE_K_HAZARD}  base_hazard sweep={:?}",
+        BASE_HAZARD_SWEEP
     );
 
-    // ABLATION-predators doesn't depend on bite_shift (no predation at all) — compute once per seed.
+    // ABLATION-predators doesn't depend on base_hazard (no predation at all) — compute once per seed.
     let ablation: Vec<ArmResult> = VERDICT_SEEDS
         .iter()
         .map(|&seed| run_driver_arm(seed, ticks, window_start, false, 0, 0))
         .collect();
 
     let mut any_regime_emerges = false;
-    let mut best_bs = BITE_SHIFT_SWEEP[0];
+    let mut best_bh = BASE_HAZARD_SWEEP[0];
     let mut best_count = 0usize;
     // Track which sub-conditions failed in the best regime (for honest NULL diagnosis)
     let mut best_floor_fails = 0usize;
     let mut best_abl_fails = 0usize;
     let mut best_ciso_fails = 0usize;
 
-    for &bs in &BITE_SHIFT_SWEEP {
+    for &bh in &BASE_HAZARD_SWEEP {
         println!("{}", "-".repeat(78));
-        println!("bite_shift={bs}");
+        println!("base_hazard={bh}");
         println!(
-            "{:<6} {:>12} {:>12} {:>12} {:>10} {:>10}",
-            "seed", "WITH%", "ablation%", "chan-iso%", "with-pop", "result"
+            "{:<6} {:>12} {:>12} {:>12} {:>10} {:>11} {:>8}",
+            "seed", "WITH%", "ablation%", "chan-iso%", "size", "drift", "result"
         );
 
-        // CHANNEL-ISOLATION matches this bite_shift (same predation strength as WITH, refuge off)
+        // CHANNEL-ISOLATION matches this base_hazard (same drain, only refuge differs)
         // so the control isolates the refuge's effect, not a confound of two varying knobs.
         let channel_iso: Vec<ArmResult> = VERDICT_SEEDS
             .iter()
-            .map(|&seed| run_driver_arm(seed, ticks, window_start, true, 0, bs))
+            .map(|&seed| run_driver_arm(seed, ticks, window_start, true, 0, bh))
             .collect();
 
         let mut seed_pass_count = 0usize;
@@ -387,7 +436,7 @@ fn driver_emergence_verdict() {
         let mut bs_ciso_fails = 0usize;
 
         for (i, &seed) in VERDICT_SEEDS.iter().enumerate() {
-            let with = run_driver_arm(seed, ticks, window_start, true, FIXED_REFUGE_K, bs);
+            let with = run_driver_arm(seed, ticks, window_start, true, FIXED_REFUGE_K_HAZARD, bh);
             let abl = &ablation[i];
             let ciso = &channel_iso[i];
 
@@ -421,16 +470,24 @@ fn driver_emergence_verdict() {
             } else {
                 "fail"
             };
+            // Intermediate-persistence readout: body size range (1, <0.9·MAX_CELLS=29) and drift-flat check (drift < 0.5).
+            let size_in_range = with.mean_body_size > 1.0 && with.mean_body_size < 0.9 * 32.0; // MAX_CELLS=32
+            let drift_flat = with.body_size_drift < 0.5;
+            let persist_note = if size_in_range && drift_flat { "✓" } else { "·" };
             println!(
-                "{:<6} {:>11.1}% {:>11.1}% {:>11.1}% {:>10.1} {:>10}",
-                seed, with_pct, abl_pct, ciso_pct, with.mean_pop, tag
+                "{:<6} {:>11.1}% {:>11.1}% {:>11.1}% {:>9.1} {:>7.2} {:>8}",
+                seed, with_pct, abl_pct, ciso_pct, with.mean_body_size, with.body_size_drift, tag
             );
+            if !persist_note.eq("✓") && !with.collapsed {
+                println!("       (body_size={:.1} in (1,29)? {}, drift={:.2} <0.5? {})",
+                    with.mean_body_size, size_in_range, with.body_size_drift, drift_flat);
+            }
         }
 
         println!("  seeds passing all 3 conditions: {seed_pass_count}/5 (need ≥{SEED_MAJORITY})");
         if seed_pass_count > best_count {
             best_count = seed_pass_count;
-            best_bs = bs;
+            best_bh = bh;
             best_floor_fails = bs_floor_fails;
             best_abl_fails = bs_abl_fails;
             best_ciso_fails = bs_ciso_fails;
@@ -445,28 +502,28 @@ fn driver_emergence_verdict() {
     if any_regime_emerges {
         println!("DRIVER-EMERGENCE VERDICT: EMERGENCE");
         println!(
-            "  A bite_shift regime (at fixed refuge_k={FIXED_REFUGE_K}) sustains multicellular_frac \u{2265}{EMERGE_FLOOR}/256 and \u{2265}{MARGIN}x both"
+            "  A base_hazard regime (at fixed refuge_k={FIXED_REFUGE_K_HAZARD}) sustains multicellular_frac \u{2265}{EMERGE_FLOOR}/256 and \u{2265}{MARGIN}x both"
         );
         println!("  the predator-ablation and channel-isolation controls, in \u{2265}{SEED_MAJORITY}/5 seeds.");
-        println!("  Best regime: bite_shift={best_bs} ({best_count}/5 seeds).");
-        println!("  Size-refuge under predation is a genuine driver of multicellularity (Boraas/Ratcliff),");
+        println!("  Best regime: base_hazard={best_bh} ({best_count}/5 seeds).");
+        println!("  Size-refuge under hazard-draining predation is a genuine driver of multicellularity (Boraas/Ratcliff),");
         println!("  not a generic predation subsidy — the channel-isolation control rules that out.");
     } else {
-        println!("DRIVER-EMERGENCE VERDICT: NULL — no bite_shift regime reached SEED_MAJORITY={SEED_MAJORITY}/5.");
-        println!("  Closest regime: bite_shift={best_bs} ({best_count}/5 seeds passing all 3 conditions), fixed refuge_k={FIXED_REFUGE_K}.");
+        println!("DRIVER-EMERGENCE VERDICT: NULL — no base_hazard regime reached SEED_MAJORITY={SEED_MAJORITY}/5.");
+        println!("  Closest regime: base_hazard={best_bh} ({best_count}/5 seeds passing all 3 conditions), fixed refuge_k={FIXED_REFUGE_K_HAZARD}.");
 
         // Distinguish the failure mode: absolute emergence vs. channel-specificity
         if best_floor_fails > 0 {
-            println!("  ✗ Sub-condition failures in best regime (bite_shift={best_bs}):");
+            println!("  ✗ Sub-condition failures in best regime (base_hazard={best_bh}):");
             println!("    - Absolute emergence floor (WITH ≥ {:.0}%): {}/{} seeds failed",
                 EMERGE_FLOOR as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0,
                 best_floor_fails, 5);
             println!("    - vs-ablation margin (WITH ≥ {MARGIN}×ablation): {}/{} seeds failed", best_abl_fails, 5);
-            println!("  Interpretation: multicellularity does not EMERGE sufficiently under universal");
-            println!("  size-predation (WITH stays <{:.0}% or <{MARGIN}×predator-off baseline).",
+            println!("  Interpretation: multicellularity does not EMERGE sufficiently under hazard-refuge");
+            println!("  predation (WITH stays <{:.0}% or <{MARGIN}×predator-off baseline).",
                 EMERGE_FLOOR as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0);
         } else if best_abl_fails > 0 {
-            println!("  ✗ Sub-condition failures in best regime (bite_shift={best_bs}):");
+            println!("  ✗ Sub-condition failures in best regime (base_hazard={best_bh}):");
             println!("    - vs-ablation margin (WITH ≥ {MARGIN}×ablation): {}/{} seeds failed", best_abl_fails, 5);
             println!("  Interpretation: multicellularity effect is NOT specific to predation");
             println!("  (WITH ≤ {MARGIN}×ablation, similar to predator-off baseline).");
@@ -479,36 +536,35 @@ fn driver_emergence_verdict() {
             println!("    - WITH ≥ {MARGIN}×ablation: {}/{} seeds passed (vs predator-off)", 5 - best_abl_fails, 5);
             println!("    - WITH ≥ {MARGIN}×channel-iso: {}/{} seeds FAILED", best_ciso_fails, 5);
             println!();
-            println!("  The multicellularity transition EMERGES when predators are on (WITH ≈ {:.0}%),",
+            println!("  The multicellularity transition EMERGES when hazard-draining predators are on (WITH ≈ {:.0}%),",
                 EMERGE_FLOOR as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0);
             println!("  and the effect is specific vs. predator-ablation (Boraas control). HOWEVER,");
             println!("  it is NOT specific to size-refuge: WITH ≥ {MARGIN}×channel-iso FAILS, meaning");
             println!("  multicellularity also reaches {:.0}% when refuge is DISABLED (refuge_k=0),",
                 EMERGE_FLOOR as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0);
-            println!("  same bite strength. Under the universal predation model, this indicates the");
-            println!("  transition is driven by universal body<-ordering (predation favours larger");
-            println!("  bodies in general), NOT by the refuge-specific size-protection mechanism.");
+            println!("  same hazard drain. Under the hazard-refuge model, this indicates the");
+            println!("  transition is driven by hazard per se (predation favours larger");
+            println!("  bodies in general via refuge), NOT exclusively by the size-refuge mechanism.");
             println!();
-            println!("  FLAG: Channel-isolation control (refuge_k=0) under universal predation does");
-            println!("  NOT cleanly isolate the refuge-channel — universal body-ordering remains");
-            println!("  active, confounding the specificity test. Refuge-mechanism hypothesis is");
-            println!("  INVALIDATED under current universal predation model. A research-informed");
-            println!("  redesign of the control is needed (separate workstream).");
+            println!("  FLAG: Channel-isolation control (refuge_k=0) under hazard mode DOES isolate");
+            println!("  the refuge channel — hazard still acts, but body-independent (no refuge).");
+            println!("  The failure to reach SEED_MAJORITY on channel-iso suggests size-refuge is");
+            println!("  not the sole driver, or prevalence/parameters need further tuning.");
         } else {
             println!("  See the regime map above for which sub-condition (floor / vs-ablation margin /");
             println!("  vs-channel-isolation margin) failed per seed \u{2014} an honest informative finding, not");
-            println!("  tuned to pass.");
+            println!("  tuned to pass. D-5 verdict: hazard prevalence is the next probe (out of scope).");
         }
     }
 }
 
-/// `v5_verdict_sweeps_bite_shift` (#278, D-4 #281): fast, NOT `#[ignore]`d liveness check that the
-/// sweep infra (`run_driver_arm`) genuinely varies with `bite_shift` at a fixed `refuge_k` and runs
-/// to completion without panicking — the actual 8000-tick verdict is `driver_emergence_verdict`
-/// (heavy, `#[ignore]`d, dispatched via `scripts/sim-run.sh driver-emergence`). This just proves
-/// the extended sweep compiles, runs, and its stats are readable (a short regime-map slice).
+/// D-5 (#286) smoke test: fast, NOT `#[ignore]`d liveness check that the base_hazard sweep infra
+/// (`run_driver_arm`) compiles, runs, and stats are readable. Verifies the sweep produces DISTINCT
+/// regimes (not identical as they were when incorrectly swept over bite_shift in D-4). The actual
+/// 8000-tick verdict is `driver_emergence_verdict` (heavy, `#[ignore]`d, dispatched via
+/// `scripts/sim-run.sh driver-emergence`).
 #[test]
-fn v5_verdict_sweeps_bite_shift() {
+fn d5_verdict_sweeps_base_hazard() {
     if cfg!(debug_assertions) {
         return;
     }
@@ -516,13 +572,26 @@ fn v5_verdict_sweeps_bite_shift() {
     const WINDOW_START: u64 = 100;
     let seed = VERDICT_SEEDS[0];
 
-    println!("v5_verdict_sweeps_bite_shift smoke (ticks={TICKS}, fixed refuge_k={FIXED_REFUGE_K}):");
-    for &bs in &BITE_SHIFT_SWEEP {
-        let with = run_driver_arm(seed, TICKS, WINDOW_START, true, FIXED_REFUGE_K, bs);
+    println!("D-5 (#286) base_hazard sweep smoke (ticks={TICKS}, fixed refuge_k={FIXED_REFUGE_K_HAZARD}):");
+    let mut last_frac: Option<i64> = None;
+    let mut distinct_count = 0;
+    for &bh in &BASE_HAZARD_SWEEP {
+        let with = run_driver_arm(seed, TICKS, WINDOW_START, true, FIXED_REFUGE_K_HAZARD, bh);
         println!(
-            "  bite_shift={bs}: frac={} mean_pop={:.1} collapsed={}",
-            with.frac, with.mean_pop, with.collapsed
+            "  base_hazard={bh}: frac={} mean_pop={:.1} size={:.1} collapsed={}",
+            with.frac, with.mean_pop, with.mean_body_size, with.collapsed
         );
-        assert!(with.mean_pop >= 0.0, "bite_shift={bs} produced a nonsensical negative mean_pop");
+        assert!(with.mean_pop >= 0.0, "base_hazard={bh} produced a nonsensical negative mean_pop");
+        // Verify that sweep produces distinct regimes (not identi cal across all values).
+        if let Some(prev) = last_frac {
+            if with.frac != prev {
+                distinct_count += 1;
+            }
+        }
+        last_frac = Some(with.frac);
     }
+    assert!(
+        distinct_count > 0,
+        "base_hazard sweep must produce at least one distinct regime (not all identical)"
+    );
 }
