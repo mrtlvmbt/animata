@@ -275,6 +275,13 @@ const FIXED_REFUGE_K_HAZARD: i32 = 128;
 const BASE_HAZARD_SWEEP: [i64; 4] = [10, 20, 30, 45];
 const VERDICT_SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
 
+/// D-5 (#290): Extended robustness-probe at base_hazard=10 (the passing regime). Seeds beyond the
+/// 5-seed verdict gate (VERDICT_SEEDS), for informational robustness readout. The main verdict GATE
+/// remains on VERDICT_SEEDS with SEED_MAJORITY=3/5 (never touched). This extended set is a separate
+/// robustness measurement, not a re-gating of the verdict.
+const EXTENDED_ROBUSTNESS_SEEDS: [u64; 15] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+const EXTENDED_ROBUSTNESS_BASE_HAZARD: i64 = 10; // robustness-probe at the verified passing regime
+
 /// Intermediate-persistence readout thresholds (#288): expressed in cell counts.
 /// BODY_SIZE_INTERMEDIATE_MIN = 1 cell (below: unicellular refuge).
 /// BODY_SIZE_INTERMEDIATE_MAX = 0.9 * MAX_CELLS ≈ 28.8 cells (intermediate-multicellular range).
@@ -570,6 +577,71 @@ fn driver_emergence_verdict() {
             println!("  tuned to pass. D-5 verdict: hazard prevalence is the next probe (out of scope).");
         }
     }
+
+    // ── D-5 (#290) Extended robustness-probe @ base_hazard=10 ─────────────────────────────────
+    // INFORMATIONAL ONLY: extended seed-set (10-15 seeds) to measure robustness of the passing regime.
+    // The verdict GATE (VERDICT_SEEDS, SEED_MAJORITY=3/5) is NOT re-gated; this is a separate measurement.
+    println!();
+    println!("{}", "=".repeat(78));
+    println!("D-5 (#290) EXTENDED ROBUSTNESS-PROBE @ base_hazard={EXTENDED_ROBUSTNESS_BASE_HAZARD}");
+    println!("(informational; verdict gate remains on VERDICT_SEEDS={:?}, SEED_MAJORITY={SEED_MAJORITY}/5)",
+        VERDICT_SEEDS);
+    println!("{}", "=".repeat(78));
+
+    // Ablation is the same for extended seeds (predators off, base_hazard irrelevant).
+    let ablation_extended: Vec<ArmResult> = EXTENDED_ROBUSTNESS_SEEDS
+        .iter()
+        .map(|&seed| run_driver_arm(seed, ticks, window_start, false, 0, 0))
+        .collect();
+
+    // Channel-isolation at EXTENDED_ROBUSTNESS_BASE_HAZARD.
+    let channel_iso_extended: Vec<ArmResult> = EXTENDED_ROBUSTNESS_SEEDS
+        .iter()
+        .map(|&seed| run_driver_arm(seed, ticks, window_start, true, 0, EXTENDED_ROBUSTNESS_BASE_HAZARD))
+        .collect();
+
+    println!(
+        "{:<6} {:>12} {:>12} {:>12} {:>10} {:>11} {:>8}",
+        "seed", "WITH%", "ablation%", "chan-iso%", "size", "drift", "result"
+    );
+
+    let mut robustness_pass_count = 0usize;
+    for (i, &seed) in EXTENDED_ROBUSTNESS_SEEDS.iter().enumerate() {
+        let with = run_driver_arm(seed, ticks, window_start, true, FIXED_REFUGE_K_HAZARD, EXTENDED_ROBUSTNESS_BASE_HAZARD);
+        let abl = &ablation_extended[i];
+        let ciso = &channel_iso_extended[i];
+
+        let floor_ok = !with.collapsed && with.frac >= EMERGE_FLOOR;
+        let margin_abl_ok = !with.collapsed && !abl.collapsed && with.frac >= MARGIN * abl.frac;
+        let margin_ciso_ok = !with.collapsed && !ciso.collapsed && with.frac >= MARGIN * ciso.frac;
+        let pass = floor_ok && margin_abl_ok && margin_ciso_ok;
+        if pass {
+            robustness_pass_count += 1;
+        }
+
+        let with_pct = with.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+        let abl_pct = abl.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+        let ciso_pct = ciso.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+        let tag = if with.collapsed {
+            "COLLAPSED"
+        } else if pass {
+            "PASS"
+        } else {
+            "fail"
+        };
+        let body_size_cells = with.mean_body_size / sim_core::BODY_SIZE_SCALE as f64;
+        let drift_cells = with.body_size_drift / sim_core::BODY_SIZE_SCALE as f64;
+
+        println!(
+            "{:<6} {:>11.1}% {:>11.1}% {:>11.1}% {:>9.1} {:>7.2} {:>8}",
+            seed, with_pct, abl_pct, ciso_pct, body_size_cells, drift_cells, tag
+        );
+    }
+
+    println!();
+    println!("robustness @ base_hazard={EXTENDED_ROBUSTNESS_BASE_HAZARD}: {robustness_pass_count}/{} seeds pass all 3 conditions",
+        EXTENDED_ROBUSTNESS_SEEDS.len());
+    println!("  (verdict gate: VERDICT_SEEDS, SEED_MAJORITY={SEED_MAJORITY}/5 — UNCHANGED)");
 }
 
 /// D-5 (#286) smoke test: fast, NOT `#[ignore]`d liveness check that the base_hazard sweep infra
