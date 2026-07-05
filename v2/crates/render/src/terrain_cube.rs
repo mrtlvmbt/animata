@@ -10,7 +10,7 @@
 //! Same `ROWS_PER_CHUNK` chunking + u16-index assert as hex terrain (`terrain.rs`).
 //! Built ONCE at startup — cold terrain immutable for the run.
 
-use crate::biome_palette::{biome_color, cliff_shade};
+use crate::biome_palette::{biome_color, cliff_shade, apply_directional_shading};
 use crate::hex::HEIGHT_SCALE;
 use crate::terrain::TerrainChunk;
 use macroquad::models::{Mesh, Vertex};
@@ -101,10 +101,11 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
             let z1 = world_row1 as f32;
 
             let base = vertices.len() as u16;
-            vertices.push(vertex(Vec3::new(x0, h, z0), color)); // TL
-            vertices.push(vertex(Vec3::new(x1, h, z0), color)); // TR
-            vertices.push(vertex(Vec3::new(x1, h, z1), color)); // BR
-            vertices.push(vertex(Vec3::new(x0, h, z1), color)); // BL
+            let top_normal = Vec3::new(0.0, 1.0, 0.0); // Top face normal (pointing up)
+            vertices.push(vertex(Vec3::new(x0, h, z0), color, top_normal)); // TL
+            vertices.push(vertex(Vec3::new(x1, h, z0), color, top_normal)); // TR
+            vertices.push(vertex(Vec3::new(x1, h, z1), color, top_normal)); // BR
+            vertices.push(vertex(Vec3::new(x0, h, z1), color, top_normal)); // BL
             indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
@@ -147,29 +148,33 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
             // Edge 3 (South, z = cz + size): from (cx-size, h, cz+size) to (cx+size, h, cz+size)
 
             let edge_configs = [
-                // West edge (x = cx - size)
+                // West edge (x = cx - size, normal = (-1, 0, 0))
                 (
                     Vec3::new(cx - size, h, cz - size), // top_a (TL)
                     Vec3::new(cx - size, h, cz + size), // top_b (BL)
+                    Vec3::new(-1.0, 0.0, 0.0), // normal
                 ),
-                // East edge (x = cx + size)
+                // East edge (x = cx + size, normal = (1, 0, 0))
                 (
                     Vec3::new(cx + size, h, cz + size), // top_a (BR)
                     Vec3::new(cx + size, h, cz - size), // top_b (TR)
+                    Vec3::new(1.0, 0.0, 0.0), // normal
                 ),
-                // North edge (z = cz - size)
+                // North edge (z = cz - size, normal = (0, 0, -1))
                 (
                     Vec3::new(cx + size, h, cz - size), // top_a (TR)
                     Vec3::new(cx - size, h, cz - size), // top_b (TL)
+                    Vec3::new(0.0, 0.0, -1.0), // normal
                 ),
-                // South edge (z = cz + size)
+                // South edge (z = cz + size, normal = (0, 0, 1))
                 (
                     Vec3::new(cx - size, h, cz + size), // top_a (BL)
                     Vec3::new(cx + size, h, cz + size), // top_b (BR)
+                    Vec3::new(0.0, 0.0, 1.0), // normal
                 ),
             ];
 
-            for (edge_idx, &(top_a, top_b)) in edge_configs.iter().enumerate() {
+            for (edge_idx, &(top_a, top_b, edge_normal)) in edge_configs.iter().enumerate() {
                 let (ncol, nrow) = neighbors[edge_idx];
                 let nh = if (0..world_dim).contains(&ncol) && (0..world_dim).contains(&nrow) {
                     world.height(ncol, nrow) as f32 * HEIGHT_SCALE
@@ -186,10 +191,10 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
                 let bot_b = Vec3::new(top_b.x, nh, top_b.z);
 
                 let cbase = vertices.len() as u16;
-                vertices.push(vertex(top_a, cliff_color));
-                vertices.push(vertex(top_b, cliff_color));
-                vertices.push(vertex(bot_b, cliff_color));
-                vertices.push(vertex(bot_a, cliff_color));
+                vertices.push(vertex(top_a, cliff_color, edge_normal));
+                vertices.push(vertex(top_b, cliff_color, edge_normal));
+                vertices.push(vertex(bot_b, cliff_color, edge_normal));
+                vertices.push(vertex(bot_a, cliff_color, edge_normal));
                 // Two triangles: (0,1,2), (0,2,3)
                 indices.extend_from_slice(&[cbase, cbase + 1, cbase + 2, cbase, cbase + 2, cbase + 3]);
             }
@@ -222,8 +227,11 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
     TerrainChunk { mesh: Mesh { vertices, indices, texture: None }, bounds }
 }
 
-fn vertex(position: Vec3, color: Color) -> Vertex {
-    Vertex { position, uv: Vec2::ZERO, color: color.into(), normal: Vec4::ZERO }
+/// Create a vertex with directional shading applied based on the face normal.
+/// The normal MUST be normalized.
+fn vertex(position: Vec3, color: Color, normal: Vec3) -> Vertex {
+    let shaded_color = apply_directional_shading(color, normal);
+    Vertex { position, uv: Vec2::ZERO, color: shaded_color.into(), normal: Vec4::ZERO }
 }
 
 #[cfg(test)]

@@ -8,11 +8,12 @@
 //!
 //! R-3: Each chunk carries a world-space AABB for frustum culling.
 
-use crate::biome_palette::{biome_color, cliff_shade};
+use crate::biome_palette::{biome_color, cliff_shade, apply_directional_shading};
 use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE};
 use macroquad::models::{Mesh, Vertex};
 use macroquad::prelude::*;
 use sim_core::{Vec2Fixed, WorldView};
+use std::f32::consts::PI;
 
 const ROWS_PER_CHUNK: i64 = 8;
 
@@ -47,8 +48,9 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
 
             // Top face: 6 corners, fan-triangulated from corner 0 (4 triangles, 6 unique verts).
             let base = vertices.len() as u16;
+            let top_normal = Vec3::new(0.0, 1.0, 0.0); // Top face normal (pointing up)
             for k in 0..6 {
-                vertices.push(vertex(hex_corner(cx, cz, h, k), top_color));
+                vertices.push(vertex(hex_corner(cx, cz, h, k), top_color, top_normal));
             }
             for k in 1..5u16 {
                 indices.extend_from_slice(&[base, base + k, base + k + 1]);
@@ -72,11 +74,12 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
                 let top_b = hex_corner(cx, cz, h, (edge + 1) % 6);
                 let bot_a = Vec3::new(top_a.x, nh, top_a.z);
                 let bot_b = Vec3::new(top_b.x, nh, top_b.z);
+                let cliff_normal = hex_cliff_normal(dir_i);
                 let cbase = vertices.len() as u16;
-                vertices.push(vertex(top_a, cliff_color));
-                vertices.push(vertex(top_b, cliff_color));
-                vertices.push(vertex(bot_b, cliff_color));
-                vertices.push(vertex(bot_a, cliff_color));
+                vertices.push(vertex(top_a, cliff_color, cliff_normal));
+                vertices.push(vertex(top_b, cliff_color, cliff_normal));
+                vertices.push(vertex(bot_b, cliff_color, cliff_normal));
+                vertices.push(vertex(bot_a, cliff_color, cliff_normal));
                 indices.extend_from_slice(&[cbase, cbase + 1, cbase + 2, cbase, cbase + 2, cbase + 3]);
             }
         }
@@ -108,6 +111,18 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
     TerrainChunk { mesh: Mesh { vertices, indices, texture: None }, bounds }
 }
 
-fn vertex(position: Vec3, color: Color) -> Vertex {
-    Vertex { position, uv: Vec2::ZERO, color: color.into(), normal: Vec4::ZERO }
+/// Compute the outward cliff normal for a hex edge given the direction index.
+/// The normal points outward in the XZ plane (perpendicular to the cliff edge).
+/// For a flat-top hex, direction i's edge midpoint is at angle `60*i° + 30°`.
+fn hex_cliff_normal(dir_index: usize) -> Vec3 {
+    // Edge midpoint angle for direction i is `60*i° + 30°`
+    let angle = PI / 3.0 * dir_index as f32 + PI / 6.0;
+    Vec3::new(angle.cos(), 0.0, angle.sin())
+}
+
+/// Create a vertex with directional shading applied based on the face normal.
+/// The normal MUST be normalized.
+fn vertex(position: Vec3, color: Color, normal: Vec3) -> Vertex {
+    let shaded_color = apply_directional_shading(color, normal);
+    Vertex { position, uv: Vec2::ZERO, color: shaded_color.into(), normal: Vec4::ZERO }
 }
