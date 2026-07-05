@@ -357,6 +357,10 @@ const DRIVER_EFFICIENCY_NUM: i32 = 160;
 const DRIVER_REFUGE_SHIFT: u32 = 8;
 /// Size-refuge strength — moderate (D-1's `d1_refuge_monotone` fixture value).
 const DRIVER_REFUGE_K: i32 = 2;
+/// D-5: hazard-refuge predation — implicit external predator per-entity drain. Starts at a viability-first
+/// level so the population survives the corridor; the verdict sweep tunes this via `--set base_hazard=…`.
+/// Sweepable via `--set base_hazard=…` (range-checked, clamped at VALUE_MAX).
+const DRIVER_BASE_HAZARD: i64 = 10;
 /// Coordination cost per live body cell per tick — mild, so a small unicell body (N=1) pays about
 /// as much as `base_metab`, while the largest bodies (`MAX_CELLS=32`) pay a real but non-lethal tax.
 const DRIVER_C_COORD: i64 = 1;
@@ -374,7 +378,7 @@ const DRIVER_C_COORD: i64 = 1;
 pub fn driver_config(seed: u64) -> SimConfig {
     let mut cfg = phase2_config(seed);
     cfg.econ.predation = Some(sim_core::PredationSpec {
-        mode: sim_core::PredationMode::Universal,
+        mode: sim_core::PredationMode::Hazard,
         bite_shift: DRIVER_BITE_SHIFT,
         combat_trait_scale: DRIVER_COMBAT_TRAIT_SCALE,
         efficiency_num: DRIVER_EFFICIENCY_NUM,
@@ -382,7 +386,7 @@ pub fn driver_config(seed: u64) -> SimConfig {
             shift: DRIVER_REFUGE_SHIFT,
             refuge_k: DRIVER_REFUGE_K,
         }),
-        base_hazard: 0,  // Hazard mode only; Universal doesn't use this
+        base_hazard: DRIVER_BASE_HAZARD,
     });
     cfg.econ.c_coord = DRIVER_C_COORD;
     // V-4 (#276): the founder starts UNICELLULAR (g_dev=1) and body size is heritable — the
@@ -1006,11 +1010,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "universal/hazard predation requires")]
     fn d4_build_sim_panics_universal_without_body_variation() {
-        // Construct a bad config: mode=Universal but no morphogen or evolve_body_size.
+        // Construct a bad config: mode=Hazard but no morphogen or evolve_body_size.
         let mut cfg = default_config(42);
-        // Ensure predation is configured with mode=Universal
+        // Ensure predation is configured with mode=Hazard
         cfg.econ.predation = Some(sim_core::PredationSpec {
-            mode: sim_core::PredationMode::Universal,
+            mode: sim_core::PredationMode::Hazard,
             bite_shift: 1,
             combat_trait_scale: 0,
             efficiency_num: 160,
