@@ -12,11 +12,22 @@
 //! framing, replaced wholesale (mesh included) once W-6 merges.
 
 use macroquad::color::Color;
+use macroquad::prelude::Vec3;
 
 /// A loud, unmistakable "unmapped biome id" marker (never a plausible terrain hue) — visible at a
 /// glance if `WorldView::biome` ever returns an id beyond the documented `0..=12` range, rather than
 /// silently drawing a wrong-but-plausible terrain color.
 const UNKNOWN: Color = Color::new(1.0, 0.0, 1.0, 1.0);
+
+/// Fixed light direction (normalized): sidelit and from above for volumetric clarity.
+/// This is a unit vector pointing toward the light source.
+const LIGHT_DIR: Vec3 = Vec3::new(0.577, 0.577, 0.577); // (1,1,1) normalized ≈ 60° elevation, sidelit
+
+/// Ambient light contribution (always present, no shadow).
+const AMBIENT: f32 = 0.3;
+
+/// Diffuse light strength (modulated by normal·light_dir).
+const DIFFUSE: f32 = 0.7;
 
 /// `id` → top-face color. `_ => UNKNOWN` is the "no panic" fallback the acceptance criterion asks for.
 pub fn biome_color(id: u8) -> Color {
@@ -43,6 +54,15 @@ pub fn biome_color(id: u8) -> Color {
 /// stepped 3D prisms rather than flat-shaded slabs of one hue.
 pub fn cliff_shade(c: Color) -> Color {
     Color::new(c.r * 0.6, c.g * 0.6, c.b * 0.6, c.a)
+}
+
+/// Apply directional shading to a biome color based on a face normal.
+/// Shading = base_color × clamp(ambient + diffuse·max(0, dot(normal, light_dir)))
+/// The normal MUST be normalized.
+pub fn apply_directional_shading(c: Color, normal: Vec3) -> Color {
+    let dot_nl = (normal.x * LIGHT_DIR.x + normal.y * LIGHT_DIR.y + normal.z * LIGHT_DIR.z).max(0.0);
+    let shade = (AMBIENT + DIFFUSE * dot_nl).min(1.0);
+    Color::new(c.r * shade, c.g * shade, c.b * shade, c.a)
 }
 
 #[cfg(test)]

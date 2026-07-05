@@ -270,6 +270,10 @@ async fn main() {
                             let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
                             draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
                         }
+                        Some(sim_core::CellType::Diff(_)) => {
+                            // Diff: differentiated cell, render as neutral sphere (same as None for now)
+                            draw_sphere(creature_pos, base_size, None, color);
+                        }
                         None => {
                             // Neutral: single sphere (for non-morphogen configs).
                             draw_sphere(creature_pos, base_size, None, color);
