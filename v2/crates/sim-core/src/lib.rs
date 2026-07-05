@@ -1530,7 +1530,7 @@ mod e1_gate_tests {
         assert!(snapshot.life.is_some(), "life stats must be present when population > 0");
 
         let life = snapshot.life.unwrap();
-        assert_eq!(life.population, pop as u64, "life.population must match sim.population()");
+        assert_eq!(life.population, pop as i64, "life.population must match sim.population()");
         assert_eq!(life.avg_energy, avg_e, "life.avg_energy must match sim.avg_energy()");
         assert_eq!(life.avg_biomass, avg_b, "life.avg_biomass must match sim.avg_biomass()");
         assert_eq!(life.species_count, sp_count, "life.species_count must match sim.species_count()");
