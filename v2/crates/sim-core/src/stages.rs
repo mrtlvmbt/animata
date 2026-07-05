@@ -477,23 +477,22 @@ pub fn stage_mineral_feed(
     }
 }
 
-// ── Stage 6c: Predation — deterministic mean-field encounters (P-2a) + D-1 per-prey size-refuge. ───
-// P-2a WIRE: predation-substrate encounters (P-1, conservation-exact, deterministic). Contacts
-// predators and prey within each cell, deterministic entity-id order, energy conservation guaranteed
-// by `resolve_encounter` invariant. No-op when `config.predation` is None.
+// ── Stage 6c: Predation — mode-driven resolution (D-5 hazard, D-4 universal, P-2a combat-split). ────
+// Three modes (D-5 spec.mode enum, type-guaranteed exclusive):
 //
-// D-1 (#268): `&Phenotype` added (read-only) so `resolve_encounter` can read the prey's own body
-// size (`Σ Phenotype.graph.module_cell_count`, clamped ≥1). `spec.size_refuge = None` (every
-// shipped config): the mean-field AGGREGATE path below is UNCHANGED — byte-identical to P-2a.
-// `Some(refuge)`: switches to a PER-PREY path (each prey resolved individually against its own
-// energy + body size, not the pool aggregate) — required because the refuge distinguishes a
-// large-bodied prey from a unicell that a pooled aggregate cannot.
+// **D-5 Hazard:** implicit external predator, per-entity per-tick drain attenuated by body size
+// (refuge-only, no offense). No entity-vs-entity eligibility; per-entity independent (R14 trivial).
+// Top-level branch (owns resolution, no fall-through).
 //
-// Determinism (R14): entity-id single-writer ordering, no RNG, mean-field aggregate prey energy
-// (or per-prey entity-id order under the D-1 refuge gate).
-// Conservation (R15): predator_gain + dissipated == prey_loss ≤ prey energy (exact integer), in
-// both paths (re-proven per-prey by `resolve_encounter`'s own invariant, applied once per prey).
-// Combat trait (P-2a semantic mapping): read from `Genome::combat_trait`, passed via `PredationSpec`.
+// **D-4 Universal:** ubiquitous size-selective predation. All entities are potential predators of
+// strictly-smaller-bodied neighbours in their cell (Boraas mechanism). Top-level branch.
+//
+// **P-2a Combat-split:** predators (combat_trait > 0) vs. prey (≤ 0). Mean-field or per-prey
+// (gated by size_refuge). Default path when neither D-5 nor D-4 is active.
+//
+// Determinism (R14): entity-id single-writer ordering, no RNG, per-entity drain or mean-field
+// aggregate prey energy. Conservation (R15): drain/loss ≤ energy (exact integer), dissipation routed
+// to ledger. No-op when `config.predation` is None (early return).
 pub fn stage_predation(
     econ: Res<EconParams>,
     mut ledger: ResMut<EnergyLedger>,
@@ -508,12 +507,60 @@ pub fn stage_predation(
         None => return,
     };
 
-    use crate::predation::resolve_encounter;
+    use crate::predation::{resolve_encounter, refuge_attenuate, PredationMode};
+
+    // D-5: top-level branch (BEFORE universal and combat-split) for hazard-refuge predation.
+    // Implicit external predator with per-entity per-tick drain, attenuated by body size only.
+    // No entity-vs-entity eligibility; per-entity independent (R14 trivial, R15 exact).
+    // Owns resolution — no fall-through.
+    if spec.mode == PredationMode::Hazard {
+        if spec.base_hazard > 0 && spec.size_refuge.is_some() {
+            let refuge = spec.size_refuge.unwrap();
+            // Collect all entities in entity-id order (R14).
+            let mut entity_list: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _)| (e.to_bits(), e)).collect();
+            entity_list.sort_unstable_by_key(|x| x.0);
+
+            for (_bits, entity) in entity_list {
+                #[cfg(feature = "perf")]
+                { wc.birth_death_iters += 1; }
+
+                // Read entity's energy and body size.
+                let (energy_val, body_size) = match q.get(entity) {
+                    Ok((_, _, energy, _, ph)) => {
+                        let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
+                        (energy.0.max(0), body)
+                    }
+                    Err(_) => continue,
+                };
+
+                if energy_val <= 0 {
+                    continue;
+                }
+
+                // Compute refuge-attenuated drain.
+                let drain = refuge_attenuate(spec.base_hazard, body_size, refuge.shift, refuge.refuge_k);
+                let drain = drain.min(energy_val); // clamp to available energy
+                let actual_drain = drain;
+
+                // Apply drain and route to dissipation.
+                if let Ok((_, _, mut energy, _, _)) = q.get_mut(entity) {
+                    energy.0 -= actual_drain;
+                    if energy.0 <= 0 {
+                        commands.entity(entity).despawn();
+                        ledger.lost += energy.0.max(0); // 0 at death
+                    }
+                }
+                ledger.dissipated += actual_drain;
+            }
+        }
+        // Hazard branch owns resolution — no fall-through to universal or combat-split.
+        return;
+    }
 
     // D-4: top-level branch (BEFORE combat-trait split) for universal predation mode.
-    // When universal=true, ALL entities are potential predators of strictly-smaller-bodied neighbours
+    // When mode=Universal, ALL entities are potential predators of strictly-smaller-bodied neighbours
     // in their cell (Boraas ubiquitous size-selective mechanism).
-    if spec.size_refuge.map_or(false, |r| r.universal) {
+    if spec.mode == PredationMode::Universal {
         // D-4a universal-size cell loop: collect all entities per cell, sort by id, resolve size-based predation.
         // Worst case: O(k²) per field-cell (k = per-cell occupancy). Accepted trade-off F4: the existing
         // perf-corridor (cli/src/lib.rs:449) trips on any O(N²) regression — risk is CI-guarded, not silent.
@@ -1451,10 +1498,12 @@ mod tests {
     #[test]
     fn d1_per_prey_not_aggregate() {
         let spec = PredationSpec {
+            mode: PredationMode::CombatSplit,
             bite_shift: 3,
             combat_trait_scale: 1,
             efficiency_num: 160,
-            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4, universal: false }),
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4 }),
+            base_hazard: 0,
         };
         let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
         let big_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
@@ -1485,10 +1534,12 @@ mod tests {
     #[test]
     fn d1_none_ignores_body_size() {
         let spec = PredationSpec {
+            mode: PredationMode::CombatSplit,
             bite_shift: 3,
             combat_trait_scale: 1,
             efficiency_num: 160,
             size_refuge: None,
+            base_hazard: 0,
         };
         let small = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
         let big = || Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![64]) };
@@ -1528,10 +1579,12 @@ mod tests {
     #[test]
     fn d4_universal_cell_loop_three_bodies() {
         let spec = PredationSpec {
+            mode: PredationMode::Universal,
             bite_shift: 3,
             combat_trait_scale: 0,
             efficiency_num: 160,
-            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2, universal: true }),
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2 }),
+            base_hazard: 0,
         };
 
         // Three peer entities, each role determined by BODY SIZE in spawn order: [1,2,4]
@@ -1607,10 +1660,12 @@ mod tests {
     #[test]
     fn d4_universal_empty_cellgraph_no_predation() {
         let spec = PredationSpec {
+            mode: PredationMode::Universal,
             bite_shift: 3,
             combat_trait_scale: 0,
             efficiency_num: 160,
-            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2, universal: true }),
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2 }),
+            base_hazard: 0,
         };
 
         // Three entities all with EMPTY CellGraph (module_cell_count = []), so all body clamp to 1.
@@ -1640,14 +1695,16 @@ mod tests {
     /// Verify the default (universal=false in size_refuge) preserves the combat-trait split behavior.
     #[test]
     fn d4_universal_false_unchanged_from_d1() {
-        // With universal=false, the spec behaves like D-1: combat-trait split + per-prey refuge.
+        // With CombatSplit mode, the spec behaves like D-1: combat-trait split + per-prey refuge.
         // All prey have combat_trait=0 (none are predators), so they remain prey regardless of body size.
         // The refuge gates the bite, but size still doesn't determine hunter vs hunted (trait does).
         let spec = PredationSpec {
+            mode: PredationMode::CombatSplit,
             bite_shift: 3,
             combat_trait_scale: 1,
             efficiency_num: 160,
-            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4, universal: false }),
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 4 }),
+            base_hazard: 0,
         };
 
         let small_body = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![1]) };
@@ -1679,10 +1736,12 @@ mod tests {
     #[test]
     fn d4_universal_two_predators_one_prey_post_drain() {
         let spec = PredationSpec {
+            mode: PredationMode::Universal,
             bite_shift: 3,
             combat_trait_scale: 0,
             efficiency_num: 160,
-            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2, universal: true }),
+            size_refuge: Some(SizeRefugeSpec { shift: 8, refuge_k: 2 }),
+            base_hazard: 0,
         };
 
         // Case (a): prey energy HIGH enough that BOTH predators feed (post-drain visible as gain inequality)

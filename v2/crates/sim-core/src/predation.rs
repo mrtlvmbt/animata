@@ -23,12 +23,31 @@
 
 use crate::Genome;
 
+/// D-5: predation mode enum — mutually exclusive predation strategies (type-guaranteed, F2).
+/// Each mode drives a distinct stage logic path; `None` is handled by early-return in stage_predation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PredationMode {
+    /// Combat-trait split: predators (combat_trait > 0) vs. prey (≤ 0), mean-field or per-prey.
+    CombatSplit,
+    /// D-4: ubiquitous size-selective predation. All entities are potential predators of
+    /// strictly-smaller-bodied neighbours in their cell (Boraas mechanism, size-only eligibility).
+    Universal,
+    /// D-5: hazard-refuge: implicit external predator, per-entity per-tick drain attenuated by body
+    /// size (refuge-only, no offense). No entity-vs-entity eligibility.
+    Hazard,
+}
+
 /// Production configuration for predation encounters — integer constants defining bite scale, combat
 /// trait influence, and metabolic efficiency. NOT `#[cfg(test)]`: P-1 instantiates this with a test
 /// *value*; P-2 reuses the *type* unchanged when it wires predation into the stage loop (mirrors
 /// E-2's `MorphogenSpec` pattern, F9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PredationSpec {
+    /// D-5: predation mode enum (mutually exclusive, type-guaranteed). Determines which stage logic
+    /// path owns resolution: `CombatSplit` (legacy), `Universal` (D-4 size-selective), `Hazard` (D-5
+    /// implicit predator with size-refuge defense).
+    pub mode: PredationMode,
+
     /// Bite size base scaling: how much prey energy becomes available to bite, as a right-shift
     /// of prey energy. E.g. `bite_shift=2` means the base bite is `prey_energy >> 2` (1/4 of prey).
     /// Range: 0..=10 (0 ⇒ can bite entire prey; 10 ⇒ tiny bites). Integer semantics: CFL-safe
@@ -52,18 +71,18 @@ pub struct PredationSpec {
     /// harder to capture. `None` (every shipped config): bite unchanged, byte-identical to P-2a.
     /// `Some(spec)`: the bite is scaled down by `spec` as a function of the PREY'S OWN body size
     /// (see [`SizeRefugeSpec`] / [`resolve_encounter`]). This is the wire only — no shipped config
-    /// turns it on yet (D-2).
+    /// turns it on yet (D-2). Only used by `CombatSplit` and `Universal` modes (inert for `Hazard`).
     pub size_refuge: Option<SizeRefugeSpec>,
+
+    /// D-5: hazard mode only — per-tick per-entity drain rate (un-refuged). Integer, defensively
+    /// capped at `VALUE_MAX` (1e6) before `<< shift` in `stage_predation`'s hazard drain calculation.
+    /// `base_hazard=0` ⇒ inert (no drain, byte-identical to no-predation).
+    pub base_hazard: i64,
 }
 
-/// D-1 & D-4: per-prey size-refuge parameters (Boraas mechanism) — larger prey bodies get a
+/// D-1: per-prey size-refuge parameters (Boraas mechanism) — larger prey bodies get a
 /// monotonically smaller bite. Q-format fixed-point, integer-only, no float (mirrors
 /// `PredationSpec`'s `>>8` combat-trait Q-format).
-///
-/// **D-4 universal mode:** when `universal=true`, the cell-loop mode changes from `combat_trait`
-/// split to universal predation: ANY entity may eat a strictly-smaller-bodied neighbour in its cell
-/// (Boraas ubiquitous, size-selective predation). This field only exists when `size_refuge=Some(_)`,
-/// so the invalid state `universal=true + no refuge` is **unrepresentable by type**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SizeRefugeSpec {
     /// Fixed-point shift `S` for the refuge Q-format: `bite_eff = (bite << S) / ((1 << S) +
@@ -78,13 +97,6 @@ pub struct SizeRefugeSpec {
     /// body size shrinks the bite more. Expected non-negative for the monotone-decreasing
     /// property (Boraas: bigger body → smaller bite) to hold.
     pub refuge_k: i32,
-    /// D-4: opt-in universal predation mode. `false` (default, all test fixtures): entity-split by
-    /// `combat_trait > 0` (predator vs prey); byte-identical to P-2a/D-1. `true` (driver_config only):
-    /// ubiquitous size-selective predation (all entities are potential predators of strictly
-    /// smaller-bodied neighbours). The flag lives **here** (not in `PredationSpec`) so
-    /// `universal=true + size_refuge=None` is **unconstructable** — invalid states guarded by the
-    /// type system, not runtime checks.
-    pub universal: bool,
 }
 
 /// The outcome of a single predator↔prey encounter under a [`PredationSpec`]. All three fields are
@@ -106,7 +118,35 @@ pub struct Outcome {
 /// (which would silently WRAP on out-of-range input; see E-2's `overflow_saturates_not_wraps` test).
 /// This is a conservative upper bound on realistic predation energy transfers (no organism can be
 /// larger than a few thousand energy units in Ф0 ecology; 1M safely bounds any accumulator).
-const VALUE_MAX: i64 = 1_000_000;
+pub const VALUE_MAX: i64 = 1_000_000;
+
+/// D-5: compute hazard drain attenuated by body size (refuge mechanism). Per-entity, no RNG.
+/// The drain is `base_drain` reduced by a monotone-decreasing refuge function of body size.
+/// Reuses the same Q-format as [`resolve_encounter`]'s size-refuge: `attenuated = (base_drain << shift) / ((1 << shift) + refuge_k * body_size)`.
+/// Returns `drain` clamped to [`VALUE_MAX`].
+///
+/// Invariants:
+/// - No RNG, no state — pure function of inputs.
+/// - Larger `body_size` → smaller `drain` (monotone-decreasing, strictly within saturating range).
+/// - `base_drain=0` ⇒ drain=0 (inert).
+/// - Integer arithmetic (i128 for the division to prevent overflow).
+pub fn refuge_attenuate(base_drain: i64, body_size: i64, shift: u32, refuge_k: i32) -> i64 {
+    let base_drain = base_drain.clamp(0, VALUE_MAX);
+    if base_drain == 0 {
+        return 0; // inert
+    }
+    if refuge_k <= 0 || shift > 32 {
+        return base_drain; // misconfigured → return base unchanged
+    }
+
+    let shift = shift.min(32);
+    let body = body_size.max(1) as i128;
+    let k = refuge_k as i128;
+    let numer: i128 = (base_drain as i128) << shift;
+    let denom: i128 = ((1i128) << shift) + k * body;
+    let denom = denom.max(1);
+    (numer / denom).clamp(0, VALUE_MAX as i128) as i64
+}
 
 /// Pure integer predation encounter resolution. Given a predator (energy + combat trait via
 /// `&Genome`), a prey (energy + body size), and a `spec`, returns the conservation-exact
@@ -213,23 +253,48 @@ mod tests {
 
     /// P-1 fixture — a realistic predation spec for Ф2 ecology. Balances bite scale with
     /// predator size influence and metabolic efficiency. These values are what P-2 would plausibly
-    /// wire into production.
+    /// wire into production. Default: CombatSplit mode, no refuge, no hazard.
     fn prod_spec() -> PredationSpec {
         PredationSpec {
+            mode: PredationMode::CombatSplit,
             bite_shift: 3,             // base bite ≈ prey_energy / 8
             combat_trait_scale: 1,     // moderate trait influence
             efficiency_num: 160,       // ~62% efficiency (160/256)
             size_refuge: None,         // D-1: gated off — byte-identical to pre-D-1
+            base_hazard: 0,            // D-5: inert
         }
     }
 
     /// D-1 fixture — `prod_spec()` with the size-refuge gate turned on, for the refuge-specific
-    /// teeth below. `shift=8, refuge_k=1` — moderate refuge strength. D-4: `universal=false` (default,
-    /// preserves combat-trait split).
+    /// teeth below. `shift=8, refuge_k=1` — moderate refuge strength. CombatSplit mode.
     fn prod_spec_with_refuge(shift: u32, refuge_k: i32) -> PredationSpec {
         let mut spec = prod_spec();
-        spec.size_refuge = Some(SizeRefugeSpec { shift, refuge_k, universal: false });
+        spec.size_refuge = Some(SizeRefugeSpec { shift, refuge_k });
         spec
+    }
+
+    /// D-4 fixture — universal size-selective predation mode (Boraas ubiquitous).
+    fn prod_spec_universal(shift: u32, refuge_k: i32) -> PredationSpec {
+        PredationSpec {
+            mode: PredationMode::Universal,
+            bite_shift: 3,
+            combat_trait_scale: 1,
+            efficiency_num: 160,
+            size_refuge: Some(SizeRefugeSpec { shift, refuge_k }),
+            base_hazard: 0,
+        }
+    }
+
+    /// D-5 fixture — hazard-refuge predation (implicit predator, per-entity drain).
+    fn prod_spec_hazard(base_hazard: i64, shift: u32, refuge_k: i32) -> PredationSpec {
+        PredationSpec {
+            mode: PredationMode::Hazard,
+            bite_shift: 3,
+            combat_trait_scale: 0,     // unused in hazard mode
+            efficiency_num: 160,       // unused in hazard mode
+            size_refuge: Some(SizeRefugeSpec { shift, refuge_k }),
+            base_hazard: base_hazard.min(VALUE_MAX),
+        }
     }
 
     fn predator_genome(size: i32) -> Genome {
@@ -630,6 +695,97 @@ mod tests {
                 out, clamped
             );
             assert!(out.predator_gain >= 0 && out.prey_loss >= 0 && out.dissipated >= 0);
+        }
+    }
+
+    // ── D-5: hazard-refuge predation teeth ───────────────────────────────────────────────────────
+
+    /// `d5_hazard_drain_monotone`: larger body size → strictly smaller (or equal at saturation) drain,
+    /// demonstrating the refuge mechanism under hazard mode. Pure per-entity drain, no encounter logic.
+    #[test]
+    fn d5_hazard_drain_monotone() {
+        let shift = 8u32;
+        let refuge_k = 2i32;
+        let base_drain = 10_000i64;
+
+        let bodies = [1i64, 2, 4, 8, 16, 32, 64, 128];
+        let drains: Vec<i64> = bodies
+            .iter()
+            .map(|&b| refuge_attenuate(base_drain, b, shift, refuge_k))
+            .collect();
+
+        for w in drains.windows(2) {
+            assert!(
+                w[0] >= w[1],
+                "hazard drain must be monotone-decreasing in body size: drains={:?} (bodies={:?})",
+                drains, bodies
+            );
+        }
+
+        // Verify first body gets the full base, last body gets heavily reduced
+        assert_eq!(drains[0], base_drain, "body=1 should get full base drain");
+        assert!(drains[drains.len()-1] < base_drain / 10, "large body should get much-reduced drain");
+    }
+
+    /// `d5_hazard_zero_inert`: `base_hazard=0` → zero drain (ablation control, inert).
+    #[test]
+    fn d5_hazard_zero_inert() {
+        let shift = 8u32;
+        let refuge_k = 2i32;
+
+        for body_size in [1i64, 2, 16, 128] {
+            let drain = refuge_attenuate(0, body_size, shift, refuge_k);
+            assert_eq!(drain, 0, "base_hazard=0 must produce zero drain for body_size={body_size}");
+        }
+    }
+
+    /// `d5_hazard_determinism`: same inputs → byte-identical drain across repeated calls (no RNG).
+    #[test]
+    fn d5_hazard_determinism() {
+        let shift = 8u32;
+        let refuge_k = 2i32;
+        let base_drain = 5_000i64;
+        let body_size = 16i64;
+
+        let drain_a = refuge_attenuate(base_drain, body_size, shift, refuge_k);
+        let drain_b = refuge_attenuate(base_drain, body_size, shift, refuge_k);
+        assert_eq!(drain_a, drain_b, "drain must be deterministic");
+    }
+
+    /// `d5_hazard_clamped_base`: clamping `base_hazard` at `VALUE_MAX` before refuge division
+    /// prevents overflow and keeps results bounded.
+    #[test]
+    fn d5_hazard_clamped_base() {
+        let shift = 8u32;
+        let refuge_k = 1i32;
+        let body_size = 1i64;
+
+        // Drain at VALUE_MAX
+        let drain_at_max = refuge_attenuate(VALUE_MAX, body_size, shift, refuge_k);
+        assert!(drain_at_max <= VALUE_MAX, "drain must never exceed VALUE_MAX");
+
+        // Drain well above VALUE_MAX (should be clamped internally)
+        let drain_above = refuge_attenuate(VALUE_MAX * 2, body_size, shift, refuge_k);
+        assert_eq!(
+            drain_at_max, drain_above,
+            "drain at 2×VALUE_MAX must equal drain at VALUE_MAX (clamped)"
+        );
+    }
+
+    /// `d5_hazard_empty_body_clamp`: body size ≤ 0 is clamped to 1 inside `refuge_attenuate`.
+    #[test]
+    fn d5_hazard_empty_body_clamp() {
+        let shift = 8u32;
+        let refuge_k = 2i32;
+        let base_drain = 5_000i64;
+
+        let drain_at_one = refuge_attenuate(base_drain, 1, shift, refuge_k);
+        for body_size in [0i64, -1, -1000] {
+            let drain = refuge_attenuate(base_drain, body_size, shift, refuge_k);
+            assert_eq!(
+                drain, drain_at_one,
+                "body_size={body_size} must clamp to 1, matching drain at body=1"
+            );
         }
     }
 }

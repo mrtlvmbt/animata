@@ -66,28 +66,26 @@ fn d2_bodies_can_be_multicellular() {
     );
 }
 
-/// `d2_predation_size_refuge_active`: with driver_config's own predation spec, a large-bodied prey
-/// suffers strictly less predation loss than an equal-energy unicell — the D-1 refuge is ON and
-/// biting at the chosen calibration (`DRIVER_REFUGE_K`), not a degenerate no-op.
+/// `d5_hazard_drain_monotone`: with driver_config's D-5 hazard predation, a large-bodied entity
+/// suffers strictly less drain than an equal-energy unicell — the refuge attenuates the hazard drain.
 #[test]
-fn d2_predation_size_refuge_active() {
+fn d5_hazard_drain_monotone() {
     let spec = driver_config(SEED)
         .econ
         .predation
         .expect("driver_config must configure predation");
+    assert_eq!(spec.mode, sim_core::PredationMode::Hazard, "driver_config must use Hazard mode");
     assert!(spec.size_refuge.is_some(), "driver_config must configure size_refuge");
+    assert!(spec.base_hazard > 0, "driver_config must have base_hazard > 0");
 
-    let predator = sim_core::Genome::founder(1);
-    let prey_energy = 10_000i64;
-
-    let loss_unicell = sim_core::resolve_encounter(&predator, prey_energy, 1, &spec).prey_loss;
-    let loss_large_body =
-        sim_core::resolve_encounter(&predator, prey_energy, 20, &spec).prey_loss;
+    let refuge = spec.size_refuge.unwrap();
+    let drain_unicell = sim_core::refuge_attenuate(spec.base_hazard, 1, refuge.shift, refuge.refuge_k);
+    let drain_large_body = sim_core::refuge_attenuate(spec.base_hazard, 20, refuge.shift, refuge.refuge_k);
 
     assert!(
-        loss_large_body < loss_unicell,
-        "a large-bodied prey (body_size=20) must lose LESS than an equal-energy unicell under \
-         driver_config's size-refuge: loss_large_body={loss_large_body}, loss_unicell={loss_unicell}"
+        drain_large_body < drain_unicell,
+        "a large-bodied entity (body_size=20) must DRAIN LESS than a unicell under \
+         driver_config's hazard refuge: drain_large_body={drain_large_body}, drain_unicell={drain_unicell}"
     );
 }
 
@@ -151,8 +149,9 @@ fn d2_determinism() {
     }
 }
 
-/// `d2_set_overrides`: `--set c_coord=<v>` and `--set refuge_k=<v>` apply + range-guard (reject
-/// negative); no-flag path stays byte-identical to `driver_config` itself.
+/// `d2_set_overrides`: `--set c_coord=<v>`, `--set refuge_k=<v>`, and D-5 `--set base_hazard=<v>`
+/// apply + range-guard (reject negative/out-of-range); no-flag path stays byte-identical to
+/// `driver_config` itself.
 #[test]
 fn d2_set_overrides() {
     // Apply: c_coord updates econ.c_coord.
@@ -166,7 +165,13 @@ fn d2_set_overrides() {
         .expect("refuge_k=9 must be accepted on a config with predation.size_refuge configured");
     assert_eq!(econ.predation.unwrap().size_refuge.unwrap().refuge_k, 9);
 
-    // Range-guard: negative values rejected for both keys.
+    // D-5: Apply: base_hazard updates the hazard predation spec.
+    let mut econ_hazard = driver_config(SEED).econ;
+    apply_overrides(&mut econ_hazard, &[("base_hazard".to_string(), "1000".to_string())])
+        .expect("base_hazard=1000 must be accepted on driver_config");
+    assert_eq!(econ_hazard.predation.unwrap().base_hazard, 1000);
+
+    // Range-guard: negative values rejected for all keys.
     let mut econ_neg = driver_config(SEED).econ;
     let r_c = apply_overrides(&mut econ_neg, &[("c_coord".to_string(), "-1".to_string())]);
     assert!(r_c.is_err(), "c_coord=-1 must return Err");
@@ -175,6 +180,11 @@ fn d2_set_overrides() {
     let r_k = apply_overrides(&mut econ_neg, &[("refuge_k".to_string(), "-1".to_string())]);
     assert!(r_k.is_err(), "refuge_k=-1 must return Err");
     assert!(r_k.unwrap_err().starts_with("error:"));
+
+    let mut econ_bh = driver_config(SEED).econ;
+    let r_bh = apply_overrides(&mut econ_bh, &[("base_hazard".to_string(), "-100".to_string())]);
+    assert!(r_bh.is_err(), "base_hazard=-100 must return Err");
+    assert!(r_bh.unwrap_err().starts_with("error:"));
 
     // refuge_k is rejected when no predation.size_refuge is configured (structural — plain default).
     let mut econ_plain = EconParams::default();
