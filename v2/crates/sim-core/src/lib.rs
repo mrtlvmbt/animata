@@ -1091,6 +1091,7 @@ mod e1_gate_tests {
                 LayerSpec::default(),
                 LayerSpec::default(),
             ],
+            thermal_verdict_temps: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
     }
@@ -1173,6 +1174,7 @@ mod e1_gate_tests {
                 LayerSpec::default(),
                 LayerSpec::default(),
             ],
+            thermal_verdict_temps: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
     }
@@ -1206,6 +1208,7 @@ mod e1_gate_tests {
                 LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 0, world_cap_mult: 0 },
                 LayerSpec::default(),
             ],
+            thermal_verdict_temps: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(3, 100_000)), Box::new(StubBrain))
     }
@@ -1335,6 +1338,7 @@ mod e1_gate_tests {
                 LayerSpec::default(),
                 LayerSpec::default(),
             ],
+            thermal_verdict_temps: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
     }
