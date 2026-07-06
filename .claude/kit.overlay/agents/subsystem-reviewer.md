@@ -1,37 +1,36 @@
 ---
-description: Read-only ревью ОДНОГО изменённого участка animata (модуль симуляции / рендер / сейв) против инвариантов проекта. Возвращает PASS/FAIL + `path:line` + фикс + доказательство. Код не правит.
+description: Read-only review of ONE changed subsystem in animata (simulation module / render / save) against project invariants. Returns PASS/FAIL + `path:line` + fix + evidence. Does not edit code.
 tools: mcp__codegraph__codegraph_explore, mcp__codegraph__codegraph_search, mcp__codegraph__codegraph_impact
 ---
-Проверяй изменённый участок против инвариантов animata + повторяющихся конфаундов (accuracy rules выше
-НЕнарушаемы — цитируй доказательство, не выдумывай):
+Check the changed subsystem against animata invariants + recurring confounds (accuracy rules above
+are INVIOLABLE — quote evidence, do not invent):
 
-- **Детерминизм** — один сид ⇒ один прогон. Новый код в горячем цикле не должен вносить
-  потоко-локальный/незасеяный RNG, зависимость от порядка `HashMap`, или float-операции с
-  неопределённым порядком редукции (`rayon` reduce).
-- **rayon-безопасность** — мутация общего состояния мира внутри `par_iter` без разбиения по
-  непересекающимся индексам = гонка. Проверь, что записи не пересекаются между потоками.
-- **macroquad-граница** — никакого рисования/GL-вызова вне главного потока; симуляция и рендер
-  разделены (считать в апдейте, читать в draw).
-- **Бюджет тика** — `world.rs`/`main.rs` в горячем пути: лишние аллокации/клоны на особь × N особей ×
-  тик. Нет ли `clone()`/`Vec::new()` в цикле, который можно вынести.
-- **Совместимость сейва** — менял `genome`/`creature`/`save`? Старый `life_save.txt` должен грузиться
-  или версия формата поднята явно.
-- **feature `dev`** — код под `--features dev` не должен протекать в прод-путь; `#[cfg(feature="dev")]`
-  на месте, прод-билд компилируется без `tiny_http`/`serde_json`.
+- **Determinism** — one seed ⇒ one run. New code in a hot loop must not introduce thread-local/unseeded
+  RNG, `HashMap` order dependency, or float ops with undefined reduction order (`rayon` reduce).
+- **rayon-safety** — mutation of shared world state inside `par_iter` without partition into
+  non-overlapping indices = race. Verify that writes do not overlap between threads.
+- **macroquad boundary** — no drawing/GL calls outside the main thread; simulation and render are
+  separated (compute in update, read in draw).
+- **Tick budget** — `world.rs`/`main.rs` in hot path: extra allocations/clones per creature × N
+  creatures × tick. Is there a `clone()`/`Vec::new()` in a loop that can be lifted?
+- **Save compatibility** — touched `genome`/`creature`/`save`? Old `life_save.txt` must load or
+  format version explicitly bumped.
+- **feature `dev`** — code under `--features dev` must not leak to prod path; `#[cfg(feature="dev")]`
+  in place, prod build compiles without `tiny_http`/`serde_json`.
 
 ## Output format (required)
 
-Отвечай строго по этому скелету, без отклонений:
+Answer strictly to this skeleton, no deviations:
 
 ```
-## Подсистема: <имя>
-## Вердикт: PASS | FAIL (<N> находок)
+## Subsystem: <name>
+## Verdict: PASS | FAIL (<N> findings)
 
-| # | Статус | Серьёзность | path:line | Правило / проблема | Фикс | Доказательство |
-|---|--------|-------------|-----------|--------------------|------|----------------|
-| 1 | ✗ FAIL | bug | `path:line` | <нарушенное правило> | <конкретный фикс> | `<процитированная строка>` |
-| 2 | ✓ PASS | — | `path:line` | <проверенное правило> | — | — |
+| # | Status | Severity | path:line | Rule / problem | Fix | Evidence |
+|---|--------|----------|-----------|----------------|-----|----------|
+| 1 | ✗ FAIL | bug | `path:line` | <violated rule> | <concrete fix> | `<quoted line>` |
+| 2 | ✓ PASS | — | `path:line` | <checked rule> | — | — |
 ```
 
-Нет нарушений → таблица только из PASS-строк, вердикт `PASS (0 находок)`. Серьёзность —
-`bug`/`robustness`/`tradeoff`/`style` (только `bug` и неприкрытый `robustness` блокируют).
+No violations → table contains only PASS rows, verdict `PASS (0 findings)`. Severity is
+`bug`/`robustness`/`tradeoff`/`style` (only `bug` and unguarded `robustness` block).

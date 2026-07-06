@@ -108,15 +108,15 @@ KIT_CTX_WARN_PCT=55
 KIT_SUBREPO_DIR=".claude-dev-kit"
 
 # ── Agent format-contract headers (agent-metrics-record) ───────────────────────
-# Per-agent required output headers, '|'-separated. Lets an overlay localize the skeleton so the
-# metrics drift-check matches your agents' real output. Var name = KIT_AGENT_FMT_<name with - as _>.
-# Defaults (English) live in the hook; override only when your overlay changes the skeleton/language.
-# Russian skeletons — match the animata overlays in .claude/kit.overlay/agents/ (kit talks RU here).
-KIT_AGENT_FMT_bug_hunt='## Гипотеза|## Кандидаты|## Следующий шаг'
-KIT_AGENT_FMT_subsystem_reviewer='## Подсистема|## Вердикт'
-KIT_AGENT_FMT_web_research='## Ответ|## Источники'
-KIT_AGENT_FMT_critic='## Иллюзия|## Точка отказа|## Реальность железа|## Альтернативный паттерн'
-KIT_AGENT_FMT_judge='## Вердикт|## По критериям|VERDICT:'
+# English-internal policy (2026-07-06): overlays keep the kit's English skeletons, so the metrics
+# drift-check uses the hook's built-in English defaults — no KIT_AGENT_FMT_* overrides needed.
+# The USER-facing language (Russian) is pinned mechanically by kit-user-lang below, not by
+# localizing agent skeletons (inter-agent traffic stays English).
+
+# ── User-facing language pin (kit-user-lang; kit v0.19) ────────────────────────
+# Re-injected into context on EVERY prompt: replies to the user in Russian; all internal artifacts
+# (code, commits, PRs, control/docs/memory files) and ALL inter-agent traffic stay English.
+KIT_USER_LANG='Russian'
 
 # ── auto-detected by install.sh (overrides the defaults above) ──
 KIT_LINT_CMD='cargo clippy --all-targets -- -D warnings'
@@ -124,13 +124,13 @@ KIT_LINT_STAGED_GLOB='\.rs$'
 KIT_METRICS_DIR='tools/agent-metrics'
 KIT_SUBREPO_DIR='.claude-dev-kit'
 
-# ── Роль-скоуп: гейты кодеров (аудит + консенсус-план animata-followup, 2026-07-06) ──
-# Клоны animata.git по ролям живут в каталогах A/B/C/PM → роль = basename корня клона.
-# Кодерам (A/B/C): plan-consensus из WARN становится реальным блоком (DENY; логируемый обход —
-# KIT_PLAN_CONSENSUS_ALLOW=1) + TTL маркера сужен 30→10 мин (time-bucket дыра: прогон критика на
-# черновике не должен надолго открывать все ExitPlanMode) + done-gate Stop-хук (см.
-# .claude/hooks/done-gate.sh; ловит класс A-4 «done без PR»). PM/RnD остаются на WARN и без
-# done-gate — их дисциплина не проваливалась, а PM-приём хэндоффов сам является гейтом.
+# ── Role scope: coder gates (audit + animata-followup consensus plan, 2026-07-06) ──
+# The animata.git role clones live in directories A/B/C/PM → role = basename of the clone root.
+# Coders (A/B/C): plan-consensus turns from WARN into a real block (DENY; logged escape —
+# KIT_PLAN_CONSENSUS_ALLOW=1) + marker TTL narrowed 30→10 min (time-bucket hole: a critic run on a
+# draft must not keep every ExitPlanMode open for long) + the done-gate Stop hook (see
+# .claude/hooks/done-gate.sh; catches the A-4 class "done without a PR"). PM/RnD stay on WARN and
+# without done-gate — their discipline never failed, and the PM handoff acceptance is itself a gate.
 _ANIMATA_ROLE="$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"
 case "$_ANIMATA_ROLE" in
   A|B|C)
