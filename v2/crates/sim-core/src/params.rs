@@ -353,16 +353,18 @@ pub struct LightSpec {
 
 // ── P3-1: ambient-tolerance thermal niche ─────────────────────────────────────────────────────
 
-/// Ambient-tolerance thermal niche specification for `EconParams.ambient_tolerance` (P3-1).
+/// Ambient-tolerance thermal niche specification for `EconParams.ambient_tolerance` (P3-1+).
 /// When `Some`, enables heritable tolerance genes (`tol_optimum`, `tol_breadth`) with mutation active.
 /// When `None` (default) → tolerance genes inert, `tol_optimum`/`tol_breadth` stay 0 forever,
 /// existing goldens stay byte-identical (the isolation gate). Option-gated exactly like `light`
 /// and `predation` above.
 #[derive(Clone, Copy, Debug)]
 pub struct AmbientToleranceSpec {
-    /// Marker field (currently unused, reserved for future P3-2/P3-3 parameters like
-    /// `tolerance_breadth_cost_k`). For P3-1, presence of `Some` gates the mutation and penalty.
-    pub enabled: bool,
+    /// P3-2: Breadth-cost coefficient (linear scaling). Specialist/generalist tradeoff:
+    /// wider `tol_breadth` incurs `breadth_cost_k * tol_breadth / BREADTH_COST_SCALE` metabolic cost.
+    /// Integer, zero-float. Gated on `is_some()` (byte-identical when None).
+    /// CALIBRATION-PROVISIONAL: final value from P3-3 neutral-run measurement.
+    pub breadth_cost_k: i64,
 }
 
 // ── P3-1: Gaussian thermal-penalty kernel (constant LUT, zero float) ──────────────────────────
@@ -400,6 +402,13 @@ pub const THERMAL_KERNEL_Q256: [i32; 257] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0,                      // x ∈ [240, 249]
     0, 0, 0, 0, 0, 0, 0,                                // x ∈ [250, 256]
 ];
+
+// ── P3-2: Breadth-cost scaling ──────────────────────────────────────────────────────────────────
+/// P3-2 (B5): Breadth-cost denominator for the specialist/generalist tradeoff.
+/// Cost = `breadth_cost_k * tol_breadth / BREADTH_COST_SCALE`.
+/// Integer scaling: `tol_breadth ∈ [100, 2000]`, base_metab ~ 2, so cost is several units.
+/// CALIBRATION-PROVISIONAL: final value from P3-3 neutral-run measurement.
+pub const BREADTH_COST_SCALE: i64 = 1000;
 
 /// P3-1 (B4): Thermal tolerance penalty (Gaussian decay, integer LUT).
 /// Computes `exp(−(deviation / breadth)²/2)` using a precomputed integer lookup table.

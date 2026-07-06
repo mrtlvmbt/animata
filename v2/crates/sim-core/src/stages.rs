@@ -224,11 +224,17 @@ pub fn stage_metabolism(
         let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
         // Charge ×N — a lump standing in for the N base ticks since the last metabolism tick, so the
         // economy stays ≈invariant to N and conservation is exact (R15).
+        // P3-2 (B5): breadth-cost additive in base_cost. Specialist/generalist tradeoff:
+        // wider tol_breadth incurs standing metabolic cost (gate on is_some() for byte-identity).
+        let breadth_cost = if econ.ambient_tolerance.is_some() {
+            econ.ambient_tolerance.as_ref().unwrap().breadth_cost_k * g.tol_breadth as i64 / crate::params::BREADTH_COST_SCALE
+        } else { 0 };
         let base_cost = (econ.base_metab
             + econ.k_size_metab * g.metab_units()
             + econ.k_move_cost * g.move_speed as i64
             + econ.k_sense_cost * g.sense_range as i64
-            + econ.c_coord * n_cells)
+            + econ.c_coord * n_cells
+            + breadth_cost)
             * n as i64;
         // D′-2a/2b: photo-machinery expression cost on the EXPRESSED capacity.
         // expressed_capacity returns 0 at night for regulated cells → cost skipped (the D′-2b lever).
@@ -261,13 +267,6 @@ pub fn stage_metabolism(
             0
         };
         let mut cost = base_cost + photo_cost + aerobe_cost;
-        // P3-1: Thermal tolerance penalty — applied when ambient_tolerance is configured.
-        // Penalty gates on is_some() to preserve byte-identity (all legacy configs have None).
-        if econ.ambient_tolerance.is_some() {
-            let temp = world.0.temp_at(pos.0);
-            let penalty = crate::params::tolerance_penalty(temp, g.tol_optimum, g.tol_breadth) as i64;
-            cost = (cost * penalty) / 256;
-        }
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
@@ -464,6 +463,7 @@ fn compute_hypoxia_factor_x1000(
 pub fn stage_interactions(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
+    world: Res<WorldRes>,
     mut field: ResMut<FieldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut tel: ResMut<Telemetry>,
@@ -607,11 +607,23 @@ pub fn stage_interactions(
         };
         let kept_x1000 = (1000 - hypoxia_x1000 as i64).max(0);
 
+        // P3-2 (F1): Thermal tolerance penalty — applied to income-yield when ambient_tolerance is configured.
+        // penalty gates on is_some() to preserve byte-identity (all legacy configs have None).
+        // Order of operations (critical for golden determinism):
+        //   1. combined_eff (composition of metabolism_eff × resp_eff)
+        //   2. hypoxia (from O₂-field)
+        //   3. thermal_x256 (tolerance penalty on current T)
+        //   4. gained = ((got × combined_eff / 256 × kept / 1000) × thermal_x256) / 256
+        let thermal_x256 = if econ.ambient_tolerance.is_some() {
+            crate::params::tolerance_penalty(world.0.temp_at(c.pos), g.tol_optimum, g.tol_breadth) as i64
+        } else { 256 };
+
         // Take the FULL grant (original semantics), convert combined_eff to energy, dissipate rest.
         // Conserved (R15): got == gained + lost. Anoxic obligate → resp_eff=0 → gained=0 → starves (R34).
         // P1-2b: gained is now reduced by hypoxia through kept_x1000 factor.
+        // P3-2: gained is further reduced by thermal_x256 factor (tolerance penalty).
         let got = field.0.conserved_take(c.pos, grants[i], c.layer);
-        let gained = got * combined_eff_x256 / 256 * kept_x1000 / 1000;
+        let gained = ((got * combined_eff_x256 / 256 * kept_x1000 / 1000) * thermal_x256) / 256;
         let lost = got - gained;  // metabolic inefficiency + hypoxia shortfall → dissipated (conserved)
         energy.0 += gained;
         ledger.dissipated += lost;
