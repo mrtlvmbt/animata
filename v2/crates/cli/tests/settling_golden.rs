@@ -1,63 +1,31 @@
-//! P4/SL-1: settling-selection mechanic golden state_checksum (two-pass gate).
+//! P4/SL-1: settling-selection mechanic golden folded checksum (two-pass gate).
 //!
-//! **Purpose**: pin the expected state trajectory for settling_config (new opt-in testbed).
-//! This is the SINGLE settling-golden added by SL-1 (byte-identity of existing goldens untouched).
+//! **Purpose**: pin the expected state trajectory for settling_config (new opt-in testbed)
+//! as a SINGLE folded checksum (u64) protecting all 512 ticks of drift.
 //!
-//! **Arch**: settling_config runs on phase2 substrate (O₂ + morphogen) with integer determinism
-//! (no float, no RNG in settling_drain). State is arch-independent. The golden is pinned arm64
-//! (standard for new testbeds; CI job `golden-arm64` only).
+//! **Structure**: fold 512 per-tick state hashes into one u64 using fnv_mix (FNV hash fold).
+//! Any tick changing → the fold changes. CI's single `right:` value in the assertion failure
+//! is the complete whole-trajectory checksum (CI-pinnable under no-local-sim constraint).
 //!
-//! **Re-pin** (single-writer, PM): Only on an INTENDED settling-mechanic change. Read the new
-//! `left:` from `.ci-report/failed.log` (arm64 job). Never re-pin to silence drift.
+//! **Arch**: settling_config runs on phase2 substrate (O₂ + morphogen) with integer determinism.
+//! Arm64 only (per-arch baseline; CI job `golden-arm64` only).
 //!
-//! **Two-pass gate**: SL-1 pass 1 reports `STATUS: blocked@settling-golden: жду CI (pass 2 of 2)`;
-//! PM pins the golden in pass 2 and re-runs; pass 2 comes back green.
+//! **Re-pin** (single-writer, PM): Read the single `right:` value from `.ci-report/failed.log`,
+//! and substitute the const below. Never re-pin to silence drift.
+//!
+//! **Two-pass gate**: Pass 1 fails with the real folded checksum; PM pins it (pass 2 green).
 
-use cli::{build_sim, settling_config, run_conserved_hashes};
+use cli::{settling_config, run_conserved_hashes};
+use sim_core::fnv_mix;
 
-// P4/SL-1: settling-golden pin — expected state_hash per tick for settling_config (SEED=default).
-// Captured on arm64 + Rust 1.96.0 (matches the CI `golden-arm64` job arch + toolchain).
-// This is pass 1; PM pins the real value from CI `.ci-report/failed.log` on pass 2.
-const SETTLING_GOLDEN: [u64; 512] = [
-    // TODO: PM pins real values from arm64 CI run on pass 2.
-    // For now, placeholder; test will fail on first run, CI reports `left:` for PM to substitute.
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-];
+// P4/SL-1: settling-golden folded checksum — fold of 512 per-tick state hashes.
+// Placeholder 0; PM pins real value from CI `.ci-report/failed.log` (arm64 job).
+// This single u64 protects the entire 512-tick trajectory against any drift.
+const SETTLING_GOLDEN_CHECKSUM: u64 = 0;
 
-/// P4/SL-1: settling-golden pin — expected state_hash trajectory for settling_config(SEED).
-/// Arm64 only (FMA-divergent phase2 substrate baseline; determinism per-arch, FP-free settling).
-/// Excluded from x86 jobs automatically via the `v2_golden` name prefix.
+/// P4/SL-1: settling-golden pin — folded checksum of 512-tick trajectory for settling_config.
+/// Arm64 only (per-arch baseline). Excluded from x86 jobs automatically via the `v2_golden`
+/// name prefix.
 #[test]
 fn v2_golden_settling() {
     if cfg!(debug_assertions) {
@@ -66,11 +34,18 @@ fn v2_golden_settling() {
 
     let hashes = run_conserved_hashes(settling_config(0xA11A_2A11), 512);
 
-    for (tick, (expected, actual)) in SETTLING_GOLDEN.iter().zip(hashes.iter()).enumerate() {
-        assert_eq!(
-            expected, actual,
-            "P4/SL-1 settling-golden mismatch at tick {}: expected {} got {}",
-            tick, expected, actual
-        );
+    // Fold 512 per-tick hashes into a single u64 using FNV mixing.
+    // Any change in any tick → the fold changes (full trajectory protection).
+    let mut folded = sim_core::FNV_OFFSET;
+    for (tick, &h) in hashes.iter().enumerate() {
+        folded = fnv_mix(folded, h);
+        // Include tick index in fold to catch reordering anomalies.
+        folded = fnv_mix(folded, tick as u64);
     }
+
+    assert_eq!(
+        SETTLING_GOLDEN_CHECKSUM, folded,
+        "P4/SL-1 settling-golden checksum mismatch (512-tick fold): expected {} got {}",
+        SETTLING_GOLDEN_CHECKSUM, folded
+    );
 }
