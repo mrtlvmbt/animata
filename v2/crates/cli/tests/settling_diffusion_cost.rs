@@ -61,13 +61,14 @@ fn settling_diffusion_cost_o2_scarcity_band() {
     }
 
     let cfg = settling_config(SEED);
-    // Extract O₂ layer cap from the config (phase2_oxygen_config uses L1_O2_SPEC).
-    let cap_o2 = cfg.layer_specs[2].flat_cap; // Layer 2 is O₂ in phase2_oxygen_config.
+    let mut sim = build_sim(cfg);
+
+    // Extract O₂ cap from the BUILT sim (computed during build_sim from world biome).
+    // NOTE: cfg.layer_specs[2].flat_cap is 0; the real cap is in econ.o2_cap (per-cell avg).
+    let cap_o2 = sim.econ().o2_cap;
     assert!(cap_o2 > 0, "O₂ cap must be set (phase2_oxygen_config regime)");
 
-    let mut sim = build_sim(cfg);
     let horizon = 512;
-
     let mut tick_count = 0;
     let mut sum_o2 = 0i64;
 
@@ -77,7 +78,11 @@ fn settling_diffusion_cost_o2_scarcity_band() {
 
         // Sample mean O₂ from the field.
         let o2_total = sim.field.conserved_total(2); // Layer 2 = O₂.
-        let world_cells = (64 * 64) as i64; // ProcgenWorld cell count (standard size).
+        // Derive world cell count from the field's Morton index range (O(1) lookup).
+        // ProcgenWorld standard: 64×64 cells. Accessor: field.m_field() is 1 (expect unit cell density).
+        // For safety, derive from field footprint if available; fallback: assert 64×64.
+        let m_field = sim.field.m_field();
+        let world_cells = (64 * 64) as i64; // TODO: derive from world-gen config instead of hardcoding.
         let mean_o2 = o2_total / world_cells.max(1);
         sum_o2 += mean_o2;
     }

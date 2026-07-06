@@ -2463,8 +2463,8 @@ mod tests {
     }
 
     #[test]
-    fn test_hypoxia_factor_monotone_decreasing() {
-        // (c-ii): strictly monotone f(16) < f(4) < f(1)=1000.
+    fn test_hypoxia_factor_monotone_increasing() {
+        // (c-ii): strictly monotone f(16) > f(4) > f(1)=0 (penalty increases with N).
         let mut field = HypoxiaMockField::new();
         let pos = Vec2Fixed { x: 0, z: 0 };
         let cap_o2 = 100; // Fixed scarce O₂ cap.
@@ -2474,26 +2474,24 @@ mod tests {
         // Set O₂ to a constant scarce level (30 → scarcity = 700).
         field.set_conserved(0, 2, 30);
 
-        // Single cell: N=1 → no interior → factor = 0.
+        // Single cell: N=1 → no interior → factor = 0 (no penalty).
         let factor_n1 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, 1, cap_o2, n_layers);
         assert_eq!(factor_n1, 0, "factor for N=1 must be 0 (no interior)");
 
-        // N=4: inner_fraction > 0, yields hypoxia > 0.
+        // N=4: inner_fraction > 0, yields penalty > 0.
         let factor_n4 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, 4, cap_o2, n_layers);
 
-        // N=16: larger body → larger inner_fraction → larger factor.
+        // N=16: larger body → larger inner_fraction → larger penalty.
         let factor_n16 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, 16, cap_o2, n_layers);
 
-        // Strict monotone: larger N → larger inner_fraction → larger factor.
-        // (Note: "larger factor" means MORE hypoxia penalty, but the factor scales down with size
-        // due to attenuation elsewhere; here we test the function in isolation returns monotone values.)
+        // Penalty increases monotonically with body size (larger N → larger inner_fraction → larger penalty).
         assert!(
             factor_n16 > factor_n4,
-            "factor monotone: f(16)={} > f(4)={}", factor_n16, factor_n4
+            "penalty increasing: f(16)={} > f(4)={}", factor_n16, factor_n4
         );
         assert!(
             factor_n4 > factor_n1,
-            "factor monotone: f(4)={} > f(1)={}", factor_n4, factor_n1
+            "penalty increasing: f(4)={} > f(1)={}", factor_n4, factor_n1
         );
     }
 
