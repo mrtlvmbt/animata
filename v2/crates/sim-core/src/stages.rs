@@ -569,14 +569,16 @@ pub fn stage_interactions(
         // aerobe machinery on every legacy entity and (b) sample the O₂ layer (index 2) on 2-layer
         // configs → OOB panic + golden drift. Gating on the econ flag (which also gates the gene's
         // mutation) makes enable_oxygen=false a true no-op: resp_eff=256 → combined_eff=metabolism_eff.
-        let resp_eff_x256: i64 = if econ.enable_oxygen {
+        // P2-R-D: save the full RespiredChoice for O₂-consumption gating (acceptor + anoxic).
+        let respired_choice = if econ.enable_oxygen {
             match &ph.respiratory_pathway {
-                Some(rp) => choose_respiratory_pathway(rp, &*field.0, c.pos, econ.n_layers).eff_x256 as i64,
-                None => 256,
+                Some(rp) => choose_respiratory_pathway(rp, &*field.0, c.pos, econ.n_layers),
+                None => RespiredChoice { acceptor: crate::FieldId::Substrate, eff_x256: 256, anoxic: false },
             }
         } else {
-            256 // enable_oxygen=false → no respiratory modifier (byte-identical isolation)
+            RespiredChoice { acceptor: crate::FieldId::Substrate, eff_x256: 256, anoxic: false }
         };
+        let resp_eff_x256: i64 = respired_choice.eff_x256 as i64;
         let combined_eff_x256 = g.metabolism_eff as i64 * resp_eff_x256 / 256;
 
         // P1-2b: Apply hypoxia to income (yield penalty from O₂-diffusion self-shading).
@@ -605,6 +607,18 @@ pub fn stage_interactions(
         let lost = got - gained;  // metabolic inefficiency + hypoxia shortfall → dissipated (conserved)
         energy.0 += gained;
         ledger.dissipated += lost;
+
+        // P2-R-C: O₂ consumption (respiration). Gated on enable_oxygen && light.is_some().
+        // Only when acceptor=O₂ and not anoxic: deb it O₂ proportional to respiratory energy.
+        // Stagebit → solve() applies netto (clamp ≥ 0). Deterministic (read-old contract,
+        // choose_respiratory_pathway saw O₂@t; consumption booked @t+1).
+        if econ.enable_oxygen && econ.light.is_some() && respired_choice.acceptor == crate::FieldId::Oxygen && !respired_choice.anoxic {
+            let cell_idx = field.0.cell_index(c.pos);
+            // O₂ consumed proportional to energy gained from respiratory pathway (1:1 stoichiometry for P2).
+            let o2_consumed = gained;
+            field.0.deposit_conserved(cell_idx, -o2_consumed, crate::FieldId::Oxygen.as_usize());
+        }
+
         // D′-1/D′-2b: additive photo energy on the EXPRESSED capacity.
         // Night-downregulated cells have expressed_capacity=0 → photo_demand returns 0 (also because
         // L=0 at night, so the saving is in COST not income — see expressed_capacity doc).
@@ -612,6 +626,15 @@ pub fn stage_interactions(
             let p = photo_demand(expressed_capacity(g, l_now), km, l_now);
             energy.0 += p;
             photo_total += p;
+
+            // P2-R-D: O₂ production (photosynthesis). Gated on enable_oxygen && light.is_some().
+            // Production proportional to photo-energy earned (1:1 stoichiometry for P2).
+            // Stagebit → solve() applies netto. Day (l_now > 0) → production; night (l_now = 0) → 0.
+            if econ.enable_oxygen && econ.light.is_some() {
+                let cell_idx = field.0.cell_index(c.pos);
+                field.0.deposit_conserved(cell_idx, p, crate::FieldId::Oxygen.as_usize());
+            }
+
             p
         } else { 0 };
         // D′-3b: record income split (exact booked integers, read-only, never fed back).

@@ -465,7 +465,17 @@ impl Sim {
             }
         }
 
-        let field_total = field.conserved_total_all();
+        // P2: the energy ledger excludes ONLY the O₂ layer — it is a separate OPEN quantity (produced by
+        // photosynthesis, consumed by respiration) with no ledger counterpart (its own R30-P2 balance),
+        // so its dynamic mass would drift R15. Pre-P2 this was masked because O₂ was STATIC (a constant
+        // on both `initial` and the running total → it cancelled); dynamic O₂ broke the constant.
+        // NOTE: `n_energy_layers` is the MUTATION range, NOT conservation membership — the MINERAL layer
+        // is also `>= n_energy_layers` but IS conserved (agents hold `MineralQuota`), so we must keep it.
+        // Only O₂ is excluded. Non-oxygen configs: unchanged (byte-identical).
+        let mut field_total = field.conserved_total_all();
+        if econ.enable_oxygen {
+            field_total -= field.conserved_total(crate::FieldId::Oxygen.as_usize());
+        }
         let agents_total = config.n_founders as i64 * config.founder_energy;
         w.insert_resource(EnergyLedger {
             initial: field_total + agents_total,
@@ -592,7 +602,15 @@ impl Sim {
     /// identity: `(field_E + field_M + Σ energy + Σ quota + dissipated + lost) − produced − initial = 0`.
     /// When `mineral_layer` is None: no entities have `MineralQuota` → quota sum is 0 → backwards-compatible.
     pub fn conservation_residual(&mut self) -> i64 {
-        let field_total = self.world.resource::<FieldRes>().0.conserved_total_all();
+        // P2: energy conservation excludes ONLY the O₂ layer (open quantity, R30-P2) — NOT the mineral
+        // layer, which IS conserved (agents hold MineralQuota; see the identity in the doc above). Matches
+        // the `initial` baseline in Sim::new. Non-oxygen configs: unchanged (byte-identical).
+        let enable_oxygen = self.world.resource::<EconParams>().enable_oxygen;
+        let field = self.world.resource::<FieldRes>();
+        let mut field_total = field.0.conserved_total_all();
+        if enable_oxygen {
+            field_total -= field.0.conserved_total(crate::FieldId::Oxygen.as_usize());
+        }
         let mut q = self.world.query::<(&Energy, Option<&MineralQuota>)>();
         let agents: i64 = q.iter(&self.world)
             .map(|(e, mq)| e.0 + mq.map(|m| m.0).unwrap_or(0))
