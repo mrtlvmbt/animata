@@ -19,9 +19,9 @@ use cli::{settling_config, run_conserved_hashes};
 use sim_core::fnv_mix;
 
 // P4/SL-1: settling-golden folded checksum — fold of 512 per-tick state hashes.
-// Placeholder 0; PM pins real value from CI `.ci-report/failed.log` (arm64 job).
+// Pinned value from arm64 CI job (14155481137023211160).
 // This single u64 protects the entire 512-tick trajectory against any drift.
-const SETTLING_GOLDEN_CHECKSUM: u64 = 0;
+const SETTLING_GOLDEN_CHECKSUM: u64 = 14155481137023211160;
 
 /// P4/SL-1: settling-golden pin — folded checksum of 512-tick trajectory for settling_config.
 /// Arm64 only (per-arch baseline). Excluded from x86 jobs automatically via the `v2_golden`

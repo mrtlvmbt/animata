@@ -548,7 +548,6 @@ pub fn p2_config(seed: u64) -> SimConfig {
     }
 }
 
-<<<<<<< HEAD
 /// P3-3 thermal-niche verdict config (golden-neutral): high-gradient biome temperatures for
 /// faithful-verdict harness (a-d gates). Gated on `thermal_verdict_temps=Some`, so `None` → stock
 /// BIOME_TEMP → byte-identical. The override is injected at world-gen time (immutable post-gen).
