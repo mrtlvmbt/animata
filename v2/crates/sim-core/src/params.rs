@@ -259,6 +259,14 @@ pub struct EconParams {
     /// Option-gated exactly like `light`/`mineral_layer` above.
     pub enable_oxygen: bool,
 
+    // ── P1-2b: O₂-diffusion cost scaling (hypoxia self-shading) ───────────────────────────────────
+    /// O₂-field cap value for hypoxia calculation (P1-2b). The scarcity factor normalizes
+    /// ambient O₂ against this cap: `scarcity = 1000 − (field_o2 × 1000 / cap_o2)`.
+    /// Derived from `layer_specs[FieldId::Oxygen.as_usize()].flat_cap` at `build_sim` time.
+    /// Must be > 0 when `enable_oxygen=true` (guarded by bounds-check in compute_hypoxia_factor).
+    /// Non-oxygen configs: o2_cap=0 (hypoxia returns 0 immediately in the bounds-guard).
+    pub o2_cap: i64,
+
     // ── E-4a: ontogenesis chain opt-in (morphogen → GRN → cell fate) ────────────────────────────
     /// Morphogen reaction-diffusion spec (E-2). `Some` together with `grn` enables the full
     /// `decode` ontogenesis chain; `None` (default, all 5 existing configs) → `decode` stays the
@@ -378,6 +386,8 @@ impl Default for EconParams {
             predation: None,
             // P1-0: O₂-field economy OFF by default — false for all 5 existing configs + l3 (byte-identical).
             enable_oxygen: false,
+            // P1-2b: O₂-cap OFF by default (0 → hypoxia disabled when enable_oxygen=false).
+            o2_cap: 0,
             // E-4a: ontogenesis chain OFF by default — None for all 5 existing configs.
             morphogen: None,
             grn: None,

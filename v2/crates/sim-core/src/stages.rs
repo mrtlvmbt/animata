@@ -14,6 +14,40 @@ use crate::WorkCounters;
 const SALT_MUT: u64   = 0x4D55_5400; // "MUT\0"
 const SALT_DEATH: u64 = 0x4445_4100; // "DEA\0" — C-1 background-death draw, MUST ≠ SALT_MUT
 
+// ── P1-2b: Hypoxia self-shading via oxygen diffusion (O₂-field layer 2, non-energy) ──────────────────
+//
+// CBRT_LUT[N] = ⌊256·cbrt(N)⌋ for N ∈ [0..256], Q8.8 fixed-point format.
+// Used to compute inner_fraction = 1 − N^(−1/3) = (CBRT_LUT[N] − 256) / CBRT_LUT[N].
+// Examples: N=1→256, N=4→406, N=8→512, N=64→1024, N=256→1625.
+const CBRT_LUT: [i32; 257] = [
+     0,  256,  323,  369,  406,  438,  465,  490,  512,  533,
+   552,  569,  586,  602,  617,  631,  645,  658,  671,  683,
+   695,  706,  717,  728,  738,  749,  758,  768,  777,  787,
+   795,  804,  813,  821,  829,  837,  845,  853,  861,  868,
+   876,  883,  890,  897,  904,  911,  917,  924,  930,  937,
+   943,  949,  956,  962,  968,  974,  979,  985,  991,  997,
+  1002, 1008, 1013, 1019, 1024, 1029, 1035, 1040, 1045, 1050,
+  1055, 1060, 1065, 1070, 1075, 1080, 1084, 1089, 1094, 1098,
+  1103, 1108, 1112, 1117, 1121, 1126, 1130, 1134, 1139, 1143,
+  1147, 1151, 1156, 1160, 1164, 1168, 1172, 1176, 1180, 1184,
+  1188, 1192, 1196, 1200, 1204, 1208, 1212, 1215, 1219, 1223,
+  1227, 1230, 1234, 1238, 1241, 1245, 1249, 1252, 1256, 1259,
+  1263, 1266, 1270, 1273, 1277, 1280, 1283, 1287, 1290, 1294,
+  1297, 1300, 1303, 1307, 1310, 1313, 1316, 1320, 1323, 1326,
+  1329, 1332, 1336, 1339, 1342, 1345, 1348, 1351, 1354, 1357,
+  1360, 1363, 1366, 1369, 1372, 1375, 1378, 1381, 1384, 1387,
+  1390, 1393, 1396, 1398, 1401, 1404, 1407, 1410, 1413, 1415,
+  1418, 1421, 1424, 1426, 1429, 1432, 1435, 1437, 1440, 1443,
+  1445, 1448, 1451, 1453, 1456, 1459, 1461, 1464, 1467, 1469,
+  1472, 1474, 1477, 1479, 1482, 1485, 1487, 1490, 1492, 1495,
+  1497, 1500, 1502, 1505, 1507, 1509, 1512, 1514, 1517, 1519,
+  1522, 1524, 1526, 1529, 1531, 1534, 1536, 1538, 1541, 1543,
+  1545, 1548, 1550, 1552, 1555, 1557, 1559, 1562, 1564, 1566,
+  1568, 1571, 1573, 1575, 1578, 1580, 1582, 1584, 1586, 1589,
+  1591, 1593, 1595, 1598, 1600, 1602, 1604, 1606, 1608, 1611,
+  1613, 1615, 1617, 1619, 1621, 1623, 1625,
+];
+
 // Stage 0 (SpatialRebuild) REMOVED (M1/F2): the NeighborGrid was rebuilt every tick but never
 // queried by any stage — dead per-tick work. Removed until a real neighbour-coupled consumer lands.
 
@@ -354,6 +388,62 @@ fn choose_respiratory_pathway(
     }
 }
 
+/// P1-2b: Compute hypoxia factor [0..1000] (Q3.10) from inner-cell O₂-starvation (self-shading).
+///
+/// Hypoxia represents the metabolic penalty of clustering: inner cells lack direct access to
+/// ambient O₂ (surface-area / volume mismatch). The factor scales the yield (income) in
+/// `stage_interactions`, reducing `gained` when body_cell_count > 1 in a hypoxic biome.
+///
+/// N≤1 → 0 (single cell has no interior, fully oxygenated surface).
+/// N>1 → inner_fraction × scarcity, clamped [0..1000].
+/// Integer-deterministic (CBRT_LUT, no float). PURE function (reads field once, no neighbor-offset).
+fn compute_hypoxia_factor_x1000(
+    primary_layer: crate::FieldId,
+    field: &dyn crate::FieldStore,
+    pos: crate::Vec2Fixed,
+    body_cell_count: i64,
+    cap_o2: i64,
+    n_layers: usize,
+) -> i32 {
+    if body_cell_count <= 1 {
+        return 0; // Single cell or non-phase2: no interior → no hypoxia.
+    }
+
+    let idx = primary_layer.as_usize();
+    if idx >= n_layers {
+        return 0; // Layer out-of-range bounds-guard (conserved_at would panic).
+    }
+    if cap_o2 <= 0 {
+        // No O₂ economy (cap unset / no O₂ field) → no diffusion cost. Return 0 rather than treating
+        // cap=0 as scarcity=1000 (which would slap MAX hypoxia on every cluster unconditionally —
+        // a mis-signed penalty). True anoxia is already handled by choose_respiratory_pathway (eff→0).
+        return 0;
+    }
+
+    // 1. Inner fraction: proportion of cells WITHOUT direct surface access.
+    //    Formula: inner_fraction = 1 − N^(−1/3) = (cbrt_n − 256) / cbrt_n
+    //    CBRT_LUT[N] = 256 · cbrt(N); clamp N to [0..256] for LUT.
+    let cbrt_n_x256 = CBRT_LUT[body_cell_count.min(256) as usize];
+    let inner_fraction_x1000 = if cbrt_n_x256 > 256 {
+        (1000i64 * (cbrt_n_x256 as i64 - 256) / cbrt_n_x256 as i64).clamp(0, 1000) as i32
+    } else {
+        0
+    };
+
+    // 2. Scarcity: local O₂ concentration relative to cap (normalized to [0..1000]).
+    //    ambient_o2 = field sample × 1000 / cap_o2
+    //    scarcity = 1000 − ambient_o2 (if abundant O₂, scarcity=0; if anoxic, scarcity=1000).
+    let ambient_o2_x1000 = if cap_o2 > 0 {
+        field.conserved_at(pos, idx) as i64 * 1000 / cap_o2
+    } else {
+        0
+    };
+    let scarcity_x1000 = (1000 - ambient_o2_x1000).clamp(0, 1000) as i32;
+
+    // 3. Hypoxia = inner_fraction × scarcity / 1000 [Q3.10].
+    ((inner_fraction_x1000 as i64 * scarcity_x1000 as i64) / 1000).min(1000) as i32
+}
+
 // ── Stage 6: Interactions — feed: proportional deficit rationing (B-3). ─────────────────────────
 //    At a deficit cell (Σ demand > R_cell) each agent's grant is `U_i·R_cell / Σ U_j` (integer
 //    truncating). Non-deficit cells grant each agent its full Monod demand.
@@ -489,11 +579,28 @@ pub fn stage_interactions(
         };
         let combined_eff_x256 = g.metabolism_eff as i64 * resp_eff_x256 / 256;
 
+        // P1-2b: Apply hypoxia to income (yield penalty from O₂-diffusion self-shading).
+        // Hypoxia is gated on enable_oxygen && Some(rp) (same gate as resp_eff above).
+        // For N≤1 or non-O₂ configs, hypoxia_x1000=0 → kept=1000 → no-op (byte-identical).
+        // Order of operations (critical for golden determinism):
+        //   1. combined_eff (composition of metabolism_eff × resp_eff)
+        //   2. hypoxia (from O₂-field)
+        //   3. gained = got × combined_eff / 256 × kept / 1000
+        let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
+        let hypoxia_x1000 = if econ.enable_oxygen && ph.respiratory_pathway.is_some() {
+            let rp = &ph.respiratory_pathway.as_ref().unwrap();
+            compute_hypoxia_factor_x1000(rp.primary_layer, &*field.0, c.pos, n_cells, econ.o2_cap, econ.n_layers)
+        } else {
+            0
+        };
+        let kept_x1000 = (1000 - hypoxia_x1000 as i64).max(0);
+
         // Take the FULL grant (original semantics), convert combined_eff to energy, dissipate rest.
         // Conserved (R15): got == gained + lost. Anoxic obligate → resp_eff=0 → gained=0 → starves (R34).
+        // P1-2b: gained is now reduced by hypoxia through kept_x1000 factor.
         let got = field.0.conserved_take(c.pos, grants[i], c.layer);
-        let gained = got * combined_eff_x256 / 256;
-        let lost = got - gained;  // metabolic inefficiency → dissipated (conserved)
+        let gained = got * combined_eff_x256 / 256 * kept_x1000 / 1000;
+        let lost = got - gained;  // metabolic inefficiency + hypoxia shortfall → dissipated (conserved)
         energy.0 += gained;
         ledger.dissipated += lost;
         // D′-1/D′-2b: additive photo energy on the EXPRESSED capacity.
@@ -1248,7 +1355,7 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_respiratory_pathway, monod_demand, stage_metabolism, stage_predation, stage_sense};
+    use super::{choose_respiratory_pathway, compute_hypoxia_factor_x1000, monod_demand, stage_metabolism, stage_predation, stage_sense};
     use crate::predation::{PredationMode, PredationSpec, SizeRefugeSpec};
     use crate::{
         CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldId, FieldRes, FieldStore,
@@ -2096,5 +2203,107 @@ mod tests {
         // (Exact value depends on EconParams::default(), but the key is that
         // respiratory_pathway==None causes NO additional dissipation beyond baseline.)
         assert!(ledger.dissipated >= 0, "conservation: dissipated must be non-negative");
+    }
+
+    /// P1-2b: Unit tests for compute_hypoxia_factor_x1000 — self-shading O₂-diffusion cost.
+    /// Tests verify integer correctness and proper isolation (N≤1 → 0; abundant O₂ → 0).
+    /// Examples from ТЗ §2 (CBRT_LUT-derived inner_fraction):
+    /// - N=1→0 (single cell, no interior)
+    /// - N=4: inner_fraction=(406-256)/406=369 @ full anoxia (scarcity=1000)
+    /// - N=8: inner_fraction=(512-256)/512=500 @ full anoxia
+    /// - N=64: inner_fraction=(1024-256)/1024=750 @ full anoxia
+    #[test]
+    fn p1_2b_hypoxia_single_cell_no_stress() {
+        let field = HypoxiaMockField::new();
+        let result = compute_hypoxia_factor_x1000(FieldId::Oxygen, &field, Vec2Fixed(0, 0), 1, 1000, 3);
+        assert_eq!(result, 0, "N=1 → hypoxia=0 (single cell, full surface exposure)");
+    }
+
+    #[test]
+    fn p1_2b_hypoxia_n4_full_anoxia() {
+        // N=4: CBRT_LUT[4]=406 → inner=(406-256)/406=150/406=369 when scarcity=1000
+        // Field O₂=0 → scarcity=1000 (full anoxia)
+        let mut field = HypoxiaMockField::new();
+        field.set_conserved(0, FieldId::Oxygen.as_usize(), 0); // no ambient O₂
+        let result = compute_hypoxia_factor_x1000(FieldId::Oxygen, &field, Vec2Fixed(0, 0), 4, 1000, 3);
+        assert_eq!(result, 369, "N=4 at anoxia: inner≈369; hypoxia=369×1000/1000=369");
+    }
+
+    #[test]
+    fn p1_2b_hypoxia_n8_full_anoxia() {
+        // N=8: CBRT_LUT[8]=512 → inner=(512-256)/512=256/512=500
+        let mut field = HypoxiaMockField::new();
+        field.set_conserved(0, FieldId::Oxygen.as_usize(), 0);
+        let result = compute_hypoxia_factor_x1000(FieldId::Oxygen, &field, Vec2Fixed(0, 0), 8, 1000, 3);
+        assert_eq!(result, 500, "N=8 at anoxia: inner=500; hypoxia=500");
+    }
+
+    #[test]
+    fn p1_2b_hypoxia_n64_full_anoxia() {
+        // N=64: CBRT_LUT[64]=1024 → inner=(1024-256)/1024=768/1024=750
+        let mut field = HypoxiaMockField::new();
+        field.set_conserved(0, FieldId::Oxygen.as_usize(), 0);
+        let result = compute_hypoxia_factor_x1000(FieldId::Oxygen, &field, Vec2Fixed(0, 0), 64, 1000, 3);
+        assert_eq!(result, 750, "N=64 at anoxia: inner=750; hypoxia=750");
+    }
+
+    #[test]
+    fn p1_2b_hypoxia_abundant_oxygen_zero_stress() {
+        // Abundant O₂ (field at cap) → scarcity=0 → hypoxia=0 regardless of N
+        let mut field = HypoxiaMockField::new();
+        field.set_conserved(0, FieldId::Oxygen.as_usize(), 1000); // ambient = cap
+        let result = compute_hypoxia_factor_x1000(FieldId::Oxygen, &field, Vec2Fixed(0, 0), 64, 1000, 3);
+        assert_eq!(result, 0, "abundant O₂ → scarcity=0 → hypoxia=0");
+    }
+
+    #[test]
+    fn p1_2b_hypoxia_out_of_range_layer_bounds_guard() {
+        // Layer index >= n_layers → bounds-guard returns 0 (prevents OOB panic)
+        let field = HypoxiaMockField::new();
+        let result = compute_hypoxia_factor_x1000(FieldId::Oxygen, &field, Vec2Fixed(0, 0), 64, 1000, 2);
+        // FieldId::Oxygen.as_usize() = 2; n_layers = 2 → idx >= n_layers → return 0
+        assert_eq!(result, 0, "layer out-of-range → bounds-guard returns 0");
+    }
+
+    /// Test mock: minimal FieldStore for hypoxia calculations (only conserved_at).
+    struct HypoxiaMockField {
+        amounts: Vec<Vec<i64>>, // amounts[cell_idx][layer]
+    }
+    impl HypoxiaMockField {
+        fn new() -> Self {
+            // Single cell (index 0), 4 layers, all initially 0.
+            HypoxiaMockField {
+                amounts: vec![vec![0i64; 4]],
+            }
+        }
+        fn set_conserved(&mut self, cell: usize, layer: usize, value: i64) {
+            if self.amounts.len() <= cell {
+                self.amounts.resize(cell + 1, vec![0i64; 4]);
+            }
+            if self.amounts[cell].len() <= layer {
+                self.amounts[cell].resize(layer + 1, 0);
+            }
+            self.amounts[cell][layer] = value;
+        }
+    }
+    impl FieldStore for HypoxiaMockField {
+        fn m_field(&self) -> i64 { 1 }
+        fn cell_index(&self, _pos: Vec2Fixed) -> usize { 0 }
+        fn cell_morton(&self, _pos: Vec2Fixed) -> u32 { 0 }
+        fn check_meta(&self, _expected_m_field: i64) -> Result<(), String> { Ok(()) }
+        fn conserved_at(&self, _pos: Vec2Fixed, layer: usize) -> i64 {
+            self.amounts.get(0).and_then(|c| c.get(layer)).copied().unwrap_or(0)
+        }
+        fn conserved_gradient(&self, _pos: Vec2Fixed, _range: i64, _layer: usize) -> (i64, i64) { (0, 0) }
+        fn conserved_take(&mut self, _pos: Vec2Fixed, _amount: i64, _layer: usize) -> i64 { 0 }
+        fn deposit_conserved(&mut self, _cell: usize, _amount: i64, _layer: usize) {}
+        fn conserved_total(&self, _layer: usize) -> i64 { 0 }
+        fn conserved_total_all(&self) -> i64 { 0 }
+        fn conserved_hash(&self) -> u64 { 0 }
+        fn signal_total(&self) -> f32 { 0.0 }
+        fn signal_hash(&self) -> u64 { 0 }
+        fn signal_all_finite(&self) -> bool { true }
+        fn commit_merge(&mut self, _batches: &[Vec<Deposit>], _strategy: MergeStrategy) {}
+        fn solve(&mut self) -> i64 { 0 }
     }
 }
