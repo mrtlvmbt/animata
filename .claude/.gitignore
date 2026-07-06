@@ -7,3 +7,6 @@ kit-plan-bypass.log
 kit-readonly-bypass.log
 kit-citation-misses.log
 # <<< claude-dev-kit (managed) <<<
+# done-gate (Stop-хук кодеров) — runtime-артефакты, не версионируются
+done-gate.log
+.done-allow
