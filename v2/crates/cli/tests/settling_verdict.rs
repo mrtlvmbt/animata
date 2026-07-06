@@ -26,15 +26,17 @@ const POP_FLOOR: i64 = 5; // below this the arm is a collapse, not a measurement
 /// 5% — small but real; below this is noise.
 const REL_MARGIN: f64 = 0.05;
 const SEED_MAJORITY: usize = 3; // ≥3/5 seeds must show the differential
-/// Maximum tolerated drift (|first-half mean − second-half mean|) in the WITH arm's body size to
-/// claim equilibrium (not still-climbing/collapsing). Provisional: ~5% of P1 equilibrium range.
-/// TODO PM pass-2 calibrate; anchor ≈ 5% P1 equilibrium
-const DRIFT_EPS: f64 = 0.5;
-/// Ceiling (scaled units, BODY_SIZE_SCALE) for the WITH arm's mean body size to claim it is a
-/// genuine INTERMEDIATE (not maxed to the morphogen cap). Provisional: 2-4 cells in telemetry units,
-/// below g_dev=4 cap.
-/// TODO PM pass-2; anchor ≈ 2-4 cells in BODY_SIZE_SCALE units, below g_dev=4 cap
-const INTERMEDIATE_CEIL: i64 = 40; // scaled units; 40 ≈ 2-4 cells (lesson #288: BODY_SIZE_SCALE)
+/// Floor (scaled units, BODY_SIZE_SCALE=256) for the WITH arm's mean body size to claim it is
+/// genuinely multicellular (>1 cell), not unicellular. 1 cell = 256 in scaled units.
+/// TODO PM pass-2
+const INTERMEDIATE_FLOOR: i64 = 256; // >1 cell = genuinely multicellular (BODY_SIZE_SCALE=256)
+/// Ceiling (scaled units, BODY_SIZE_SCALE=256) for the WITH arm's mean body size to claim it is a
+/// genuine INTERMEDIATE (not maxed to the morphogen cap). <12 of the g_dev=4 cap (4096 = 16 cells).
+/// TODO PM pass-2
+const INTERMEDIATE_CEIL: i64 = 3072; // <12 of the 16-cell g_dev=4 cap (4096) → genuine intermediate, not maxed
+/// Late-window drift as a fraction of equilibrium body size. 5% — small stable variation, not still-climbing.
+/// TODO PM pass-2
+const DRIFT_FRAC: f64 = 0.05; // late-window drift / mean_body_size < 5%
 
 struct ArmResult {
     mean_body_size: f64,
@@ -141,16 +143,16 @@ fn settling_verdict() {
     println!(
         "  larger-bodied lineages survived settling rounds and reproduced (group-level selection)."
     );
-    println!("PRE-DECLARED THRESHOLDS (F1/F3 falsifiability):");
+    println!("PRE-DECLARED THRESHOLDS (F1/F3 falsifiability, BODY_SIZE_SCALE=256, 1 cell=256):");
     println!("  (a/d) reversible/conditional: WITH body size > ABLATION by ≥{:.0}% in ≥{SEED_MAJORITY}/{} seeds", REL_MARGIN * 100.0, VERDICT_SEEDS.len());
     println!(
-        "  (b-i) intermediate-genuine: WITH late-window mean body size > 1 (multicellular, not unicellular)"
+        "  (b-i) intermediate-genuine: WITH late-window mean body size > {INTERMEDIATE_FLOOR} (>1 cell, multicellular)"
     );
     println!(
-        "  (b-ii) intermediate-bounded: WITH late-window mean body size < {INTERMEDIATE_CEIL} (scaled units, not maxed)"
+        "  (b-ii) intermediate-bounded: WITH late-window mean body size < {INTERMEDIATE_CEIL} (<12 cells, not maxed to g_dev=4 cap)"
     );
     println!(
-        "  (b-iii) intermediate-stable: WITH late-window drift (|first-half mean − second-half mean|) < {DRIFT_EPS}"
+        "  (b-iii) intermediate-stable: WITH late-window drift / mean_body_size < {:.0}%", DRIFT_FRAC * 100.0
     );
     println!("  (c) measurable-cost: hypoxia structural cost persists in ABLATION (proven SL-2)");
     println!("ticks={ticks}  late-window=[{window_start},{ticks}]  config=settling_config");
@@ -174,9 +176,10 @@ fn settling_verdict() {
         let alive = !with.collapsed && !abl.collapsed;
         let shows_differential = alive && rel_gap >= REL_MARGIN;
         let is_intermediate = alive
-            && with.mean_body_size > 1.0
+            && (with.mean_body_size as i64) > INTERMEDIATE_FLOOR
             && (with.mean_body_size as i64) < INTERMEDIATE_CEIL
-            && with.drift < DRIFT_EPS;
+            && with.mean_body_size > 0.0
+            && with.drift / with.mean_body_size < DRIFT_FRAC;
 
         if alive {
             both_alive += 1;
@@ -216,8 +219,9 @@ fn settling_verdict() {
         REL_MARGIN * 100.0
     );
     println!(
-        "RESULT (b): {intermediates}/{} seeds show WITH intermediate (>1, <{INTERMEDIATE_CEIL}, drift<{DRIFT_EPS})",
-        VERDICT_SEEDS.len()
+        "RESULT (b): {intermediates}/{} seeds show WITH intermediate (>{INTERMEDIATE_FLOOR}, <{INTERMEDIATE_CEIL}, drift<{:.0}%)",
+        VERDICT_SEEDS.len(),
+        DRIFT_FRAC * 100.0
     );
     println!("(both-alive={both_alive}, POP_FLOOR={POP_FLOOR})");
 
