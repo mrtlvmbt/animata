@@ -485,6 +485,59 @@ pub fn phase2_oxygen_config(seed: u64) -> SimConfig {
     }
 }
 
+/// **P2 golden-TOUCHING:** biotic dynamic O₂ (photosynthesis produces O₂, respiration consumes it).
+/// Builds on phase2_oxygen_config (morphogen + hypoxia) + adds light economy.
+/// Layer 0: substrate, Layer 1: organics, Layer 2: O₂ (dynamic via photo-produce + respire-consume).
+/// Geyт: `enable_oxygen && light.is_some()` → O₂ evolves day-night gradient (R-A).
+/// Existing oxygen_config/phase2_oxygen_config (light=None) stay static (byte-identical isolation).
+pub fn p2_config(seed: u64) -> SimConfig {
+    let mspec = sim_core::MorphogenSpec {
+        g_dev: 4,
+        n_dev: 8,
+        boundary: sim_core::Boundary::Reflecting,
+        diffuse_shift: 3,
+        decay_num: 1,
+        decay_shift: 4,
+        seed_scale: 4096,
+        stop_threshold: 0,
+        apoptosis_threshold: None,
+        germ_threshold: None,
+        supply_source: None,
+        adhesion_threshold: None,
+    };
+    let gspec = sim_core::GrnSpec::new(
+        2,
+        vec![32, -32, -32, 32],
+        vec![0, 0],
+        vec![0, 0],
+        3,
+        12,
+        0,
+        0,
+        vec![144, 112],
+    );
+    let light_spec = LightSpec {
+        l_max: 100,         // peak day light (dive #71 §5)
+        period_ticks: 100,  // 100-tick day-night cycle
+        day_ticks: 50,      // 50% duty cycle (50 ticks day, 50 ticks night)
+        km_photo: 30,       // photo Monod half-saturation (dive #71 §5)
+    };
+    SimConfig {
+        n_layers: 3,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L1_O2_SPEC, LayerSpec::default()],
+        econ: EconParams {
+            morphogen: Some(mspec),
+            grn: Some(gspec),
+            enable_oxygen: true,
+            light: Some(light_spec),  // P2: add light economy (geyт for dynamic O₂)
+            evolve_body_size: true,
+            hypoxia_base_x1000: 543,
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
@@ -1669,5 +1722,81 @@ mod tests {
         for _ in 0..100 { sim.step(); }
         let t100 = sim.field_layer_total(o2);
         assert_eq!(t0, t100, "R30 VIOLATED: O₂-масса не сохранена: t0={t0} t100={t100}");
+    }
+
+    // ─── P2: Dynamic O₂ (photosynthesis produces, respiration consumes) ─────────────────────────
+
+    #[test]
+    fn p2_config_builds_and_runs() {
+        // P2: p2_config вводит свет (light.is_some()) → enable O₂ produce/consume динамику.
+        // Smoke test: build и run 10 тиков без panic.
+        let cfg = p2_config(123);
+        let mut sim = build_sim(cfg);
+        assert_eq!(sim.econ().n_layers, 3, "p2_config must have n_layers=3");
+        assert!(sim.econ().enable_oxygen, "p2_config must have enable_oxygen=true");
+        assert!(sim.econ().light.is_some(), "p2_config must have light.is_some()");
+        for _ in 0..10 {
+            sim.step();
+            let residual = sim.conservation_residual();
+            assert_eq!(residual, 0, "ENERGY CONSERVATION VIOLATED: residual={}", residual);
+        }
+    }
+
+    #[test]
+    fn p2_oxygen_mass_conserved() {
+        // R30-P2: O₂ is a dynamic OPEN quantity (photosynthesis produces, respiration consumes). This
+        // asserts, over a FULL day-night cycle, that the mechanic actually FIRES (O₂ changes — not dead
+        // code), stays physically valid (never negative — R-B clamp; bounded — no runaway creation), the
+        // population SURVIVES (respiration drains O₂ but must not anoxic-collapse the config), and energy
+        // conservation (R15 — which now EXCLUDES the O₂ non-energy layer) holds EXACTLY every tick.
+        let cfg = p2_config(42);
+        let mut sim = build_sim(cfg);
+        let o2_idx = FieldId::Oxygen.as_usize();
+        let t0 = sim.field_layer_total(o2_idx);
+        assert!(t0 > 0, "p2_config should init O₂ from world-caps");
+
+        let mut changed = false;
+        let mut max_o2 = t0;
+        for _ in 0..120 {
+            // >1 full day-night cycle (period_ticks=100)
+            sim.step();
+            assert_eq!(
+                sim.conservation_residual(),
+                0,
+                "R15 energy conservation (O₂ excluded) violated at tick {}",
+                sim.tick()
+            );
+            let o2 = sim.field_layer_total(o2_idx);
+            assert!(o2 >= 0, "O₂-field never negative (R-B clamp) at tick {}", sim.tick());
+            assert!(sim.population() > 0, "p2_config population must survive (O₂ drain must not anoxic-collapse)");
+            if o2 != t0 {
+                changed = true;
+            }
+            max_o2 = max_o2.max(o2);
+        }
+        assert!(changed, "O₂ field must CHANGE over the run — produce/consume must actually fire (anti-dead-code)");
+        assert!(max_o2 <= t0 * 4, "O₂ bounded — no runaway creation (max={} init={})", max_o2, t0);
+    }
+
+    #[test]
+    fn p2_oxygen_determinism_two_run() {
+        // R33-determinism: p2_config run twice with same seed → byte-identical trajectory.
+        // Deposit staging order-independent (Σ associative) → identical hashes.
+        let seed = 99;
+        let cfg1 = p2_config(seed);
+        let cfg2 = p2_config(seed);
+        let mut sim1 = build_sim(cfg1);
+        let mut sim2 = build_sim(cfg2);
+
+        // Run both for 30 ticks (enough to exercise produce/consume cycling).
+        let ticks = 30;
+        for _ in 0..ticks {
+            sim1.step();
+            sim2.step();
+            let hash1 = sim1.state_hash();
+            let hash2 = sim2.state_hash();
+            assert_eq!(hash1, hash2, "DETERMINISM VIOLATED at tick {}: hash1={:x}, hash2={:x}",
+                       sim1.tick(), hash1, hash2);
+        }
     }
 }

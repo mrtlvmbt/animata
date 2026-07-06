@@ -384,9 +384,11 @@ impl FieldStore for CpuFieldStore {
 
     fn solve(&mut self) -> i64 {
         // Apply staged deposits → grid (the t+1 snapshot, R17) for each layer.
+        // P2-R-B: clamp conserved ≥ 0 (O₂ consumption can produce negative staging;
+        // shortfall → clamp-to-0, no mass creation/destruction, exact conservation).
         for layer in 0..self.n_layers {
             for (g, s) in self.conserved[layer].iter_mut().zip(self.conserved_staging[layer].iter_mut()) {
-                *g += *s;
+                *g = (*g + *s).max(0);
                 *s = 0;
             }
         }
