@@ -1392,9 +1392,19 @@ mod tests {
     use crate::predation::{PredationMode, PredationSpec, SizeRefugeSpec};
     use crate::{
         CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldId, FieldRes, FieldStore,
-        Genome, MergeStrategy, Phenotype, Position, RespiratoryPathway, Sensors, SimClock, Telemetry, Vec2Fixed,
+        Genome, MergeStrategy, Phenotype, Position, RespiratoryPathway, Sensors, SimClock, Telemetry, Vec2Fixed, WorldRes, WorldView,
     };
     use bevy_ecs::prelude::*;
+
+    /// Minimal stub WorldView for test setup (temp_at for thermal tolerance tests).
+    struct TestStubWorld;
+    impl WorldView for TestStubWorld {
+        fn is_solid(&self, _p: Vec2Fixed) -> bool { false }
+        fn height(&self, _x: i64, _z: i64) -> i64 { 0 }
+        fn biome(&self, _p: Vec2Fixed) -> u8 { 0 }
+        fn resource(&self, _p: Vec2Fixed) -> i64 { 100 }
+        fn temp_at(&self, _p: Vec2Fixed) -> i32 { 1500 }
+    }
 
     /// Minimal `FieldStore` test double for the `stage_sense` regression test below: layer 0 and
     /// layer 1 hold DISTINCT, hand-set amounts, so a Sense read that used the wrong layer index is
@@ -1534,10 +1544,11 @@ mod tests {
         world.insert_resource(SimClock { seed: 0, tick: 0 });
         world.insert_resource(EnergyLedger::default());
         world.insert_resource(Telemetry::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         let ids: Vec<Entity> = phenotypes
             .into_iter()
-            .map(|ph| world.spawn((Genome::founder(2), ph, Energy(1_000_000))).id())
+            .map(|ph| world.spawn((Position(Vec2Fixed(0, 0)), Genome::founder(2), ph, Energy(1_000_000))).id())
             .collect();
 
         let mut schedule = Schedule::default();
@@ -1666,6 +1677,7 @@ mod tests {
         world.insert_resource(EconParams { predation: Some(spec), ..EconParams::default() });
         world.insert_resource(FieldRes(Box::new(SingleCellFieldStub)));
         world.insert_resource(EnergyLedger::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         let entity_ids: Vec<Entity> = entities
             .into_iter()
@@ -1707,6 +1719,7 @@ mod tests {
         world.insert_resource(EconParams { predation: Some(spec), ..EconParams::default() });
         world.insert_resource(FieldRes(Box::new(SingleCellFieldStub)));
         world.insert_resource(EnergyLedger::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         let pred_id = world
             .spawn((
@@ -2215,6 +2228,7 @@ mod tests {
         world.insert_resource(SimClock { seed: 0, tick: 0 });
         world.insert_resource(EnergyLedger::default());
         world.insert_resource(Telemetry::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         // Entity with NO respiratory pathway (simulates enable_oxygen=false or gene=0).
         let ph_none = Phenotype {
@@ -2224,7 +2238,7 @@ mod tests {
             respiratory_pathway: None,
         };
 
-        let _id = world.spawn((Genome::founder(2), ph_none, Energy(1_000_000))).id();
+        let _id = world.spawn((Position(Vec2Fixed(0, 0)), Genome::founder(2), ph_none, Energy(1_000_000))).id();
 
         let mut schedule = Schedule::default();
         schedule.add_systems(stage_metabolism);
