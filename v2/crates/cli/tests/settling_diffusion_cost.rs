@@ -14,7 +14,7 @@
 
 use cli::{build_sim, settling_config};
 
-const SEED: u64 = 0xD1FF_C05T;
+const SEED: u64 = 0xD1FF_C057;
 
 /// (F2-a) Reachability guard: at least one entity reaches N>1 under settling selection.
 /// This verifies that the g_dev=1 (unicellular founder) base still allows growth to N>1
@@ -32,11 +32,11 @@ fn settling_diffusion_cost_reachable_intermediate() {
     let mut max_body_size = 0i64;
     for _ in 0..horizon {
         sim.step();
-        // Find the largest body in the population at this tick.
-        for entity in sim.entities.read() {
-            let body_size = entity.genome.body_size() as i64;
-            if body_size > max_body_size {
-                max_body_size = body_size;
+        // Use body_size_probe to get the max body size at this tick.
+        let probe = sim.body_size_probe();
+        if let Some(max_tick_size) = probe.into_iter().max() {
+            if max_tick_size > max_body_size {
+                max_body_size = max_tick_size;
             }
         }
     }
@@ -77,12 +77,9 @@ fn settling_diffusion_cost_o2_scarcity_band() {
         tick_count += 1;
 
         // Sample mean O₂ from the field.
-        let o2_total = sim.field.conserved_total(2); // Layer 2 = O₂.
-        // Derive world cell count from the field's Morton index range (O(1) lookup).
-        // ProcgenWorld standard: 64×64 cells. Accessor: field.m_field() is 1 (expect unit cell density).
-        // For safety, derive from field footprint if available; fallback: assert 64×64.
-        let m_field = sim.field.m_field();
-        let world_cells = (64 * 64) as i64; // TODO: derive from world-gen config instead of hardcoding.
+        let o2_total = sim.field_layer_total(2); // Layer 2 = O₂.
+        // ProcgenWorld standard: 64×64 cells (confirmed in v2/crates/world/src/lib.rs).
+        let world_cells = (64 * 64) as i64;
         let mean_o2 = o2_total / world_cells.max(1);
         sum_o2 += mean_o2;
     }
