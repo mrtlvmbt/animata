@@ -123,3 +123,19 @@ KIT_LINT_CMD='cargo clippy --all-targets -- -D warnings'
 KIT_LINT_STAGED_GLOB='\.rs$'
 KIT_METRICS_DIR='tools/agent-metrics'
 KIT_SUBREPO_DIR='.claude-dev-kit'
+
+# ── Роль-скоуп: гейты кодеров (аудит + консенсус-план animata-followup, 2026-07-06) ──
+# Клоны animata.git по ролям живут в каталогах A/B/C/PM → роль = basename корня клона.
+# Кодерам (A/B/C): plan-consensus из WARN становится реальным блоком (DENY; логируемый обход —
+# KIT_PLAN_CONSENSUS_ALLOW=1) + TTL маркера сужен 30→10 мин (time-bucket дыра: прогон критика на
+# черновике не должен надолго открывать все ExitPlanMode) + done-gate Stop-хук (см.
+# .claude/hooks/done-gate.sh; ловит класс A-4 «done без PR»). PM/RnD остаются на WARN и без
+# done-gate — их дисциплина не проваливалась, а PM-приём хэндоффов сам является гейтом.
+_ANIMATA_ROLE="$(basename "${CLAUDE_PROJECT_DIR:-$PWD}")"
+case "$_ANIMATA_ROLE" in
+  A|B|C)
+    KIT_PLAN_CONSENSUS_DENY=1
+    KIT_PLAN_CONSENSUS_TTL_MIN=10
+    ANIMATA_DONE_GATE=1
+    ;;
+esac

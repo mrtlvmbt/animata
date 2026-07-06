@@ -83,6 +83,18 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/done-gate.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/done-gate.sh\" || exit 0",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   }
 }
