@@ -2442,7 +2442,7 @@ mod tests {
     /// Criterion-(c) test suite for `compute_hypoxia_factor_x1000`.
     /// Tests the size-graded structural O₂-diffusion cost INDEPENDENT of the settling-toggle state.
     /// (c-i) presence: factor < 1000 for body_cell_count > 1 at scarce O₂ level.
-    /// (c-ii) size-graded: strictly monotone f(16) < f(4) < f(1)=1000.
+    /// (c-ii) size-graded: strictly monotone f(16) > f(4) > f(1)=0 (penalty increases with N).
     /// (c-iii) settling-INDEPENDENT: function signature does NOT include econ.settling.
     #[test]
     fn test_hypoxia_factor_presence_at_scarce_o2() {

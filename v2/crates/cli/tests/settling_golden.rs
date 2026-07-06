@@ -22,9 +22,9 @@ use cli::{settling_config, run_conserved_hashes};
 use sim_core::fnv_mix;
 
 // P4/SL-2: settling-golden folded checksum — fold of 512 per-tick state hashes.
-// PLACEHOLDER: rebase from p2_config to phase2_oxygen_config changes trajectory.
-// PM will pin the REAL arm64 value from .ci-report/failed.log after first CI run.
-const SETTLING_GOLDEN_CHECKSUM: u64 = 0x0000_0000_0000_0001; // PLACEHOLDER — will be re-pinned arm64 by PM
+// Trajectory re-pinned after the p2_config → phase2_oxygen_config rebase (SL-2).
+// PM single-writer pin, matched-arch arm64 (CI run 28815652518, golden-arm64 job).
+const SETTLING_GOLDEN_CHECKSUM: u64 = 0x3DB2_8BE3_BABE_3ED3; // arm64 (4445769592374968019)
 
 /// P4/SL-1: settling-golden pin — folded checksum of 512-tick trajectory for settling_config.
 /// Arm64 only (per-arch baseline). Excluded from x86 jobs automatically via the `v2_golden`
