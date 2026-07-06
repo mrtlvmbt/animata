@@ -2448,9 +2448,9 @@ mod tests {
     fn test_hypoxia_factor_presence_at_scarce_o2() {
         // (c-i): factor < 1000 for body_cell_count > 1 at scarce O₂ level.
         let mut field = HypoxiaMockField::new();
-        let pos = Vec2Fixed { x: 0, z: 0 };
+        let pos = Vec2Fixed(0, 0);
         let cap_o2 = 100; // Fixed scarce O₂ cap.
-        let primary_layer = FieldId::new(2).unwrap(); // Layer 2 = O₂ layer.
+        let primary_layer = FieldId::Oxygen; // Layer 2 = O₂ layer.
         let n_layers = 3;
 
         // Set O₂ level to 30 (scarcity = 1000 - 30*1000/100 = 700).
@@ -2466,9 +2466,9 @@ mod tests {
     fn test_hypoxia_factor_monotone_increasing() {
         // (c-ii): strictly monotone f(16) > f(4) > f(1)=0 (penalty increases with N).
         let mut field = HypoxiaMockField::new();
-        let pos = Vec2Fixed { x: 0, z: 0 };
+        let pos = Vec2Fixed(0, 0);
         let cap_o2 = 100; // Fixed scarce O₂ cap.
-        let primary_layer = FieldId::new(2).unwrap();
+        let primary_layer = FieldId::Oxygen;
         let n_layers = 3;
 
         // Set O₂ to a constant scarce level (30 → scarcity = 700).
@@ -2503,9 +2503,9 @@ mod tests {
         // and does NOT take econ.settling as a parameter.
         // Verify: identical inputs → identical output (determinism, no random state).
         let mut field = HypoxiaMockField::new();
-        let pos = Vec2Fixed { x: 0, z: 0 };
+        let pos = Vec2Fixed(0, 0);
         let cap_o2 = 100;
-        let primary_layer = FieldId::new(2).unwrap();
+        let primary_layer = FieldId::Oxygen;
         let n_layers = 3;
         let body_cell_count = 8;
 
