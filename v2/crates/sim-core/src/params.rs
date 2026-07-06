@@ -318,6 +318,15 @@ pub struct EconParams {
     /// `true` only on `driver_config` (the emergence testbed), gated additionally on
     /// `morphogen_spec.is_some()` in `Genome::mutate`.
     pub evolve_body_size: bool,
+
+    // ── P3-1: ambient-tolerance thermal niche (heritable tol_optimum, tol_breadth) ───────────
+    /// Ambient-tolerance specification (P3-1). `Some` enables thermal-tolerance genes
+    /// (`tol_optimum`, `tol_breadth`) with mutation active and metabolic penalty applied.
+    /// `None` (default, all 6 existing production configs) → tolerance genes stay 0 forever,
+    /// mutation gate prevents draw, hash gate prevents state inclusion → byte-identical goldens
+    /// (the isolation gate; un-re-pinned existing goldens are the test). Option-gated exactly
+    /// like `light`, `predation`, `morphogen`, `mineral_layer` above.
+    pub ambient_tolerance: Option<AmbientToleranceSpec>,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -340,6 +349,84 @@ pub struct LightSpec {
     /// Photo Monod half-saturation constant (eu). Must be > 0. Km_photo < Km_chem (plan §0:
     /// faster light saturation than substrate — calibrated at 30 vs km_chem=74).
     pub km_photo: i64,
+}
+
+// ── P3-1: ambient-tolerance thermal niche ─────────────────────────────────────────────────────
+
+/// Ambient-tolerance thermal niche specification for `EconParams.ambient_tolerance` (P3-1).
+/// When `Some`, enables heritable tolerance genes (`tol_optimum`, `tol_breadth`) with mutation active.
+/// When `None` (default) → tolerance genes inert, `tol_optimum`/`tol_breadth` stay 0 forever,
+/// existing goldens stay byte-identical (the isolation gate). Option-gated exactly like `light`
+/// and `predation` above.
+#[derive(Clone, Copy, Debug)]
+pub struct AmbientToleranceSpec {
+    /// Marker field (currently unused, reserved for future P3-2/P3-3 parameters like
+    /// `tolerance_breadth_cost_k`). For P3-1, presence of `Some` gates the mutation and penalty.
+    pub enabled: bool,
+}
+
+// ── P3-1: Gaussian thermal-penalty kernel (constant LUT, zero float) ──────────────────────────
+
+/// P3-1 (B4): Gaussian kernel exp(−x²/2) precomputed to integer Q8.8 fixed-point.
+/// Indexed [0..=256]; entry at index i corresponds to normalized deviation i/256.
+/// Precomputed offline via Python: `exp(-norm_x²/2)` scaled to [0, 256].
+/// Zero float arithmetic; deterministic cross-architecture.
+/// Used by `tolerance_penalty()` to compute metabolic penalty from thermal deviation.
+pub const THERMAL_KERNEL_Q256: [i32; 257] = [
+    256, 255, 254, 252, 251, 250, 248, 247, 246, 244,  // x ∈ [0, 9]
+    243, 242, 240, 239, 238, 236, 235, 234, 232, 231,  // x ∈ [10, 19]
+    230, 228, 227, 226, 224, 223, 222, 220, 219, 218,  // x ∈ [20, 29]
+    216, 215, 214, 212, 211, 210, 208, 207, 206, 204,  // x ∈ [30, 39]
+    203, 202, 200, 199, 198, 196, 195, 194, 192, 191,  // x ∈ [40, 49]
+    190, 188, 187, 186, 184, 183, 182, 180, 179, 178,  // x ∈ [50, 59]
+    176, 175, 174, 172, 171, 170, 169, 167, 166, 165,  // x ∈ [60, 69]
+    163, 162, 161, 159, 158, 157, 156, 154, 153, 152,  // x ∈ [70, 79]
+    150, 149, 148, 147, 145, 144, 143, 141, 140, 139,  // x ∈ [80, 89]
+    138, 136, 135, 134, 132, 131, 130, 129, 127, 126,  // x ∈ [90, 99]
+    125, 124, 122, 121, 120, 119, 117, 116, 115, 114,  // x ∈ [100, 109]
+    112, 111, 110, 109, 107, 106, 105, 104, 103, 101,  // x ∈ [110, 119]
+    100, 99, 98, 97, 95, 94, 93, 92, 91, 89,           // x ∈ [120, 129]
+    88, 87, 86, 85, 83, 82, 81, 80, 79, 77,            // x ∈ [130, 139]
+    76, 75, 74, 73, 72, 70, 69, 68, 67, 66,            // x ∈ [140, 149]
+    65, 63, 62, 61, 60, 59, 58, 57, 55, 54,            // x ∈ [150, 159]
+    53, 52, 51, 50, 49, 48, 46, 45, 44, 43,            // x ∈ [160, 169]
+    42, 41, 40, 39, 37, 36, 35, 34, 33, 32,            // x ∈ [170, 179]
+    31, 30, 29, 28, 26, 25, 24, 23, 22, 21,            // x ∈ [180, 189]
+    20, 19, 18, 17, 16, 15, 13, 12, 11, 10,            // x ∈ [190, 199]
+    9, 8, 7, 6, 5, 5, 4, 3, 2, 1,                      // x ∈ [200, 209]
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0,                      // x ∈ [210, 219]
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,                      // x ∈ [220, 229]
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,                      // x ∈ [230, 239]
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0,                      // x ∈ [240, 249]
+    0, 0, 0, 0, 0, 0, 0,                                // x ∈ [250, 256]
+];
+
+/// P3-1 (B4): Thermal tolerance penalty (Gaussian decay, integer LUT).
+/// Computes `exp(−(deviation / breadth)²/2)` using a precomputed integer lookup table.
+/// All integer; no float; deterministic cross-arch.
+///
+/// **Parameters:**
+/// - `world_temp`: ambient temperature at entity position (centidegrees)
+/// - `tol_optimum`: entity's tolerance optimum (centidegrees)
+/// - `tol_breadth`: entity's tolerance breadth, half-width σ (centidegrees)
+///
+/// **Returns:** penalty factor ∈ [0, 256] (Q8.8 fixed-point).
+/// - At `world_temp == tol_optimum`: penalty = 256 (no penalty; 100% metabolic capacity)
+/// - At `world_temp == tol_optimum ± tol_breadth`: penalty ≈ 96 (exp(−1) ≈ 0.37; ~37% retained)
+/// - At `world_temp == tol_optimum ± 2×tol_breadth`: penalty ≈ 7 (exp(−4) ≈ 0.018; ~2% retained)
+///
+/// **Application in stage_metabolism:**
+/// `penalized_cost = (base_cost * tolerance_penalty(...)) / 256`
+/// The penalty multiplies the base metabolic rate directly (stress → slow enzyme kinetics).
+#[inline]
+pub fn tolerance_penalty(world_temp: i32, tol_optimum: i32, tol_breadth: i32) -> i32 {
+    let dev = (world_temp - tol_optimum).abs() as i64;
+    let breadth = (tol_breadth as i64) * 2;  // full width = 2σ
+    if breadth == 0 {
+        return 256;  // guard: no breadth → no penalty (shouldn't happen at founder=500)
+    }
+    let normalized = (dev * 256 / breadth).min(256) as usize;
+    THERMAL_KERNEL_Q256[normalized]
 }
 
 /// L(t): deterministic day-night light intensity, pure function of tick + `LightSpec`.
@@ -417,6 +504,8 @@ impl Default for EconParams {
             // V-4: body-size axis OFF by default — false for all existing configs (driver_config
             // opts in explicitly).
             evolve_body_size: false,
+            // P3-1: ambient-tolerance thermal niche OFF by default — None for all 6 existing configs.
+            ambient_tolerance: None,
         }
     }
 }

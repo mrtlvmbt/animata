@@ -32,6 +32,10 @@ pub struct ProcgenWorld {
     /// Surface material per cell (W-4's `ErosionState.surface_material`), exposed for richness
     /// testing (critic F2: assert Bedrock material is actually exposed, not just slope-driven Rock).
     surface_material: Vec<u8>,
+    /// Temperature per cell, row-major (P3-1, centidegrees). Computed from BiomeId → biome-reference-point T
+    /// during world-gen. Immutable post-gen (R27); read-only access via `temp_at()` trait method.
+    /// Range: [−3000, +5000] (−30°C to +50°C). Each cell's temperature is constant per biome.
+    temp_grid: Vec<i32>,
 }
 
 /// Rescale a W-5 cap (`[0, CAP_MAX]`) into the SAME magnitude range the legacy `NoiseWorld` fed the
@@ -44,6 +48,41 @@ pub struct ProcgenWorld {
 fn rescale_cap(cap: i64, resource_base: i64) -> i64 {
     cap * resource_base / CAP_MAX + 1
 }
+
+/// P3-1 (B2): Biome reference temperatures (centidegrees). Indexed by FinalBiome ordinal (0-12).
+/// Static per biome; used to initialize the temp_grid during world-gen.
+/// First 8 match zonal BiomeId; last 5 are azonal (edaphic) overrides (RnD 11 §3).
+/// Matching § 1.1 theory (RnD/engineering/43-ambient-tolerance-*.md):
+/// Zonal (0-7):
+/// - Tundra: −15°C
+/// - BorealForest: −5°C
+/// - TemperateGrassland: +10°C
+/// - TemperateForest: +12°C
+/// - TemperateRainforest: +12°C
+/// - Desert: +25°C
+/// - Savanna: +25°C
+/// - TropicalRainforest: +25°C
+/// Azonal (8-12, edaphic overrides):
+/// - Wetland: +10°C (temperate water-logged environment)
+/// - Floodplain: +12°C (warm-temperate, riparian)
+/// - Rock: −5°C (exposed mineral, cold/variable baseline)
+/// - Fertile: +12°C (nutrient-rich, temperate-forest baseline)
+/// - Dune: +25°C (arid sand, desert-heat baseline)
+const BIOME_TEMP: [i32; 13] = [
+    -1500,  // 0: Tundra (zonal)
+    -500,   // 1: BorealForest (zonal)
+    1000,   // 2: TemperateGrassland (zonal)
+    1200,   // 3: TemperateForest (zonal)
+    1200,   // 4: TemperateRainforest (zonal)
+    2500,   // 5: Desert (zonal)
+    2500,   // 6: Savanna (zonal)
+    2500,   // 7: TropicalRainforest (zonal)
+    1000,   // 8: Wetland (azonal, temperate water-environment)
+    1200,   // 9: Floodplain (azonal, warm-temperate riparian)
+    -500,   // 10: Rock (azonal, cold/exposed mineral)
+    1200,   // 11: Fertile (azonal, nutrient-rich temperate)
+    2500,   // 12: Dune (azonal, hot desert sand)
+];
 
 impl ProcgenWorld {
     /// Precompute-once (RnD 10 §1 cold init): runs `height_at → erode → classify_and_caps` a
@@ -84,6 +123,7 @@ impl ProcgenWorld {
 
         let mut resource = Vec::with_capacity(n);
         let mut oxygen_resource = Vec::with_capacity(n);
+        let mut temp_grid = Vec::with_capacity(n);
         for i in 0..n {
             // W-6b Phase A: decouple — resource is independent of solid_level (height-based passability).
             // Barrenness is already in caps (Rock base 0, Bedrock mult 0); rescale floors every cell to >=1.
@@ -94,6 +134,10 @@ impl ProcgenWorld {
             let o2_raw = oxygen_cap_from(fields.final_biome[i]);
             let o2_rescaled = rescale_cap(o2_raw, resource_base);
             oxygen_resource.push(o2_rescaled);
+
+            // P3-1 (B2): temperature per cell — biome-derived, immutable post-gen (R27).
+            let t = BIOME_TEMP[fields.final_biome[i] as usize];
+            temp_grid.push(t);
         }
 
         let max_resource = *resource.iter().max().unwrap_or(&0);
@@ -127,7 +171,7 @@ impl ProcgenWorld {
             solid_frac_final * 100.0
         );
 
-        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, surface_material: fields.surface_material }
+        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, surface_material: fields.surface_material, temp_grid }
     }
 
     fn wrap(&self, v: i64) -> i64 {
@@ -162,6 +206,10 @@ impl WorldView for ProcgenWorld {
 
     fn resource(&self, pos: Vec2Fixed) -> i64 {
         self.resource[self.idx(pos.0, pos.1)]
+    }
+
+    fn temp_at(&self, pos: Vec2Fixed) -> i32 {
+        self.temp_grid[self.idx(pos.0, pos.1)]
     }
 }
 

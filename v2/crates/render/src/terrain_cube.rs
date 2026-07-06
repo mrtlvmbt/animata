@@ -264,6 +264,9 @@ mod tests {
         fn resource(&self, _pos: Vec2Fixed) -> i64 {
             0
         }
+        fn temp_at(&self, _pos: Vec2Fixed) -> i32 {
+            1500 // P3-1: stub returns mesophile (15°C)
+        }
     }
 
     /// Flat (height 0 everywhere) so hidden-face culling drops ALL cliffs (nh=0 >= h=0) —
