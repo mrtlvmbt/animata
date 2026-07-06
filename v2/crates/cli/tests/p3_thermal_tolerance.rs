@@ -1,15 +1,12 @@
-//! P3-1 thermal-tolerance mechanic tests. P3-1 (B3): apply thermal penalty to metabolic cost
-//! when `ambient_tolerance=Some`. Integer-deterministic + conservation invariants — run on BOTH
-//! CI jobs. Complements unit test `tolerance_penalty()` in `sim-core/src/params.rs`.
+//! P3-2 thermal-tolerance mechanic tests. Sign-fix (income-side penalty) + breadth-cost tradeoff.
+//! Tests must be FALSIFYING: fail if penalty is on cost (wrong sign) or if breadth_cost is not applied.
 
 use cli::{build_sim, config_with};
 use sim_core::{AmbientToleranceSpec, EconParams, MergeStrategy, SimConfig};
 
 const TICKS: u64 = 256;
 
-/// Smoke test: `ambient_tolerance=None` (the default, all legacy configs) must remain byte-identical
-/// and conserve energy. This guards the byte-identity gate: if the penalty is applied when
-/// is_some() is false, this test catches the regression.
+/// Smoke test: `ambient_tolerance=None` (all legacy configs) must remain byte-identical.
 #[test]
 fn p3_thermal_disabled_byte_identical() {
     let mut cfg = config_with(0xA311_0001, 1, MergeStrategy::Canonical);
@@ -28,12 +25,10 @@ fn p3_thermal_disabled_byte_identical() {
 }
 
 /// Mechanic test: when `ambient_tolerance=Some`, the penalty is applied (gates the function).
-/// Population must remain viable — thermal stress doesn't kill everyone (penalty is multiplicative,
-/// not lethal). Energy conservation still holds: the penalty is deterministic and accounted.
+/// Population must remain viable — thermal stress doesn't kill everyone. Conservation still holds.
 #[test]
 fn p3_thermal_enabled_population_viable() {
     let mut cfg = config_with(0xA311_0002, 1, MergeStrategy::Canonical);
-    // Enable thermal tolerance (gates the penalty application in stage_metabolism)
     cfg.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 1 });
 
     let mut sim = build_sim(cfg);
@@ -42,7 +37,6 @@ fn p3_thermal_enabled_population_viable() {
 
     for _ in 0..TICKS {
         sim.step();
-        // P3-1: energy must still be conserved exactly (penalty is integer arithmetic).
         assert_eq!(
             sim.conservation_residual(),
             0,
@@ -55,15 +49,13 @@ fn p3_thermal_enabled_population_viable() {
         max_pop = max_pop.max(pop);
     }
 
-    // Thermal stress reduces birth rate (higher metabolic cost), but population must not
-    // collapse to zero. This is a coarse guard that the penalty doesn't create a fatal load.
+    // Thermal stress reduces birth rate (income penalty), but population must not collapse.
     assert!(min_pop > 0, "population went extinct under thermal penalty");
     assert!(max_pop > 0, "population never recovered under thermal penalty");
 }
 
 /// Determinism: two runs with the same seed and `ambient_tolerance=Some` must produce
-/// identical state hashes. Penalty computation is pure (deterministic integer arithmetic),
-/// so this verifies the gating and penalty application are thread-safe and replay-identical.
+/// identical state hashes. Penalty computation is pure (deterministic integer arithmetic).
 #[test]
 fn p3_thermal_enabled_deterministic() {
     let seed = 0xA311_0003u64;
@@ -89,79 +81,107 @@ fn p3_thermal_enabled_deterministic() {
     }
 }
 
-/// P3-2 sign-fix mechanic test: verify that thermal penalty correctly scales INCOME (not cost).
-/// Proxy check: with correct sign-fix, population remains viable under thermal penalty.
-/// If sign were wrong (penalty on cost instead of income), cost reduction at suboptimal T 
-/// would reward thermostress → population would thrive. With correct sign (penalty on income),
-/// thermostress reduces intake → population is constrained but viable (selective pressure).
+/// P3-2 sign-fix FALSIFYING test: thermal penalty must reduce INCOME (not cost).
+/// FALSIFICATION criterion: if thermal_x256 were incorrectly applied to COST instead of INCOME,
+/// the population would be HIGHER (lower cost at suboptimal T → reward thermostress).
+/// With correct sign-fix (penalty on income), population is constrained by reduced intake.
+///
+/// Test method: Compare population trajectory with thermal penalty (income-side) vs without.
+/// Income-side penalty → population constrained; cost-side penalty → population boosted.
 #[test]
-fn p3_thermal_sign_fix_optimum_income() {
-    // Two lineages: one with tol_optimum at cold (~0°C = 0 centidegrees),
-    // one with tol_optimum at hot (~30°C = 3000 centidegrees).
-    // Both run in a world with heterogeneous temperature (created via world-gen biome mix).
-    // Lineage at its optimum should have higher average income than the off-optimum one.
+fn p3_thermal_sign_fix_income_not_cost() {
+    const N_TICKS: u64 = 512;
 
-    // Seed 0xA311_0004 with thermal tolerance enabled.
-    let mut cfg_cold = config_with(0xA311_0004, 1, MergeStrategy::Canonical);
-    cfg_cold.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 1 });
-    // Set founder optimum to cold (~0°C = 0 in centidegrees).
-    // Note: this requires access to the genome, which is set during build_sim.
-    // For this test, we rely on the default founder (1500 = 15°C) and the world temp
-    // to have non-uniform distribution. The real test happens when mutations drive optimum.
+    // Run 1: WITH thermal penalty (correct sign-fix = income-side)
+    let mut cfg_with = config_with(0xA311_0004, 1, MergeStrategy::Canonical);
+    cfg_with.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 1 });
+    let mut sim_with = build_sim(cfg_with);
 
-    let mut sim = build_sim(cfg_cold);
-    let mut energy_readings: Vec<i64> = Vec::new();
-
-    for _ in 0..TICKS {
-        sim.step();
-        // Collect population energy (proxy for income level).
-        // Real test would track per-entity income from `tel.income_record`, but that's internal.
-        // This test just verifies the population remains viable under thermal penalty,
-        // which it must if the penalty sign is correct (income reduction is optional, 0 == no penalty).
-        assert_eq!(
-            sim.conservation_residual(),
-            0,
-            "energy conservation failed under thermal penalty with heterogeneous world"
-        );
+    let mut pop_with_final = 0u64;
+    for _ in 0..N_TICKS {
+        sim_with.step();
+        assert_eq!(sim_with.conservation_residual(), 0, "conservation failed WITH thermal penalty");
     }
+    pop_with_final = sim_with.population();
 
-    // Guard: population should remain viable. Correct sign (penalty on income) constrains growth
-    // but doesn't collapse it. Wrong sign (penalty on cost) would boost population (lower cost).
+    // Run 2: WITHOUT thermal penalty (baseline, ambient_tolerance=None)
+    let mut cfg_without = config_with(0xA311_0004, 1, MergeStrategy::Canonical);
+    assert!(cfg_without.econ.ambient_tolerance.is_none());
+    let mut sim_without = build_sim(cfg_without);
+
+    let mut pop_without_final = 0u64;
+    for _ in 0..N_TICKS {
+        sim_without.step();
+        assert_eq!(sim_without.conservation_residual(), 0, "conservation failed WITHOUT thermal penalty");
+    }
+    pop_without_final = sim_without.population();
+
+    // FALSIFICATION: if penalty were on COST (wrong sign), pop_with > pop_without (more energy retained).
+    // If penalty is on INCOME (correct sign), pop_with < pop_without (less energy intake).
+    // Both should be > 0 (not extinct), but WITH should be smaller due to income reduction.
     assert!(
-        sim.population() > 0,
-        "population extinct under thermal penalty with correct sign-fix (thermal_x256 on income); suggests implementation error"
+        pop_with_final > 0,
+        "population extinct WITH thermal penalty — penalty may be too severe or conservation broken"
+    );
+    assert!(
+        pop_without_final > 0,
+        "population extinct WITHOUT thermal penalty (baseline) — unexpected"
+    );
+    assert!(
+        pop_with_final < pop_without_final,
+        "population WITH thermal penalty ({}) must be < WITHOUT ({}); if > then penalty is on cost (wrong sign)",
+        pop_with_final, pop_without_final
     );
 }
 
-/// P3-2 breadth-cost mechanic test: verify specialist/generalist tradeoff mechanics hold.
-/// Proxy check: with breadth-cost active, population remains viable and conservation (R15) exact.
-/// Full monotonicity check (wider breadth → strictly larger cost) requires per-entity cost tracking
-/// across mutations; this test smoke-checks that the cost is reasonable (not fatal, not zero).
+/// P3-2 breadth-cost FALSIFYING test: wider tol_breadth must incur strictly larger metabolic cost.
+/// FALSIFICATION criterion: if breadth_cost were not applied (= 0), both scenarios would have equal
+/// cost and energy trajectories. With breadth_cost applied (monotonic), wider breadth = higher cost.
+///
+/// Test method: Run two scenarios identical except breadth_cost_k (high vs low), measure relative
+/// population/energy — with non-zero cost, higher breadth_cost_k must reduce population.
 #[test]
-fn p3_breadth_cost_monotonic() {
-    // Breadth-cost integration test: smoke-check that the cost doesn't collapse population
-    // or violate conservation. Per-entity cost monotonicity verified via mutation-tracking in P3-3.
+fn p3_breadth_cost_monotonic_and_applying() {
+    const N_TICKS: u64 = 512;
 
-    let mut cfg = config_with(0xA311_0005, 1, MergeStrategy::Canonical);
-    cfg.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 10 }); // Calibration-provisional
+    // Scenario A: breadth_cost_k = 5 (higher cost on breadth)
+    let mut cfg_high = config_with(0xA311_0005, 1, MergeStrategy::Canonical);
+    cfg_high.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 5 });
+    let mut sim_high = build_sim(cfg_high);
 
-    let mut sim = build_sim(cfg);
-
-    // Run a baseline to verify population viability and conservation.
-    for _ in 0..TICKS {
-        sim.step();
-        assert_eq!(
-            sim.conservation_residual(),
-            0,
-            "energy conservation failed with breadth-cost at tick {}",
-            sim.tick()
-        );
+    let mut pop_high_final = 0u64;
+    for _ in 0..N_TICKS {
+        sim_high.step();
+        assert_eq!(sim_high.conservation_residual(), 0, "conservation failed with high breadth_cost_k");
     }
+    pop_high_final = sim_high.population();
 
-    // Verify population didn't collapse (breadth-cost must be reasonable).
+    // Scenario B: breadth_cost_k = 1 (lower cost on breadth)
+    let mut cfg_low = config_with(0xA311_0005, 1, MergeStrategy::Canonical);
+    cfg_low.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 1 });
+    let mut sim_low = build_sim(cfg_low);
+
+    let mut pop_low_final = 0u64;
+    for _ in 0..N_TICKS {
+        sim_low.step();
+        assert_eq!(sim_low.conservation_residual(), 0, "conservation failed with low breadth_cost_k");
+    }
+    pop_low_final = sim_low.population();
+
+    // FALSIFICATION: if breadth_cost_k were not applied (= 0), pop_high ≈ pop_low.
+    // If breadth_cost is applied and monotonic, pop_high < pop_low (higher cost penalty).
+    // Seed is identical, so drift is minimal; difference is due to breadth_cost impact.
     assert!(
-        sim.population() > 0,
-        "population extinct under breadth-cost (cost may be too high or conservation broken)"
+        pop_high_final > 0,
+        "population extinct with high breadth_cost_k — cost may be prohibitive"
+    );
+    assert!(
+        pop_low_final > 0,
+        "population extinct with low breadth_cost_k — unexpected"
+    );
+    assert!(
+        pop_high_final < pop_low_final,
+        "population with breadth_cost_k=5 ({}) must be < with breadth_cost_k=1 ({}); if equal then breadth_cost not applied",
+        pop_high_final, pop_low_final
     );
 }
-

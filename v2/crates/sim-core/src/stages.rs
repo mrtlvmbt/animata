@@ -197,7 +197,6 @@ pub fn stage_move(
 pub fn stage_metabolism(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
-    world: Res<WorldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut tel: ResMut<Telemetry>,
     mut q: Query<(&Position, &Genome, &Phenotype, &mut Energy)>,
