@@ -541,6 +541,10 @@ pub struct SimConfig {
     /// Per-layer field parameters. Only the first `n_layers` entries are used by `build_sim`.
     /// Unused slots may be zeroed (`LayerSpec::default()`).
     pub layer_specs: [LayerSpec; 4],
+    /// P3-3 thermal-verdict world-temp override. `Some([i32; 13])` injects custom biome temperatures
+    /// (ONLY for verdict harness); `None` (default) uses stock BIOME_TEMP from world-gen.
+    /// Passed to ProcgenWorld at construction; byte-identical when `None` (F1, golden-neutral gate).
+    pub thermal_verdict_temps: Option<[i32; 13]>,
 }
 
 #[cfg(test)]

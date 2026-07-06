@@ -94,7 +94,11 @@ impl ProcgenWorld {
     /// range. A dropped/wrong rescale (e.g. feeding the raw `[0,300]` cap straight through) would
     /// push `max` far past `resource_base+1` — caught HERE, at build time, before it ever reaches a
     /// tick or burns a CI/pin cycle on a guaranteed corridor breach.
-    pub fn new(dim: i64, hmax: i64, resource_base: i64, seed: u64) -> Self {
+    ///
+    /// P3-3 (F1, golden-neutral): `thermal_verdict_temps` — optional biome-temperature override
+    /// for the thermal-niche verdict harness. `None` (default) uses stock BIOME_TEMP; `Some(array)`
+    /// injects custom temps (verdict-only, never shipped). Gated at world-gen time (immutable post-gen).
+    pub fn new(dim: i64, hmax: i64, resource_base: i64, seed: u64, thermal_verdict_temps: Option<[i32; 13]>) -> Self {
         let fields = classify_and_caps(seed, hmax, dim as usize);
         // W-6b Phase A: DECOUPLE resource from solid_level (RnD 01 §40,43: is_solid=movement,
         // resource=food are SEPARATE queries). solid_level → ONLY movement/collision (is_solid).
@@ -121,6 +125,9 @@ impl ProcgenWorld {
             // Use fallback even if out of range — let the guard assert surface it
         }
 
+        // P3-3: choose temp array — override if provided, else stock BIOME_TEMP.
+        let biome_temps = thermal_verdict_temps.unwrap_or(BIOME_TEMP);
+
         let mut resource = Vec::with_capacity(n);
         let mut oxygen_resource = Vec::with_capacity(n);
         let mut temp_grid = Vec::with_capacity(n);
@@ -136,7 +143,8 @@ impl ProcgenWorld {
             oxygen_resource.push(o2_rescaled);
 
             // P3-1 (B2): temperature per cell — biome-derived, immutable post-gen (R27).
-            let t = BIOME_TEMP[fields.final_biome[i] as usize];
+            // P3-3 (F1): use override if provided, else stock BIOME_TEMP.
+            let t = biome_temps[fields.final_biome[i] as usize];
             temp_grid.push(t);
         }
 
@@ -228,7 +236,7 @@ mod tests {
 
     #[test]
     fn resource_nonneg_and_bounded() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
         for x in 0..DIM {
             for z in 0..DIM {
                 let r = w.resource(Vec2Fixed(x, z));

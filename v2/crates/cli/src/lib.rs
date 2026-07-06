@@ -97,6 +97,7 @@ pub fn config_with(seed: u64, sim_threads: usize, merge_strategy: MergeStrategy)
         merge_strategy,
         n_layers: 2,
         layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
+        thermal_verdict_temps: None,
     }
 }
 
@@ -538,6 +539,48 @@ pub fn p2_config(seed: u64) -> SimConfig {
     }
 }
 
+/// P3-3 thermal-niche verdict config (golden-neutral): high-gradient biome temperatures for
+/// faithful-verdict harness (a-d gates). Gated on `thermal_verdict_temps=Some`, so `None` → stock
+/// BIOME_TEMP → byte-identical. The override is injected at world-gen time (immutable post-gen).
+///
+/// High-gradient temps (centidegrees):
+/// - Zonal (0-7): Tundra: −30°C, Boreal: −20°C, TemperateGrassland: +5°C, TemperateForest: +10°C,
+///   TemperateRainforest: +12°C, Desert: +35°C, Savanna: +40°C, TropicalRainforest: +45°C.
+/// - Azonal (8-12): same stock temps (Wetland: +10°C, Floodplain: +12°C, Rock: −5°C, Fertile: +12°C, Dune: +25°C).
+/// Spread: −30°C ... +45°C (75°C range, 62.5% extreme cold/hot) vs stock 40°C range, weak-gradient (7.9%).
+///
+/// Config: `ambient_tolerance=Some(breadth_cost_k)` with provisional value for calibration.
+/// Ticks default to 8000 (design-spec §3b intermediate-stable horizon).
+pub fn p3_verdict_config(seed: u64) -> SimConfig {
+    const BREADTH_COST_K_PROVISIONAL: i64 = 5; // Provisional, calibrated in pass 2 from criterion (c)
+
+    // P3-3 high-gradient biome temperatures (centidegrees).
+    const BIOME_TEMP_P3_VERDICT: [i32; 13] = [
+        -3000,  // 0: Tundra (zonal, extreme cold −30°C)
+        -2000,  // 1: BorealForest (zonal, cold −20°C)
+        500,    // 2: TemperateGrassland (zonal, cool +5°C)
+        1000,   // 3: TemperateForest (zonal, temperate +10°C)
+        1200,   // 4: TemperateRainforest (zonal, temperate +12°C)
+        3500,   // 5: Desert (zonal, extreme hot +35°C)
+        4000,   // 6: Savanna (zonal, very hot +40°C)
+        4500,   // 7: TropicalRainforest (zonal, extreme hot +45°C)
+        1000,   // 8: Wetland (azonal, temperate water)
+        1200,   // 9: Floodplain (azonal, warm-temperate)
+        -500,   // 10: Rock (azonal, cold exposed)
+        1200,   // 11: Fertile (azonal, temperate)
+        2500,   // 12: Dune (azonal, desert sand)
+    ];
+
+    SimConfig {
+        econ: EconParams {
+            ambient_tolerance: Some(sim_core::AmbientToleranceSpec { breadth_cost_k: BREADTH_COST_K_PROVISIONAL }),
+            ..EconParams::default()
+        },
+        thermal_verdict_temps: Some(BIOME_TEMP_P3_VERDICT),
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
@@ -587,7 +630,7 @@ pub fn build_sim(config: SimConfig) -> Sim {
         }
     }
     let econ = config.econ.clone();
-    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT);
+    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT, config.thermal_verdict_temps);
     let grid_w = econ.world_dim / M_FIELD;
     let n = (grid_w * grid_w) as usize;
 
@@ -656,6 +699,7 @@ pub fn bench_config(seed: u64, n_founders: u64) -> SimConfig {
         sim_threads: DEFAULT_THREADS, merge_strategy: MergeStrategy::Canonical,
         n_layers: 1,
         layer_specs: [L0_SPEC, LayerSpec::default(), LayerSpec::default(), LayerSpec::default()],
+        thermal_verdict_temps: None,
     }
 }
 
