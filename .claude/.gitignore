@@ -10,3 +10,4 @@ kit-citation-misses.log
 # done-gate (Stop-хук кодеров) — runtime-артефакты, не версионируются
 done-gate.log
 .done-allow
+status.md
