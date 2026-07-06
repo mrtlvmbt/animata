@@ -587,11 +587,13 @@ pub fn stage_interactions(
         //   2. hypoxia (from O₂-field)
         //   3. gained = got × combined_eff / 256 × kept / 1000
         let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
-        let hypoxia_x1000 = if econ.enable_oxygen && ph.respiratory_pathway.is_some() {
+        let hypoxia_x1000 = if econ.enable_oxygen && !econ.ablate_hypoxia && ph.respiratory_pathway.is_some() {
             let rp = &ph.respiratory_pathway.as_ref().unwrap();
-            compute_hypoxia_factor_x1000(rp.primary_layer, &*field.0, c.pos, n_cells, econ.o2_cap, econ.n_layers)
+            let raw = compute_hypoxia_factor_x1000(rp.primary_layer, &*field.0, c.pos, n_cells, econ.o2_cap, econ.n_layers);
+            // Calibration scale (dive §4.1 hypoxia_base_x1000): anchor to Ratcliffe −10%. Default 1000 → ×1.0.
+            (raw as i64 * econ.hypoxia_base_x1000 / 1000).clamp(0, 1000) as i32
         } else {
-            0
+            0 // enable_oxygen=false OR ablate_hypoxia=true (verdict control arm) OR no pathway → no hypoxia
         };
         let kept_x1000 = (1000 - hypoxia_x1000 as i64).max(0);
 

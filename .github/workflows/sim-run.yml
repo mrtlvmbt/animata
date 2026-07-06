@@ -23,6 +23,7 @@ on:
           - dprime-2c   # D′-2c verdict: PLASTIC (reg_gain_max=4) vs CONSTITUTIVE (reg_gain_max=0), 5 seeds
           - dprime-3b   # D′-3b emergence verdict: Guild::Phototroph fraction in dprime mineral economy
           - driver-emergence  # D-3b verdict: multicellularity under predation size-refuge (refuge_k sweep)
+          - hypoxia-verdict   # P1-2b verdict: O₂-diffusion hypoxia grounds settling (WITH vs ablation, size-shrink)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -86,8 +87,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -155,6 +156,16 @@ jobs:
               cd v2
               DRIVER_EMERGENCE_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- driver_emergence_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            hypoxia-verdict)
+              # P1-2b (#306) faithful-verdict: does the O₂-diffusion hypoxia cost GROUND settling —
+              # selectively suppress LARGER multicellular bodies (crit. c) rather than being a size-knob?
+              # WITH vs ABLATION (ablate_hypoxia) on the calibrated phase2_oxygen_config (hypoxia_base=543,
+              # Ratcliffe −10%). Pre-declared: WITH mean body size < ABLATION by ≥5% in ≥3/5 seeds → FAITHFUL.
+              # HYPOXIA_BASE_X1000 env can override the calibration for a sweep.
+              cd v2
+              HYPOXIA_VERDICT_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- hypoxia_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release

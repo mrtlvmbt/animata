@@ -470,6 +470,15 @@ pub fn phase2_oxygen_config(seed: u64) -> SimConfig {
             morphogen: Some(mspec),
             grn: Some(gspec),
             enable_oxygen: true,
+            // P1-2b faithful-verdict calibration (hypoxia_verdict sweep, 2026-07-06): body size must be
+            // heritable for the O₂-diffusion cost to SELECT on it, and the raw penalty (~−30% at N=16) is
+            // artefactually harsh (population crash). hypoxia_base_x1000=543 anchors it to Ratcliffe −10%
+            // at N=4 — the sweep found FAITHFUL size-selection (3/5 seeds, bodies shrink WITH vs ablation,
+            // population survives) exactly at this biologically-anchored value, bracketed by NULL on both
+            // sides (1000→crash, 300→too weak). NOT taste-cranked: the target is the external Ratcliffe
+            // measurement. See pm/reports/ + hypoxia_verdict test.
+            evolve_body_size: true,
+            hypoxia_base_x1000: 543,
             ..EconParams::default()
         },
         ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
