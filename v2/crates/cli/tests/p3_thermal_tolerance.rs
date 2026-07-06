@@ -97,24 +97,22 @@ fn p3_thermal_sign_fix_income_not_cost() {
     cfg_with.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 1 });
     let mut sim_with = build_sim(cfg_with);
 
-    let mut pop_with_final = 0u64;
     for _ in 0..N_TICKS {
         sim_with.step();
         assert_eq!(sim_with.conservation_residual(), 0, "conservation failed WITH thermal penalty");
     }
-    pop_with_final = sim_with.population();
+    let pop_with_final = sim_with.population();
 
     // Run 2: WITHOUT thermal penalty (baseline, ambient_tolerance=None)
     let mut cfg_without = config_with(0xA311_0004, 1, MergeStrategy::Canonical);
     assert!(cfg_without.econ.ambient_tolerance.is_none());
     let mut sim_without = build_sim(cfg_without);
 
-    let mut pop_without_final = 0u64;
     for _ in 0..N_TICKS {
         sim_without.step();
         assert_eq!(sim_without.conservation_residual(), 0, "conservation failed WITHOUT thermal penalty");
     }
-    pop_without_final = sim_without.population();
+    let pop_without_final = sim_without.population();
 
     // FALSIFICATION: if penalty were on COST (wrong sign), pop_with > pop_without (more energy retained).
     // If penalty is on INCOME (correct sign), pop_with < pop_without (less energy intake).
@@ -149,24 +147,22 @@ fn p3_breadth_cost_monotonic_and_applying() {
     cfg_high.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 5 });
     let mut sim_high = build_sim(cfg_high);
 
-    let mut pop_high_final = 0u64;
     for _ in 0..N_TICKS {
         sim_high.step();
         assert_eq!(sim_high.conservation_residual(), 0, "conservation failed with high breadth_cost_k");
     }
-    pop_high_final = sim_high.population();
+    let pop_high_final = sim_high.population();
 
     // Scenario B: breadth_cost_k = 1 (lower cost on breadth)
     let mut cfg_low = config_with(0xA311_0005, 1, MergeStrategy::Canonical);
     cfg_low.econ.ambient_tolerance = Some(AmbientToleranceSpec { breadth_cost_k: 1 });
     let mut sim_low = build_sim(cfg_low);
 
-    let mut pop_low_final = 0u64;
     for _ in 0..N_TICKS {
         sim_low.step();
         assert_eq!(sim_low.conservation_residual(), 0, "conservation failed with low breadth_cost_k");
     }
-    pop_low_final = sim_low.population();
+    let pop_low_final = sim_low.population();
 
     // FALSIFICATION: if breadth_cost_k were not applied (= 0), pop_high ≈ pop_low.
     // If breadth_cost is applied and monotonic, pop_high < pop_low (higher cost penalty).
