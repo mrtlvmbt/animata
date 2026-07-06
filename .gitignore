@@ -12,6 +12,10 @@
 # Local Claude settings
 .claude/settings.local.json
 
+# no-local-sim guard runtime artifacts (bypass token + audit log)
+.claude/.sim-allow
+.claude/no-local-sim.log
+
 # Generated simulation outputs (saves, stat/tree dumps, sweeps)
 /animata-save.bin
 /animata_save.txt

@@ -6,6 +6,10 @@
         "hooks": [
           {
             "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/no-local-sim.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/no-local-sim.sh\" || exit 0"
+          },
+          {
+            "type": "command",
             "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/branch-guard.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/branch-guard.sh\" || exit 0"
           },
           {
