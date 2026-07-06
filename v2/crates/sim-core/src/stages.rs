@@ -1040,6 +1040,72 @@ pub fn stage_predation(
     }
 }
 
+// ── Stage 6d: Settling — size²-attenuated mortality pulse (P4/SL-1) ────────────────────────────
+// P4/SL-1 settling-selection mechanic: every `period` ticks, a size²-attenuated mortality pulse.
+// Drain per entity is computed as: `drain = (strength << SHIFT) / ((1 << SHIFT) + settling_k · size²)`
+// where `size = Σ module_cell_count` (integer i128 to prevent overflow). Energy → `ledger.dissipated`,
+// death at ≤0 in stage 7 (R15 conservation — mortality energy accounted before entity removal).
+// Stage order: AFTER 6c-predation, BEFORE 7-birth_death (ТЗ F3, R15 logic).
+pub fn stage_settling(
+    econ: Res<EconParams>,
+    clock: Res<SimClock>,
+    mut ledger: ResMut<EnergyLedger>,
+    mut q: Query<(&Position, &mut Energy, &Phenotype)>,
+) {
+    // Early exit: no settling configured → stage is a no-op (byte-identical).
+    let spec = match &econ.settling {
+        Some(s) => s,
+        None => return,
+    };
+
+    // Inert gate: period=0 → no-op.
+    if spec.period == 0 {
+        return;
+    }
+
+    // Trigger gate: `SimClock.tick % period == 0`.
+    if clock.tick % spec.period != 0 {
+        return;
+    }
+
+    // Settling pulse active this tick.
+    for (_pos, mut energy, phenotype) in &mut q {
+        if energy.0 <= 0 {
+            continue; // dead or inert
+        }
+
+        // Compute body size: Σ module_cell_count (integer).
+        let body_size: i64 = phenotype
+            .graph
+            .module_cell_count
+            .iter()
+            .map(|&c| c as i64)
+            .sum::<i64>()
+            .max(1);
+
+        // Size²-attenuated drain (Q-format, i128 to prevent overflow).
+        // Formula: `drain = (strength << SHIFT) / ((1 << SHIFT) + settling_k · size²)`
+        // Mirrors refuge_attenuate from predation.rs, but with size² instead of linear body_size.
+        let strength = spec.strength.clamp(0, 1_000_000); // defensively clamp
+        if strength == 0 {
+            continue; // inert
+        }
+
+        let shift = spec.shift.min(32); // defensive clamp to prevent overflow
+        let size_sq: i128 = (body_size as i128) * (body_size as i128);
+        let k = (spec.settling_k as i128).max(0);
+        let numer: i128 = (strength as i128) << shift;
+        let denom: i128 = ((1i128) << shift) + k * size_sq;
+        let denom = denom.max(1);
+        let drain: i64 = (numer / denom).clamp(0, 1_000_000) as i64;
+
+        // Apply drain: clamp to available energy.
+        let actual_drain = drain.min(energy.0);
+        energy.0 -= actual_drain;
+        ledger.dissipated += actual_drain;
+    }
+}
+
 // ── Stage 7: BirthDeath — division (energy split) + death, via the command buffer (sync point). ────
 // D′-3a additions: Liebig AND-gate on division (quota ≥ q_mineral), overflow-heat when energy-ready
 // but mineral-poor (ONE site, same sorted loop), and mineral quota recycled on death.

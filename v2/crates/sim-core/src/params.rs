@@ -327,6 +327,16 @@ pub struct EconParams {
     /// (the isolation gate; un-re-pinned existing goldens are the test). Option-gated exactly
     /// like `light`, `predation`, `morphogen`, `mineral_layer` above.
     pub ambient_tolerance: Option<AmbientToleranceSpec>,
+
+    // ── P4/SL-1: settling-selection (size²-attenuated mortality pulse) ──────────────────────
+    /// Settling-selection specification (P4/SL-1). `Some` enables settling-mechanic: every
+    /// `period` ticks, a size²-attenuated mortality pulse drains energy (dissipated via
+    /// `ledger.dissipated`, death at ≤0 in stage 7). `None` (default, all 6 existing
+    /// production configs) → `stage_settling` is a no-op → byte-identical goldens (the isolation
+    /// gate; un-re-pinned existing goldens are the test). Option-gated exactly like `light`,
+    /// `predation`, `morphogen`, `mineral_layer` above. SL-1 settling-mechanic ONLY; diffusion
+    /// cost (criterion c) = SL-2; verdict (a-d gates) = SL-3.
+    pub settling: Option<SettlingSpec>,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -365,6 +375,32 @@ pub struct AmbientToleranceSpec {
     /// Integer, zero-float. Gated on `is_some()` (byte-identical when None).
     /// CALIBRATION-PROVISIONAL: final value from P3-3 neutral-run measurement.
     pub breadth_cost_k: i64,
+}
+
+// ── P4/SL-1: settling-selection (size²-attenuated mortality pulse) ────────────────────────────
+
+/// Settling-selection specification for `EconParams.settling` (P4/SL-1).
+/// When `Some`, enables settling-mechanic: every `period` ticks, size²-attenuated mortality pulse.
+/// When `None` (default, all 6 existing production configs) → `stage_settling` is a no-op,
+/// byte-identical goldens (the isolation gate). Option-gated exactly like `light`, `predation`,
+/// `morphogen`, `mineral_layer` above. SL-1 settling-mechanic ONLY; diffusion cost (criterion c)
+/// = SL-2; verdict (a-d gates) = SL-3.
+#[derive(Clone, Copy, Debug)]
+pub struct SettlingSpec {
+    /// Settling-pulse period (ticks). `period=0` → stage_settling is a no-op (byte-identical).
+    /// Every `period` ticks where `SimClock.tick % period == 0`, trigger a settling-pulse.
+    /// Must be > 0 when active (gate: if `period==0` treat as None for compatibility).
+    pub period: u64,
+    /// Settling-pulse strength (base drain before size²-attenuation). Integer, non-negative.
+    /// Q-format numerator: `drain = (strength << SHIFT) / ((1 << SHIFT) + settling_k · size²)`.
+    pub strength: i64,
+    /// Settling-attenuation factor (size² scaling in Q-format denominator).
+    /// `settling_k=0` → drain unchanged (inert), larger k → stronger attenuation by size².
+    /// Calibrated empirically for settling-velocity emergence (ТЗ: PROVISIONAL).
+    pub settling_k: i32,
+    /// Q-format shift for size²-attenuation denominator. Standard Q-format (mirrors refuge_attenuate).
+    /// Must be > 0 and ≤ 32 (defensively clamped to prevent overflow). Typical: 16.
+    pub shift: u32,
 }
 
 // ── P3-1: Gaussian thermal-penalty kernel (constant LUT, zero float) ──────────────────────────
@@ -516,6 +552,8 @@ impl Default for EconParams {
             evolve_body_size: false,
             // P3-1: ambient-tolerance thermal niche OFF by default — None for all 6 existing configs.
             ambient_tolerance: None,
+            // P4/SL-1: settling-selection OFF by default — None for all 6 existing configs.
+            settling: None,
         }
     }
 }
