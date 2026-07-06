@@ -433,6 +433,49 @@ pub fn oxygen_config(seed: u64) -> SimConfig {
     }
 }
 
+/// P1-2b: Multicellular + O₂ respiration testbed (L=3 + morphogen + enable_oxygen).
+/// Combines phase2 ontogenesis (N>1 todies) with hypoxia self-shading (O₂-diffusion cost).
+/// Layer 0: substrate (ProcgenWorld resource), Layer 1: organics (excreta),
+/// Layer 2: O₂ (non-energy, conserved from biom). Founders spawn with N=4 (size_viability_floor=3).
+pub fn phase2_oxygen_config(seed: u64) -> SimConfig {
+    let mspec = sim_core::MorphogenSpec {
+        g_dev: 4,
+        n_dev: 8,
+        boundary: sim_core::Boundary::Reflecting,
+        diffuse_shift: 3,
+        decay_num: 1,
+        decay_shift: 4,
+        seed_scale: 4096,
+        stop_threshold: 0,
+        apoptosis_threshold: None,
+        germ_threshold: None,
+        supply_source: None,
+        adhesion_threshold: None,
+    };
+    let gspec = sim_core::GrnSpec::new(
+        2,
+        vec![32, -32, -32, 32],
+        vec![0, 0],
+        vec![0, 0],
+        3,
+        12,
+        0,
+        0,
+        vec![144, 112],
+    );
+    SimConfig {
+        n_layers: 3,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L1_O2_SPEC, LayerSpec::default()],
+        econ: EconParams {
+            morphogen: Some(mspec),
+            grn: Some(gspec),
+            enable_oxygen: true,
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
@@ -516,6 +559,20 @@ pub fn build_sim(config: SimConfig) -> Sim {
             vec![spec.flat_cap; n] // flat_cap=0 → all cells start at 0 (empty layer)
         };
         caps_per_layer.push(caps);
+    }
+
+    // P1-2b: Initialize o2_cap for hypoxia calculation. Use average O₂-cap per cell as the
+    // normalization base for scarcity computation: `scarcity = 1000 − (field_o2 × 1000 / cap_o2)`.
+    // For oxygen_config, layer 2 caps come from world.oxygen_resource() or flat_cap (if world_cap_mult=0).
+    // For non-oxygen configs, o2_cap stays 0 (bounds-guard in compute_hypoxia_factor returns 0).
+    if econ.enable_oxygen && config.n_layers > 2 {
+        let o2_layer_caps = &caps_per_layer[2]; // Layer 2 is O₂ (per oxygen_config and P1-0)
+        let avg_o2_cap = if !o2_layer_caps.is_empty() {
+            o2_layer_caps.iter().sum::<i64>() / o2_layer_caps.len() as i64
+        } else {
+            0
+        };
+        config.econ.o2_cap = avg_o2_cap;
     }
 
     let field = CpuFieldStore::new_layered(
