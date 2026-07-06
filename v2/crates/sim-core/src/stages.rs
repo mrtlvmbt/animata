@@ -403,7 +403,7 @@ fn choose_respiratory_pathway(
 /// N≤1 → 0 (single cell has no interior, fully oxygenated surface).
 /// N>1 → inner_fraction × scarcity, clamped [0..1000].
 /// Integer-deterministic (CBRT_LUT, no float). PURE function (reads field once, no neighbor-offset).
-fn compute_hypoxia_factor_x1000(
+pub(crate) fn compute_hypoxia_factor_x1000(
     primary_layer: crate::FieldId,
     field: &dyn crate::FieldStore,
     pos: crate::Vec2Fixed,
@@ -2437,5 +2437,89 @@ mod tests {
         fn signal_all_finite(&self) -> bool { true }
         fn commit_merge(&mut self, _batches: &[Vec<Deposit>], _strategy: MergeStrategy) {}
         fn solve(&mut self) -> i64 { 0 }
+    }
+
+    /// Criterion-(c) test suite for `compute_hypoxia_factor_x1000`.
+    /// Tests the size-graded structural O₂-diffusion cost INDEPENDENT of the settling-toggle state.
+    /// (c-i) presence: factor < 1000 for body_cell_count > 1 at scarce O₂ level.
+    /// (c-ii) size-graded: strictly monotone f(16) > f(4) > f(1)=0 (penalty increases with N).
+    /// (c-iii) settling-INDEPENDENT: function signature does NOT include econ.settling.
+    #[test]
+    fn test_hypoxia_factor_presence_at_scarce_o2() {
+        // (c-i): factor < 1000 for body_cell_count > 1 at scarce O₂ level.
+        let mut field = HypoxiaMockField::new();
+        let pos = Vec2Fixed(0, 0);
+        let cap_o2 = 100; // Fixed scarce O₂ cap.
+        let primary_layer = FieldId::Oxygen; // Layer 2 = O₂ layer.
+        let n_layers = 3;
+
+        // Set O₂ level to 30 (scarcity = 1000 - 30*1000/100 = 700).
+        field.set_conserved(0, 2, 30);
+
+        // Test body_cell_count = 4 (N > 1 → interior exists → hypoxia > 0).
+        let factor_n4 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, 4, cap_o2, n_layers);
+        assert!(factor_n4 < 1000, "factor for N=4 at scarce O₂ must be < 1000, got {}", factor_n4);
+        assert!(factor_n4 > 0, "factor for N=4 must be > 0 when O₂ is scarce, got {}", factor_n4);
+    }
+
+    #[test]
+    fn test_hypoxia_factor_monotone_increasing() {
+        // (c-ii): strictly monotone f(16) > f(4) > f(1)=0 (penalty increases with N).
+        let mut field = HypoxiaMockField::new();
+        let pos = Vec2Fixed(0, 0);
+        let cap_o2 = 100; // Fixed scarce O₂ cap.
+        let primary_layer = FieldId::Oxygen;
+        let n_layers = 3;
+
+        // Set O₂ to a constant scarce level (30 → scarcity = 700).
+        field.set_conserved(0, 2, 30);
+
+        // Single cell: N=1 → no interior → factor = 0 (no penalty).
+        let factor_n1 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, 1, cap_o2, n_layers);
+        assert_eq!(factor_n1, 0, "factor for N=1 must be 0 (no interior)");
+
+        // N=4: inner_fraction > 0, yields penalty > 0.
+        let factor_n4 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, 4, cap_o2, n_layers);
+
+        // N=16: larger body → larger inner_fraction → larger penalty.
+        let factor_n16 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, 16, cap_o2, n_layers);
+
+        // Penalty increases monotonically with body size (larger N → larger inner_fraction → larger penalty).
+        assert!(
+            factor_n16 > factor_n4,
+            "penalty increasing: f(16)={} > f(4)={}", factor_n16, factor_n4
+        );
+        assert!(
+            factor_n4 > factor_n1,
+            "penalty increasing: f(4)={} > f(1)={}", factor_n4, factor_n1
+        );
+    }
+
+    #[test]
+    fn test_hypoxia_factor_settling_independent() {
+        // (c-iii) structural independence: settling is NOT in the function signature.
+        // This is validated by the fact that compute_hypoxia_factor_x1000 takes ONLY:
+        // (primary_layer, field, pos, body_cell_count, cap_o2, n_layers)
+        // and does NOT take econ.settling as a parameter.
+        // Verify: identical inputs → identical output (determinism, no random state).
+        let mut field = HypoxiaMockField::new();
+        let pos = Vec2Fixed(0, 0);
+        let cap_o2 = 100;
+        let primary_layer = FieldId::Oxygen;
+        let n_layers = 3;
+        let body_cell_count = 8;
+
+        field.set_conserved(0, 2, 50);
+
+        // Call twice with identical inputs → must get identical output.
+        let result1 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, body_cell_count, cap_o2, n_layers);
+        let result2 = compute_hypoxia_factor_x1000(primary_layer, &field, pos, body_cell_count, cap_o2, n_layers);
+
+        assert_eq!(result1, result2, "identical inputs must yield identical output (determinism)");
+
+        // The cost is computed from (body_cell_count, cap_o2, field contents at pos, n_layers) only.
+        // econ.settling is NOT in the call signature → cost is INDEPENDENT of the settling toggle state.
+        // This is structural independence, not empirical (it does not depend on running a sim and
+        // comparing settling-on vs settling-off populations).
     }
 }

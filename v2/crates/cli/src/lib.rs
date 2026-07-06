@@ -598,11 +598,14 @@ pub fn p3_verdict_config(seed: u64) -> SimConfig {
 ///
 /// **P4/SL-1 golden-ADDITIVE:** settling-mechanic is new, opt-in. `settling_config` is a
 /// testbed config that wires the settling economy (settling=Some) into the phase2 substrate.
+/// SL-2: rebase onto phase2_oxygen_config (static-O₂ deficit regime, proven faithful 5/5, P1-landmark).
+/// This puts settling_config into a constant O₂-deficit so hypoxia cost is INDEPENDENT of the
+/// settling-toggle state → criterion (c) structural cost. See TZ pm/reports/p4-sl-2-diffusion-cost-tz.md.
 /// Production configs (`p2_config` etc.) keep settling=None → stage_settling is a no-op →
 /// trajectories byte-identical (the isolation gate; un-re-pinned existing goldens are the test).
 /// Once merged, SL-1 settling-golden will be pinned arm64 via `ci-report.sh`.
 pub fn settling_config(seed: u64) -> SimConfig {
-    let mut cfg = p2_config(seed);
+    let mut cfg = phase2_oxygen_config(seed);
     // SL-1: settling-selection ONLY (predation OFF for clean size-emergence signal).
     cfg.econ.predation = None;
     cfg.econ.settling = Some(sim_core::SettlingSpec {
