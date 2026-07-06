@@ -49,9 +49,9 @@ pub use grn_lut::{
     PREACT_MAX as GRN_PREACT_MAX, PREACT_MIN as GRN_PREACT_MIN,
 };
 pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
-pub use params::{AmbientToleranceSpec, EconParams, FieldId, LayerSpec, LightSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
+pub use params::{AmbientToleranceSpec, EconParams, FieldId, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
-pub use stages::expressed_capacity;
+pub use stages::{expressed_capacity, settling_drain};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
@@ -969,6 +969,7 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         stage!("6_interactions", stage_interactions),
         stage!("6b_mineral_feed", stage_mineral_feed),
         stage!("6c_predation", stage_predation),
+        stage!("6d_settling", stage_settling),
         stage!("7_birth_death", stage_birth_death),
         stage!("8_field_scatter", stage_field_scatter),
         stage!("9_observe", stage_observe),
