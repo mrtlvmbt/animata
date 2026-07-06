@@ -424,9 +424,10 @@ pub const BREADTH_COST_SCALE: i64 = 1000;
 /// - At `world_temp == tol_optimum ± tol_breadth`: penalty ≈ 96 (exp(−1) ≈ 0.37; ~37% retained)
 /// - At `world_temp == tol_optimum ± 2×tol_breadth`: penalty ≈ 7 (exp(−4) ≈ 0.018; ~2% retained)
 ///
-/// **Application in stage_metabolism:**
-/// `penalized_cost = (base_cost * tolerance_penalty(...)) / 256`
-/// The penalty multiplies the base metabolic rate directly (stress → slow enzyme kinetics).
+/// **Application in stage_interactions (P3-2):**
+/// `thermal_x256 = tolerance_penalty(...)` applied as a multiplicative factor on energy income:
+/// `gained = ((got * eff / 256 * kept / 1000) * thermal_x256) / 256`
+/// Penalty reduces uptake at suboptimal T (stress → slow uptake kinetics), driving selection toward T_optimum.
 #[inline]
 pub fn tolerance_penalty(world_temp: i32, tol_optimum: i32, tol_breadth: i32) -> i32 {
     let dev = (world_temp - tol_optimum).abs() as i64;
