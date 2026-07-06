@@ -267,6 +267,23 @@ pub struct EconParams {
     /// Non-oxygen configs: o2_cap=0 (hypoxia returns 0 immediately in the bounds-guard).
     pub o2_cap: i64,
 
+    /// P1-2b faithful-verdict ABLATION knob: when `true`, hypoxia is forced to 0 (the diffusion cost
+    /// is switched off) while EVERYTHING else — aerobic yield, respiratory strategy, O₂ field —
+    /// stays identical. This is the control arm for the a-d verdict (crit. c): the size-selection
+    /// differential must be PRESENT with hypoxia and VANISH under ablation to be faithful (else NULL).
+    /// Default `false` → hypoxia active → byte-identical to the shipped P1-2b behaviour (golden-neutral).
+    pub ablate_hypoxia: bool,
+
+    /// P1-2b hypoxia calibration knob (dive #70 §4.1 `hypoxia_base_x1000`): scales the raw physical
+    /// hypoxia factor so the penalty can be anchored to the Ratcliffe −10% size-cost regime instead of
+    /// the artefactually harsh raw value. Applied at the stage_interactions call site:
+    /// `hypoxia = compute_hypoxia_factor(...) × hypoxia_base_x1000 / 1000`. Default `1000` → ×1.0 →
+    /// byte-identical to raw physics (golden-neutral). The faithful verdict config lowers it (~543) so
+    /// N=4 clusters pay ≈−10% (calibrated empirically via the hypoxia-verdict run, NOT a taste knob:
+    /// the target is the external Ratcliffe measurement, so lowering it grounds — it does not chase
+    /// emergence). The raw-physics unit tests on `compute_hypoxia_factor_x1000` are unaffected.
+    pub hypoxia_base_x1000: i64,
+
     // ── E-4a: ontogenesis chain opt-in (morphogen → GRN → cell fate) ────────────────────────────
     /// Morphogen reaction-diffusion spec (E-2). `Some` together with `grn` enables the full
     /// `decode` ontogenesis chain; `None` (default, all 5 existing configs) → `decode` stays the
@@ -388,6 +405,8 @@ impl Default for EconParams {
             enable_oxygen: false,
             // P1-2b: O₂-cap OFF by default (0 → hypoxia disabled when enable_oxygen=false).
             o2_cap: 0,
+            ablate_hypoxia: false,
+            hypoxia_base_x1000: 1000,
             // E-4a: ontogenesis chain OFF by default — None for all 5 existing configs.
             morphogen: None,
             grn: None,
