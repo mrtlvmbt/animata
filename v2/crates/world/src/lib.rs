@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn height_wraps_toroidally_like_noise_world_did() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
         assert_eq!(w.height(0, 0), w.height(DIM, 0), "x must wrap at dim");
         assert_eq!(w.height(0, 0), w.height(0, DIM), "z must wrap at dim");
         assert_eq!(w.height(-1, 0), w.height(DIM - 1, 0), "negative x must wrap");
@@ -255,8 +255,8 @@ mod tests {
 
     #[test]
     fn procgen_world_is_deterministic_across_repeated_builds() {
-        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED);
-        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED);
+        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
         for x in 0..DIM {
             for z in 0..DIM {
                 let pos = Vec2Fixed(x, z);
@@ -273,7 +273,7 @@ mod tests {
     /// climate-only "≥2 biomes" check would silently pass even if erosion fully no-oped).
     #[test]
     fn procgen_world_is_rich_and_not_degenerate_at_prod_scale() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
 
         let mut min_h = i64::MAX;
         let mut max_h = i64::MIN;
@@ -322,7 +322,7 @@ mod tests {
     fn resource_decoupled_from_solid_level() {
         use gen::material::MaterialId;
 
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
         let mut resource_on_solid = Vec::new();
         let mut resource_on_non_solid = Vec::new();
 
