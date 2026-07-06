@@ -376,6 +376,15 @@ const DRIVER_BASE_HAZARD: i64 = 10;
 const DRIVER_C_COORD: i64 = 1;
 // D-5 hazard-refuge predation: viability tuning is separate concern (verdict-harness only).
 
+/// P4/SL-1: settling-selection CONSTANTS (size²-attenuated mortality pulse).
+/// Provisional calibration: settling_strength × settling_k determine the mortality gradient.
+/// CALIBRATION: ТЗ specifies range for final settling-verdict calibration (SL-3).
+const SETTLING_PERIOD: u64 = 100;     // settling pulse every 100 ticks
+const SETTLING_STRENGTH: i64 = 100;   // base drain strength (Q-format numerator)
+const SETTLING_K: i32 = 128;          // size² attenuation factor (denominator coefficient)
+const SETTLING_SHIFT: u32 = 16;       // Q-format shift (matches Q8.8 magnitude)
+// P4/SL-1 settling-selection: viability tuning is separate concern (verdict-harness only).
+
 /// D-2 (#270): the multicellular-predation cost↔benefit economy — the experiment substrate D-3
 /// sweeps for body-size emergence. D-5 evolution: now uses hazard-refuge predation (implicit
 /// external predator, per-entity per-tick drain) as a CONDITIONAL size-benefit (harder bodies drain
@@ -539,6 +548,7 @@ pub fn p2_config(seed: u64) -> SimConfig {
     }
 }
 
+<<<<<<< HEAD
 /// P3-3 thermal-niche verdict config (golden-neutral): high-gradient biome temperatures for
 /// faithful-verdict harness (a-d gates). Gated on `thermal_verdict_temps=Some`, so `None` → stock
 /// BIOME_TEMP → byte-identical. The override is injected at world-gen time (immutable post-gen).
@@ -579,6 +589,37 @@ pub fn p3_verdict_config(seed: u64) -> SimConfig {
         thermal_verdict_temps: Some(BIOME_TEMP_P3_VERDICT),
         ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
     }
+}
+
+/// P4/SL-1 settling-selection testbed (L=3 + morphogen + settling, predation OFF).
+/// Combines phase2 ontogenesis (N>1 todies) with settling-selection mechanic.
+/// Layer 0: substrate (ProcgenWorld resource), Layer 1: organics (excreta),
+/// Layer 2: O₂ (non-energy, conserved from biom). Founders spawn with N=4 (size_viability_floor=3).
+/// V-4: body_size evolves heritable (g_dev=1 founder → multicellularity emerges under settling).
+///
+/// **P4/SL-1 golden-ADDITIVE:** settling-mechanic is new, opt-in. `settling_config` is a
+/// testbed config that wires the settling economy (settling=Some) into the phase2 substrate.
+/// Production configs (`p2_config` etc.) keep settling=None → stage_settling is a no-op →
+/// trajectories byte-identical (the isolation gate; un-re-pinned existing goldens are the test).
+/// Once merged, SL-1 settling-golden will be pinned arm64 via `ci-report.sh`.
+pub fn settling_config(seed: u64) -> SimConfig {
+    let mut cfg = p2_config(seed);
+    // SL-1: settling-selection ONLY (predation OFF for clean size-emergence signal).
+    cfg.econ.predation = None;
+    cfg.econ.settling = Some(sim_core::SettlingSpec {
+        period: SETTLING_PERIOD,
+        strength: SETTLING_STRENGTH,
+        settling_k: SETTLING_K,
+        shift: SETTLING_SHIFT,
+    });
+    // V-4 (#276): the founder starts UNICELLULAR (g_dev=1) and body size is heritable.
+    if let Some(mspec) = cfg.econ.morphogen.as_mut() {
+        mspec.g_dev = 1;
+    }
+    cfg.econ.evolve_body_size = true;
+    // P3-3: thermal_verdict_temps field (None → stock BIOME_TEMP behavior).
+    cfg.thermal_verdict_temps = None;
+    cfg
 }
 
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
