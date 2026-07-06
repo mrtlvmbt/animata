@@ -532,3 +532,39 @@ pub struct SimConfig {
     /// Unused slots may be zeroed (`LayerSpec::default()`).
     pub layer_specs: [LayerSpec; 4],
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tolerance_penalty() {
+        // At optimum temperature: penalty should be maximal (256 = no penalty applied).
+        let p_at_optimum = tolerance_penalty(1500, 1500, 500);
+        assert_eq!(p_at_optimum, 256, "penalty at optimum temp should be 256");
+
+        // At ±1σ (±tol_breadth/2): large penalty (exp(-1) ≈ 0.37).
+        let p_one_sigma = tolerance_penalty(2000, 1500, 500);
+        assert!(p_one_sigma < 256, "penalty at +1σ should be less than 256");
+        assert!(p_one_sigma > 0, "penalty should remain positive");
+
+        // At ±1.5σ (±3/4 of tol_breadth): severe penalty (exp(-2.25) ≈ 0.105).
+        let p_one_half_sigma = tolerance_penalty(2375, 1500, 500); // dev=875, breadth=1000, norm=224
+        assert!(p_one_half_sigma < p_one_sigma, "penalty at +1.5σ should be less than +1σ");
+        assert!(p_one_half_sigma >= 0, "penalty should be non-negative");
+
+        // Symmetric: negative deviation should equal positive.
+        let p_neg_one_sigma = tolerance_penalty(1000, 1500, 500);
+        assert_eq!(p_neg_one_sigma, p_one_sigma, "penalty symmetric around optimum");
+
+        // Guard: zero breadth returns 256 (degenerate, no penalty).
+        let p_zero_breadth = tolerance_penalty(1500, 1500, 0);
+        assert_eq!(p_zero_breadth, 256, "zero breadth should return 256");
+
+        // Extreme temperature: penalty saturates at index 256 (return value 0).
+        let p_extreme = tolerance_penalty(5000, 1500, 500);  // normalized >= 256 → kernel[256]=0
+        let p_more_extreme = tolerance_penalty(10000, 1500, 500);
+        assert_eq!(p_extreme, p_more_extreme, "penalty saturates at normalized=256");
+        assert_eq!(p_extreme, 0, "penalty at extreme deviation is 0 (total stress)");
+    }
+}

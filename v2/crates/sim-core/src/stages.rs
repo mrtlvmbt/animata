@@ -197,9 +197,10 @@ pub fn stage_move(
 pub fn stage_metabolism(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
+    world: Res<WorldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut tel: ResMut<Telemetry>,
-    mut q: Query<(&Genome, &Phenotype, &mut Energy)>,
+    mut q: Query<(&Position, &Genome, &Phenotype, &mut Energy)>,
 ) {
     let n = econ.metab_period.max(1);
     if !clock.tick.is_multiple_of(n) {
@@ -217,7 +218,7 @@ pub fn stage_metabolism(
     // lump is N-invariant only under this alignment; Sim::new rejects configs that violate it.
     let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
     let mut photo_cost_this_event: i64 = 0;
-    for (g, ph, mut e) in &mut q {
+    for (pos, g, ph, mut e) in &mut q {
         // M7-e-a: coordination cost on total live body cell count (Σ module_cell_count). 0 for
         // every non-phase2 genome (empty CellGraph) and inert at c_coord=0 (all shipped configs).
         let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
@@ -259,7 +260,14 @@ pub fn stage_metabolism(
         } else {
             0
         };
-        let cost = base_cost + photo_cost + aerobe_cost;
+        let mut cost = base_cost + photo_cost + aerobe_cost;
+        // P3-1: Thermal tolerance penalty — applied when ambient_tolerance is configured.
+        // Penalty gates on is_some() to preserve byte-identity (all legacy configs have None).
+        if econ.ambient_tolerance.is_some() {
+            let temp = world.0.temp_at(pos.0);
+            let penalty = crate::params::tolerance_penalty(temp, g.tol_optimum, g.tol_breadth) as i64;
+            cost = (cost * penalty) / 256;
+        }
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
