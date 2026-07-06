@@ -1,11 +1,10 @@
-# animata — инструкции проекта
+# animata — project instructions
 
-**Язык общения — РУССКИЙ.** Отвечай пользователю по-русски во всех сессиях этого репозитория. Это
-относится к главному треду диалога. Исключения (всегда по-английски): код и идентификаторы, имена
-веток/коммитов/PR и тела git-команд, машинные токены инструментов. Форк-агенты кита
-(`bug-hunt`/`subsystem-reviewer`/`web-research`/`critic`/`judge`) уже локализованы на русский через
-`.claude/kit.overlay/agents/` — их вывод тоже русский, кроме машинных токенов (`F1`, `[severity: …]`,
-`VERDICT: PASS|FAIL`).
+**User-facing language is Russian.** The kit hook `kit-user-lang` (configured with `KIT_USER_LANG='Russian'` in
+`.claude/kit.config.sh`) enforces Russian replies in the main conversation thread; this configuration is
+re-injected into every prompt and does not drift. All internal artifacts (this file, control files,
+agent-traffic handoff blocks) and all inter-agent communication are English. Code, identifiers, branch/commit/PR
+names, git command bodies, and machine tokens (F-ids, severities, VERDICT strings) are always English.
 
 <!-- claude-dev-kit:rules START (managed — do not edit by hand) -->
 ## Working with claude-dev-kit (consumer contract)
@@ -73,81 +72,83 @@ the rtk proxy that swallows test output), honours `.cargo/config.toml`'s `RUST_T
 passes failure detail through; in a non-TTY run it prints checkpoint lines instead of a `\r` bar
 (cadence `BAR_EVERY=N`).
 
-## Контракт финального отчёта (кодеры A/B/C — обязательный)
+## Final-report contract (coders A/B/C — mandatory)
 
-Последняя строка финального отчёта сессии/диспатча — ровно одна из двух:
+The last line of every session/dispatch final report must be exactly one of:
 
 ```
 STATUS: done
-STATUS: blocked@<шаг>: <что нужно, чтобы продолжить>
+STATUS: blocked@<step>: <what is needed to continue>
 ```
 
-- `STATUS: done` разрешён ТОЛЬКО когда `.claude/hooks/done-check.sh` печатает `PASS`: открытый PR по
-  текущей ветке + зелёный CI на HEAD + ни одного незакрытого пункта ТЗ (`- [ ]`) в теле PR. Stop-хук
-  `done-gate.sh` проверяет это машинно и блокирует ложный «done» (происхождение: кейс A-4 —
-  placeholder-пин запушен, PR не создан, отчитано «done»; PM доделывал руками).
-- Двухпроходная задача (значение рождается в CI: golden re-pin и родня) на проходе 1 отчитывается
-  `STATUS: blocked@N: жду CI (pass 2 of 2)` — это честный и разрешённый исход, гейт его пропускает.
-- «Сделано» в середине сессии («шаг 2 сделан, иду дальше») — не финальный отчёт, гейт не трогает.
-- Сознательный обход гейта: создать файл `.claude/.done-allow` и повторить — обход одноразовый и
-  логируется в `.claude/done-gate.log` (зеркало `KIT_ALLOW_DIRTY`).
+- `STATUS: done` is permitted ONLY when `.claude/hooks/done-check.sh` prints `PASS`: an open PR on
+  the current branch + green CI on HEAD + zero unchecked acceptance items (`- [ ]`) in the PR body.
+  The stop-hook `done-gate.sh` validates this automatically and blocks a false `done` claim (origin: case
+  A-4 — placeholder pin pushed, PR not created, reported done; PM fixed it by hand).
+- Two-pass tasks (value is born in CI: golden re-pin and kin) report pass 1 as
+  `STATUS: blocked@N: awaiting CI (pass 2 of 2)` — this is honest and the gate permits it.
+- "Done" mid-session ("step 2 done, moving on") is not a final report; the gate does not touch it.
+- Intentional gate bypass: create `.claude/.done-allow` and retry — the bypass is one-shot and logged
+  in `.claude/done-gate.log` (mirrors `KIT_ALLOW_DIRTY`).
 
-## Pre-merge self-review (кодеры A/B/C — обязательный)
+## Pre-merge self-review (coders A/B/C — mandatory)
 
-Перед переводом PR в ready-for-review — холодный форк **`code-critic`** (агент в `.claude/agents/`,
-model opus) на дифф ветки против ТЗ issue: скорми ему `git diff main...HEAD` + текст ТЗ (acceptance
-criteria). Правила:
+Before moving a PR to ready-for-review, fork the **`code-critic`** agent (in `.claude/agents/`,
+model opus) as a cold review of the branch diff against the issue ТЗ/acceptance criteria:
+feed it `git diff main...HEAD` + the ТЗ text. Rules:
 
-- `VERDICT: FAIL` с неснятым `bug`/неприкрытым `robustness` — чинить ДО ready-for-review, не
-  спорить с холодным форком в чате (Fix-or-Accept; Accept только для `tradeoff`/`style`).
-- Вердикт-блок отчёта (последние строки, включая `VERDICT:`) приложить комментарием в PR — PM видит,
-  что self-review был, и что именно снято.
-- Это НЕ отменяет PM-прогон на приёме: кодерский слой ловит дешёвое раннее (same-tier, свои слепые
-  зоны), PM-слой остаётся авторитетным — та же двухслойность, что done-gate + PM-линт.
-- Критик обязан сверяться с «Known review false-positives» ниже — прецедент цитируется, не
-  пере-выводится.
+- `VERDICT: FAIL` with an unresolved `bug` or unguarded `robustness` → fix BEFORE ready-for-review,
+  do not argue with the cold fork in chat (Fix-or-Accept; Accept only for `tradeoff`/`style`).
+- Append the verdict block (final lines, including `VERDICT:`) as a PR comment — PM sees that
+  self-review happened and what was resolved.
+- This does NOT replace the PM run at intake: the coder layer catches cheap early wins (same-tier,
+  own blind spots); the PM layer remains authoritative — the same layering as done-gate + PM lint.
+- The critic MUST check against the "Known review false-positives" list below — cite the precedent,
+  do not re-derive.
 
-## Статус-файл (кодеры A/B/C — в конце каждой сессии/диспатча)
+## Status file (coders A/B/C — end of every session/dispatch)
 
-Последнее действие сессии — записать `.claude/status.md` (машиночитаемый, не версионируется):
+The last action of a session is to write `.claude/status.md` (machine-readable, not versioned):
 
 ```
-task: <#issue / PR / краткое имя>
-phase: <что сейчас: план | код | тесты | CI | PR>
-blocked_on: <- | что именно блокирует>
-next: <первое действие следующей сессии>
+task: <#issue / PR / short name>
+phase: <current: plan | code | tests | CI | PR>
+blocked_on: <what exactly is blocking>
+next: <first action of next session>
 updated: <YYYY-MM-DD HH:MM>
 ```
 
-PM читает эти файлы (`../A/.claude/status.md` и т.д.) ВМЕСТО вопроса «на чём остановились»;
-`updated` старше 24ч = файл протух, PM спрашивает напрямую. Не заменяет `STATUS:`-строку финального
-отчёта — это разные каналы (отчёт = handoff, файл = живое состояние между сессиями).
+PM reads these files (`../A/.claude/status.md` etc.) INSTEAD of asking "where did you stop";
+`updated` older than 24h = stale, PM asks directly. This does NOT replace the `STATUS:` line of
+the final report — they are separate channels (report = handoff, file = live state between sessions).
 
-## Приём handoff (PM — машинный линт)
+## Handoff intake (PM — machine lint)
 
-- Финальный отчёт кодера БЕЗ строки `^STATUS: (done|blocked@…)` — **автоматический возврат**
-  («формат нарушен»), содержимое не разбирается. Пропуск токена = отказ, не тихий провоз.
-- Перед приёмом «done» PM смотрит `.claude/done-gate.log` кодера: запись `BLOCKED-OVERRIDE`
-  (повторённый `STATUS: done` после блока) или свежий `ALLOW` — hard-fail очередь: handoff не
-  принимается до разбора причины.
+- A coder's final report without a `^STATUS: (done|blocked@…)` line is an **automatic return**
+  ("format violated"), content is not parsed. A missing token = rejection, not silent pass.
+- Before accepting "done", PM inspects the coder's `.claude/done-gate.log`: an entry `BLOCKED-OVERRIDE`
+  (repeated `STATUS: done` after a block) or a fresh `ALLOW` triggers a hard-fail: handoff is not
+  accepted until the cause is reviewed.
 
-## Known review false-positives (ground-checked — цитируй прецедент, не пере-выводи)
+## Known review false-positives (ground-checked — cite precedent, do not re-derive)
 
-Ревью кода кодеров (агентное и ручное) регулярно пере-открывает одни и те же НЕ-баги. Каждая запись
-держит доказательство И precondition — запись валидна, пока precondition цел (фальсифицируемый
-приор, как в ките: `.claude-dev-kit/docs/review-agent-accuracy.md` § Version-floor check).
+Code reviews by coders (agent and manual) repeatedly re-open the same NON-bugs. Each entry carries
+both evidence AND a precondition — the entry is valid only while its precondition holds (a falsifiable
+prior, as in the kit: `.claude-dev-kit/docs/review-agent-accuracy.md` § Version-floor check).
 
-- **Правка golden-константы в тесте, СОЗДАННОМ той же сессией/веткой, — НЕ подтасовка.** Канон
-  создания golden-теста для нового детерминированного кода: placeholder → первый прогон → пин
-  реального значения (прецедент: сессия B 1f4485b8, w3/w4/w5_chain, 03.07.2026 — два независимых
-  ревью-форка ложно обвинили). *Precondition:* файл теста новый в этой ветке (нет в main). Если
-  правится пин СУЩЕСТВУЮЩЕГО в main golden-теста без обоснования смены алгоритма — флаг валиден.
-- **Fix-loop «тест упал → Edit → тест прошёл» с раскрытым обоснованием между прогонами — НЕ обман.**
-  Норма разработки; интервал 18–44 сек между fail и pass — это правка, а не фальсификация
-  (прецедент: сессия A f19d3c4b, 5 ложных кейсов «строгого» ревью). *Precondition:* между прогонами
-  есть Edit/текст с объяснением. Молчаливая правка ассертов без обоснования — флаг валиден.
-- **Падение `v2_golden_drift` локально на arm64 при намеренной смене hash-контрибуции — ожидаемый
-  re-pin, не скрытая поломка.** Golden арх-привязан (см. шапку `crates/cli/tests/golden.rs`: только
-  arm64 CI job, x86 исключает, debug self-skip); re-pin по процессу — из `.ci-report/failed.log`
-  (`golden-arm64` job), владелец — PM. *Precondition:* шапка golden.rs сохраняет arch-bound контракт
-  и смена hash-логики заявлена в PR.
+- **Editing a golden constant in a test CREATED by the same session/branch is NOT goldbricking.**
+  Canonical golden-test creation for new deterministic code: placeholder → first run → pin actual
+  value (precedent: session B 1f4485b8, w3/w4/w5_chain, 03.07.2026 — two independent review forks
+  falsely flagged it). *Precondition:* the test file is new in this branch (not in main). If the pin
+  for an EXISTING golden test in main is edited without justification of an algorithm change, the
+  flag is valid.
+- **A fix-loop "test fails → Edit → test passes" with transparent reasoning between runs is NOT fraud.**
+  Normal development; a 18–44 second interval between fail and pass is an edit, not falsification
+  (precedent: session A f19d3c4b, 5 false cases from "strict" review). *Precondition:* there is an
+  Edit/text explaining the reasoning between runs. Silent assertion rewrites without justification —
+  the flag is valid.
+- **A `v2_golden_drift` fall locally on arm64 during an intentional hash-contribution change is an
+  expected re-pin, not a hidden break.** Goldens are arch-bound (see the header of
+  `crates/cli/tests/golden.rs`: arm64 CI job only, x86 excluded, debug self-skip); re-ping by process —
+  from `.ci-report/failed.log` (`golden-arm64` job), owner PM. *Precondition:* the golden.rs header
+  preserves the arch-bound contract and the hash-logic change is declared in the PR.

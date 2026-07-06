@@ -1,3 +1,8 @@
+# done-gate (coders Stop hook) — runtime artifacts, not versioned
+done-gate.log
+.done-allow
+status.md
+
 # >>> claude-dev-kit (managed) — do not edit >>>
 settings.json.bak.*
 .critic-report.md
@@ -7,7 +12,3 @@ kit-plan-bypass.log
 kit-readonly-bypass.log
 kit-citation-misses.log
 # <<< claude-dev-kit (managed) <<<
-# done-gate (Stop-хук кодеров) — runtime-артефакты, не версионируются
-done-gate.log
-.done-allow
-status.md

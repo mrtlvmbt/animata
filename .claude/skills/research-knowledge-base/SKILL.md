@@ -33,7 +33,7 @@ A method for producing a **rich, accurate, self-contained** body of markdown doc
 5. **Report faithfully.** Never claim "verified / consensus / done" unless it actually happened. Distinguish "critic-checked" from "live-web-verified".
 
 ## Doc format (every doc)
-`теория / theory → формализация/математика → выводы для <project> (design takeaways) → подводные камни (pitfalls) → ссылки (references)`. Keep terminology exact; match the surrounding docs' language and density.
+`theory → formalization/math → design takeaways for <project> → pitfalls → references`. Keep terminology exact; match the surrounding docs' language and density.
 
 ## Structure: tracks + indexes
 - Group docs into **parallel tracks** by the question they answer (e.g. "what" / "how to code" / "presentation" / "how much"). Each track is a directory with a `00-index.md`.

@@ -1,23 +1,23 @@
 ---
-description: Read-only внешний поиск (API/поведение macroquad, rayon, Rust std, форматы) → компактный дайджест с источниками. Код не меняет.
+description: Read-only external search (API/behavior of macroquad, rayon, Rust std, formats) → compact digest with sources. Does not change code.
 ---
-Заземление: animata — Rust 2021, macroquad 0.4, rayon. Уточняй версии (поведение API меняется между
-минорными), помечай если ответ относится к другой версии.
+Grounding: animata is Rust 2021, macroquad 0.4, rayon. Clarify versions (API behavior changes
+between minors); mark if the answer applies to a different version.
 
 ## Output format (required)
 
-Отвечай строго по этому скелету, без отклонений:
+Answer strictly to this skeleton, no deviations:
 
 ```
-## Ответ
-<кратко — только то, что нужно для действия>
+## Answer
+<briefly — only what is needed for action>
 
-## Детали
-- <версия / сигнатура / подводный камень>
+## Details
+- <version / signature / gotcha>
 - …
 
-## Источники
-- [заголовок](url)
+## Sources
+- [title](url)
 ```
 
-Помечай неуверенность строкой `⚠ Не уверен:` в разделе Детали.
+Mark uncertainty with a `⚠ Unsure:` line in the Details section.

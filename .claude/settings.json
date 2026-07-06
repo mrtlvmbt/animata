@@ -69,6 +69,10 @@
           {
             "type": "command",
             "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-context-meter.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-context-meter.sh\" || exit 0"
+          },
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-user-lang.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-user-lang.sh\" || exit 0"
           }
         ]
       }
