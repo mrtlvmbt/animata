@@ -1046,6 +1046,27 @@ pub fn stage_predation(
 // where `size = Σ module_cell_count` (integer i128 to prevent overflow). Energy → `ledger.dissipated`,
 // death at ≤0 in stage 7 (R15 conservation — mortality energy accounted before entity removal).
 // Stage order: AFTER 6c-predation, BEFORE 7-birth_death (ТЗ F3, R15 logic).
+
+/// P4/SL-1: Compute size²-attenuated settling drain (Q-format, single source of truth for formula).
+/// Given a SettlingSpec and body size, returns the drain to be deducted this tick.
+/// Formula: `drain = (strength << SHIFT) / ((1 << SHIFT) + settling_k · size²)` (integer only).
+/// Used by both stage_settling (ECS loop) and test harness (settling_mechanic.rs).
+#[inline]
+pub fn settling_drain(spec: &crate::params::SettlingSpec, body_size: i64) -> i64 {
+    let strength = spec.strength.clamp(0, 1_000_000);
+    if strength == 0 {
+        return 0; // inert
+    }
+
+    let shift = spec.shift.min(32); // defensive clamp to prevent overflow
+    let size_sq: i128 = (body_size as i128) * (body_size as i128);
+    let k = (spec.settling_k as i128).max(0);
+    let numer: i128 = (strength as i128) << shift;
+    let denom: i128 = ((1i128) << shift) + k * size_sq;
+    let denom = denom.max(1);
+    (numer / denom).clamp(0, 1_000_000) as i64
+}
+
 pub fn stage_settling(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
@@ -1083,21 +1104,8 @@ pub fn stage_settling(
             .sum::<i64>()
             .max(1);
 
-        // Size²-attenuated drain (Q-format, i128 to prevent overflow).
-        // Formula: `drain = (strength << SHIFT) / ((1 << SHIFT) + settling_k · size²)`
-        // Mirrors refuge_attenuate from predation.rs, but with size² instead of linear body_size.
-        let strength = spec.strength.clamp(0, 1_000_000); // defensively clamp
-        if strength == 0 {
-            continue; // inert
-        }
-
-        let shift = spec.shift.min(32); // defensive clamp to prevent overflow
-        let size_sq: i128 = (body_size as i128) * (body_size as i128);
-        let k = (spec.settling_k as i128).max(0);
-        let numer: i128 = (strength as i128) << shift;
-        let denom: i128 = ((1i128) << shift) + k * size_sq;
-        let denom = denom.max(1);
-        let drain: i64 = (numer / denom).clamp(0, 1_000_000) as i64;
+        // Size²-attenuated drain via single-source-of-truth formula.
+        let drain = settling_drain(spec, body_size);
 
         // Apply drain: clamp to available energy.
         let actual_drain = drain.min(energy.0);

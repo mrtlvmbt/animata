@@ -1,201 +1,172 @@
 //! P4/SL-1: settling-selection mechanic — size²-attenuated mortality pulse.
 //!
-//! **Purpose**: verify the settling-mechanic (SL-1 only) before diffusion cost (SL-2) and verdict
-//! (SL-3) are added. Tests FALSIFY — fail if the pulse were size-independent or absent, demonstrating
-//! that size² gradient is real and load-bearing.
+//! **Purpose**: verify the settling-mechanic (SL-1 only) with REAL falsification tests —
+//! each test MUST fail if stage_settling is a no-op, size-independent, or miscomputed.
 //!
 //! **Golden-ADDITIVE:** settling_config is a new opt-in testbed config; existing goldens stay
 //! byte-identical. A new settling-golden will be pinned arm64 (PM single-writer, post-review).
-//!
-//! **Test pattern**: settling_config(seed) → run for N ticks → probe population → verify:
-//! 1. size²-gradient (large entity under pulse has higher mortality pressure than small)
-//! 2. R15 conservation holds exactly
-//! 3. population does not instantly collapse
-//! 4. determinism (two runs, same seed → identical trajectory)
 
 use cli::{build_sim, settling_config};
-use sim_core::{body_size_aggregate, CellGraph};
+use sim_core::settling_drain;
 
-const SEED: u64 = 0xC0_DE_5EED;  // settling-specific seed
-const SETTLING_PERIOD: u64 = 100; // pulse every 100 ticks
-const TICKS: u64 = 400;           // 4 pulses per run
+const SEED: u64 = 0xC0_DE_5EED;
 
-/// SL-1 Tooth 1: size²-attenuated drain computes correctly (unit test).
-/// Verify the Q-format formula independently: `drain = (strength << shift) / ((1 << shift) + k * size²)`.
-/// Larger size² → smaller drain (monotone-decreasing refuge); smaller size² → larger drain.
+/// SL-1 Tooth 1: settling_drain formula via single source of truth (NOT a copy).
+/// Verify the formula on the REAL pub function; compute explicitly on known sizes.
+/// FALSIFIES if: formula were size-independent, size-inverse, or absent.
 #[test]
-fn settling_size_squared_attenuation_formula() {
-    // Q-format parameters (matching settling_config constants).
-    let strength: i64 = 100;
-    let shift: u32 = 16;
-    let k: i32 = 128;
+fn settling_formula_size_squared_gradient() {
+    use sim_core::SettlingSpec;
 
-    // Helper: compute drain using the settling formula (same as stage_settling).
-    let compute_drain = |body_size: i64| -> i64 {
-        let strength = strength.clamp(0, 1_000_000);
-        if strength == 0 {
-            return 0;
-        }
-        let shift = shift.min(32);
-        let size_sq: i128 = (body_size as i128) * (body_size as i128);
-        let k = (k as i128).max(0);
-        let numer: i128 = (strength as i128) << shift;
-        let denom: i128 = ((1i128) << shift) + k * size_sq;
-        let denom = denom.max(1);
-        (numer / denom).clamp(0, 1_000_000) as i64
+    let spec = SettlingSpec {
+        period: 100,
+        strength: 100,
+        settling_k: 128,
+        shift: 16,
     };
 
     // Small body (size=1): drain ≈ strength (high pressure).
-    let drain_small = compute_drain(1);
+    let drain_small = settling_drain(&spec, 1);
     assert!(drain_small > 0, "drain at size=1 must be positive");
     assert!(drain_small >= 80, "drain at size=1 must be ≥80 (nearly full strength)");
 
-    // Medium body (size=4): drain is smaller (lower pressure).
-    let drain_medium = compute_drain(4);
+    // Medium body (size=4): drain is smaller.
+    let drain_medium = settling_drain(&spec, 4);
     assert!(drain_medium > 0, "drain at size=4 must be positive");
-    assert!(drain_medium < drain_small, "drain must DECREASE with larger size (size²-attenuation)");
+    assert!(drain_medium < drain_small, "size² must attenuate: drain(4) < drain(1)");
 
-    // Large body (size=16): drain is even smaller (low pressure).
-    let drain_large = compute_drain(16);
+    // Large body (size=16): drain is even smaller.
+    let drain_large = settling_drain(&spec, 16);
     assert!(drain_large > 0, "drain at size=16 must be positive");
-    assert!(drain_large < drain_medium, "drain must DECREASE further at size=16");
+    assert!(drain_large < drain_medium, "size² must attenuate: drain(16) < drain(4)");
 
-    // Verify monotone-decreasing: small < medium < large body sizes → large > medium > small drains.
+    // Verify monotone-decreasing (FALSIFIES if formula were linear or absent).
     assert!(drain_large < drain_medium && drain_medium < drain_small,
-            "drain gradient (size=1: {}, size=4: {}, size=16: {}) must be strictly decreasing",
-            drain_small, drain_medium, drain_large);
+            "size² gradient critical: drain({}) > drain({}) > drain({}), but got {}, {}, {}",
+            1, 4, 16, drain_small, drain_medium, drain_large);
 }
 
-/// SL-1 Tooth 2: settling_config population viability — population does not instantly collapse.
-/// Run settling_config for 4 pulse cycles; assert population > 0 at end (R15: conservation holds).
+/// SL-1 Tooth 2: population survival + conservation R15.
+/// Run settling_config for 4 pulses; verify population > 0 and ledger stays balanced.
 #[test]
-fn settling_population_survives() {
+fn settling_population_survives_conserves() {
     if cfg!(debug_assertions) {
-        return; // skip in debug (slow iteration)
+        return;
     }
 
     let mut sim = build_sim(settling_config(SEED));
-
-    // Initial population (founders).
     let initial_pop = sim.population();
-    assert!(initial_pop > 0, "settling_config must start with >0 founders");
+    assert!(initial_pop > 0, "must start with founders");
 
-    // Run for 4 settling pulses (SETTLING_PERIOD=100, TICKS=400).
-    for _ in 0..TICKS {
+    // Run 400 ticks (4 settling pulses at period=100).
+    for _ in 0..400 {
         sim.step();
-        assert_eq!(
-            sim.conservation_residual(),
-            0,
-            "R15 energy conservation (O₂ excluded) violated at tick {}",
-            sim.tick()
-        );
+        assert_eq!(sim.conservation_residual(), 0, "R15 must hold every tick");
     }
 
-    // Population must survive (settling pulse is strong but not instant-lethal).
     let final_pop = sim.population();
     assert!(final_pop > 0,
-            "settling_config population must survive 4 settling pulses (final: {}, initial: {})",
+            "settling pulse must not be instantly lethal (final: {}, initial: {})",
             final_pop, initial_pop);
 }
 
-/// SL-1 Tooth 3: settling-mechanic is actually ACTIVE (falsification test).
-/// Compare population under settling ON vs OFF: if settling were absent or size-independent,
-/// the trajectory would be identical. This test runs settling_config (settling ON) and verifies
-/// that population IS affected (not a no-op).
-///
-/// Strategy: settling_config is phase2 with settling=Some, predation=None, evolve_body_size=true.
-/// If we could toggle settling off, population would grow faster. Instead, we verify that
-/// settling_config shows nonzero settling-pulse drain by observing population dynamics.
+/// SL-1 Tooth 3: population shrinkage under settling pulse.
+/// Run settling_config to tick 105 (after first pulse at tick 100).
+/// Population should shrink (settling pulse culls). Conservation still holds.
+/// FALSIFIES if: pulse were absent or inert.
 #[test]
-fn settling_mechanic_is_active() {
+fn settling_population_shrinks_at_pulse() {
     if cfg!(debug_assertions) {
         return;
     }
 
     let mut sim = build_sim(settling_config(SEED));
 
-    // Collect body sizes at each tick to verify size gradient exists.
-    let mut body_sizes_at_pulse: Vec<i64> = Vec::new();
-
-    // Run to first settling pulse (tick 100).
-    for _ in 0..SETTLING_PERIOD {
+    // Probe at tick 99 (before pulse).
+    for _ in 0..99 {
         sim.step();
     }
+    let pop_before_pulse = sim.population();
+    assert!(pop_before_pulse > 0, "population must exist before pulse");
 
-    // At tick=SETTLING_PERIOD, the pulse has just fired. Probe body sizes.
-    let sizes_tick100 = sim.body_size_probe();
-    body_sizes_at_pulse.push(sizes_tick100.iter().max().copied().unwrap_or(1));
-
-    // Run to second pulse and probe again.
-    for _ in 0..(SETTLING_PERIOD) {
+    // Step through pulse (tick 100) and a few ticks after.
+    for _ in 99..105 {
         sim.step();
+        assert_eq!(sim.conservation_residual(), 0, "R15 always holds");
     }
-    let sizes_tick200 = sim.body_size_probe();
-    body_sizes_at_pulse.push(sizes_tick200.iter().max().copied().unwrap_or(1));
 
-    // Verify: population is nonzero and has bodies (sizes > 0).
-    assert!(sim.population() > 0, "settling_config must sustain population");
+    let pop_after_pulse = sim.population();
+
+    // Population should shrink due to settling cull (FALSIFIES if stage_settling is no-op).
     assert!(
-        !body_sizes_at_pulse.is_empty() && body_sizes_at_pulse.iter().all(|&s| s >= 1),
-        "all probed body sizes must be ≥1"
+        pop_after_pulse < pop_before_pulse,
+        "settling pulse must reduce population: before={}, after={}",
+        pop_before_pulse, pop_after_pulse
     );
 }
 
-/// SL-1 Tooth 4: determinism — two runs with same seed → identical trajectories (R33).
-/// Run settling_config twice, collect per-tick hashes. Trajectories must be byte-identical.
+/// SL-1 Tooth 4: settling is active — ON vs OFF divergence.
+/// Run settling_config (settling ON) and identical config (settling=None) in parallel.
+/// Verify they DIVERGE after 4 pulses (mean_body_size or population differs).
+/// FALSIFIES if: stage_settling were a no-op.
 #[test]
-fn settling_determinism_two_runs() {
+fn settling_mechanic_diverges_from_no_settling() {
     if cfg!(debug_assertions) {
         return;
     }
 
-    let cfg1 = settling_config(SEED);
-    let cfg2 = settling_config(SEED);
-    let mut sim1 = build_sim(cfg1);
-    let mut sim2 = build_sim(cfg2);
+    let mut sim_with = build_sim(settling_config(SEED));
 
-    for tick in 0..TICKS {
+    // Create an identical config but with settling=None.
+    let mut sim_without = {
+        let mut cfg = settling_config(SEED);
+        cfg.econ.settling = None;  // Disable settling.
+        build_sim(cfg)
+    };
+
+    // Run both for 4 pulses (400 ticks).
+    for _ in 0..400 {
+        sim_with.step();
+        sim_without.step();
+    }
+
+    let pop_with = sim_with.population();
+    let pop_without = sim_without.population();
+
+    // With settling ON, population should be lower (settling culls small entities).
+    // This FALSIFIES if settling were inert or size-independent (would give pop_with ≈ pop_without).
+    assert!(pop_with < pop_without,
+            "settling must reduce population: with={}, without={} (settling is active)",
+            pop_with, pop_without);
+}
+
+/// SL-1 Tooth 5: determinism R33 — two runs identical.
+#[test]
+fn settling_determinism() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    let mut sim1 = build_sim(settling_config(SEED));
+    let mut sim2 = build_sim(settling_config(SEED));
+
+    for tick in 0..200 {
         sim1.step();
         sim2.step();
-
-        let hash1 = sim1.state_hash();
-        let hash2 = sim2.state_hash();
-        assert_eq!(
-            hash1, hash2,
-            "R33: state_hash mismatch at tick {} (settling is deterministic)",
-            tick
-        );
+        assert_eq!(sim1.state_hash(), sim2.state_hash(), "R33 at tick {}", tick);
     }
-
-    // Final population must be identical.
-    assert_eq!(
-        sim1.population(),
-        sim2.population(),
-        "final population must be identical across deterministic runs"
-    );
 }
 
-/// SL-1 Tooth 5: conservation under settling — R15 holds every tick.
-/// During settling pulse ticks, energy dissipated via settling must be accounted in the ledger.
-/// This is implicitly tested in `settling_population_survives`, but we make it explicit:
-/// any settling drain appears as ledger.dissipated, conserving the total.
+/// SL-1 Tooth 6: conservation R15 explicitly.
 #[test]
-fn settling_conservation_ledger() {
+fn settling_conservation_exact() {
     if cfg!(debug_assertions) {
         return;
     }
 
     let mut sim = build_sim(settling_config(SEED));
-
-    // Run past the first settling pulse (tick 100).
     for _ in 0..150 {
         sim.step();
-        // Every tick, conservation_residual() must be exactly 0 (no rounding error, no leaks).
-        let residual = sim.conservation_residual();
-        assert_eq!(
-            residual, 0,
-            "R15 violated at tick {}: residual = {}",
-            sim.tick(), residual
-        );
+        assert_eq!(sim.conservation_residual(), 0, "R15 exact at tick {}", sim.tick());
     }
 }

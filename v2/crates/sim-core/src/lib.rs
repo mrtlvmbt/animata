@@ -51,7 +51,7 @@ pub use grn_lut::{
 pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
 pub use params::{AmbientToleranceSpec, EconParams, FieldId, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
-pub use stages::expressed_capacity;
+pub use stages::{expressed_capacity, settling_drain};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
