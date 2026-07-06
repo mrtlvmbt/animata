@@ -42,6 +42,14 @@ pub trait WorldView: Send + Sync {
     fn height(&self, x: i64, z: i64) -> i64;
     fn biome(&self, pos: Vec2Fixed) -> u8;
     fn resource(&self, pos: Vec2Fixed) -> i64;
+
+    /// Ambient temperature at cell (P3-1, centidegrees). Derived from BiomeId during world-gen.
+    /// **INVARIANT R27 (immutable):** Returns the SAME value for any given position
+    /// across the entire simulation run. No per-tick mutation. Deterministic & arch-independent.
+    /// Violation of R27 corrupts thermal-niche selection, making traces non-repeatable.
+    /// Range: [−3000, +5000] (−30°C to +50°C).
+    /// Out-of-bounds (x,z) → clamped to nearest valid cell (or panic debug_assert).
+    fn temp_at(&self, pos: Vec2Fixed) -> i32;
 }
 
 /// The field backend — one CONSERVED resource field (fixed-point integer) and one SIGNAL field (f32)

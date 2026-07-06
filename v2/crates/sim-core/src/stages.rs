@@ -197,9 +197,10 @@ pub fn stage_move(
 pub fn stage_metabolism(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
+    world: Res<WorldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut tel: ResMut<Telemetry>,
-    mut q: Query<(&Genome, &Phenotype, &mut Energy)>,
+    mut q: Query<(&Position, &Genome, &Phenotype, &mut Energy)>,
 ) {
     let n = econ.metab_period.max(1);
     if !clock.tick.is_multiple_of(n) {
@@ -217,7 +218,7 @@ pub fn stage_metabolism(
     // lump is N-invariant only under this alignment; Sim::new rejects configs that violate it.
     let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
     let mut photo_cost_this_event: i64 = 0;
-    for (g, ph, mut e) in &mut q {
+    for (pos, g, ph, mut e) in &mut q {
         // M7-e-a: coordination cost on total live body cell count (Σ module_cell_count). 0 for
         // every non-phase2 genome (empty CellGraph) and inert at c_coord=0 (all shipped configs).
         let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
@@ -259,7 +260,14 @@ pub fn stage_metabolism(
         } else {
             0
         };
-        let cost = base_cost + photo_cost + aerobe_cost;
+        let mut cost = base_cost + photo_cost + aerobe_cost;
+        // P3-1: Thermal tolerance penalty — applied when ambient_tolerance is configured.
+        // Penalty gates on is_some() to preserve byte-identity (all legacy configs have None).
+        if econ.ambient_tolerance.is_some() {
+            let temp = world.0.temp_at(pos.0);
+            let penalty = crate::params::tolerance_penalty(temp, g.tol_optimum, g.tol_breadth) as i64;
+            cost = (cost * penalty) / 256;
+        }
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
@@ -1169,7 +1177,7 @@ pub fn stage_birth_death(
             }
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen);
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some());
             let species_c = *species;
 
             // E-1/E-5a/E-5b: decode-seam gate. Ф0 always returns Some; the five existing configs
@@ -1384,9 +1392,19 @@ mod tests {
     use crate::predation::{PredationMode, PredationSpec, SizeRefugeSpec};
     use crate::{
         CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldId, FieldRes, FieldStore,
-        Genome, MergeStrategy, Phenotype, Position, RespiratoryPathway, Sensors, SimClock, Telemetry, Vec2Fixed,
+        Genome, MergeStrategy, Phenotype, Position, RespiratoryPathway, Sensors, SimClock, Telemetry, Vec2Fixed, WorldRes, WorldView,
     };
     use bevy_ecs::prelude::*;
+
+    /// Minimal stub WorldView for test setup (temp_at for thermal tolerance tests).
+    struct TestStubWorld;
+    impl WorldView for TestStubWorld {
+        fn is_solid(&self, _p: Vec2Fixed) -> bool { false }
+        fn height(&self, _x: i64, _z: i64) -> i64 { 0 }
+        fn biome(&self, _p: Vec2Fixed) -> u8 { 0 }
+        fn resource(&self, _p: Vec2Fixed) -> i64 { 100 }
+        fn temp_at(&self, _p: Vec2Fixed) -> i32 { 1500 }
+    }
 
     /// Minimal `FieldStore` test double for the `stage_sense` regression test below: layer 0 and
     /// layer 1 hold DISTINCT, hand-set amounts, so a Sense read that used the wrong layer index is
@@ -1526,10 +1544,11 @@ mod tests {
         world.insert_resource(SimClock { seed: 0, tick: 0 });
         world.insert_resource(EnergyLedger::default());
         world.insert_resource(Telemetry::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         let ids: Vec<Entity> = phenotypes
             .into_iter()
-            .map(|ph| world.spawn((Genome::founder(2), ph, Energy(1_000_000))).id())
+            .map(|ph| world.spawn((Position(Vec2Fixed(0, 0)), Genome::founder(2), ph, Energy(1_000_000))).id())
             .collect();
 
         let mut schedule = Schedule::default();
@@ -1658,6 +1677,7 @@ mod tests {
         world.insert_resource(EconParams { predation: Some(spec), ..EconParams::default() });
         world.insert_resource(FieldRes(Box::new(SingleCellFieldStub)));
         world.insert_resource(EnergyLedger::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         let entity_ids: Vec<Entity> = entities
             .into_iter()
@@ -1699,6 +1719,7 @@ mod tests {
         world.insert_resource(EconParams { predation: Some(spec), ..EconParams::default() });
         world.insert_resource(FieldRes(Box::new(SingleCellFieldStub)));
         world.insert_resource(EnergyLedger::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         let pred_id = world
             .spawn((
@@ -2207,6 +2228,7 @@ mod tests {
         world.insert_resource(SimClock { seed: 0, tick: 0 });
         world.insert_resource(EnergyLedger::default());
         world.insert_resource(Telemetry::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
 
         // Entity with NO respiratory pathway (simulates enable_oxygen=false or gene=0).
         let ph_none = Phenotype {
@@ -2216,7 +2238,7 @@ mod tests {
             respiratory_pathway: None,
         };
 
-        let _id = world.spawn((Genome::founder(2), ph_none, Energy(1_000_000))).id();
+        let _id = world.spawn((Position(Vec2Fixed(0, 0)), Genome::founder(2), ph_none, Energy(1_000_000))).id();
 
         let mut schedule = Schedule::default();
         schedule.add_systems(stage_metabolism);

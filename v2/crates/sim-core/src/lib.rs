@@ -49,7 +49,7 @@ pub use grn_lut::{
     PREACT_MAX as GRN_PREACT_MAX, PREACT_MIN as GRN_PREACT_MIN,
 };
 pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
-pub use params::{EconParams, FieldId, LayerSpec, LightSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick};
+pub use params::{AmbientToleranceSpec, EconParams, FieldId, LayerSpec, LightSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
 pub use stages::expressed_capacity;
 pub use pool::{ScatterParams, SimPool};
@@ -413,8 +413,10 @@ impl Sim {
         // template — the ONLY place `econ.grn`/`econ.morphogen` are consulted; `decode` reads
         // `self.grn_spec`/`self.morphogen_spec` from here on (never `econ.grn`/`econ.morphogen`
         // directly). `GrnSpec` is `Arc`-wrapped for CoW; `MorphogenSpec` is `Copy`, no `Arc` needed.
+        // P3-1: initialize ambient-tolerance genes from gate (founder=0 inert until gate is Some).
         let founder = Genome::founder(config.n_layers)
-            .with_specs(econ.grn.clone().map(Arc::new), econ.morphogen);
+            .with_specs(econ.grn.clone().map(Arc::new), econ.morphogen)
+            .with_ambient_tolerance(econ.ambient_tolerance);
         let has_mineral = econ.mineral_layer.is_some();
         for i in 0..config.n_founders {
             // Deterministic scatter across the domain (co-prime strides → spread, no float).
@@ -996,6 +998,7 @@ mod e1_gate_tests {
         fn height(&self, _x: i64, _z: i64) -> i64 { 0 }
         fn biome(&self, _p: Vec2Fixed) -> u8 { 0 }
         fn resource(&self, _p: Vec2Fixed) -> i64 { 100 }
+        fn temp_at(&self, _p: Vec2Fixed) -> i32 { 1500 } // P3-1: stub returns mesophile (15°C)
     }
 
     // ── Minimal stub Brain — outputs zeros (entities stay put). ─────────────────────────────
