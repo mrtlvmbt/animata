@@ -351,6 +351,14 @@ pub struct EconParams {
     /// `predation`, `morphogen`, `mineral_layer` above. SL-1 settling-mechanic ONLY; diffusion
     /// cost (criterion c) = SL-2; verdict (a-d gates) = SL-3.
     pub settling: Option<SettlingSpec>,
+
+    // ── DL-M: division-of-labor mechanic (germ/soma specialization) ─────────────────────────
+    /// Division-of-labor economy (DL-M). `true` enables germ/soma specialization:
+    /// predation refuge scales with soma_mass (not total body), reproduction rate scales with
+    /// germ investment (all-soma is sterile). `false` (default, all 6 existing production configs)
+    /// → mechanics inert, byte-identical goldens (the isolation gate; un-re-pinned existing
+    /// goldens are the test). Option-gated exactly like `enable_oxygen`/`enable_photic` above.
+    pub division_of_labor: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -613,6 +621,8 @@ impl Default for EconParams {
             ambient_tolerance: None,
             // P4/SL-1: settling-selection OFF by default — None for all 6 existing configs.
             settling: None,
+            // DL-M: division-of-labor OFF by default — false for all 6 existing configs (byte-identical).
+            division_of_labor: false,
         }
     }
 }
