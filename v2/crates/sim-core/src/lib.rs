@@ -829,6 +829,31 @@ impl Sim {
         }
     }
 
+    /// Raw cell redox data for diagnostic probes (live-field distribution).
+    /// Returns Vec of (o2_live, no3_live) for all non-solid livable cells.
+    /// Used by P5-1b diagnostic dump to compute percentile statistics.
+    pub fn redox_cell_probe(&self) -> Vec<(i64, i64)> {
+        let world_view = self.world.resource::<WorldRes>();
+        let field = self.world.resource::<FieldRes>();
+        let econ = self.world.resource::<EconParams>();
+
+        let grid_w = econ.world_dim / econ.m_field;
+
+        let mut cells: Vec<(i64, i64)> = Vec::new();
+        for cz in 0..grid_w {
+            for cx in 0..grid_w {
+                let pos = Vec2Fixed(cx * econ.m_field, cz * econ.m_field);
+                if world_view.0.is_solid(pos) {
+                    continue;
+                }
+                let o2_val = field.0.conserved_at(pos, FieldId::Oxygen.as_usize());
+                let no3_val = field.0.conserved_at(pos, FieldId::Nitrate.as_usize());
+                cells.push((o2_val, no3_val));
+            }
+        }
+        cells
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }
