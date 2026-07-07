@@ -504,6 +504,13 @@ pub fn stage_interactions(
         );
         let r = field.0.conserved_at(pos.0, layer);
         let demand = monod_demand(econ.u_max, econ.km, r);
+        let demand = if econ.dol_economy {
+            // DR-0: soma cells scale demand (income ∝ soma). Founder has soma=0 (germ-only body),
+            // so max(soma,1) ensures bootstrap survival at baseline rate; soma≥1 gains income bonus.
+            let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
+            demand * soma.max(1)
+        } else { demand };
         let cell = field.0.cell_index(pos.0);
         Contestant {
             cell_layer: cell * 4 + layer,
@@ -1255,10 +1262,16 @@ pub fn stage_birth_death(
         };
 
         let repro_bar = if econ.division_of_labor && econ.dol_germ_repro {
+            // OLD DL-M inverted mechanic — PRESERVED for the historical DL-V/DL-C harnesses
             let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
             let germ = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
                 .filter_map(|(&c, &g)| if g { Some(c as i64) } else { None }).sum::<i64>();
             if germ == 0 { i64::MAX } else { genome.repro_threshold as i64 * body / germ }
+        } else if econ.dol_economy {
+            // NEW: germ = flat fertility gate. germ=0 → sterile; germ≥1 → flat threshold (no body/germ tax).
+            let germ: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                .filter_map(|(&c, &g)| if g { Some(c as i64) } else { None }).sum();
+            if germ == 0 { i64::MAX } else { genome.repro_threshold as i64 }
         } else { genome.repro_threshold as i64 };
 
         if energy.0 >= repro_bar

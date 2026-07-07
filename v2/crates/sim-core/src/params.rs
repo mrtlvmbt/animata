@@ -364,6 +364,11 @@ pub struct EconParams {
     /// When `division_of_labor=true` and `dol_germ_repro=false`, soma-refuge is active but repro is
     /// scalar (decoupled from germ:soma ratio). `false` (default) keeps all shipped configs byte-identical.
     pub dol_germ_repro: bool,
+    /// Economy-coupled division-of-labor redesign (DR-0+). When `true`, enables the redesigned
+    /// economy-coupled mechanic: soma cells scale resource uptake (demand ∝ soma), germ provides
+    /// a flat fertility gate (germ=0 → sterile; germ≥1 → flat threshold). `false` (default, all
+    /// existing production configs) → mechanics inert, byte-identical goldens (the isolation gate).
+    pub dol_economy: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -630,6 +635,8 @@ impl Default for EconParams {
             division_of_labor: false,
             // DL-V: germ-throughput repro gate OFF by default — false for all 6 existing configs (byte-identical).
             dol_germ_repro: false,
+            // DR-0: economy-coupled division-of-labor OFF by default — false for all existing configs (byte-identical).
+            dol_economy: false,
         }
     }
 }

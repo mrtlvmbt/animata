@@ -27,6 +27,7 @@ on:
           - settling-verdict     # P4/SL-3 verdict: settling mechanic produces emergent stable size intermediate (WITH vs ablation)
           - dol-verdict          # DL-V (#343) verdict: division-of-labor robustness (4 arms: D-5 baseline / DOL-full / DOL-refuge / ablation)
           - composition-verdict   # DL-C (#345) verdict: composition of D-5 + settling + O₂ + DOL (3 arms: D-5 / kitchensink / ablation)
+          - dr0-diag            # DR-0 (#347) economy-coupled bootstrapping diagnostic (founder survival + soma growth)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -90,8 +91,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -201,6 +202,15 @@ jobs:
               cd v2
               DLC_VERDICT_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- kitchensink_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            dr0-diag)
+              # DR-0 (#347) economy-coupled bootstrapping diagnostic: does the redesigned economy-coupled
+              # mechanic (income∝soma, germ=flat fertility) bootstrap multi-soma bodies from a unicellular
+              # founder under the D-5 hazard economy? Tests founder survival (≥3/5 seeds) and soma growth
+              # (mean soma≥2 with germ-minority, multicellular_frac≥baseline).
+              cd v2
+              DR0_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- dr0_bootstrap_diag --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
