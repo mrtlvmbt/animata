@@ -564,10 +564,10 @@ fn is_viable_size(size: i32) -> bool {
 /// - `0..=64`: obligate aerobe (O₂ only; anoxia cost = 256 = death; aerobe_cost = 10 = −3.9%).
 /// - `65..=128`: facultative (O₂ primary + NO₃⁻ fallback; anoxia = fermentation cost 32 = −12.5%;
 ///   aerobe_cost = 15 = −5.9% — more expensive than obligate due to enzyme maintenance).
-/// - `129..=192`: reserved for P5+ redox diversification (NO₃⁻-primary, etc.).
+/// - `129..=192`: NO₃⁻-primary obligate (denitrifier, P5-1); anoxia cost = 32; aerobe_cost = 10.
 /// - `193..=255`: reserved for P5+ (obligate-anaerobe, etc.).
 /// - Gene=0 encodes the obligate-aerobe founder phenotype (byte-identical to P1-0 when disabled).
-fn decode_respiratory_pathways(genome: &Genome) -> Option<RespiratoryPathway> {
+pub(crate) fn decode_respiratory_pathways(genome: &Genome) -> Option<RespiratoryPathway> {
     let rtype = genome.respiratory_pathway;
 
     match rtype {
@@ -593,7 +593,16 @@ fn decode_respiratory_pathways(genome: &Genome) -> Option<RespiratoryPathway> {
                 aerobe_cost_x256: 15,                  // ×(15/256) = −5.9% (dual enzyme sets)
             })
         }
-        // Reserved for P5+ (NO₃⁻-primary, obligate-anaerobe, etc.) — returns None (inert) for now.
+        // P5-1: NO₃-primary obligate (denitrifier) — occupies the anaerobic niche (O₂=0, NO₃ available).
+        129..=192 => Some(RespiratoryPathway {
+            primary_layer: crate::FieldId::Nitrate,
+            primary_eff_x256: 180,        // ×0.7 — NO₃⁻ E° +420 mV, ATP ≈25 vs 30 for O₂ (Thauer 1977)
+            fallback_layers: vec![],      // P5 v1: obligate NO₃-respirer, NO fallback (fermentation is the anoxia floor)
+            fallback_effs_x256: vec![],
+            anoxia_cost_x256: 32,         // ×0.125 fermentation when NO₃ depleted (same floor as facultative)
+            aerobe_cost_x256: 10,         // Parity with O₂ obligate: single-strategy obligate, no dual-set penalty
+        }),
+        // Still reserved for P5+ (obligate-anaerobe SO₄/CO₂, chemolithotroph) — inert.
         _ => None,
     }
 }
@@ -1835,6 +1844,86 @@ mod tests {
              shipped spec has input_weights=[0,0] (monomorphic, zero morphogen effect); the two \
              must never collapse into the same shape"
         );
+    }
+
+    // ── P5-1: respiratory pathway decode — NO₃-primary obligate (denitrifier) ──────────────────
+    //
+    // P5-1 decodes genes 129..=192 to a NO₃-primary obligate (denitrifier) phenotype, activating
+    // the anaerobic niche. Unit tests prove the decode function directly without running the full sim.
+
+    /// P5-1 (1): NO₃-primary decode for genes 129, 130, 160, 192 (boundaries & interior).
+    /// Asserts the whole RespiratoryPathway struct with exact values.
+    #[test]
+    fn p5_1_nitrate_primary_decode_boundaries_and_interior() {
+        let test_genes = vec![129, 130, 160, 192];
+        for gene in test_genes {
+            let mut g = Genome::founder(2);
+            g.respiratory_pathway = gene;
+            let rp = decode_respiratory_pathways(&g);
+
+            assert_eq!(rp, Some(RespiratoryPathway {
+                primary_layer: crate::FieldId::Nitrate,
+                primary_eff_x256: 180,
+                fallback_layers: vec![],
+                fallback_effs_x256: vec![],
+                anoxia_cost_x256: 32,
+                aerobe_cost_x256: 10,
+            }), "gene {} must decode to NO₃-primary exact struct", gene);
+        }
+    }
+
+    /// P5-1 (2): Regression — arms 0..=128 byte-identical.
+    /// Obligate-aerobe: genes 0 and 64.
+    /// Facultative: genes 65 and 128.
+    #[test]
+    fn p5_1_regression_arms_0_to_128_unchanged() {
+        // Obligate-aerobe struct (O₂ primary, no fallback, death in anoxia).
+        let obligate_aerobe = Some(RespiratoryPathway {
+            primary_layer: crate::FieldId::Oxygen,
+            primary_eff_x256: 256,
+            fallback_layers: vec![],
+            fallback_effs_x256: vec![],
+            anoxia_cost_x256: 256,
+            aerobe_cost_x256: 10,
+        });
+
+        // Facultative struct (O₂ primary + NO₃ fallback).
+        let facultative = Some(RespiratoryPathway {
+            primary_layer: crate::FieldId::Oxygen,
+            primary_eff_x256: 256,
+            fallback_layers: vec![crate::FieldId::Nitrate],
+            fallback_effs_x256: vec![180],
+            anoxia_cost_x256: 32,
+            aerobe_cost_x256: 15,
+        });
+
+        let mut g = Genome::founder(2);
+
+        // Test obligate-aerobe boundaries.
+        g.respiratory_pathway = 0;
+        assert_eq!(decode_respiratory_pathways(&g), obligate_aerobe, "gene 0 must be obligate-aerobe");
+
+        g.respiratory_pathway = 64;
+        assert_eq!(decode_respiratory_pathways(&g), obligate_aerobe, "gene 64 must be obligate-aerobe");
+
+        // Test facultative boundaries.
+        g.respiratory_pathway = 65;
+        assert_eq!(decode_respiratory_pathways(&g), facultative, "gene 65 must be facultative");
+
+        g.respiratory_pathway = 128;
+        assert_eq!(decode_respiratory_pathways(&g), facultative, "gene 128 must be facultative");
+    }
+
+    /// P5-1 (3): Tail still reserved — genes 193 and 255 return None.
+    #[test]
+    fn p5_1_tail_reserved_193_to_255() {
+        let test_genes = vec![193, 255];
+        for gene in test_genes {
+            let mut g = Genome::founder(2);
+            g.respiratory_pathway = gene;
+            let rp = decode_respiratory_pathways(&g);
+            assert_eq!(rp, None, "gene {} must return None (reserved)", gene);
+        }
     }
 
     // ── M7-a: multicellular graph-body COLD representation (golden-NEUTRAL) ────────────────────
