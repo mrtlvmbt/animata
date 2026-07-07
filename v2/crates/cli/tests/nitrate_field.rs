@@ -55,8 +55,10 @@ fn p5_0_nitrate_biome_gradient_unit() {
 }
 
 /// Criterion (1b): NO₃ is MEASURABLY INVERSE to O₂ (high where O₂ is low). Construct a
-/// ProcgenWorld directly and iterate over cells, partitioning by O₂ cap. Assert that
-/// mean(NO₃ | O₂-low cells) > mean(NO₃ | O₂-high cells) by a clear margin.
+/// ProcgenWorld directly and iterate over LIVABLE cells (excluding Rock/solid), partitioning by
+/// O₂ cap. Assert that mean(NO₃ | O₂-low cells) > mean(NO₃ | O₂-high cells) by a clear margin.
+/// Rock cells (uninhabitable) are excluded because they have both O₂=0 AND NO₃=0, confounding
+/// the aggregate — the niche gradient is only meaningful where organisms can live.
 #[test]
 fn p5_0_nitrate_inverse_to_oxygen_live_world() {
     let mut low_o2_no3 = Vec::new();
@@ -68,10 +70,14 @@ fn p5_0_nitrate_inverse_to_oxygen_live_world() {
         let mut o2_caps = Vec::new();
         let mut no3_caps = Vec::new();
 
-        // Iterate over grid cells and collect O₂/NO₃ caps
+        // Iterate over grid cells and collect O₂/NO₃ caps from LIVABLE cells only
         for x in 0..64 {
             for z in 0..64 {
                 let pos = Vec2Fixed(x, z);
+                // Skip uninhabitable (solid/Rock) cells — the redox niche is meaningful only where organisms live
+                if world.is_solid(pos) {
+                    continue;
+                }
                 let o2 = world.oxygen_resource(pos);
                 let no3 = world.nitrate_resource(pos);
                 o2_caps.push(o2);
@@ -79,7 +85,7 @@ fn p5_0_nitrate_inverse_to_oxygen_live_world() {
             }
         }
 
-        // Partition by O₂ median
+        // Partition by O₂ median (over livable cells only)
         let mut o2_sorted = o2_caps.clone();
         o2_sorted.sort_unstable();
         let o2_median = o2_sorted[o2_sorted.len() / 2];
@@ -93,7 +99,7 @@ fn p5_0_nitrate_inverse_to_oxygen_live_world() {
         }
     }
 
-    // Assert inverse relationship: low-O₂ cells have MORE NO₃ than high-O₂ cells
+    // Assert inverse relationship: low-O₂ cells (among livable) have MORE NO₃ than high-O₂ cells
     let mean_low_o2_no3: i64 = low_o2_no3.iter().sum::<i64>() / low_o2_no3.len() as i64;
     let mean_high_o2_no3: i64 = high_o2_no3.iter().sum::<i64>() / high_o2_no3.len() as i64;
 
