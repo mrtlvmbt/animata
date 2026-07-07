@@ -26,6 +26,25 @@ The kit is **read-only** here — it is a shared mechanism layer, not project co
   (kit-generated-guard) blocks commits when a generated agent drifts from its overlay/base.
 <!-- claude-dev-kit:rules END -->
 
+## Decision index — `pm/reports/DECISIONS.md` (mandatory upkeep)
+
+`pm/reports/DECISIONS.md` is the PM-workspace map of every mechanic → status (LIVE / GATED-OFF /
+CUT / NULL-MARGINAL) → code anchor (flag/const) → justification doc → verdict. (It lives in `pm/reports/`
+like every other report — gitignored, so readable by review agents via file paths but not in the code
+repo's git history.) It exists so a reviewer or anyone revising an algorithm can answer "why is this here
+/ why did we NOT do X" without re-deriving. It is the durable counterpart to the PM-private memory narrative.
+
+**Upkeep is a rule, not a courtesy:**
+- **On every slice MERGE** — PM adds/updates its row (flag + report + status). A merged slice with no
+  DECISIONS row is an incomplete handoff.
+- **On every ladder / frontier CONCLUSION** (a verdict landmark lands) — PM appends the CONCLUSION: flip
+  the status to its final verdict (FAITHFUL / NULL / MARGINAL / ARTEFACT-CUT), link the landmark, and
+  record the one-line root-cause + the anti-knob decision (what we DECLINED to crank and why). This is
+  how the "why we stopped" survives past the session.
+- Keep anchors at **flag/const/report granularity** (line numbers drift; flags and report names don't).
+- Landmarks (`*-landmark.md`) remain the authoritative long-form "why"; DECISIONS.md is the index INTO
+  them. When you write a landmark, add/flip its DECISIONS row in the same pass.
+
 ## Running tests (ALL agents — mandatory)
 
 **The authoritative green gate is the cloud CI pipeline, NOT a local run.** The heavy suite (the
