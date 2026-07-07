@@ -171,9 +171,9 @@ fn p5_0_golden_neutral_contract() {
     // Real proof = `bash scripts/ci-report.sh` → `exit 0` with no `*_golden*` diffs on HEAD.
 }
 
-/// Criterion (4) IMPLICIT: Field is inert w.r.t. population. No gene decodes to a Nitrate-primary
-/// phenotype yet (that is P5-1). In `nitrate_config`, the NO₃ field is initialized from world-gen
-/// caps but no entity consumes it. This is NOT separately tested because it's a consequence of the
-/// absence of decode logic — the test would be "run a sim and verify no consumption happens", but
-/// that's a tautology until P5-2 adds consumption. Stated here for record: the layer is LIVE
-/// (properly wired) but INERT (unused by organisms), which is the intentional P5-0 design.
+// Criterion (4) IMPLICIT: Field is inert w.r.t. population. No gene decodes to a Nitrate-primary
+// phenotype yet (that is P5-1). In `nitrate_config`, the NO₃ field is initialized from world-gen
+// caps but no entity consumes it. This is NOT separately tested because it's a consequence of the
+// absence of decode logic — the test would be "run a sim and verify no consumption happens", but
+// that's a tautology until P5-2 adds consumption. Stated here for record: the layer is LIVE
+// (properly wired) but INERT (unused by organisms), which is the intentional P5-0 design.
