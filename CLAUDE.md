@@ -29,10 +29,15 @@ The kit is **read-only** here — it is a shared mechanism layer, not project co
 ## Decision index — `pm/reports/DECISIONS.md` (mandatory upkeep)
 
 `pm/reports/DECISIONS.md` is the PM-workspace map of every mechanic → status (LIVE / GATED-OFF /
-CUT / NULL-MARGINAL) → code anchor (flag/const) → justification doc → verdict. (It lives in `pm/reports/`
-like every other report — gitignored, so readable by review agents via file paths but not in the code
-repo's git history.) It exists so a reviewer or anyone revising an algorithm can answer "why is this here
-/ why did we NOT do X" without re-deriving. It is the durable counterpart to the PM-private memory narrative.
+CUT / NULL-MARGINAL) → code anchor (flag/const) → justification doc → verdict. It exists so a reviewer or
+anyone revising an algorithm can answer "why is this here / why did we NOT do X" without re-deriving. It
+is the durable counterpart to the PM-private memory narrative.
+
+**Where reports are version-controlled:** `pm/` is its OWN git repo (`git@github.com:mrtlvmbt/animata-pm.git`),
+nested inside and gitignored by the animata code repo (`.git/info/exclude` → `/pm/`). So reports ARE in
+git history — just of the SEPARATE `animata-pm` repo, never the code repo. `main` there is protected
+(same as animata): commit on a branch → PR → merge. Writing a report to `pm/reports/` is NOT enough; it
+must be committed+pushed to animata-pm or it exists only on this machine.
 
 **Upkeep is a rule, not a courtesy:**
 - **On every slice MERGE** — PM adds/updates its row (flag + report + status). A merged slice with no
@@ -41,6 +46,9 @@ repo's git history.) It exists so a reviewer or anyone revising an algorithm can
   the status to its final verdict (FAITHFUL / NULL / MARGINAL / ARTEFACT-CUT), link the landmark, and
   record the one-line root-cause + the anti-knob decision (what we DECLINED to crank and why). This is
   how the "why we stopped" survives past the session.
+- **Commit+push to animata-pm in the same pass** — the DECISIONS row edit and any new/updated report go
+  onto a branch in the `pm/` repo → PR → merge. A report written but left uncommitted in animata-pm is a
+  half-done handoff (durable only on this machine).
 - Keep anchors at **flag/const/report granularity** (line numbers drift; flags and report names don't).
 - Landmarks (`*-landmark.md`) remain the authoritative long-form "why"; DECISIONS.md is the index INTO
   them. When you write a landmark, add/flip its DECISIONS row in the same pass.
