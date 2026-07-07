@@ -1254,7 +1254,7 @@ pub fn stage_birth_death(
             true // no mineral economy → gate always open
         };
 
-        let repro_bar = if econ.division_of_labor {
+        let repro_bar = if econ.division_of_labor && econ.dol_germ_repro {
             let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
             let germ = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
                 .filter_map(|(&c, &g)| if g { Some(c as i64) } else { None }).sum::<i64>();
