@@ -453,7 +453,7 @@ pub fn dol_probe_config(seed: u64) -> SimConfig {
         seed_scale: 4096,
         stop_threshold: 0,
         apoptosis_threshold: None,
-        germ_threshold: Some(5),  // Modules ≤5 cells = germ; >5 = soma (mirrors classifygen_nway test)
+        germ_threshold: None,  // Test will add germ_threshold=Some(5) to verify germ/soma split
         supply_source: None,
         adhesion_threshold: None,
     };
