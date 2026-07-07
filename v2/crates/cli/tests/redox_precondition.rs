@@ -30,7 +30,9 @@ use cli::{build_sim, redox_precondition_config};
 
 /// Fixed seed verified at authoring to have biome-rich world (both aerated and anaerobic zones).
 /// This ensures the precondition test runs on a representative substrate, not an edge case.
-const TEST_SEED: u64 = 0x1111_1111;
+/// Verified to produce Wetland/Floodplain (high NO₃) AND Forest/Grassland (high O₂) biomes
+/// in the same world, as confirmed in P5-0's nitrate_field test suite.
+const TEST_SEED: u64 = 0x2222_2222;
 
 /// Ticks for the live-field measurement. ~500 ticks allows respiration to establish O₂ depletion
 /// in populated cells and diffusion to reach a quasi-equilibrium (not homogeneous).
