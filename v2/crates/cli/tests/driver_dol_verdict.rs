@@ -15,7 +15,6 @@ const VERDICT_SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
 
 // DOL-specific thresholds: germ:soma axis is coarse (~4-5 states), expect discrete intermediate
 // instead of D-5's smooth body-size continuum.
-const GERM_DRIFT_EPSILON: f64 = 1.0; // Allow 1 cell drift (coarse axis granularity)
 const GERM_INTERMEDIATE_MIN: i64 = 2; // Modal germ ≥ 2 (not germ=1 pinning)
 
 /// Extended result for DOL verdict: includes germ:soma metrics.
@@ -75,8 +74,8 @@ fn run_dol_arm(
     let mid_point = window_start + (window_len as u64 / 2);
 
     // Track germ:soma distribution
-    let mut germ_sum: i64 = 0;
-    let mut germ_count: i64 = 0;
+    let mut germ_frac_sum: f64 = 0.0;  // Accumulate per-body germ fraction (germ_cells / total_cells)
+    let mut germ_frac_count: i64 = 0;  // Number of bodies sampled
     let mut germ_histogram: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
 
     for t in 0..ticks {
@@ -93,8 +92,9 @@ fn run_dol_arm(
             // Process snapshot data
             for (_n_modules, germ_cells, _soma_cells, total_cells) in snapshot {
                 if total_cells > 0 {
-                    germ_sum += germ_cells;
-                    germ_count += 1;
+                    let frac = germ_cells as f64 / total_cells as f64;
+                    germ_frac_sum += frac;
+                    germ_frac_count += 1;
                     *germ_histogram.entry(germ_cells).or_insert(0) += 1;
                 }
             }
@@ -117,7 +117,7 @@ fn run_dol_arm(
 
     let mean_pop = if pop_ticks > 0 { pop_sum as f64 / pop_ticks as f64 } else { 0.0 };
     let mean_body_size = if body_size_ticks > 0 { body_size_sum / body_size_ticks as f64 } else { 0.0 };
-    let mean_germ_frac = if germ_count > 0 { germ_sum as f64 / germ_count as f64 } else { 0.0 };
+    let mean_germ_frac = if germ_frac_count > 0 { germ_frac_sum / germ_frac_count as f64 } else { 0.0 };
 
     // Find modal germ count
     let modal_germ = germ_histogram
@@ -186,8 +186,8 @@ fn driver_dol_verdict() {
         BASE_HAZARD_SWEEP
     );
     println!(
-        "GERM:SOMA thresholds: drift≤{:.1} cells, modal_germ≥{} (coarse axis granularity)",
-        GERM_DRIFT_EPSILON, GERM_INTERMEDIATE_MIN
+        "GERM:SOMA thresholds: modal_germ≥{} (coarse axis granularity, not germ=1 pinning)",
+        GERM_INTERMEDIATE_MIN
     );
 
     // Ablation is independent of base_hazard
@@ -206,6 +206,7 @@ fn driver_dol_verdict() {
             "seed", "D-5%", "DOL-full%", "DOL-refuge%", "ablation%", "size", "drift", "germ_frac", "modal_g", "result"
         );
 
+        let mut seed_d5_baseline_pass = 0usize;   // Track D-5 baseline pass rate for robustness lift comparison
         let mut seed_dol_full_pass = 0usize;
         let mut seed_dol_refuge_pass = 0usize;
         let mut regime_has_nondegenerate_germ = false;
@@ -222,6 +223,14 @@ fn driver_dol_verdict() {
             let dol_full_pct = dol_full.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
             let dol_refuge_pct = dol_refuge_only.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
             let abl_pct = abl.frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+
+            // D-5 baseline pass check (same emergence conditions as DOL-full)
+            let d5_floor_ok = !d5_baseline.collapsed && d5_baseline.frac >= EMERGE_FLOOR;
+            let d5_margin_abl_ok = !d5_baseline.collapsed && !abl.collapsed && d5_baseline.frac >= MARGIN * abl.frac;
+            let d5_baseline_pass = d5_floor_ok && d5_margin_abl_ok;
+            if d5_baseline_pass {
+                seed_d5_baseline_pass += 1;
+            }
 
             // (a) DOL-full passes D-5 faithfulness gates
             let floor_ok = !dol_full.collapsed && dol_full.frac >= EMERGE_FLOOR;
@@ -276,12 +285,14 @@ fn driver_dol_verdict() {
             }
         }
 
+        println!("  D-5 baseline seeds passing faithfulness: {seed_d5_baseline_pass}/5 (marginal ~60%)");
         println!("  DOL-full seeds passing all 3 conditions (a/b/c): {seed_dol_full_pass}/5 (need ≥{SEED_MAJORITY})");
         println!("  DOL-refuge-only seeds (condition b baseline): {seed_dol_refuge_pass}/5");
 
-        if seed_dol_full_pass >= SEED_MAJORITY {
+        // Verdict condition: DOL-full reaches SEED_MAJORITY AND exceeds D-5 baseline (robustness lift)
+        if seed_dol_full_pass >= SEED_MAJORITY && seed_dol_full_pass > seed_d5_baseline_pass {
             any_regime_emerges = true;
-            println!("  ✓ Regime supports DOL emergence (a/b/c all pass)");
+            println!("  ✓ Regime supports DOL emergence (a/b/c all pass & robustness lift over D-5)");
         } else {
             println!("  ✗ Regime does NOT support DOL emergence");
         }
