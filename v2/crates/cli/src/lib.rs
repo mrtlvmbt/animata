@@ -650,6 +650,56 @@ pub fn nitrate_config(seed: u64) -> SimConfig {
     }
 }
 
+/// P5-1b Eh-gradient precondition gate (test-only config): Combines phase2_oxygen_config
+/// (proven-faithful static-O₂ regime with morphogen + hypoxia) with the NO₃ field enabled.
+/// Layer 0: substrate, Layer 1: organics, Layer 2: O₂ (static, non-energy),
+/// Layer 3: NO₃ (static-inverse, regen_rate=0, non-energy). Verifies the world stratifies
+/// (O₂ depletes in populated cells; NO₃ inverse-caps) BEFORE the P5-4 verdict harness.
+/// NO₃ layer is inert (regen_rate=0) so diffusion conserves the total — ledger balances
+/// with no new conservation code (P5-0-proven posture, F4).
+/// Not used by any golden or corridor — purely for P5-1b acceptance test.
+pub fn redox_precondition_config(seed: u64) -> SimConfig {
+    let mspec = sim_core::MorphogenSpec {
+        g_dev: 4,
+        n_dev: 8,
+        boundary: sim_core::Boundary::Reflecting,
+        diffuse_shift: 3,
+        decay_num: 1,
+        decay_shift: 4,
+        seed_scale: 4096,
+        stop_threshold: 0,
+        apoptosis_threshold: None,
+        germ_threshold: None,
+        supply_source: None,
+        adhesion_threshold: None,
+    };
+    let gspec = sim_core::GrnSpec::new(
+        2,
+        vec![32, -32, -32, 32],
+        vec![0, 0],
+        vec![0, 0],
+        3,
+        12,
+        0,
+        0,
+        vec![144, 112],
+    );
+    SimConfig {
+        n_layers: 4,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L1_O2_SPEC, L1_NO3_SPEC],
+        econ: EconParams {
+            morphogen: Some(mspec),
+            grn: Some(gspec),
+            enable_oxygen: true,
+            evolve_body_size: true,
+            hypoxia_base_x1000: 543,
+            enable_nitrate: true,
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from

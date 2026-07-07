@@ -153,6 +153,24 @@ impl Default for SpeciationState {
     }
 }
 
+/// P5-1b Eh-gradient probe: measures whether a redox (O₂ ↔ NO₃) gradient forms in the live field.
+/// Used as a golden-NEUTRAL observer to verify the PRECONDITION that the world substrate
+/// stratifies spatially — the foundation for P5-4's a-d verdict. Reports summary statistics
+/// partitioning cells by live-O₂ value (not depth — animata's redox is biome-horizontal).
+#[derive(Clone, Debug)]
+pub struct RedoxGradientReport {
+    /// Count of non-solid livable cells sampled (Rock confound: solid cells skipped).
+    pub n_livable: usize,
+    /// Mean live [O₂] over cells BELOW the live-O₂ median (low-O₂ bucket).
+    pub mean_o2_low_bucket: i64,
+    /// Mean live [O₂] over cells >= live-O₂ median (high-O₂ bucket).
+    pub mean_o2_high_bucket: i64,
+    /// Mean live [NO₃] over the low-O₂ bucket.
+    pub mean_no3_low_o2: i64,
+    /// Mean live [NO₃] over the high-O₂ bucket.
+    pub mean_no3_high_o2: i64,
+}
+
 /// D-3a: fixed-point scale for the body-size telemetry (`mean_body_size`/`multicellular_frac`).
 /// Same scale as `RECYCLE_DEN`/`metabolism_eff` — one integer multiply-then-divide, no float.
 pub const BODY_SIZE_SCALE: i64 = 256;
@@ -721,6 +739,94 @@ impl Sim {
     pub fn body_size_probe(&mut self) -> Vec<i64> {
         let mut q = self.world.query::<&Phenotype>();
         q.iter(&self.world).map(|ph| ph.graph.body_size()).collect()
+    }
+
+    /// P5-1b Eh-gradient observer: measures whether a redox (O₂ ↔ NO₃) gradient forms in the live field.
+    /// Partitions all non-solid cells by live-O₂ value (median split), returns mean [O₂] and [NO₃]
+    /// for each bucket. Golden-NEUTRAL: `&self` read-only, reads existing resources, zero mutation.
+    /// This gate verifies the PRECONDITION — that the substrate actually stratifies — before the
+    /// P5-4 verdict harness invests in a-d selection testing.
+    /// **Partition-axis assumption (F2):** the probe partitions by live-O₂ VALUE (median split),
+    /// not by depth, because animata's redox structure is biome-horizontal (aerated forest cells
+    /// vs anaerobic wetland cells), not a water-column depth structure. This is valid because
+    /// the world is biome-stratified and NO₃ caps are inverse-initialised per biome (P5-0).
+    pub fn redox_precondition_probe(&self) -> RedoxGradientReport {
+        let world_view = self.world.resource::<WorldRes>();
+        let field = self.world.resource::<FieldRes>();
+        let econ = self.world.resource::<EconParams>();
+
+        let grid_w = econ.world_dim / econ.m_field;
+
+        // Collect all livable cells' O₂ and NO₃ values (skip solid Rock).
+        let mut cells: Vec<(i64, i64)> = Vec::new();
+        for cz in 0..grid_w {
+            for cx in 0..grid_w {
+                let pos = Vec2Fixed(cx * econ.m_field, cz * econ.m_field);
+                if world_view.0.is_solid(pos) {
+                    continue; // Rock confound: skip solid cells
+                }
+                let o2_val = field.0.conserved_at(pos, FieldId::Oxygen.as_usize());
+                let no3_val = field.0.conserved_at(pos, FieldId::Nitrate.as_usize());
+                cells.push((o2_val, no3_val));
+            }
+        }
+
+        let n_livable = cells.len();
+        if n_livable == 0 {
+            return RedoxGradientReport {
+                n_livable: 0,
+                mean_o2_low_bucket: 0,
+                mean_o2_high_bucket: 0,
+                mean_no3_low_o2: 0,
+                mean_no3_high_o2: 0,
+            };
+        }
+
+        // Compute the median O₂ value for partitioning.
+        let mut o2_values: Vec<i64> = cells.iter().map(|&(o2, _)| o2).collect();
+        o2_values.sort_unstable();
+        let median_o2 = o2_values[n_livable / 2];
+
+        // Partition cells: low-O₂ bucket = cells with O₂ < median; high-O₂ bucket = cells with O₂ >= median.
+        let mut low_o2_bucket: Vec<(i64, i64)> = Vec::new();
+        let mut high_o2_bucket: Vec<(i64, i64)> = Vec::new();
+        for &(o2, no3) in &cells {
+            if o2 < median_o2 {
+                low_o2_bucket.push((o2, no3));
+            } else {
+                high_o2_bucket.push((o2, no3));
+            }
+        }
+
+        // Compute means for each bucket.
+        let mean_o2_low = if !low_o2_bucket.is_empty() {
+            low_o2_bucket.iter().map(|&(o2, _)| o2).sum::<i64>() / low_o2_bucket.len() as i64
+        } else {
+            0
+        };
+        let mean_o2_high = if !high_o2_bucket.is_empty() {
+            high_o2_bucket.iter().map(|&(o2, _)| o2).sum::<i64>() / high_o2_bucket.len() as i64
+        } else {
+            0
+        };
+        let mean_no3_low = if !low_o2_bucket.is_empty() {
+            low_o2_bucket.iter().map(|&(_, no3)| no3).sum::<i64>() / low_o2_bucket.len() as i64
+        } else {
+            0
+        };
+        let mean_no3_high = if !high_o2_bucket.is_empty() {
+            high_o2_bucket.iter().map(|&(_, no3)| no3).sum::<i64>() / high_o2_bucket.len() as i64
+        } else {
+            0
+        };
+
+        RedoxGradientReport {
+            n_livable,
+            mean_o2_low_bucket: mean_o2_low,
+            mean_o2_high_bucket: mean_o2_high,
+            mean_no3_low_o2: mean_no3_low,
+            mean_no3_high_o2: mean_no3_high,
+        }
     }
 
     pub fn tick(&self) -> u64 {
