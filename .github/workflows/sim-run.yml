@@ -24,8 +24,9 @@ on:
           - dprime-3b   # D′-3b emergence verdict: Guild::Phototroph fraction in dprime mineral economy
           - driver-emergence  # D-3b verdict: multicellularity under predation size-refuge (refuge_k sweep)
           - hypoxia-verdict   # P1-2b verdict: O₂-diffusion hypoxia grounds settling (WITH vs ablation, size-shrink)
-          - settling-verdict  # P4/SL-3 verdict: settling mechanic produces emergent stable size intermediate (WITH vs ablation)
-          - dol-verdict       # DL-V (#343) verdict: division-of-labor robustness (4 arms: D-5 baseline / DOL-full / DOL-refuge / ablation)
+          - settling-verdict     # P4/SL-3 verdict: settling mechanic produces emergent stable size intermediate (WITH vs ablation)
+          - dol-verdict          # DL-V (#343) verdict: division-of-labor robustness (4 arms: D-5 baseline / DOL-full / DOL-refuge / ablation)
+          - composition-verdict   # DL-C (#345) verdict: composition of D-5 + settling + O₂ + DOL (3 arms: D-5 / kitchensink / ablation)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -89,8 +90,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -189,6 +190,17 @@ jobs:
               cd v2
               DOL_VERDICT_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- driver_dol_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            composition-verdict)
+              # DL-C (#345) composition verdict: does the ECOLOGY of D-5 hazard-refuge + settling +
+              # O₂-hypoxia + DOL compose to a robust multicellular transition? Three arms: D-5 baseline /
+              # kitchensink (all mechanics ON) / ablation (no predators). Verdict logic: (a) kitchensink
+              # passes emergence gates (frac≥50% AND ≥2x ablation), (b) germ:soma intermediate non-degenerate
+              # (modal_germ≥2, soma appears, not germ=1 pinning). EMPIRICAL: no pre-declared hard robustness
+              # number beyond a/b gates — NULL is an honest result (composition insufficient).
+              cd v2
+              DLC_VERDICT_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- kitchensink_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
