@@ -107,7 +107,7 @@ fn germ_fertility_flat_gate() {
     // can reproduce). If the gate were broken (e.g. all bodies sterile), population would
     // stagnate or decline due to background death (d0).
     assert!(
-        population_at_tick_500 > population_at_tick_100 || population_at_tick_500 > 1,
+        population_at_tick_500 > population_at_tick_100,
         "germ=1+ body should reproduce: pop at 100={}, pop at 500={}; dol_economy fertility gate should enable growth",
         population_at_tick_100, population_at_tick_500
     );
