@@ -446,6 +446,26 @@ pub fn dol_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// DR-0 economy-coupled division-of-labor diagnostic config (test-only, opt-in, golden-NEUTRAL).
+/// Clones `driver_config` (D-5 hazard-refuge + size-refuge + g_dev=1 heritable; no settling/O₂)
+/// and enables the economy-coupled redesign: `dol_economy=true` (income∝soma, germ=flat fertility).
+/// Live-drives GRN with `input_weights=[8,0]` and `germ_threshold=Some(5)` to enable multi-module
+/// differentiation. Does NOT set `division_of_labor` or `dol_germ_repro` (keeps both false). Tests
+/// the bootstrapping question: do bodies reach soma≥2 and germ minority under the D-5 economy with
+/// the economy-coupled mechanic?
+pub fn dr0_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    cfg.econ.dol_economy = true;
+    // Live-drive GRN with input_weights=[8,0] to enable multi-module differentiation
+    if let Some(mspec) = cfg.econ.morphogen.as_mut() {
+        mspec.germ_threshold = Some(5); // germ = modules with ≤5 cells; soma = modules >5
+    }
+    if let Some(gspec) = cfg.econ.grn.as_mut() {
+        gspec.input_weights = vec![8, 0]; // live-drive gradient (gene 0 responds, gene 1 does not)
+    }
+    cfg
+}
+
 /// DL-C composition verdict config (test-only, opt-in, golden-NEUTRAL): merges D-5 hazard-refuge +
 /// settling + O₂-hypoxia + DOL into a single world. Tests the substrate-enrichment program's
 /// thesis: complexity emerges from the ECOLOGY of many mechanisms together. Builds on
