@@ -797,7 +797,7 @@ fn dol_precondition_probe() {
         for d in 1..=10 {
             let idx = (d as usize * germ_frac_list.len() / 10).saturating_sub(1).min(germ_frac_list.len() - 1);
             let val = germ_frac_list.get(idx).unwrap_or(&0);
-            deciles.push_str(&format!("{}", val / 100));  // Convert ×1000 to ×100 for display
+            deciles.push_str(&format!("{}", val / 100));  // ×1000 to ×10 for display (0–1 fraction in 0.1 steps)
             if d < 10 {
                 deciles.push(',');
             }
