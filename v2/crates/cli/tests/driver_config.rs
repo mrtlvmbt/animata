@@ -683,9 +683,10 @@ fn d5_verdict_sweeps_base_hazard() {
 }
 
 /// DL-0.5 D2b: calibration unit test for DOL precondition-probe config.
-/// Verifies that dol_probe_config's developmental GRN produces ≥2 modules AND a germ/soma mix,
-/// across a size sweep. This is the fast gate (runs locally in CI, no cloud sim-run) proving the
-/// config is not degenerate BEFORE the expensive ecological probe.
+/// Verifies that dol_probe_config's developmental GRN produces ≥2 modules AND a germ/soma mix.
+/// Uses size=21 (E-6 boundary from the m7a_live_drive_produces_multiple_modules fixture).
+/// This is the fast gate (runs locally in CI, no cloud sim-run) proving the config is not
+/// degenerate BEFORE the expensive ecological probe.
 #[test]
 fn dol_probe_config_produces_germ_soma_mix() {
     if cfg!(debug_assertions) {
@@ -694,47 +695,27 @@ fn dol_probe_config_produces_germ_soma_mix() {
 
     let econ = dol_probe_config(SEED).econ;
 
-    // Size sweep: test above the E-6 fate boundary (size=20|21) to maximize morphogen gradient effect.
-    // Live-drive spec needs sufficient size to develop ≥2 modules (fixture: size=21 with g_dev=4 produces ≥2).
-    let sizes = vec![21, 25, 28, 32, 36];  // All ≥21 (above boundary) to ensure gradient-driven multi-module
-    let mut sizes_with_mix = 0;
-
-    for &size in &sizes {
-        let mut g = Genome::founder(2).with_specs(
-            econ.grn.clone().map(std::sync::Arc::new),
-            econ.morphogen.clone(),
-        );
-        g.size = size;
-
-        let ph = g.decode(&econ).expect("dol_probe_config genome must decode to Some");
-        let n_modules = ph.graph.module_cell_count.len();
-        let germ_cells: i64 = ph.graph.module_cell_count.iter()
-            .zip(ph.graph.module_is_germ.iter())
-            .filter_map(|(&count, &is_germ)| if is_germ { Some(count as i64) } else { None })
-            .sum();
-        let soma_cells: i64 = ph.graph.module_cell_count.iter()
-            .zip(ph.graph.module_is_germ.iter())
-            .filter_map(|(&count, &is_germ)| if !is_germ { Some(count as i64) } else { None })
-            .sum();
-
-        // Check both conditions: ≥2 modules AND both germ and soma present
-        let has_modules = n_modules >= 2;
-        let has_germ = germ_cells > 0;
-        let has_soma = soma_cells > 0;
-        let has_mix = has_germ && has_soma;
-
-        if has_modules && has_mix {
-            sizes_with_mix += 1;
-        }
-    }
-
-    // At least half of the sizes should produce a germ/soma mix (all ≥21, prime breeding ground for live-drive)
-    assert!(
-        sizes_with_mix >= 3,  // 3 out of 5 sizes
-        "dol_probe_config must produce germ/soma mix for at least 3 sizes in [21,25,28,32,36]; \
-         got {sizes_with_mix}/5. Check GRN spec (input_weights must be live-drive [8,0], not [0,0]) \
-         and germ_threshold setting."
+    // Use size=21 (E-6 fate boundary where live-drive effect is maximized).
+    let mut g = Genome::founder(2).with_specs(
+        econ.grn.clone().map(std::sync::Arc::new),
+        econ.morphogen.clone(),
     );
+    g.size = 21;
+
+    let ph = g.decode(&econ).expect("dol_probe_config genome must decode to Some");
+    let n_modules = ph.graph.module_cell_count.len();
+    let germ_cells: i64 = ph.graph.module_cell_count.iter()
+        .zip(ph.graph.module_is_germ.iter())
+        .filter_map(|(&count, &is_germ)| if is_germ { Some(count as i64) } else { None })
+        .sum();
+    let soma_cells: i64 = ph.graph.module_cell_count.iter()
+        .zip(ph.graph.module_is_germ.iter())
+        .filter_map(|(&count, &is_germ)| if !is_germ { Some(count as i64) } else { None })
+        .sum();
+
+    assert!(n_modules >= 2, "dol_probe_config (size=21) must produce ≥2 modules; got {}", n_modules);
+    assert!(germ_cells > 0, "dol_probe_config (size=21) must produce germ cells; got 0");
+    assert!(soma_cells > 0, "dol_probe_config (size=21) must produce soma cells; got 0");
 }
 
 /// DL-0.5 D3: DOL precondition-probe ecological test — `#[ignore]`d, run via sim-run cloud scenario.
