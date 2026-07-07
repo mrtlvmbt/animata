@@ -446,6 +446,52 @@ pub fn dol_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// DL-C composition verdict config (test-only, opt-in, golden-NEUTRAL): merges D-5 hazard-refuge +
+/// settling + O₂-hypoxia + DOL into a single world. Tests the substrate-enrichment program's
+/// thesis: complexity emerges from the ECOLOGY of many mechanisms together. Builds on
+/// `phase2_oxygen_config` (O₂ + hypoxia + morphogen + size-heritable) and LAYERS ON the other three
+/// mechanics coherently (D-5 refuge + settling + DOL both-flags + live-drive GRN).
+/// The specific hypothesis: three size-forces (refuge REWARDS size, settling + hypoxia PENALIZE size)
+/// may settle an equilibrium body size > germ_threshold(5) → soma appears → DOL's benefits bootstrap.
+pub fn kitchensink_config(seed: u64) -> SimConfig {
+    let mut cfg = phase2_oxygen_config(seed);  // O₂ + hypoxia + morphogen + evolve_body_size
+    // D-5 hazard-refuge (size REWARD) — copy driver_config's PredationSpec block verbatim
+    cfg.econ.predation = Some(sim_core::PredationSpec {
+        mode: sim_core::PredationMode::Hazard,
+        bite_shift: DRIVER_BITE_SHIFT,
+        combat_trait_scale: DRIVER_COMBAT_TRAIT_SCALE,
+        efficiency_num: DRIVER_EFFICIENCY_NUM,
+        size_refuge: Some(sim_core::SizeRefugeSpec {
+            shift: DRIVER_REFUGE_SHIFT,
+            refuge_k: DRIVER_REFUGE_K,
+        }),
+        base_hazard: DRIVER_BASE_HAZARD,
+    });
+    cfg.econ.c_coord = DRIVER_C_COORD;
+    // settling (size PENALTY, periodic size²-mortality) — copy settling_config's SettlingSpec block
+    cfg.econ.settling = Some(sim_core::SettlingSpec {
+        period: SETTLING_PERIOD,
+        strength: SETTLING_STRENGTH,
+        settling_k: SETTLING_K,
+        shift: SETTLING_SHIFT,
+    });
+    // founder starts UNICELLULAR, size heritable (driver/settling pattern)
+    if let Some(m) = cfg.econ.morphogen.as_mut() {
+        m.g_dev = 1;
+    }
+    // DOL — both halves ON + live-drive GRN + germ_threshold
+    cfg.econ.division_of_labor = true;
+    cfg.econ.dol_germ_repro = true;
+    if let Some(m) = cfg.econ.morphogen.as_mut() {
+        m.germ_threshold = Some(5);
+    }
+    // Live-drive GRN with input_weights=[8,0] (mirror dol_config exactly)
+    if let Some(gspec) = cfg.econ.grn.as_mut() {
+        gspec.input_weights = vec![8, 0];
+    }
+    cfg
+}
+
 /// P1-0 O₂-field infrastructure config (L=2): substrate + O₂ field.
 ///
 /// **P1-0 golden-ADDITIVE:** O₂ field is new, opt-in. `oxygen_config` is a testbed config that
