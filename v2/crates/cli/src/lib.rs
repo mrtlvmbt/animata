@@ -426,6 +426,25 @@ pub fn driver_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// DL-M division-of-labor mechanic config: clone `driver_config` + opt-in germ/soma specialization.
+/// Enables `division_of_labor=true` with live-drive GRN (`input_weights=[8,0]` for multi-module
+/// differentiation) and `germ_threshold=Some(5)` (germ=minority small modules). Body-size evolution
+/// (`evolve_body_size=true`, g_dev=1→4) remains from driver_config to provide the hetero-modular
+/// substrate. Testbed config (opt-in only); shipped configs stay byte-identical.
+pub fn dol_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    cfg.econ.division_of_labor = true;
+    // Live-drive GRN with input_weights=[8,0] (gradient input ON for gene 0, OFF for gene 1)
+    // to encourage multi-module differentiation (not uniform 1-module collapse).
+    if let Some(mspec) = cfg.econ.morphogen.as_mut() {
+        mspec.germ_threshold = Some(5); // germ = modules with ≤5 cells; soma = modules >5
+    }
+    if let Some(gspec) = cfg.econ.grn.as_mut() {
+        gspec.input_weights = vec![8, 0]; // live-drive gradient (gene 0 responds, gene 1 does not)
+    }
+    cfg
+}
+
 /// P1-0 O₂-field infrastructure config (L=2): substrate + O₂ field.
 ///
 /// **P1-0 golden-ADDITIVE:** O₂ field is new, opt-in. `oxygen_config` is a testbed config that

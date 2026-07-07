@@ -669,6 +669,25 @@ impl Sim {
         hist
     }
 
+    /// DL-M: per-entity germ/soma census (read-only telemetry, not in state hash). Returns a vector
+    /// of `(n_modules, germ_cells, soma_cells, total_cells)` per live entity, sorted by entity id.
+    /// Used for division-of-labor diagnostics and germ-non-collapse verification. An empty CellGraph
+    /// (non-Phase-2 body) legitimately gives total=0 — no assertion is applied.
+    pub fn cellgraph_snapshot(&mut self) -> Vec<(usize, i64, i64, i64)> {
+        let mut q = self.world.query::<(Entity, &Phenotype)>();
+        let mut v: Vec<(u64, usize, i64, i64, i64)> = q.iter(&self.world).map(|(e, ph)| {
+            let n_modules = ph.graph.module_cell_count.len();
+            let germ_cells = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                .filter_map(|(&c, &g)| if g { Some(c as i64) } else { None }).sum::<i64>();
+            let soma_cells = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum::<i64>();
+            let total_cells = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>();
+            (e.to_bits(), n_modules, germ_cells, soma_cells, total_cells)
+        }).collect();
+        v.sort_unstable_by_key(|x| x.0);
+        v.into_iter().map(|(_, n, g, s, t)| (n, g, s, t)).collect()
+    }
+
     /// E-5b: cumulative count of REAL, criterion-triggered stillbirths (the size-viability gate —
     /// never `#[cfg(test)]` `force_decode_none` injections). Probe/test helper — read-only, not used
     /// in the deterministic tick loop or state hash. Mirrors [`Sim::uptake_layer_histogram`]'s

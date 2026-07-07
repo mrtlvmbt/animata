@@ -792,10 +792,14 @@ pub fn stage_predation(
                 { wc.birth_death_iters += 1; }
 
                 // Read entity's energy and body size.
-                let (energy_val, body_size) = match q.get(entity) {
+                let (energy_val, body_size, refuge_mass) = match q.get(entity) {
                     Ok((_, _, energy, _, ph)) => {
                         let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
-                        (energy.0.max(0), body)
+                        let refuge_mass = if econ.division_of_labor {
+                            ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                                .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum::<i64>().max(1)
+                        } else { body };
+                        (energy.0.max(0), body, refuge_mass)
                     }
                     Err(_) => continue,
                 };
@@ -805,7 +809,7 @@ pub fn stage_predation(
                 }
 
                 // Compute refuge-attenuated drain.
-                let drain = refuge_attenuate(spec.base_hazard, body_size, refuge.shift, refuge.refuge_k);
+                let drain = refuge_attenuate(spec.base_hazard, refuge_mass, refuge.shift, refuge.refuge_k);
                 let drain = drain.min(energy_val); // clamp to available energy
                 let actual_drain = drain;
 
@@ -1131,19 +1135,19 @@ pub fn stage_birth_death(
     mut field: ResMut<FieldRes>,  // C-2: receive recycled body energy → substrate (layer 0)
     mut repro: ResMut<ReproEvents>,
     mut commands: Commands,
-    mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId)>,
+    mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId, &Phenotype)>,
     mut qmin: Query<&mut MineralQuota>,  // D′-3a: separate query (avoids borrow conflict)
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     use crate::params::{D0_MASK, RECYCLE_DEN};
     let has_mineral = econ.mineral_layer.is_some();
     repro.parents.clear();
-    let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _)| (e.to_bits(), e)).collect();
+    let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
     for (bits, e) in ents {
         #[cfg(feature = "perf")]
         { wc.birth_death_iters += 1; }
-        let (_, pos, mut energy, genome, species) = q.get_mut(e).expect("entity present");
+        let (_, pos, mut energy, genome, species, ph) = q.get_mut(e).expect("entity present");
 
         // ── C-1: background death (d0) — FIRST check, before starvation and division. ──────────
         // A d0-killed agent does not also divide this tick; the counter-RNG draw is pure per-
@@ -1250,7 +1254,14 @@ pub fn stage_birth_death(
             true // no mineral economy → gate always open
         };
 
-        if energy.0 >= genome.repro_threshold as i64
+        let repro_bar = if econ.division_of_labor {
+            let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
+            let germ = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                .filter_map(|(&c, &g)| if g { Some(c as i64) } else { None }).sum::<i64>();
+            if germ == 0 { i64::MAX } else { genome.repro_threshold as i64 * body / germ }
+        } else { genome.repro_threshold as i64 };
+
+        if energy.0 >= repro_bar
             && energy.0 >= econ.e_cell + econ.c_div
             && mineral_gate_passes
         {
