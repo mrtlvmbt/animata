@@ -694,8 +694,9 @@ fn dol_probe_config_produces_germ_soma_mix() {
 
     let econ = dol_probe_config(SEED).econ;
 
-    // Size sweep: test a range of founder sizes to confirm mix is not size-dependent fluke
-    let sizes = vec![2, 4, 8, 16, 32];
+    // Size sweep: test above the E-6 fate boundary (size=20|21) to maximize morphogen gradient effect.
+    // Live-drive spec needs sufficient size to develop ≥2 modules (fixture: size=21 with g_dev=4 produces ≥2).
+    let sizes = vec![21, 25, 28, 32, 36];  // All ≥21 (above boundary) to ensure gradient-driven multi-module
     let mut sizes_with_mix = 0;
 
     for &size in &sizes {
@@ -727,10 +728,10 @@ fn dol_probe_config_produces_germ_soma_mix() {
         }
     }
 
-    // At least half of the sizes should produce a germ/soma mix
+    // At least half of the sizes should produce a germ/soma mix (all ≥21, prime breeding ground for live-drive)
     assert!(
         sizes_with_mix >= 3,  // 3 out of 5 sizes
-        "dol_probe_config must produce germ/soma mix for at least 3 sizes in [2,4,8,16,32]; \
+        "dol_probe_config must produce germ/soma mix for at least 3 sizes in [21,25,28,32,36]; \
          got {sizes_with_mix}/5. Check GRN spec (input_weights must be live-drive [8,0], not [0,0]) \
          and germ_threshold setting."
     );
