@@ -58,7 +58,9 @@ fn dc_diag_size_ceiling() {
             // Read telemetry at horizon.
             let tel = sim.telemetry();
             let mean_cells = tel.mean_body_size as f64 / BODY_SIZE_SCALE as f64;
-            let max_cells = tel.max_body_size as f64 / BODY_SIZE_SCALE as f64;
+            // NOTE: max_body_size is a RAW cell count (sim-core/lib.rs:162), NOT ×BODY_SIZE_SCALE —
+            // unlike mean_body_size / multicellular_frac which ARE fixed-point ×SCALE. Do not divide.
+            let max_cells = tel.max_body_size as f64;
             let mc_frac_pct = tel.multicellular_frac as f64 / BODY_SIZE_SCALE as f64 * 100.0;
             let pop = tel.population;
 
