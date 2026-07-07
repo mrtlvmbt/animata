@@ -29,6 +29,7 @@ on:
           - composition-verdict   # DL-C (#345) verdict: composition of D-5 + settling + O₂ + DOL (3 arms: D-5 / kitchensink / ablation)
           - dr0-diag            # DR-0 (#347) economy-coupled bootstrapping diagnostic (founder survival + soma growth)
           - dr0-gradient        # DR-0b (#349) resource-gradient diagnostic (scarcity sweep: u_max factor × seeds)
+          - dc-diag             # DC-DIAG (#351) size-ceiling diagnostic (cap-bound vs driver-bound: base_hazard sweep, max_body_size)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -93,7 +94,7 @@ jobs:
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
       - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient'
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'dc-diag'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -220,6 +221,15 @@ jobs:
               cd v2
               DR0B_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- dr0_resource_gradient --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            dc-diag)
+              # DC-DIAG (#351) size-ceiling diagnostic: is body size cap-bound (g_dev≤4→16 cells) or
+              # driver-bound (weak size selection)? Sweeps base_hazard [10,30,100,300,1000] × seeds 1..5
+              # on driver_config (D-5 hazard-refuge, strongest size-driver) and reports mean/max_body_size.
+              # Decisive: max_body_size ≤~8 across all levels → cap not binding → precondition-NULL.
+              cd v2
+              DC_DIAG_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- dc_diag_size_ceiling --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
