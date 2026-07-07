@@ -434,6 +434,7 @@ pub fn driver_config(seed: u64) -> SimConfig {
 pub fn dol_config(seed: u64) -> SimConfig {
     let mut cfg = driver_config(seed);
     cfg.econ.division_of_labor = true;
+    cfg.econ.dol_germ_repro = true; // Enable germ-throughput reproduction scaling
     // Live-drive GRN with input_weights=[8,0] (gradient input ON for gene 0, OFF for gene 1)
     // to encourage multi-module differentiation (not uniform 1-module collapse).
     if let Some(mspec) = cfg.econ.morphogen.as_mut() {

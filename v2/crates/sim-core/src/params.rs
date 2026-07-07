@@ -359,6 +359,11 @@ pub struct EconParams {
     /// → mechanics inert, byte-identical goldens (the isolation gate; un-re-pinned existing
     /// goldens are the test). Option-gated exactly like `enable_oxygen`/`enable_photic` above.
     pub division_of_labor: bool,
+    /// Germ-throughput reproduction gate (DL-V verdict arm isolation). When `division_of_labor=true`
+    /// and `dol_germ_repro=true`, reproduction rate scales with germ investment (germ=0 → sterile).
+    /// When `division_of_labor=true` and `dol_germ_repro=false`, soma-refuge is active but repro is
+    /// scalar (decoupled from germ:soma ratio). `false` (default) keeps all shipped configs byte-identical.
+    pub dol_germ_repro: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -623,6 +628,8 @@ impl Default for EconParams {
             settling: None,
             // DL-M: division-of-labor OFF by default — false for all 6 existing configs (byte-identical).
             division_of_labor: false,
+            // DL-V: germ-throughput repro gate OFF by default — false for all 6 existing configs (byte-identical).
+            dol_germ_repro: false,
         }
     }
 }
