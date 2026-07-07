@@ -206,6 +206,33 @@ pub fn oxygen_cap_from(biome: FinalBiome) -> i64 {
     oxygen_base_cap(biome).clamp(0, CAP_MAX)
 }
 
+/// Per-`FinalBiome` base NO₃ capacity (P5-0, ШВ-1). Anaerobic/waterlogged biomes have high NO₃;
+/// aerated surface biomes have low NO₃ (denitrification, leaching). Integer fixed-point (same scale
+/// as substrate caps). NO₃ is the INVERSE of O₂ — high where O₂ is low. Non-negative and bounded
+/// to `[0, CAP_MAX]` for consistency with substrate.
+fn nitrate_base_cap(b: FinalBiome) -> i64 {
+    match b {
+        // Anaerobic/waterlogged biomes: high NO₃ capacity (accumulates in reducing zones)
+        FinalBiome::Wetland => 220,
+        FinalBiome::Floodplain => 180,
+        FinalBiome::Tundra => 120,  // Permafrost waterlogged
+        // Aerated surface biomes: low NO₃ (consumed/leached in oxic soil)
+        FinalBiome::TemperateRainforest | FinalBiome::TropicalRainforest => 40,
+        FinalBiome::TemperateForest | FinalBiome::BorealForest => 30,
+        FinalBiome::TemperateGrassland | FinalBiome::Savanna => 30,
+        FinalBiome::Fertile => 40,
+        FinalBiome::Desert | FinalBiome::Dune => 30,  // Arid, minimal NO₃
+        // Anaerobic/impenetrable: no NO₃ (uninhabitable)
+        FinalBiome::Rock => 0,
+    }
+}
+
+/// Pure integer per-cell NO₃ cap (P5-0, ШВ-1): derived from biome only (inverse of O₂). Returns
+/// NO₃ capacity clamped to `[0, CAP_MAX]`. Static field in P5-0 (no regen; inert layer).
+pub fn nitrate_cap_from(biome: FinalBiome) -> i64 {
+    nitrate_base_cap(biome).clamp(0, CAP_MAX)
+}
+
 /// The full W-5 output over a `dim × dim` grid (mirrors W-3/W-4's state shape, critic F5): the
 /// POST-erosion `height` (W-6's `ProcgenWorld` needs this for `WorldView::height`/`is_solid` —
 /// added here rather than having W-6 re-run `erode` a second time), the final post-override biome,

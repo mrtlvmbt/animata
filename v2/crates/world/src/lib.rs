@@ -7,7 +7,7 @@
 //! the golden stays per-arch (arm64) only because of the sim's UNRELATED f32 signal field.
 
 use sim_core::{Vec2Fixed, WorldView};
-use gen::caps::{classify_and_caps, CAP_MAX, FinalBiome, oxygen_cap_from};
+use gen::caps::{classify_and_caps, CAP_MAX, FinalBiome, oxygen_cap_from, nitrate_cap_from};
 
 /// W-1..W-6 world-gen pipeline stage home (see the module doc).
 pub mod gen;
@@ -29,6 +29,10 @@ pub struct ProcgenWorld {
     /// O₂ resource cap per cell (P1-0 ШВ-1) — derived from biome via `oxygen_cap_from`, rescaled
     /// into the same `resource_base`-comparable magnitude for layer-management consistency. Static field.
     oxygen_resource: Vec<i64>,
+    /// NO₃ resource cap per cell (P5-0, ШВ-1) — derived from biome via `nitrate_cap_from`, rescaled
+    /// into the same `resource_base`-comparable magnitude. INVERSE of O₂ (high where O₂ is low).
+    /// Static, inert field in P5-0 (no consumption yet, regen_rate=0).
+    nitrate_resource: Vec<i64>,
     /// Surface material per cell (W-4's `ErosionState.surface_material`), exposed for richness
     /// testing (critic F2: assert Bedrock material is actually exposed, not just slope-driven Rock).
     surface_material: Vec<u8>,
@@ -130,6 +134,7 @@ impl ProcgenWorld {
 
         let mut resource = Vec::with_capacity(n);
         let mut oxygen_resource = Vec::with_capacity(n);
+        let mut nitrate_resource = Vec::with_capacity(n);
         let mut temp_grid = Vec::with_capacity(n);
         for i in 0..n {
             // W-6b Phase A: decouple — resource is independent of solid_level (height-based passability).
@@ -141,6 +146,11 @@ impl ProcgenWorld {
             let o2_raw = oxygen_cap_from(fields.final_biome[i]);
             let o2_rescaled = rescale_cap(o2_raw, resource_base);
             oxygen_resource.push(o2_rescaled);
+
+            // P5-0: NO₃ resource cap — biome-derived (INVERSE of O₂), rescaled for consistency.
+            let no3_raw = nitrate_cap_from(fields.final_biome[i]);
+            let no3_rescaled = rescale_cap(no3_raw, resource_base);
+            nitrate_resource.push(no3_rescaled);
 
             // P3-1 (B2): temperature per cell — biome-derived, immutable post-gen (R27).
             // P3-3 (F1): use override if provided, else stock BIOME_TEMP.
@@ -179,7 +189,7 @@ impl ProcgenWorld {
             solid_frac_final * 100.0
         );
 
-        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, surface_material: fields.surface_material, temp_grid }
+        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, nitrate_resource, surface_material: fields.surface_material, temp_grid }
     }
 
     fn wrap(&self, v: i64) -> i64 {
@@ -196,6 +206,12 @@ impl ProcgenWorld {
     /// O₂ resource cap at a position (P1-0 ШВ-1). Returns rescaled O₂-cap for the biome at `pos`.
     pub fn oxygen_resource(&self, pos: Vec2Fixed) -> i64 {
         self.oxygen_resource[self.idx(pos.0, pos.1)]
+    }
+
+    /// NO₃ resource cap at a position (P5-0, ШВ-1). Returns rescaled NO₃-cap for the biome at `pos`.
+    /// INVERSE of O₂: high where O₂ is low (anaerobic/waterlogged zones).
+    pub fn nitrate_resource(&self, pos: Vec2Fixed) -> i64 {
+        self.nitrate_resource[self.idx(pos.0, pos.1)]
     }
 }
 

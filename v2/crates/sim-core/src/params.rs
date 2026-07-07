@@ -259,6 +259,15 @@ pub struct EconParams {
     /// Option-gated exactly like `light`/`mineral_layer` above.
     pub enable_oxygen: bool,
 
+    // ── P5-0: NO₃ conserved-field infrastructure (inert substrate) ────────────────────────────────
+    /// NO₃-field infrastructure (P5-0, ШВ-1). `true` enables the conserved NO₃ resource layer
+    /// (static, inert in P5-0; consumption P5-2+), biom-derived NO₃-caps (INVERSE of O₂) from world-gen.
+    /// `false` (default, all 6 existing production configs) → NO₃ layer inert, trajectories byte-identical
+    /// (the isolation gate; un-re-pinned existing goldens are the test). When `true`, `n_layers` and
+    /// `layer_specs` must include NO₃-layer entry (via `nitrate_config`). Option-gated exactly like
+    /// `enable_oxygen` above.
+    pub enable_nitrate: bool,
+
     // ── P1-2b: O₂-diffusion cost scaling (hypoxia self-shading) ───────────────────────────────────
     /// O₂-field cap value for hypoxia calculation (P1-2b). The scarcity factor normalizes
     /// ambient O₂ against this cap: `scarcity = 1000 − (field_o2 × 1000 / cap_o2)`.
@@ -536,6 +545,8 @@ impl Default for EconParams {
             predation: None,
             // P1-0: O₂-field economy OFF by default — false for all 5 existing configs + l3 (byte-identical).
             enable_oxygen: false,
+            // P5-0: NO₃-field economy OFF by default — false for all 6 existing configs (byte-identical).
+            enable_nitrate: false,
             // P1-2b: O₂-cap OFF by default (0 → hypoxia disabled when enable_oxygen=false).
             o2_cap: 0,
             ablate_hypoxia: false,

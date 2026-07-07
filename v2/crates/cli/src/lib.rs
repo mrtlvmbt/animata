@@ -80,6 +80,14 @@ const L1_O2_SPEC: LayerSpec = LayerSpec {
     regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 8, flat_cap: 0, world_cap_mult: 1,
 };
 
+// Layer 3 (P5-0 NO₃ field): nitrate / secondary redox acceptor — regen=0 (INERT in P5-0; source
+// coupling deferred P5-1b), α=1/8 (diffusion rate, same as O₂), world_cap_mult=1 (NO₃-cap derived
+// from world biome, INVERSE of O₂). P5-0: static NO₃ field. No consumption yet (P5-2+ adds respiration).
+// Non-energy layer (excluded from n_energy_layers) — same as O₂.
+const L1_NO3_SPEC: LayerSpec = LayerSpec {
+    regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 8, flat_cap: 0, world_cap_mult: 1,
+};
+
 /// Default production config (L=2): layer 0 = substrate, layer 1 = organics/excreta (empty start).
 pub fn default_config(seed: u64) -> SimConfig {
     config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
@@ -624,6 +632,24 @@ pub fn settling_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// P5-0 NO₃-field infrastructure config (L=4): substrate + organics + O₂ + NO₃ fields (test-only,
+/// acceptance harness for P5-0). Enables the NO₃ (nitrate) static inert layer derived from biome
+/// (INVERSE of O₂). Layer 0=substrate, Layer 1=organics, Layer 2=O₂ (static), Layer 3=NO₃ (inert).
+/// NO₃ has regen_rate=0 (no source yet; layer stays constant from world-gen initial caps).
+/// Not used by any golden or corridor — purely for P5-0 acceptance test.
+pub fn nitrate_config(seed: u64) -> SimConfig {
+    SimConfig {
+        n_layers: 4,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L1_O2_SPEC, L1_NO3_SPEC],
+        econ: EconParams {
+            enable_oxygen: true,
+            enable_nitrate: true,
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 /// Build a `Sim` with the `ProcgenWorld` (W-6 WIRE: the integer `gen/` pipeline — real relief,
 /// varied biomes, edaphic overrides — replaces the legacy `NoiseWorld` float-noise placeholder)
 /// + the two-class field (conserved fixed-point + signal f32). Per-cell caps for layer 0 come from
@@ -681,11 +707,13 @@ pub fn build_sim(config: SimConfig) -> Sim {
     // and any layer 1+ with world_cap_mult > 0.
     let mut world_caps = Vec::with_capacity(n);
     let mut oxygen_caps = Vec::with_capacity(n);
+    let mut nitrate_caps = Vec::with_capacity(n);
     for cz in 0..grid_w {
         for cx in 0..grid_w {
             let pos = Vec2Fixed(cx * M_FIELD, cz * M_FIELD);
             world_caps.push(world.resource(pos));
             oxygen_caps.push(world.oxygen_resource(pos));  // P1-0: pre-compute O₂ caps
+            nitrate_caps.push(world.nitrate_resource(pos));  // P5-0: pre-compute NO₃ caps
         }
     }
 
@@ -701,6 +729,9 @@ pub fn build_sim(config: SimConfig) -> Sim {
         } else if econ.enable_oxygen && l == 2 && spec.world_cap_mult > 0 {
             // P1-0: if oxygen is enabled and this is layer 2 (O₂) with world_cap_mult, use O₂-caps
             oxygen_caps.clone()
+        } else if econ.enable_nitrate && l == 3 && spec.world_cap_mult > 0 {
+            // P5-0: if nitrate is enabled and this is layer 3 (NO₃) with world_cap_mult, use NO₃-caps
+            nitrate_caps.clone()
         } else if spec.world_cap_mult > 0 {
             world_caps.iter().map(|&c| c * spec.world_cap_mult).collect()
         } else {
@@ -1885,5 +1916,23 @@ mod tests {
             assert_eq!(hash1, hash2, "DETERMINISM VIOLATED at tick {}: hash1={:x}, hash2={:x}",
                        sim1.tick(), hash1, hash2);
         }
+    }
+
+    // ─── P5-0: Nitrate (NO₃⁻) field (inert in P5-0, gate: smoke test for nitrate_config) ──────
+
+    /// P5-0: NO₃ field can be instantiated without crashing (gate: smoke test for nitrate_config).
+    /// Verify nitrate_config builds and runs for a short corridor (ticks=10) without panic.
+    /// This exercises the l==3 caps-routing branch in build_sim when enable_nitrate=true.
+    #[test]
+    fn p5_0_nitrate_config_builds_and_runs() {
+        let cfg = nitrate_config(42);
+        assert!(
+            cfg.econ.enable_nitrate,
+            "nitrate_config must have enable_nitrate=true"
+        );
+
+        // Run the sim for a few ticks without panic
+        let _hashes = run(cfg, 10);
+        // If we got here, the NO₃-layer field initialized correctly and the sim ran.
     }
 }
