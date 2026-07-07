@@ -3825,10 +3825,20 @@ mod tests {
         let ph128 = g.decode(&econ).expect("rtype=128 must decode");
         assert_eq!(ph128.respiratory_pathway, ph65.respiratory_pathway, "rtype=128 must equal rtype=65 (both facultative)");
 
-        // rtype > 128 → reserved for P5+, returns None (inert) for now
+        // rtype in [129..=192] → NO₃-primary obligate (denitrifier, P5-1)
         g.respiratory_pathway = 192;
         let ph192 = g.decode(&econ).expect("rtype=192 must decode");
-        assert!(ph192.respiratory_pathway.is_none(), "rtype=192 must decode to None (reserved for P5+)");
+        assert!(ph192.respiratory_pathway.is_some(), "rtype=192 must decode to Some (NO₃-primary)");
+        let rp192 = ph192.respiratory_pathway.as_ref().expect("rtype=192");
+        assert_eq!(rp192.primary_layer, crate::FieldId::Nitrate, "NO₃-primary must have Nitrate primary");
+        assert_eq!(rp192.fallback_layers.len(), 0, "NO₃-primary must have no fallback");
+        assert_eq!(rp192.anoxia_cost_x256, 32, "NO₃-primary anoxia_cost must be 32 (fermentation)");
+        assert_eq!(rp192.aerobe_cost_x256, 10, "NO₃-primary aerobe_cost must be 10 (parity with O₂ obligate)");
+
+        // rtype > 192 → still reserved for P5+, returns None
+        g.respiratory_pathway = 193;
+        let ph193 = g.decode(&econ).expect("rtype=193 must decode");
+        assert!(ph193.respiratory_pathway.is_none(), "rtype=193 must decode to None (reserved for P5+)");
     }
 
     /// R31 (e): hash_contribution folds respiratory_pathway when non-zero (byte-identical when 0).
