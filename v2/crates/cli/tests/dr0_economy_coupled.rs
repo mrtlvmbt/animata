@@ -10,7 +10,6 @@
 //!          germ-minority AND multicellular_frac ≥ D-5 baseline (same seed). Else STOP.
 
 use cli::{build_sim, dr0_config, driver_config};
-use sim_core::SimConfig;
 
 const VERDICT_SEEDS: [u64; 5] = [1, 2, 3, 4, 5];
 const BOOT_WINDOW_START: u64 = 0;
@@ -259,5 +258,226 @@ fn dr0_bootstrap_diag() {
         .filter(|g| !g.is_empty())
         .collect();
         println!("DR-0-VERDICT: STOP (failed: {})", failed_gates.join(", "));
+    }
+}
+
+/// Run DR-0 arm with a u_max override, matched D-5 baseline, for scarcity gradient mapping.
+fn run_dr0_gradient_with_u_max(seed: u64, u_max_factor: u64, base_u_max: i64, ticks: u64) -> Dr0Result {
+    // ── DR-0 arm with u_max override ──
+    let mut cfg = dr0_config(seed);
+    cfg.econ.u_max = (base_u_max * u_max_factor as i64) / 100;
+    let mut sim = build_sim(cfg);
+
+    let mut soma_cells_sum: f64 = 0.0;
+    let mut germ_cells_sum: f64 = 0.0;
+    let mut total_cells_sum: f64 = 0.0;
+    let mut grow_window_count: usize = 0;
+    let mut germ_histogram: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let mut dr0_frac_sum: i64 = 0;
+    let mut dr0_frac_count: usize = 0;
+
+    for t in 0..ticks {
+        sim.step();
+
+        // Q-grow: soma growth metrics over late window
+        if t >= GROW_WINDOW_START && t < GROW_WINDOW_END {
+            let snapshot = sim.cellgraph_snapshot();
+            let tel = sim.telemetry();
+
+            // Accumulate snapshot data
+            let mut window_soma: i64 = 0;
+            let mut window_germ: i64 = 0;
+            let mut window_total: i64 = 0;
+            for (_n_modules, germ_cells, soma_cells, total_cells) in snapshot {
+                window_soma += soma_cells;
+                window_germ += germ_cells;
+                window_total += total_cells;
+                *germ_histogram.entry(germ_cells).or_insert(0) += 1;
+            }
+
+            soma_cells_sum += window_soma as f64;
+            germ_cells_sum += window_germ as f64;
+            total_cells_sum += window_total as f64;
+            grow_window_count += 1;
+
+            // Multicellular fraction (DR-0)
+            if tel.population >= POP_FLOOR {
+                dr0_frac_sum += tel.multicellular_frac;
+                dr0_frac_count += 1;
+            }
+        }
+    }
+
+    let mean_soma = if grow_window_count > 0 {
+        soma_cells_sum / grow_window_count as f64
+    } else {
+        0.0
+    };
+    let mean_germ = if grow_window_count > 0 {
+        germ_cells_sum / grow_window_count as f64
+    } else {
+        0.0
+    };
+    let mean_total = if grow_window_count > 0 {
+        total_cells_sum / grow_window_count as f64
+    } else {
+        0.0
+    };
+    let modal_germ = germ_histogram
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(g, _)| *g)
+        .unwrap_or(0);
+    let dr0_multi_frac = if dr0_frac_count > 0 {
+        dr0_frac_sum as i64 / dr0_frac_count as i64
+    } else {
+        0
+    };
+
+    // ── D-5 baseline arm (at the SAME seed, SAME u_max override) ──
+    let mut d5_cfg = driver_config(seed);
+    d5_cfg.econ.u_max = (base_u_max * u_max_factor as i64) / 100;
+    let mut d5_sim = build_sim(d5_cfg);
+    let mut d5_frac_sum: i64 = 0;
+    let mut d5_frac_count: usize = 0;
+
+    for t in 0..ticks {
+        d5_sim.step();
+        if t >= GROW_WINDOW_START && t < GROW_WINDOW_END {
+            let tel = d5_sim.telemetry();
+            if tel.population >= POP_FLOOR {
+                d5_frac_sum += tel.multicellular_frac;
+                d5_frac_count += 1;
+            }
+        }
+    }
+
+    let d5_multi_frac = if d5_frac_count > 0 {
+        d5_frac_sum as i64 / d5_frac_count as i64
+    } else {
+        0
+    };
+
+    Dr0Result {
+        seed,
+        dr0_survived: true,  // Not used in gradient test
+        dr0_mean_soma_cells: mean_soma,
+        dr0_mean_germ_cells: mean_germ,
+        dr0_mean_body_size: mean_total,
+        dr0_modal_germ: modal_germ,
+        dr0_multicellular_frac: dr0_multi_frac,
+        d5_multicellular_frac: d5_multi_frac,
+    }
+}
+
+#[test]
+#[ignore]
+fn dr0_resource_gradient() {
+    let ticks: u64 = std::env::var("DR0B_TICKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(400);
+
+    // Read the base u_max from a default config
+    let base_config = dr0_config(1);
+    let base_u_max = base_config.econ.u_max;
+
+    const U_MAX_FACTORS: [u64; 5] = [25, 50, 100, 200, 400];
+
+    println!("\nDR-0b (#349) resource-gradient diagnostic");
+    println!("Question: does soma-majority emerge under increasing resource scarcity?");
+    println!("Scarcity lever: u_max multiplier (lower u_max → slower feeding → resource-constrained)");
+    println!("Base u_max: {}", base_u_max);
+    println!("ticks={ticks}");
+    println!();
+
+    // Collect all results
+    let mut all_results: Vec<(u64, Dr0Result)> = Vec::new();
+
+    for &factor in &U_MAX_FACTORS {
+        for &seed in &VERDICT_SEEDS {
+            let result = run_dr0_gradient_with_u_max(seed, factor, base_u_max, ticks);
+            all_results.push((factor, result));
+        }
+    }
+
+    // Print full table
+    println!(
+        "{:<8} {:<6} {:>12} {:>12} {:>12} {:>12} {:>10} {:>10} {:>10} {:>10}",
+        "DR-0b:", "factor", "seed", "soma_cells", "germ_cells", "soma_frac", "modal_germ", "body_size", "DR0%", "D5%"
+    );
+
+    let mut factor_aggregates: std::collections::HashMap<u64, (usize, usize, usize, usize)> = std::collections::HashMap::new();
+
+    for (factor, result) in &all_results {
+        let soma_frac = if result.dr0_mean_soma_cells + result.dr0_mean_germ_cells > 0.0 {
+            result.dr0_mean_soma_cells / (result.dr0_mean_soma_cells + result.dr0_mean_germ_cells)
+        } else {
+            0.0
+        };
+
+        let body_size_cells = result.dr0_mean_body_size / sim_core::BODY_SIZE_SCALE as f64;
+        let dr0_pct = result.dr0_multicellular_frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+        let d5_pct = result.d5_multicellular_frac as f64 / sim_core::BODY_SIZE_SCALE as f64 * 100.0;
+
+        println!(
+            "DR-0b: {:>6} {:>12} {:>12.2} {:>12.2} {:>12.4} {:>12} {:>10.2} {:>9.0}% {:>9.0}%",
+            factor,
+            result.seed,
+            result.dr0_mean_soma_cells,
+            result.dr0_mean_germ_cells,
+            soma_frac,
+            result.dr0_modal_germ,
+            body_size_cells,
+            dr0_pct,
+            d5_pct
+        );
+
+        // Aggregate per factor
+        let agg = factor_aggregates.entry(*factor).or_insert((0, 0, 0, 0));
+        if result.dr0_mean_soma_cells >= result.dr0_mean_germ_cells {
+            agg.0 += 1; // soma-majority count
+        }
+        if result.dr0_mean_soma_cells >= 2.0 && result.dr0_mean_germ_cells < result.dr0_mean_soma_cells {
+            agg.1 += 1; // soma >= 2 with germ < soma count
+        }
+        if result.dr0_multicellular_frac >= result.d5_multicellular_frac {
+            agg.2 += 1; // beat per-seed D-5 count
+        }
+        agg.3 += 1; // total seeds at this factor
+    }
+
+    println!();
+    println!("Per-u_max_factor aggregates:");
+    println!("{:<10} {:>15} {:>15} {:>15}", "factor%", "soma-majority", "soma>=2,germ<soma", "beat-D5");
+
+    let mut soma_majority_factors: Vec<u64> = Vec::new();
+
+    for &factor in &U_MAX_FACTORS {
+        if let Some((soma_maj, soma2, beat_d5, total)) = factor_aggregates.get(&factor) {
+            println!(
+                "{:<10} {:>15} {:>15} {:>15}",
+                factor,
+                format!("{}/{}", soma_maj, total),
+                format!("{}/{}", soma2, total),
+                format!("{}/{}", beat_d5, total),
+            );
+
+            if *soma_maj >= 3 {
+                soma_majority_factors.push(factor);
+            }
+        }
+    }
+
+    println!();
+    if soma_majority_factors.is_empty() {
+        println!("DR-0b-MAP: soma-majority emerges at u_max_factor∈{{}} (germ-majority is regime-independent)");
+    } else {
+        let factors_str = soma_majority_factors
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        println!("DR-0b-MAP: soma-majority emerges at u_max_factor∈{{{}}}", factors_str);
     }
 }

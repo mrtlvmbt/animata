@@ -28,6 +28,7 @@ on:
           - dol-verdict          # DL-V (#343) verdict: division-of-labor robustness (4 arms: D-5 baseline / DOL-full / DOL-refuge / ablation)
           - composition-verdict   # DL-C (#345) verdict: composition of D-5 + settling + O₂ + DOL (3 arms: D-5 / kitchensink / ablation)
           - dr0-diag            # DR-0 (#347) economy-coupled bootstrapping diagnostic (founder survival + soma growth)
+          - dr0-gradient        # DR-0b (#349) resource-gradient diagnostic (scarcity sweep: u_max factor × seeds)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -91,8 +92,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -211,6 +212,14 @@ jobs:
               cd v2
               DR0_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- dr0_bootstrap_diag --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            dr0-gradient)
+              # DR-0b (#349) resource-gradient diagnostic: does soma-majority emerge under increasing
+              # resource scarcity? Sweeps u_max factor [25,50,100,200,400]% across seeds 1..5 and compares
+              # soma:germ ratios to identify the scarcity threshold where multicellularity preference changes.
+              cd v2
+              DR0B_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- dr0_resource_gradient --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
