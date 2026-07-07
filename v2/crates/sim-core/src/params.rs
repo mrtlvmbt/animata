@@ -268,6 +268,11 @@ pub struct EconParams {
     /// `enable_oxygen` above.
     pub enable_nitrate: bool,
 
+    // ── P5-D: spatial (depth-attenuated) light economy ────────────────────────────────────────────
+    /// P5-D: when true, photosynthesis light is depth-attenuated by cell height (`light_at`);
+    /// default false → uniform light, byte-identical to P2. Isolation gate like `enable_oxygen`.
+    pub enable_photic: bool,
+
     // ── P1-2b: O₂-diffusion cost scaling (hypoxia self-shading) ───────────────────────────────────
     /// O₂-field cap value for hypoxia calculation (P1-2b). The scarcity factor normalizes
     /// ambient O₂ against this cap: `scarcity = 1000 − (field_o2 × 1000 / cap_o2)`.
@@ -497,6 +502,47 @@ pub fn light_at_tick(spec: &LightSpec, tick: u64) -> i64 {
     }
 }
 
+// ── P5-D: spatial (depth-attenuated) light ────────────────────────────────────────────────────────
+
+/// P5-D: Critical depth (in world height units) below which photosynthesis is fully attenuated.
+/// STRUCTURAL CONSTANT — calibrated ONCE at P5-D-1 so both an oxic and an anoxic band exist; do NOT tune per verdict.
+pub const PHOTIC_H: i64 = 200;
+
+/// P5-D: Q-scale denominator for photic-attenuation ramp (e.g., 256 for 8-bit fixed-point).
+/// Used in: `light_attenuated = base_light * photic_atten(height) / PHOTIC_SCALE`.
+pub const PHOTIC_SCALE: i64 = 256;
+
+/// P5-D: Depth-attenuation ramp. Maps height ∈ [0, PHOTIC_H] → [0, PHOTIC_SCALE].
+/// `0` at h=0 (deepest/dark) → `PHOTIC_SCALE` at h≥PHOTIC_H (shallow/lit).
+fn photic_atten(height: i64) -> i64 {
+    height.clamp(0, PHOTIC_H) * PHOTIC_SCALE / PHOTIC_H
+}
+
+/// P5-D: Spatial (depth-attenuated) light intensity. Per-cell function of tick + height.
+///
+/// When `enable_photic=false` (the default, gate OFF): returns `light_at_tick(ls, tick)` with ZERO
+/// attenuation arithmetic — the exact same integer expression as before the patch. This guarantees
+/// byte-identical output for every shipped config (all have `enable_photic=false`).
+///
+/// When `enable_photic=true` (gate ON, P5-D-1+): attenuates by depth via `photic_atten(height) / PHOTIC_SCALE`.
+/// Cells with height ≥ PHOTIC_H get full light; shallow cells get full light; deep cells get diminished light
+/// or zero. This creates a spatial oxic↔anoxic gradient.
+///
+/// Pure integer, deterministic (height is static per world-gen, light_at_tick is pure).
+pub fn light_at(light: Option<&LightSpec>, tick: u64, enable_photic: bool, height: i64) -> i64 {
+    match light {
+        None => 0,
+        Some(ls) => {
+            let base = light_at_tick(ls, tick);
+            if !enable_photic {
+                base  // ★ F2: early return, NO arithmetic — byte-identical to today's l_now
+            } else {
+                base * photic_atten(height) / PHOTIC_SCALE  // gate ON: attenuate by height
+            }
+        }
+    }
+}
+
 impl Default for EconParams {
     fn default() -> Self {
         EconParams {
@@ -547,6 +593,8 @@ impl Default for EconParams {
             enable_oxygen: false,
             // P5-0: NO₃-field economy OFF by default — false for all 6 existing configs (byte-identical).
             enable_nitrate: false,
+            // P5-D: spatial light economy OFF by default — false for all 6 existing configs (byte-identical).
+            enable_photic: false,
             // P1-2b: O₂-cap OFF by default (0 → hypoxia disabled when enable_oxygen=false).
             o2_cap: 0,
             ablate_hypoxia: false,
@@ -629,5 +677,155 @@ mod tests {
         let p_more_extreme = tolerance_penalty(10000, 1500, 500);
         assert_eq!(p_extreme, p_more_extreme, "penalty saturates at normalized=256");
         assert_eq!(p_extreme, 0, "penalty at extreme deviation is 0 (total stress)");
+    }
+
+    #[test]
+    fn test_light_at_gate_off_byte_identity() {
+        // F2: Gate OFF (enable_photic=false) returns light_at_tick with ZERO attenuation arithmetic.
+        // Proof: output is independent of height.
+        let spec = LightSpec {
+            l_max: 100,
+            period_ticks: 100,
+            day_ticks: 50,
+            km_photo: 30,
+        };
+
+        // Day tick (within day_ticks).
+        let tick_day = 25;
+        let l_base_day = light_at_tick(&spec, tick_day);
+        assert_eq!(l_base_day, 100, "day tick should return l_max");
+
+        // Gate OFF: all heights should return the same value as light_at_tick.
+        for height in [0, 50, 100, PHOTIC_H, 1000].iter() {
+            let l_gated_off = light_at(Some(&spec), tick_day, false, *height);
+            assert_eq!(
+                l_gated_off, l_base_day,
+                "gate OFF at height {} should match light_at_tick",
+                height
+            );
+        }
+
+        // Night tick (outside day_ticks).
+        let tick_night = 75;
+        let l_base_night = light_at_tick(&spec, tick_night);
+        assert_eq!(l_base_night, 0, "night tick should return 0");
+
+        // Gate OFF at night: all heights should return 0.
+        for height in [0, 50, 100, PHOTIC_H, 1000].iter() {
+            let l_gated_off = light_at(Some(&spec), tick_night, false, *height);
+            assert_eq!(
+                l_gated_off, 0,
+                "gate OFF at night (height {}) should return 0",
+                height
+            );
+        }
+    }
+
+    #[test]
+    fn test_light_at_gate_off_none_returns_zero() {
+        // When light=None, light_at always returns 0 (no spec to attenuate).
+        for height in [0, 100, 1000].iter() {
+            let l = light_at(None, 12345, false, *height);
+            assert_eq!(l, 0, "light=None at height {} should return 0", height);
+
+            let l = light_at(None, 12345, true, *height);
+            assert_eq!(l, 0, "light=None at height {} (gate ON) should return 0", height);
+        }
+    }
+
+    #[test]
+    fn test_light_at_gate_on_depth_ramp() {
+        // F2: Gate ON (enable_photic=true) applies attenuation.
+        let spec = LightSpec {
+            l_max: 100,
+            period_ticks: 100,
+            day_ticks: 50,
+            km_photo: 30,
+        };
+
+        // Day tick: attenuation applies.
+        let tick_day = 25;
+        let l_base_day = light_at_tick(&spec, tick_day);
+        assert_eq!(l_base_day, 100, "day tick should return l_max");
+
+        // Deepest cell (height=0): fully attenuated → 0.
+        let l_deep = light_at(Some(&spec), tick_day, true, 0);
+        assert_eq!(l_deep, 0, "height=0 should return 0 (fully attenuated)");
+
+        // At PHOTIC_H: full light (no attenuation).
+        let l_photic = light_at(Some(&spec), tick_day, true, PHOTIC_H);
+        assert_eq!(
+            l_photic, l_base_day,
+            "height=PHOTIC_H should return full light (no attenuation)"
+        );
+
+        // Above PHOTIC_H: clamps to full light (no overshoot).
+        let l_above = light_at(Some(&spec), tick_day, true, PHOTIC_H + 100);
+        assert_eq!(
+            l_above, l_base_day,
+            "height > PHOTIC_H should clamp to full light"
+        );
+
+        // Intermediate heights: monotonically increasing (0 < h < PHOTIC_H).
+        let l_quarter = light_at(Some(&spec), tick_day, true, PHOTIC_H / 4);
+        let l_half = light_at(Some(&spec), tick_day, true, PHOTIC_H / 2);
+        let l_three_quarter = light_at(Some(&spec), tick_day, true, 3 * PHOTIC_H / 4);
+
+        assert!(l_quarter > 0, "light at 1/4 depth should be > 0");
+        assert!(l_quarter < l_half, "light strictly increases with height");
+        assert!(l_half < l_three_quarter, "light strictly increases with height");
+        assert!(l_three_quarter < l_photic, "light strictly increases with height");
+    }
+
+    #[test]
+    fn test_light_at_gate_on_night_zero() {
+        // At night, even with gate ON, light is 0 (nothing to attenuate).
+        let spec = LightSpec {
+            l_max: 100,
+            period_ticks: 100,
+            day_ticks: 50,
+            km_photo: 30,
+        };
+
+        let tick_night = 75;
+        let l_base = light_at_tick(&spec, tick_night);
+        assert_eq!(l_base, 0, "night tick should return 0");
+
+        // Gate ON: should still return 0 (0 * anything = 0).
+        for height in [0, PHOTIC_H / 2, PHOTIC_H, 1000].iter() {
+            let l = light_at(Some(&spec), tick_night, true, *height);
+            assert_eq!(
+                l, 0,
+                "gate ON at night (height {}) should return 0",
+                height
+            );
+        }
+    }
+
+    #[test]
+    fn test_light_at_determinism_integer() {
+        // Pure integer, no float/rand — same inputs yield same output.
+        let spec = LightSpec {
+            l_max: 256,
+            period_ticks: 200,
+            day_ticks: 100,
+            km_photo: 40,
+        };
+
+        let tick = 50;
+        let height = 120;
+
+        // Call twice, expect identical results.
+        let l1 = light_at(Some(&spec), tick, true, height);
+        let l2 = light_at(Some(&spec), tick, true, height);
+        assert_eq!(l1, l2, "deterministic: same inputs → same output");
+
+        // Calling with different gates/heights produces different results (as expected).
+        let l_off = light_at(Some(&spec), tick, false, height);
+        let l_on = light_at(Some(&spec), tick, true, height);
+        assert_eq!(l_off, 256, "gate OFF should return full light at day");
+        // At height=120, atten = 120 * 256 / 200 = 153.6 → 153 (truncated).
+        // light_at = 256 * 153 / 256 = 153.
+        assert_eq!(l_on, 153, "gate ON at height 120 should return attenuated value");
     }
 }

@@ -197,6 +197,7 @@ pub fn stage_move(
 pub fn stage_metabolism(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
+    world: Res<WorldRes>,
     mut ledger: ResMut<EnergyLedger>,
     mut tel: ResMut<Telemetry>,
     mut q: Query<(&Position, &Genome, &Phenotype, &mut Energy)>,
@@ -215,7 +216,7 @@ pub fn stage_metabolism(
     // exact multiples of metab_period → every n-tick lump window is wholly within one phase →
     // l_now sampled once at the metab tick is representative of the entire lump. The (eff·n)/den
     // lump is N-invariant only under this alignment; Sim::new rejects configs that violate it.
-    let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
+    // P5-D: l_now is now per-entity (depth-attenuated), computed in the loop.
     let mut photo_cost_this_event: i64 = 0;
     for (pos, g, ph, mut e) in &mut q {
         // M7-e-a: coordination cost on total live body cell count (Σ module_cell_count). 0 for
@@ -239,6 +240,9 @@ pub fn stage_metabolism(
         // expressed_capacity returns 0 at night for regulated cells → cost skipped (the D′-2b lever).
         // Charge per event = (NUM · eff · n) / DEN (delayed division avoids truncation at low eff).
         // Threshold: at NUM=1, DEN=8, n=2 → eff ≥ 4 for non-zero charge (≈ 16.7% of day income).
+        // P5-D: compute L(t) per-entity using per-cell height; when enable_photic=false this is
+        // identical to the old uniform l_now (byte-identity guarantee).
+        let l_now = crate::params::light_at(econ.light.as_ref(), clock.tick, econ.enable_photic, world.0.height(pos.0.0, pos.0.1));
         let eff = expressed_capacity(g, l_now);
         let photo_cost = if eff > 0 {
             (econ.photo_cost_num * eff as i64 * n as i64) / econ.photo_cost_den
@@ -472,8 +476,8 @@ pub fn stage_interactions(
     mut q: Query<(Entity, &Position, &Genome, &Phenotype, &mut Energy)>,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
-    // D′-1: compute L(t) once for this tick (pure function, non-rival — same value for every cell).
-    let l_now: i64 = econ.light.map(|ls| crate::params::light_at_tick(&ls, clock.tick)).unwrap_or(0);
+    // D′-1: km_photo is the photo Monod half-saturation (non-rival, computed once).
+    // P5-D: light itself is now per-cell (depth-attenuated), computed in the apply loop.
     let km_photo: Option<i64> = econ.light.map(|ls| ls.km_photo);
 
     // 1. Gather: one read per entity (Monod demand). No `conserved_take` yet.
@@ -641,6 +645,9 @@ pub fn stage_interactions(
         // D′-1/D′-2b: additive photo energy on the EXPRESSED capacity.
         // Night-downregulated cells have expressed_capacity=0 → photo_demand returns 0 (also because
         // L=0 at night, so the saving is in COST not income — see expressed_capacity doc).
+        // P5-D: compute L(t) per-entity using per-cell height; when enable_photic=false this is
+        // identical to the old uniform l_now (byte-identity guarantee).
+        let l_now = crate::params::light_at(econ.light.as_ref(), clock.tick, econ.enable_photic, world.0.height(c.pos.0, c.pos.1));
         let photo = if let Some(km) = km_photo {
             let p = photo_demand(expressed_capacity(g, l_now), km, l_now);
             energy.0 += p;
