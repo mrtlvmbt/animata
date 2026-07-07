@@ -10,7 +10,7 @@
 //! to any `*_golden` / `state_checksum` pin. If any golden moves, the isolation gate leaked.
 
 use world::{gen::caps::{FinalBiome, oxygen_cap_from, nitrate_cap_from}, ProcgenWorld};
-use sim_core::Vec2Fixed;
+use sim_core::{Vec2Fixed, WorldView};
 
 const HMAX: i64 = 200;
 const RESOURCE_BASE: i64 = 120;

@@ -1917,4 +1917,22 @@ mod tests {
                        sim1.tick(), hash1, hash2);
         }
     }
+
+    // ─── P5-0: Nitrate (NO₃⁻) field (inert in P5-0, gate: smoke test for nitrate_config) ──────
+
+    /// P5-0: NO₃ field can be instantiated without crashing (gate: smoke test for nitrate_config).
+    /// Verify nitrate_config builds and runs for a short corridor (ticks=10) without panic.
+    /// This exercises the l==3 caps-routing branch in build_sim when enable_nitrate=true.
+    #[test]
+    fn p5_0_nitrate_config_builds_and_runs() {
+        let cfg = nitrate_config(42);
+        assert!(
+            cfg.econ.enable_nitrate,
+            "nitrate_config must have enable_nitrate=true"
+        );
+
+        // Run the sim for a few ticks without panic
+        let _hashes = run(cfg, 10);
+        // If we got here, the NO₃-layer field initialized correctly and the sim ran.
+    }
 }
