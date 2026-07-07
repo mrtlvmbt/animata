@@ -426,6 +426,57 @@ pub fn driver_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// DL-0.5: DOL precondition-probe config — diagnostic only, answers F1 (is a germ:soma axis
+/// separable from body_size heritable and measurable?).
+///
+/// Shipped Phase-2 GRN is zero-drive (input_weights=[0,0]) → every grid cell classifies
+/// identically → exactly ONE module. This probe uses a LIVE-DRIVE, MULTI-MODULE spec (input_weights=[8,0],
+/// based on m7a_live_drive_gspec fixture `:1949` in genome.rs) so bodies CAN develop ≥2 modules
+/// and split into germ/soma mix (when germ_threshold=Some(t) is set). Reuses driver_config as the base
+/// (predation + refuge + c_coord + evolve_body_size) but swaps the developmental GRN.
+///
+/// Golden-NEUTRAL: dol_probe_config is opt-in and read-only (no changes to state hash, never folded
+/// into production runs); all 6 shipped configs stay byte-identical (an opt-in #[ignore] test).
+pub fn dol_probe_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+
+    // Override the developmental program: live-drive multi-module spec.
+    // g_dev ≥ 2 allows a grid to develop multiple modules.
+    // input_weights=[8,0] (not [0,0]) biases the gradient to flip cell fate across the grid.
+    let mspec = sim_core::MorphogenSpec {
+        g_dev: 4,  // Match phase2 grid size for familiar behavior (minimum is 2)
+        n_dev: 8,
+        boundary: sim_core::Boundary::Reflecting,
+        diffuse_shift: 3,
+        decay_num: 1,
+        decay_shift: 4,
+        seed_scale: 4096,
+        stop_threshold: 0,
+        apoptosis_threshold: None,
+        germ_threshold: Some(5),  // Modules ≤5 cells = germ; >5 = soma (mirrors classifygen_nway test)
+        supply_source: None,
+        adhesion_threshold: None,
+    };
+
+    // Live-drive GRN: input_weights=[8,0] (not [0,0]) so morphogen gradient affects classification.
+    // Replicates m7a_live_drive_gspec from genome.rs `:1949`.
+    let gspec = sim_core::GrnSpec::new(
+        2,
+        vec![64, -64, -64, 64],
+        vec![8, 0],  // [8, 0] = live drive (not [0, 0] = dead drive)
+        vec![0, 0],
+        3,
+        12,
+        0,
+        0,
+        vec![0, sim_core::GRN_EXPR_MAX],
+    );
+
+    cfg.econ.morphogen = Some(mspec);
+    cfg.econ.grn = Some(gspec);
+    cfg
+}
+
 /// P1-0 O₂-field infrastructure config (L=2): substrate + O₂ field.
 ///
 /// **P1-0 golden-ADDITIVE:** O₂ field is new, opt-in. `oxygen_config` is a testbed config that

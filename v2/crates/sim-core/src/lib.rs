@@ -723,6 +723,29 @@ impl Sim {
         q.iter(&self.world).map(|ph| ph.graph.body_size()).collect()
     }
 
+    /// DL-0: per-entity germ/soma split from `CellGraph` — read-only DOL diagnostic.
+    /// Returns `(n_modules, germ_cells, soma_cells, total_cells)` per live entity.
+    /// Golden-NEUTRAL: read-only query, no state mutation, not used in the deterministic tick loop
+    /// or state hash (mirrors `uptake_layer_histogram` / `body_size_aggregate` pattern).
+    pub fn cellgraph_snapshot(&mut self) -> Vec<(usize, i64, i64, i64)> {
+        let mut q = self.world.query::<&Phenotype>();
+        q.iter(&self.world)
+            .map(|ph| {
+                let n_modules = ph.graph.module_cell_count.len();
+                let germ_cells: i64 = ph.graph.module_cell_count.iter()
+                    .zip(ph.graph.module_is_germ.iter())
+                    .filter_map(|(&count, &is_germ)| if is_germ { Some(count as i64) } else { None })
+                    .sum();
+                let soma_cells: i64 = ph.graph.module_cell_count.iter()
+                    .zip(ph.graph.module_is_germ.iter())
+                    .filter_map(|(&count, &is_germ)| if !is_germ { Some(count as i64) } else { None })
+                    .sum();
+                let total_cells = germ_cells + soma_cells;
+                (n_modules, germ_cells, soma_cells, total_cells)
+            })
+            .collect()
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }
@@ -1621,5 +1644,35 @@ mod e1_gate_tests {
         assert_eq!(sim.tick(), tick_before, "observe_render must not mutate tick");
         assert_eq!(snapshot.tick, tick_before, "snapshot.tick must match sim.tick()");
         assert_eq!(snapshot.population, pop_before as i64, "snapshot.population must match sim.population()");
+    }
+
+    #[test]
+    fn dol_cellgraph_snapshot_returns_one_row_per_entity() {
+        let mut sim = make_quick_repro_sim(0xDEAD_BEEF_u64, 2); // 2 founders
+        sim.step();
+
+        let snapshot = sim.cellgraph_snapshot();
+        let pop = sim.population() as usize;
+
+        // Snapshot should have one row per entity
+        assert_eq!(
+            snapshot.len(), pop,
+            "cellgraph_snapshot must return one row per live entity; got {} but population = {}",
+            snapshot.len(), pop
+        );
+
+        // Each row should have valid structure (n_modules, germ_cells, soma_cells, total_cells)
+        for (idx, &(n_modules, germ_cells, soma_cells, total_cells)) in snapshot.iter().enumerate() {
+            assert_eq!(
+                germ_cells + soma_cells, total_cells,
+                "row {}: germ_cells + soma_cells must equal total_cells; got {} + {} != {}",
+                idx, germ_cells, soma_cells, total_cells
+            );
+            assert!(
+                total_cells >= 1,
+                "row {}: total_cells must be >= 1 (body_size floor); got {}",
+                idx, total_cells
+            );
+        }
     }
 }

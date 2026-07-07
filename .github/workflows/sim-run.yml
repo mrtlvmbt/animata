@@ -25,6 +25,7 @@ on:
           - driver-emergence  # D-3b verdict: multicellularity under predation size-refuge (refuge_k sweep)
           - hypoxia-verdict   # P1-2b verdict: O₂-diffusion hypoxia grounds settling (WITH vs ablation, size-shrink)
           - settling-verdict  # P4/SL-3 verdict: settling mechanic produces emergent stable size intermediate (WITH vs ablation)
+          - dol-probe         # DL-0.5 verdict: precondition probe — germ/soma axis separable from body_size?
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -74,9 +75,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # Build the V1 headless binary (all scenarios except v2-perf and dprime-2c/dprime-3b/driver-emergence).
+      # Build the V1 headless binary (all scenarios except v2-perf and dprime-2c/dprime-3b/driver-emergence/hypoxia-verdict/settling-verdict/dol-probe).
       - name: Build headless (V1)
-        if: inputs.scenario != 'v2-perf' && inputs.scenario != 'dprime-2c' && inputs.scenario != 'dprime-3b' && inputs.scenario != 'driver-emergence'
+        if: inputs.scenario != 'v2-perf' && inputs.scenario != 'dprime-2c' && inputs.scenario != 'dprime-3b' && inputs.scenario != 'driver-emergence' && inputs.scenario != 'hypoxia-verdict' && inputs.scenario != 'settling-verdict' && inputs.scenario != 'dol-probe'
         run: cargo build -p animata-sim --bin headless --release
 
       # Build the V2 binary with the perf feature (v2-perf only). v2/ is a STANDALONE workspace;
@@ -85,11 +86,11 @@ jobs:
         if: inputs.scenario == 'v2-perf'
         run: cd v2 && cargo build --bin v2-sim --release --features perf
 
-      # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
+      # D′-2c/D′-3b/D-3b driver-emergence/DL-0.5: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-probe
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-probe'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -177,6 +178,14 @@ jobs:
               cd v2
               SETTLING_VERDICT_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- settling_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            dol-probe)
+              # DL-0.5 (#338) precondition-probe: does dol_probe_config produce ≥2 modules per body
+              # and a germ/soma mix (both germ_frac ∈ (0,1))? Is germ_frac separable from body_size
+              # (low correlation = axis exists)? #[ignore]d ecological probe — measures (NOT tests).
+              cd v2
+              DOL_PROBE_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- dol_precondition_probe --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release

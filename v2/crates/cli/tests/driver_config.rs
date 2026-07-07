@@ -6,8 +6,8 @@
 //! Arch-independent integer invariants — run on BOTH CI jobs (x86 + arm64). The additive golden
 //! (`v2_golden_conserved_driver`, `golden_conserved.rs`) is arm64-only (PM-pinned separately).
 
-use cli::{apply_overrides, build_sim, driver_config, run};
-use sim_core::EconParams;
+use cli::{apply_overrides, build_sim, driver_config, dol_probe_config, run};
+use sim_core::{EconParams, Genome};
 
 const SEED: u64 = 0xBE_EF_5EED;
 const TICKS: u64 = 512;
@@ -680,4 +680,153 @@ fn d5_verdict_sweeps_base_hazard() {
         distinct_count > 0,
         "base_hazard sweep must produce at least one distinct regime (not all identical)"
     );
+}
+
+/// DL-0.5 D2b: calibration unit test for DOL precondition-probe config.
+/// Verifies that dol_probe_config's developmental GRN produces ≥2 modules AND a germ/soma mix,
+/// across a size sweep. This is the fast gate (runs locally in CI, no cloud sim-run) proving the
+/// config is not degenerate BEFORE the expensive ecological probe.
+#[test]
+fn dol_probe_config_produces_germ_soma_mix() {
+    if cfg!(debug_assertions) {
+        return;
+    }
+
+    let econ = dol_probe_config(SEED).econ;
+
+    // Size sweep: test a range of founder sizes to confirm mix is not size-dependent fluke
+    let sizes = vec![2, 4, 8, 16, 32];
+    let mut sizes_with_mix = 0;
+
+    for &size in &sizes {
+        let mut g = Genome::founder(2).with_specs(
+            econ.grn.clone().map(std::sync::Arc::new),
+            econ.morphogen.clone(),
+        );
+        g.size = size;
+
+        let ph = g.decode(&econ).expect("dol_probe_config genome must decode to Some");
+        let n_modules = ph.graph.module_cell_count.len();
+        let germ_cells: i64 = ph.graph.module_cell_count.iter()
+            .zip(ph.graph.module_is_germ.iter())
+            .filter_map(|(&count, &is_germ)| if is_germ { Some(count as i64) } else { None })
+            .sum();
+        let soma_cells: i64 = ph.graph.module_cell_count.iter()
+            .zip(ph.graph.module_is_germ.iter())
+            .filter_map(|(&count, &is_germ)| if !is_germ { Some(count as i64) } else { None })
+            .sum();
+
+        // Check both conditions: ≥2 modules AND both germ and soma present
+        let has_modules = n_modules >= 2;
+        let has_germ = germ_cells > 0;
+        let has_soma = soma_cells > 0;
+        let has_mix = has_germ && has_soma;
+
+        if has_modules && has_mix {
+            sizes_with_mix += 1;
+        }
+    }
+
+    // At least half of the sizes should produce a germ/soma mix
+    assert!(
+        sizes_with_mix >= 3,  // 3 out of 5 sizes
+        "dol_probe_config must produce germ/soma mix for at least 3 sizes in [2,4,8,16,32]; \
+         got {sizes_with_mix}/5. Check GRN spec (input_weights must be live-drive [8,0], not [0,0]) \
+         and germ_threshold setting."
+    );
+}
+
+/// DL-0.5 D3: DOL precondition-probe ecological test — `#[ignore]`d, run via sim-run cloud scenario.
+/// Measures whether dol_probe_config bodies develop ≥2 modules, split into germ/soma mix, and
+/// whether germ_frac is separable from body_size (low correlation = axis exists).
+#[test]
+#[ignore]
+fn dol_precondition_probe() {
+    let ticks: u64 = std::env::var("DOL_PROBE_TICKS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(2000);
+
+    // Measure across a small seed set
+    let seeds = vec![1u64, 2, 3];
+
+    for seed in seeds {
+        let mut sim = build_sim(dol_probe_config(seed));
+        for _ in 0..ticks {
+            sim.step();
+        }
+
+        // Snapshot the live population
+        let snapshot = sim.cellgraph_snapshot();
+        let population = snapshot.len() as u64;
+
+        if population == 0 {
+            println!("DOL-PROBE-DIAG: seed={} population=0", seed);
+            continue;
+        }
+
+        // Compute per-body germ_frac and aggregate stats
+        let mut n_modules_sum: i64 = 0;
+        let mut germ_frac_list: Vec<i64> = Vec::new();  // Stored as ×1000 (fixed-point)
+        let mut germ_cells_total: i64 = 0;
+        let mut soma_cells_total: i64 = 0;
+        let mut total_cells_total: i64 = 0;
+        let mut body_sizes: Vec<i64> = Vec::new();
+
+        for &(n_modules, germ_cells, soma_cells, total_cells) in &snapshot {
+            n_modules_sum += n_modules as i64;
+            germ_cells_total += germ_cells;
+            soma_cells_total += soma_cells;
+            total_cells_total += total_cells;
+
+            if total_cells > 0 {
+                let germ_frac_x1000 = (germ_cells * 1000) / total_cells;
+                germ_frac_list.push(germ_frac_x1000);
+                body_sizes.push(total_cells);
+            }
+        }
+
+        let mean_modules = if population > 0 { n_modules_sum as f64 / population as f64 } else { 0.0 };
+        let mean_germ = if population > 0 { germ_cells_total as f64 / population as f64 } else { 0.0 };
+        let mean_soma = if population > 0 { soma_cells_total as f64 / population as f64 } else { 0.0 };
+        let mean_total = if population > 0 { total_cells_total as f64 / population as f64 } else { 0.0 };
+
+        // Compute germ_frac deciles
+        germ_frac_list.sort_unstable();
+        let mut deciles = String::new();
+        for d in 1..=10 {
+            let idx = (d as usize * germ_frac_list.len() / 10).saturating_sub(1).min(germ_frac_list.len() - 1);
+            let val = germ_frac_list.get(idx).unwrap_or(&0);
+            deciles.push_str(&format!("{}", val / 100));  // Convert ×1000 to ×100 for display
+            if d < 10 {
+                deciles.push(',');
+            }
+        }
+
+        // Compute correlation(germ_frac, total_cells) as a covariance-sign proxy
+        // Simplified: correlation = sign(covariance) + magnitude
+        let mut cov_sum: i64 = 0;
+        let mean_gf = germ_frac_list.iter().sum::<i64>() as f64 / germ_frac_list.len().max(1) as f64;
+        let mean_size = body_sizes.iter().sum::<i64>() as f64 / body_sizes.len().max(1) as f64;
+
+        if germ_frac_list.len() > 0 {
+            for i in 0..germ_frac_list.len() {
+                let gf = germ_frac_list[i] as f64;
+                let sz = body_sizes[i] as f64;
+                cov_sum += ((gf - mean_gf) * (sz - mean_size)) as i64;
+            }
+        }
+
+        let corr_germfrac_size = if germ_frac_list.len() > 0 {
+            cov_sum / (germ_frac_list.len() as i64).max(1)
+        } else {
+            0
+        };
+
+        println!(
+            "DOL-PROBE-DIAG: seed={} population={} mean_modules={:.2} germ_frac_deciles=[{}] \
+             mean_germ={:.1} mean_soma={:.1} mean_total={:.1} corr_germfrac_size={}",
+            seed, population, mean_modules, deciles, mean_germ, mean_soma, mean_total, corr_germfrac_size
+        );
+    }
 }
