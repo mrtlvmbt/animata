@@ -240,7 +240,8 @@ pub fn stage_metabolism(
             + econ.k_move_cost * g.move_speed as i64
             + econ.k_sense_cost * g.sense_range as i64
             + econ.c_coord * n_cells
-            + breadth_cost)
+            + breadth_cost
+            + burden_cost)
             * n as i64;
         // D′-2a/2b: photo-machinery expression cost on the EXPRESSED capacity.
         // expressed_capacity returns 0 at night for regulated cells → cost skipped (the D′-2b lever).
