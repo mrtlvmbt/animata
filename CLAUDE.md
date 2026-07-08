@@ -6,6 +6,14 @@ re-injected into every prompt and does not drift. All internal artifacts (this f
 agent-traffic handoff blocks) and all inter-agent communication are English. Code, identifiers, branch/commit/PR
 names, git command bodies, and machine tokens (F-ids, severities, VERDICT strings) are always English.
 
+## When you hit a wall — check `GOTCHAS.md` FIRST
+
+When something breaks or behaves unexpectedly, consult **[`GOTCHAS.md`](GOTCHAS.md)** (repo root) BEFORE
+debugging from scratch — it is a symptom→cause→fix index of rakes already stepped on (rtk summary lies,
+`cargo build` vs `cargo test --no-run`, arm64 golden re-pin, `--admin` merge auth, …). After you solve a
+NEW wall/surprise, append ONE compressed entry (`Symptom → Cause → What to do`) to its `## Gotchas`
+section — append-only, never rewrite existing entries.
+
 <!-- claude-dev-kit:rules START (managed — do not edit by hand) -->
 ## Working with claude-dev-kit (consumer contract)
 
