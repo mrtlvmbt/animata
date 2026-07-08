@@ -144,7 +144,6 @@ pub struct Genome {
     /// Non-load-enabled configs: genetic_load stays 0 forever, mutation gate prevents draw,
     /// hash gate prevents state inclusion → existing goldens byte-identical (the isolation gate).
     /// Range: [0, 10_000] (guarded clamp).
-    pub genetic_load: i32,
 
     // ── V-1: heritable + point-mutable indirect genome (the differentiation PROGRAM) ────────────
     /// The GRN regulatory spec — heritable, per-individual, point-mutated by [`Genome::mutate`].
@@ -680,8 +679,6 @@ impl Genome {
             tol_breadth: 0,
             genetic_load: 0,
             // GA-LOAD: genetic load founder = 0 (load-free at origin).
-            genetic_load: 0,
-            // Test-only E-1/E-4 injection flag — always false in production.
             #[cfg(test)]
             force_decode_none: false,
             // V-1: no heritable spec by default — attach one via `with_specs` at founder-spawn
