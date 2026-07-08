@@ -132,6 +132,9 @@ pub struct Genome {
     /// Range: [100, 2000] (±1°C to ±20°C generalist). Specialist (narrow σ) pays less penalty; generalist spreads cost.
     /// Traded against metabolic budget (P3-2 cost model, deferred).
     pub tol_breadth: i32,
+    // ── GA-LOAD: deleterious-mutation load (genetic architecture enrichment) ──────────────────
+    /// Accumulated deleterious burden from mutations (GA-LOAD). `i32` load units; founder = 0.
+    pub genetic_load: i32,
 
     // ── GA-LOAD: deleterious-mutation load (genetic architecture enrichment) ──────────────────
     /// Accumulated deleterious burden from mutations (GA-LOAD). `i32` load units; founder = 0.
@@ -675,6 +678,7 @@ impl Genome {
             // Set to 1500/500 (mesophile optimum ±5°C) via `.with_ambient_tolerance()` at spawn time.
             tol_optimum: 0,
             tol_breadth: 0,
+            genetic_load: 0,
             // GA-LOAD: genetic load founder = 0 (load-free at origin).
             genetic_load: 0,
             // Test-only E-1/E-4 injection flag — always false in production.
@@ -1330,6 +1334,10 @@ impl Genome {
         // Founder isolation: when gate=None, both stay 0 → not folded → byte-identical to non-tolerance runs.
         if self.tol_optimum != 0 {
             h = fnv_mix(h, self.tol_optimum as u64);
+        // GA-LOAD: fold genetic_load ONLY when non-zero.
+        if self.genetic_load != 0 {
+            h = fnv_mix(h, self.genetic_load as u64);
+        }
         }
         if self.tol_breadth != 0 {
             h = fnv_mix(h, self.tol_breadth as u64);
