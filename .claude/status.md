@@ -1,5 +1,10 @@
-task: #347 — DR-0 economy-coupled division-of-labor diagnostic
-phase: CI (pass 1 of 2)
-blocked_on: awaiting full CI pass (golden lock arm64 SUCCESS ✓, other jobs IN_PROGRESS)
-next: (1) verify ci-report.sh exits 0; (2) merge #348; (3) pass 2: sim-run dr0-diag ticks=8000
-updated: 2026-07-07 17:35
+task: ENVIRONMENT axis (now PRIMARY, user steer) — biotic co-evolutionary pressure as the complexity engine. + GA-LOAD-0 in code.
+phase: environment grounding — web-research DONE (hypothesis CONFIRMED), predation-architecture dive running
+result: Environment web-research = hypothesis STRONGLY confirmed. Biotic/coevolution (predation, Red Queen, Vermeij escalation) = DOMINANT complexity engine; abiotic (O₂/temp) = permissive ceiling only. Predation = THE Cambrian trigger. ★★ KILLER evidence: Tierra/Avida/Polyworld PLATEAU without ecology, RESUME complexity when parasites/predators/competitors added → ecology drives open-endedness, genome mechanics alone don't. OEE requires ecological interactions + escalating (not static) pressure.
+  ★ 3 Red Queen modes: static-fixed → ESS saturation (= our D-4 ~95% ceiling AND our abiotic world); fluctuating → no escalation; ESCALATORY reciprocal coevolution → complexity grows (= NEVER TRIED). Coevolution moves the fitness landscape itself → no saturation.
+  Sharpened D-4/D-5 diagnosis: BOTH non-coevolutionary (fixed strong→ceiling / fixed weak→marginal). We were right D-4 = artefact, WRONG remedy (went weak-fixed D-5 instead of escalating-coevolutionary). Never built a Red Queen.
+  Faithful recipe (anti-caricature): reciprocal coevolution (predator AND prey evolve) + niche opportunity (spatial heterogeneity) + constraints (cycles/coexistence NOT infinity — unbounded armor = tuned) + ecological NETWORKS not dyads.
+blocked_on: GA-LOAD-0 coder [aa9534ce] (genetic rung, parallel); predation-architecture dive [a4de07ada] — is predation CO-EVOLUTIONARY (evolving predator↔prey) or FIXED HAZARD (one-sided)? combat_trait used or vestigial? smallest path to Red Queen?
+next: dive returns → design the ENVIRONMENT frontier: escalating reciprocal predator-prey (Red Queen) — either tune existing evolving-predation OR build predator-as-evolving-organism if predation is currently a fixed hazard. Re-examine/annotate D-4 landmark under coevolution lens. Then critic → code (RUN it, per recalibrated discipline).
+context: origin/main 85e3562 (GA-LOAD-0 = 1st code, in flight). animata-pm main 557b576. GH issue #354.
+updated: 2026-07-08 05:00

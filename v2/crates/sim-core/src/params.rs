@@ -369,6 +369,27 @@ pub struct EconParams {
     /// a flat fertility gate (germ=0 → sterile; germ≥1 → flat threshold). `false` (default, all
     /// existing production configs) → mechanics inert, byte-identical goldens (the isolation gate).
     pub dol_economy: bool,
+    // ── GA-LOAD: deleterious-mutation load substrate ────────────────────────────────────
+    /// Enable the deleterious-mutation-load mechanic (GA-LOAD, genetic-architecture enrichment).
+    /// `false` (default, all 6 existing production configs) → load mechanic inert, genetic_load
+    /// stays 0 forever, mutation gate prevents draw, hash gate prevents state inclusion →
+    /// byte-identical goldens (the isolation gate). `true` only on `ga_load_config`.
+    pub enable_mutation_load: bool,
+    /// Deleterious mutation probability numerator (per mutation EVENT). `del_num/del_den`
+    /// is the fraction of mutations that are deleterious. Anchored to give f_del≈1/16 at
+    /// founder mutation rate (so U ≈ 1 for L-shaped DFE; biological range). Default 0 when
+    /// enable_mutation_load=false (inert).
+    pub mut_load_del_num: i32,
+    /// Deleterious mutation probability denominator. Default 0 when enable_mutation_load=false.
+    pub mut_load_del_den: i32,
+    /// Beneficial (compensatory) mutation probability numerator. Smaller than del_num.
+    /// Default 0 when enable_mutation_load=false (inert).
+    pub mut_load_ben_num: i32,
+    /// Beneficial mutation probability denominator. Default 0 when enable_mutation_load=false.
+    pub mut_load_ben_den: i32,
+    /// Energy cost per load unit per tick (burden_cost = genetic_load * burden_cost_k).
+    /// Anchored to ≈2–3% of ~80 eu income → s≈0.025. Default 0 when enable_mutation_load=false (inert).
+    pub burden_cost_k: i64,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -637,6 +658,15 @@ impl Default for EconParams {
             dol_germ_repro: false,
             // DR-0: economy-coupled division-of-labor OFF by default — false for all existing configs (byte-identical).
             dol_economy: false,
+            // GA-LOAD: mutation-load economy OFF by default — false for all 6 existing configs (byte-identical).
+            enable_mutation_load: false,
+            // GA-LOAD defaults (meaningful when enable_mutation_load=true, diagnostics-swept otherwise).
+            // Anchored to U ≈ 1: f_del ≈ 1/16 at founder μ. Values below assume mutation_rate=32/256=0.125, L=136.
+            mut_load_del_num: 16,    // del_den=8 → f_del = 16*256 / (8*256) = 16/8 = 2 (not 1/16; recalibrate if needed)
+            mut_load_del_den: 256,   // placeholder; swept in ga-load diagnostic
+            mut_load_ben_num: 2,     // beneficial rate ≪ deleterious (stub)
+            mut_load_ben_den: 256,   // placeholder; swept in ga-load diagnostic
+            burden_cost_k: 2,        // energy cost per load unit; anchored to ~2% of income (swept in diagnostic)
         }
     }
 }

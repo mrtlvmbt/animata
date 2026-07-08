@@ -29,6 +29,7 @@ on:
           - composition-verdict   # DL-C (#345) verdict: composition of D-5 + settling + O₂ + DOL (3 arms: D-5 / kitchensink / ablation)
           - dr0-diag            # DR-0 (#347) economy-coupled bootstrapping diagnostic (founder survival + soma growth)
           - dr0-gradient        # DR-0b (#349) resource-gradient diagnostic (scarcity sweep: u_max factor × seeds)
+          - ga-load              # GA-LOAD-0 (#354) ratchet diagnostic (f_del sweep via del_den × burden_cost_k × seeds)
           - dc-diag             # DC-DIAG (#351) size-ceiling diagnostic (cap-bound vs driver-bound: base_hazard sweep, max_body_size)
       seed:
         description: "World seed (evo-stats / perf)"
@@ -94,7 +95,7 @@ jobs:
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
       - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'dc-diag'
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -221,6 +222,15 @@ jobs:
               cd v2
               DR0B_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- dr0_resource_gradient --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            ga-load)
+              # GA-LOAD-0 (#354) ratchet diagnostic: deleterious-mutation load substrate.
+              # Clonal population sweeps f_del (via mut_load_del_den [8,16,32,64]) ×
+              # burden_cost_k [1,2,4] × seeds [1,2,3]. Emits descriptive MAP per cell
+              # (no PASS/FAIL); analysis is offline. Checks: run to horizon, load>=0, pop>=0.
+              cd v2
+              GA_LOAD_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- ga_load_ratchet --nocapture --ignored 2>&1 | tee ../$SUM
               ;;
             dc-diag)
               # DC-DIAG (#351) size-ceiling diagnostic: is body size cap-bound (g_dev≤4→16 cells) or
