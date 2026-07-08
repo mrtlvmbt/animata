@@ -32,21 +32,23 @@ fn ga_load_ratchet() {
                 // Override sweep parameters
                 config.econ.mut_load_del_den = del_den as i32;
                 config.econ.burden_cost_k = burden_cost_k;
-                
+
+                // Calculate f_del before run() consumes config
+                let f_del = (config.econ.mut_load_del_num as f64) / (config.econ.mut_load_del_den as f64);
+
                 let hashes = run(config, ticks);
-                
+
                 // Structural assertions
                 assert!(!hashes.is_empty(), "Simulation did not run to completion");
-                
+
                 // Extract final population from conserved_hashes (if available)
                 // For now, just verify the simulation completed and hashes are valid
                 for (i, &h) in hashes.iter().enumerate() {
-                    assert_ne!(h, 0, "Hash at tick {} is zero (invalid state)", i * (ticks / 100));
+                    assert_ne!(h, 0, "Hash at tick {} is zero (invalid state)", (i as u64) * (ticks / 100));
                 }
-                
+
                 // Emit descriptive MAP line (stdout for collection by sim-run harness)
-                let f_del = (config.econ.mut_load_del_num as f64) / (config.econ.mut_load_del_den as f64);
-                println!("GA-LOAD del_den={} burden_cost_k={} seed={} f_del={:.4} ticks={} hashes={}", 
+                println!("GA-LOAD del_den={} burden_cost_k={} seed={} f_del={:.4} ticks={} hashes={}",
                     del_den, burden_cost_k, seed, f_del, ticks, hashes.len());
             }
         }
