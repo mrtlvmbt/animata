@@ -1487,7 +1487,7 @@ mod tests {
         let g = Genome::founder(2);
         assert_eq!(g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0), g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
+            let m = g.mutate(s, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
@@ -1498,19 +1498,19 @@ mod tests {
         }
         // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 4, false, false, false, false, 0, 0, 0, 0);
+            let m = g.mutate(s, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0);
             assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
             assert!((-4..=4).contains(&m.reg_gain), "reg_gain must be in [-reg_gain_max, +reg_gain_max]");
         }
         // reg_gain_max=0 locks regulation OFF even when has_light=true.
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 0, false, false, false, false, 0, 0, 0, 0);
+            let m = g.mutate(s, 2, true, 0, false, false, false, false, false, false, 0, 0, 0, 0);
             assert_eq!(m.reg_gain, 0, "reg_gain must stay 0 when reg_gain_max=0 (D′-2c lock)");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1, false, 0, false, false, false, false, 0, 0, 0, 0);
+        let m1 = g1.mutate(0, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }
@@ -1529,7 +1529,7 @@ mod tests {
         }
         // Also holds for a mutated genome.
         let g = Genome::founder(2);
-        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false, false, false, 0, 0, 0, 0);
+        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0);
         assert_eq!(mutated.decode(&EconParams::default()), mutated.decode(&EconParams::default()), "decode deterministic on mutated genome");
     }
 
@@ -1552,7 +1552,7 @@ mod tests {
             "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
         // Also for mutated genome — projection stays 1:1 regardless of trait value.
         for s in 0..50u64 {
-            let m = g.mutate(s, 2, false, 0, false, false, false, false, 0, 0, 0, 0);
+            let m = g.mutate(s, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0);
             let mph = m.decode(&EconParams::default()).expect("mutated Ф0 must decode to Some");
             assert_eq!(mph.uptake_layer, m.uptake_layer,
                 "1:1 projection must hold after mutation (seed={s})");
@@ -1589,14 +1589,14 @@ mod tests {
             "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
 
         // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
-        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, 0, 0, 0, 0);
+        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0);
         assert!(mutated_child.force_decode_none,
             "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
         assert!(mutated_child.decode(&EconParams::default()).is_none(),
             "inherited flag: child decode() also returns None (lineage-level stillbirth)");
 
         // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
-        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, 0, 0, 0, 0);
+        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0);
         assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
         assert!(normal_child.decode(&EconParams::default()).is_some(), "normal child decode() must return Some");
     }
@@ -3017,7 +3017,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1111_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-c: flag=false must keep n_genes constant (iteration {i})");
             }
@@ -3034,8 +3034,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
+        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -3285,7 +3285,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1A00_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-d: flag=false must keep n_genes constant (iteration {i})");
                 assert_eq!(spec.gene_ids, vec![0, 1], "V-3-d: flag=false must never permute gene_ids (iteration {i})");
@@ -3303,8 +3303,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
+        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -3721,7 +3721,7 @@ mod tests {
         g.mutation_rate = 256;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_1111u64 + gen;
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
             assert_eq!(g.morphogen_spec.unwrap().g_dev, 1, "flag off: g_dev must never change (generation {gen})");
         }
 
@@ -3729,7 +3729,7 @@ mod tests {
         let base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(1)));
         let seed = 0xDEAD_BEEF_1234u64;
         let on = base.clone().mutate(seed, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0);
-        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0);
+        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0);
         assert_eq!(on.metabolism_eff, off.metabolism_eff);
         assert_eq!(on.move_speed, off.move_speed);
         assert_eq!(on.sense_range, off.sense_range);
@@ -3811,7 +3811,7 @@ mod tests {
 
         // With enable_oxygen=false, respiratory_pathway must stay 0 (no mutation draw).
         for seed in 0..100u64 {
-            let m = g.mutate(seed, 2, false, 4, false, false, false, false, 0, 0, 0, 0); // enable_oxygen=false
+            let m = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0); // enable_oxygen=false
             assert_eq!(m.respiratory_pathway, 0, "with enable_oxygen=false, respiratory_pathway must not mutate (seed={seed})");
         }
 
