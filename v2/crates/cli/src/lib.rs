@@ -743,6 +743,49 @@ pub fn nitrate_config(seed: u64) -> SimConfig {
 /// per-arch only because of the sim's unrelated f32 signal field). Layers 1+ use
 /// `config.layer_specs[l].flat_cap` (0 = empty start) or `world_cap_mult × world`. Handles any
 /// `n_layers ≥ 1` from `config.layer_specs`; no fixed-L branches.
+
+/// GA-LOAD diagnostic config: mutation-load substrate with L-shaped DFE.
+///
+/// **GA-LOAD-0:** Single clonal population in default 3-layer economy. Enables the
+/// deleterious-mutation-load mechanic: each mutation draws from an L-shaped DFE
+/// (majority near-neutral, small deleterious tail, tiny beneficial tail). Load accumulates
+/// heritably and drains energy (`burden_cost = genetic_load × burden_cost_k`), creating
+/// an emergent energy-cost gradient. At founder mutation rate, meaningful-deleterious load
+/// U ≈ 1 (biological range); the diagnostic SWEEPS `f_del` (via mut_load_del_den ∈ {8..64})
+/// × `burden_cost_k` ∈ {1..4} × seed ∈ {1..3} to measure whether Muller's ratchet CLICKS
+/// (irreversible load accumulation in finite asexual population) and an error threshold
+/// emerges (raising μ·L past the fitness-transfer limit). Descriptive MAP (no PASS/FAIL);
+/// analysis is offline.
+pub fn ga_load_config(seed: u64) -> SimConfig {
+    SimConfig {
+        n_layers: 3,
+        layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, L2_DETRITUS_SPEC, LayerSpec::default()],
+        econ: EconParams {
+            detritus_layer: Some(2),
+            detritus_frac_num: 256, // RECYCLE_DEN = 256 → frac=1.0 full-replace (bootstrap)
+            // GA-LOAD: mutation-load economy enabled with anchored L-shaped DFE.
+            enable_mutation_load: true,
+            // L-shaped DFE anchoring: U = L·μ·f_del = 136·(32/256)·f_del = 17·f_del.
+            // Target U ≈ 1 → f_del ≈ 1/17 ≈ 0.059. Use f_del = 1/16 (del_num=1, del_den=16) for simplicity.
+            // But DFE probs are per-mutation-event (genome level), not per-bit-flip.
+            // At L=136, μ=32/256=0.125: ~17 mutation events per birth.
+            // To get ~10% of births with ≥1 deleterious mutation, we need f_del ≈ (1 - 0.9^(1/17)) ≈ 0.0616.
+            // Anchor del_den to {8,16,32,64} (swept in diagnostic); start with 16.
+            mut_load_del_num: 1,
+            mut_load_del_den: 16,
+            // Beneficial mutations rare (anti-caricature): ben_num ≪ del_num.
+            mut_load_ben_num: 1,
+            mut_load_ben_den: 128,   // ≈ del_num / 8
+            // Burden cost anchored to ~2–3% of ~60 eu/tick income → s ≈ 0.025.
+            // burden_cost_k ≈ 60 eu/tick · 0.025 / 1 load_unit ≈ 1.5 eu/load/tick. Use 2.
+            burden_cost_k: 2,
+            ..EconParams::default()
+        },
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
+
 pub fn build_sim(config: SimConfig) -> Sim {
     // B-2: sync econ.n_layers = config.n_layers so stage_birth_death can clamp layer-trait mutations.
     // D′-3a: if mineral_layer is set, n_energy_layers = mineral_layer index (genomes can only

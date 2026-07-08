@@ -247,7 +247,7 @@ mod tests {
     fn different_genome_diverges() {
         let spec = fixture_spec();
         let founder = morphogen(&Genome::founder(1), &spec);
-        let mutated = morphogen(&Genome::founder(1).mutate(0xDEAD_BEEF, 1, false, 0, false, false, false, false, false), &spec);
+        let mutated = morphogen(&Genome::founder(1).mutate(0xDEAD_BEEF, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0), &spec);
         // Not asserting inequality unconditionally (mutation could no-op on `size`); assert the
         // function actually depends on the genome by varying `size` directly.
         let mut bigger = Genome::founder(1);

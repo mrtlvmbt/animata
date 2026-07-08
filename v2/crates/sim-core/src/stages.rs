@@ -229,12 +229,19 @@ pub fn stage_metabolism(
         let breadth_cost = if econ.ambient_tolerance.is_some() {
             econ.ambient_tolerance.as_ref().unwrap().breadth_cost_k * g.tol_breadth as i64 / crate::params::BREADTH_COST_SCALE
         } else { 0 };
+        // GA-LOAD: genetic-load energy burden cost. Additive in base_cost.
+        // Load expresses as standing metabolic drain: burden_cost = genetic_load × burden_cost_k
+        // (gate on enable_mutation_load for byte-identity with non-load configs).
+        let burden_cost = if econ.enable_mutation_load {
+            g.genetic_load as i64 * econ.burden_cost_k
+        } else { 0 };
         let base_cost = (econ.base_metab
             + econ.k_size_metab * g.metab_units()
             + econ.k_move_cost * g.move_speed as i64
             + econ.k_sense_cost * g.sense_range as i64
             + econ.c_coord * n_cells
-            + breadth_cost)
+            + breadth_cost
+            + burden_cost)
             * n as i64;
         // D′-2a/2b: photo-machinery expression cost on the EXPRESSED capacity.
         // expressed_capacity returns 0 at night for regulated cells → cost skipped (the D′-2b lever).
@@ -1293,7 +1300,7 @@ pub fn stage_birth_death(
             }
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some());
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den);
             let species_c = *species;
 
             // E-1/E-5a/E-5b: decode-seam gate. Ф0 always returns Some; the five existing configs
