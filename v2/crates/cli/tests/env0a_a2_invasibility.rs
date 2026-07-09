@@ -1,14 +1,26 @@
 //! ENV-0a'-a2: mutual-invasibility measurement harness (the spatial cloud gate).
 //!
-//! Reciprocal-invasibility test for coexistence measurement between unicell and multicell strategies
+//! Reciprocal-invasibility diagnostic for coexistence measurement between unicell and multicell strategies
 //! under spatial monopolization (a1 mechanic + patch-grain sweep). This is a cloud diagnostic MAP
 //! (#[ignore], run via sim-run.sh env-frontier scenario).
 //!
 //! Harness config: breed-true (evolve_body_size=false, speciation frozen) to keep strategies
 //! cleanly distinguishable by founding SpeciesId (0=resident, 1=invader) across generations.
+//!
+//! Output format (space-separated fields, greppable MAP):
+//!   ENV-0a-a2 patch_grain seed direction invader_start invader_end n_opt_baseline_A n_opt_baseline_B
+//!
+//! - patch_grain: spatial grain value {1,2,4,8,16,32}
+//! - seed: random seed {1,2,3}
+//! - direction: "multi→uni" (resident=multicell, invader=unicell) or "uni→multi" (vice versa)
+//! - invader_start: rare lineage count at t=0 (start)
+//! - invader_end: rare lineage count at t=horizon (end)
+//! - n_opt_baseline_A: mean body size (fixed-point 256-scale) without env_frontier_config
+//! - n_opt_baseline_B: mean body size with env_frontier_config at current grain
 
 use sim_core::{Genome, GrnSpec, MorphogenSpec, Boundary, EconParams};
 use std::sync::Arc;
+use std::env;
 
 /// Construct unicell template (g_dev=1 → 1 cell) with verified decode.
 /// Panics loudly if decode fails or cell count ≠ 1.
@@ -130,72 +142,128 @@ fn env0a_a2_templates_construct_and_decode() {
     );
 }
 
-/// Reciprocal invasibility harness: for a fixed patch_grain, measure rare-invader growth
-/// in both directions (resident = multicell, invader = unicell) and vice versa.
-/// Structure: reciprocal seeding at ~90/10 split, fixed horizon generations, track SpeciesId 1
-/// via species_census(). Structural asserts only (ran to horizon, counts ≥ 0), no PASS/FAIL verdict.
+/// ENV-0a'-a2 grain-sweep coexistence harness (cloud diagnostic MAP, #[ignore]).
+/// Sweeps patch_grain over FIXED set {1,2,4,8,16,32} × seeds {1,2,3}.
+/// For each combination, runs reciprocal seedings (multi→uni and uni→multi) to horizon.
+/// Measures rare-invader (SpeciesId 1) trajectory and port-check baselines.
+/// Emits greppable MAP lines; structural asserts only (no PASS/FAIL verdict).
 #[test]
-#[ignore] // cloud-only diagnostic MAP
-fn env0a_a2_reciprocal_invasibility_harness() {
+#[ignore]  // Cloud-only diagnostic; runs via sim-run.yml env-frontier case
+fn env0a_a2_invasibility_sweep() {
+    use cli::driver_config;
+
     let n_layers = 2;
     let unicell = make_unicell_template(n_layers);
     let multicell = make_multicell_template(n_layers);
 
-    let patch_grain = 4i64; // fixed for this smoke test; swept {1,2,4,8,16,32} in cloud
-    let seed = 42u64; // fixed for this smoke test; ≥3 seeds in cloud
+    // Read horizon ticks from environment (default: 2000 ≈ ~1000 generations)
+    let horizon_ticks = env::var("ENV_FRONTIER_TICKS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(2000);
 
-    // Direction 1: resident = multicell (90%), invader = unicell (10%)
-    let mut config1 = cli::env_frontier_invasibility_config(seed, patch_grain);
-    config1.n_founders = 100;
-    // Multi-template seeding: 90 multicell (SpeciesId 0) + 10 unicell (SpeciesId 1)
-    config1.founder_templates = Some(vec![
-        (multicell.clone(), 90),
-        (unicell.clone(), 10),
-    ]);
+    // Sweep grid: patch_grain × seed (pre-declared fixed set per issue)
+    let patch_grains = [1i64, 2, 4, 8, 16, 32];
+    let seeds = [1u64, 2, 3];
 
-    let mut sim1 = cli::build_sim(config1);
+    for &patch_grain in &patch_grains {
+        for &seed in &seeds {
+            // === Port-check Baseline A: retention-OFF (plain driver_config, no env_frontier) ===
+            let mut config_baseline_a = driver_config(seed);
+            let mut sim_baseline_a = cli::build_sim(config_baseline_a);
+            for _ in 0..horizon_ticks {
+                sim_baseline_a.step();
+            }
+            let n_opt_a = sim_baseline_a.n_opt(); // fixed-point 256-scale
+            // Structural assert: N_opt must be >= 0
+            assert!(n_opt_a >= 0, "baseline A n_opt must be >= 0");
 
-    // Run to horizon (e.g., 100 generations ≈ 2000 ticks at typical turnover)
-    // For this structural test, just run a short simulation
-    let horizon_ticks = 200;
-    for _ in 0..horizon_ticks {
-        sim1.step();
+            // === Port-check Baseline B: retention-ON at current grain (env_frontier_config) ===
+            let mut config_baseline_b = cli::env_frontier_invasibility_config(seed, patch_grain);
+            // Disable templates for baseline (test the mechanic alone)
+            config_baseline_b.founder_templates = None;
+            let mut sim_baseline_b = cli::build_sim(config_baseline_b);
+            for _ in 0..horizon_ticks {
+                sim_baseline_b.step();
+            }
+            let n_opt_b = sim_baseline_b.n_opt();
+            assert!(n_opt_b >= 0, "baseline B n_opt must be >= 0");
+
+            // === Direction 1: resident = multicell (90%), invader = unicell (10%) ===
+            let mut config1 = cli::env_frontier_invasibility_config(seed, patch_grain);
+            config1.n_founders = 100;
+            config1.founder_templates = Some(vec![
+                (multicell.clone(), 90),
+                (unicell.clone(), 10),
+            ]);
+            let mut sim1 = cli::build_sim(config1);
+
+            // Capture rare invader (SpeciesId 1) start count
+            let census1_start = sim1.species_census();
+            let invader_start_dir1: u64 = census1_start
+                .iter()
+                .find(|(id, _)| id.0 == 1)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+
+            // Run to horizon
+            for _ in 0..horizon_ticks {
+                sim1.step();
+            }
+
+            // Capture rare invader end count
+            let census1_end = sim1.species_census();
+            let invader_end_dir1: u64 = census1_end
+                .iter()
+                .find(|(id, _)| id.0 == 1)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+
+            // Structural asserts
+            assert!(invader_end_dir1 >= 0, "dir1 invader_end must be >= 0");
+
+            // === Direction 2: resident = unicell (90%), invader = multicell (10%) ===
+            let mut config2 = cli::env_frontier_invasibility_config(seed, patch_grain);
+            config2.n_founders = 100;
+            config2.founder_templates = Some(vec![
+                (unicell.clone(), 90),
+                (multicell.clone(), 10),
+            ]);
+            let mut sim2 = cli::build_sim(config2);
+
+            // Capture rare invader start count
+            let census2_start = sim2.species_census();
+            let invader_start_dir2: u64 = census2_start
+                .iter()
+                .find(|(id, _)| id.0 == 1)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+
+            // Run to horizon
+            for _ in 0..horizon_ticks {
+                sim2.step();
+            }
+
+            // Capture rare invader end count
+            let census2_end = sim2.species_census();
+            let invader_end_dir2: u64 = census2_end
+                .iter()
+                .find(|(id, _)| id.0 == 1)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+
+            // Structural asserts
+            assert!(invader_end_dir2 >= 0, "dir2 invader_end must be >= 0");
+
+            // === Emit greppable MAP lines ===
+            println!(
+                "ENV-0a-a2 {} {} multi→uni {} {} {} {}",
+                patch_grain, seed, invader_start_dir1, invader_end_dir1, n_opt_a, n_opt_b
+            );
+            println!(
+                "ENV-0a-a2 {} {} uni→multi {} {} {} {}",
+                patch_grain, seed, invader_start_dir2, invader_end_dir2, n_opt_a, n_opt_b
+            );
+        }
     }
-
-    // Read species census: SpeciesId 1 is the rare invader (unicell)
-    let census1 = sim1.species_census();
-    let invader_end_dir1 = census1.iter().find(|(id, _)| id.0 == 1).map(|(_, count)| *count).unwrap_or(0);
-
-    // Structural assert: population counts are non-negative (always true, but documents expectation)
-    assert!(invader_end_dir1 >= 0, "direction 1: invader count must be ≥ 0");
-
-    // Direction 2: resident = unicell (90%), invader = multicell (10%)
-    let mut config2 = cli::env_frontier_invasibility_config(seed, patch_grain);
-    config2.n_founders = 100;
-    // Multi-template seeding: 90 unicell (SpeciesId 0) + 10 multicell (SpeciesId 1)
-    config2.founder_templates = Some(vec![
-        (unicell.clone(), 90),
-        (multicell.clone(), 10),
-    ]);
-
-    let mut sim2 = cli::build_sim(config2);
-
-    // Run to same horizon
-    for _ in 0..horizon_ticks {
-        sim2.step();
-    }
-
-    // Read species census: SpeciesId 1 is the rare invader (multicell)
-    let census2 = sim2.species_census();
-    let invader_end_dir2 = census2.iter().find(|(id, _)| id.0 == 1).map(|(_, count)| *count).unwrap_or(0);
-
-    // Structural assert: population counts are non-negative
-    assert!(invader_end_dir2 >= 0, "direction 2: invader count must be ≥ 0");
-
-    // No PASS/FAIL verdict — this is diagnostic telemetry only.
-    // PM reads both directions' trajectories to infer coexistence domain.
-    eprintln!(
-        "ENV-0a'-a2 invasibility (grain=?, seed=42): dir1(multi→uni) invader_end={}, dir2(uni→multi) invader_end={}",
-        invader_end_dir1, invader_end_dir2
-    );
 }
