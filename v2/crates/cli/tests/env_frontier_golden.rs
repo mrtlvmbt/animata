@@ -11,25 +11,22 @@
 use cli::{env_frontier_config, run, build_sim};
 use sim_core::Sim;
 
-/// Placeholder golden (pass 1, locally computed). Real arm64 value from CI golden-arm64 job.
-/// This will be replaced in pass 2 once CI runs and captures the actual value.
-const ENV_FRONTIER_GOLDEN: [u64; 384] = [
-    0x0000000000000001; 384 // Placeholder: CI pass 2 replaces with actual arm64 value
-];
+/// Single folded trajectory checksum over the 384-tick run (arm64 release golden).
+/// Uses FNV-1a style fold: any single-tick drift changes the fold, validating the full trajectory.
+const ENV_FRONTIER_GOLDEN: u64 = 0; // placeholder — CI reports the real fold; pin it in the follow-up push
 
 /// Golden drift (R19): arm64 release only. Skipped in debug (float-fusing differs).
 #[test]
-fn env_frontier_golden_drift() {
+fn v2_golden_env_frontier_drift() {
     if cfg!(debug_assertions) {
         return; // golden pinned for release; debug float-fusing differs (run via the arm64 release job)
     }
-    let h = run(env_frontier_config(1), ENV_FRONTIER_GOLDEN.len() as u64);
-    for t in 0..ENV_FRONTIER_GOLDEN.len() {
-        assert_eq!(
-            h[t], ENV_FRONTIER_GOLDEN[t],
-            "env_frontier golden drift at tick {t} (left=run, right=ENV_FRONTIER_GOLDEN)"
-        );
-    }
+    let hashes = run(env_frontier_config(1), 384);
+    let fold = hashes.iter().fold(0xcbf29ce484222325u64, |acc, &h| (acc ^ h).wrapping_mul(0x100000001b3));
+    assert_eq!(
+        fold, ENV_FRONTIER_GOLDEN,
+        "env_frontier golden drift at ticks 0..384 (left=run fold, right=ENV_FRONTIER_GOLDEN)"
+    );
 }
 
 /// R15 energy conservation: priority-ration mechanic conserves energy exactly, tick by tick.
