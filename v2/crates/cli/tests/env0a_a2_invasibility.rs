@@ -141,13 +141,12 @@ fn env0a_a2_reciprocal_invasibility_harness() {
     let unicell = make_unicell_template(n_layers);
     let multicell = make_multicell_template(n_layers);
 
+    let patch_grain = 4i64; // fixed for this smoke test; swept {1,2,4,8,16,32} in cloud
+    let seed = 42u64; // fixed for this smoke test; ≥3 seeds in cloud
+
     // Direction 1: resident = multicell (90%), invader = unicell (10%)
-    let mut config1 = cli::env_frontier_config(42);
+    let mut config1 = cli::env_frontier_invasibility_config(seed, patch_grain);
     config1.n_founders = 100;
-    // Breed-true: disable body-size evolution
-    config1.econ.evolve_body_size = false;
-    // Freeze speciation: set threshold astronomically high (no speciation)
-    config1.econ.speciation_threshold = i64::MAX;
     // Multi-template seeding: 90 multicell (SpeciesId 0) + 10 unicell (SpeciesId 1)
     config1.founder_templates = Some(vec![
         (multicell.clone(), 90),
@@ -171,10 +170,8 @@ fn env0a_a2_reciprocal_invasibility_harness() {
     assert!(invader_end_dir1 >= 0, "direction 1: invader count must be ≥ 0");
 
     // Direction 2: resident = unicell (90%), invader = multicell (10%)
-    let mut config2 = cli::env_frontier_config(42);
+    let mut config2 = cli::env_frontier_invasibility_config(seed, patch_grain);
     config2.n_founders = 100;
-    config2.econ.evolve_body_size = false;
-    config2.econ.speciation_threshold = i64::MAX;
     // Multi-template seeding: 90 unicell (SpeciesId 0) + 10 multicell (SpeciesId 1)
     config2.founder_templates = Some(vec![
         (unicell.clone(), 90),
