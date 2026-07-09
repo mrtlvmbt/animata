@@ -738,6 +738,23 @@ pub fn env_frontier_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// ENV-0a'-a2: breed-true invasibility harness config (test/diagnostic, cloud-only).
+/// Base: env_frontier_config + patch-grain. Harness isolation: evolve_body_size=false
+/// (freeze g_dev mutations), speciation_threshold=i64::MAX (disable re-speciation).
+/// Rationale: keeps two founder strategies cleanly distinguishable by SpeciesId across generations
+/// so rare-invader trajectories can be tracked via species_census() without drift/fragmentation.
+/// Accepts founder_templates as parameter (set by test harness per grain/seed).
+/// Not a shipped config; used only in ENV-0a'-a2 cloud diagnostics (cli tests + sim-run scenarios).
+pub fn env_frontier_invasibility_config(seed: u64, patch_grain: i64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    cfg.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain });
+    // Breed-true: freeze body-size evolution so g_dev stays constant for each lineage
+    cfg.econ.evolve_body_size = false;
+    // Freeze speciation: set threshold astronomically high so SpeciesId never re-assigns
+    cfg.econ.speciation_threshold = i64::MAX;
+    cfg
+}
+
 /// P5-0 NO₃-field infrastructure config (L=4): substrate + organics + O₂ + NO₃ fields (test-only,
 /// acceptance harness for P5-0). Enables the NO₃ (nitrate) static inert layer derived from biome
 /// (INVERSE of O₂). Layer 0=substrate, Layer 1=organics, Layer 2=O₂ (static), Layer 3=NO₃ (inert).
@@ -825,14 +842,17 @@ pub fn build_sim(config: SimConfig) -> Sim {
 
     // D-4/D-5 (F2): universal and hazard predation modes require varying body sizes to be meaningful
     // — guard this at setup (cheap, loud) rather than silently producing zero predation downstream.
+    // Size variance comes from EITHER evolve_body_size=true (genetic drift) OR founder_templates with
+    // distinct body sizes (multi-template seeding). ENV-0a'-a2 uses the latter (breed-true harness).
     if let Some(pred_spec) = &config.econ.predation {
         match pred_spec.mode {
             sim_core::PredationMode::Universal | sim_core::PredationMode::Hazard => {
                 assert!(
-                    config.econ.morphogen.is_some() && config.econ.evolve_body_size,
-                    "universal/hazard predation requires morphogen=Some AND evolve_body_size=true; got morphogen={}, evolve_body_size={}",
-                    config.econ.morphogen.is_some(),
-                    config.econ.evolve_body_size
+                    config.econ.morphogen.is_some()
+                        && (config.econ.evolve_body_size || config.founder_templates.is_some()),
+                    "universal/hazard predation requires size variance: either evolve_body_size=true OR ≥2 founder_templates; got evolve_body_size={}, founder_templates={}",
+                    config.econ.evolve_body_size,
+                    config.founder_templates.is_some()
                 );
                 // D-5 (subsystem-reviewer F7): Hazard drains via the refuge Q-format, so it needs a
                 // size_refuge — otherwise `stage_predation`'s Hazard branch silently no-ops (drain=0)

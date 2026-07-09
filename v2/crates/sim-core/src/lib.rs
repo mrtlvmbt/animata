@@ -813,6 +813,20 @@ impl Sim {
         q.iter(&self.world).map(|ph| ph.graph.body_size()).collect()
     }
 
+    /// ENV-0a'-a2: population-mean cells-per-body (Σ entities module_cell_count / population).
+    /// Mirror `population()`/`species_census()` — golden-neutral, read-only, not in state_hash or tick.
+    /// Empty population → 0. Fixed-point BODY_SIZE_SCALE (256) to match telemetry scale.
+    pub fn n_opt(&mut self) -> i64 {
+        let mut total_cells = 0i64;
+        let mut count = 0u64;
+        let mut q = self.world.query::<&Phenotype>();
+        for ph in q.iter(&self.world) {
+            total_cells += ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>();
+            count += 1;
+        }
+        if count == 0 { 0 } else { (total_cells * BODY_SIZE_SCALE) / count as i64 }
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }
