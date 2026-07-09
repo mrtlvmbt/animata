@@ -815,7 +815,7 @@ impl Sim {
 
     /// ENV-0a'-a2: population-mean cells-per-body (Σ entities module_cell_count / population).
     /// Mirror `population()`/`species_census()` — golden-neutral, read-only, not in state_hash or tick.
-    /// Empty population → 0. Fixed-point 256-scale (matches SCALE used elsewhere for body size telemetry).
+    /// Empty population → 0. Fixed-point BODY_SIZE_SCALE (256) to match telemetry scale.
     pub fn n_opt(&mut self) -> i64 {
         let mut total_cells = 0i64;
         let mut count = 0u64;
@@ -824,7 +824,7 @@ impl Sim {
             total_cells += ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>();
             count += 1;
         }
-        if count == 0 { 0 } else { (total_cells * SCALE as i64) / count as i64 }
+        if count == 0 { 0 } else { (total_cells * BODY_SIZE_SCALE) / count as i64 }
     }
 
     pub fn tick(&self) -> u64 {
