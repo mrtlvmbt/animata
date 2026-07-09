@@ -208,7 +208,7 @@ fn env0a_a2_invasibility_sweep() {
     for &patch_grain in &patch_grains {
         for &seed in &seeds {
             // === Port-check Baseline A: retention-OFF (plain driver_config, no env_frontier) ===
-            let mut config_baseline_a = driver_config(seed);
+            let config_baseline_a = driver_config(seed);
             let mut sim_baseline_a = cli::build_sim(config_baseline_a);
             for _ in 0..horizon_ticks {
                 sim_baseline_a.step();
