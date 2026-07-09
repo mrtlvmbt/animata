@@ -49,7 +49,7 @@ pub use grn_lut::{
     PREACT_MAX as GRN_PREACT_MAX, PREACT_MIN as GRN_PREACT_MIN,
 };
 pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
-pub use params::{AmbientToleranceSpec, EconParams, FieldId, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
+pub use params::{AmbientToleranceSpec, EconParams, EnvFrontierConfig, FieldId, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
 pub use stages::{expressed_capacity, settling_drain};
 pub use pool::{ScatterParams, SimPool};
@@ -622,6 +622,12 @@ impl Sim {
     /// Panics if `layer >= n_layers`.
     pub fn field_layer_total(&self, layer: usize) -> i64 {
         self.world.resource::<FieldRes>().0.conserved_total(layer)
+    }
+
+    /// Total conserved-field energy across all layers (diagnostic; not in the tick loop or state_hash).
+    /// ENV-0a'-a1: used for Σ-conservation test (retention-OFF vs retention-ON runs).
+    pub fn conserved_field_total_all(&self) -> i64 {
+        self.world.resource::<FieldRes>().0.conserved_total_all()
     }
 
     /// Total signal concentration (serial reduction).

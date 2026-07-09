@@ -395,6 +395,11 @@ const SETTLING_K: i32 = 128;          // size² attenuation factor (denominator 
 const SETTLING_SHIFT: u32 = 16;       // Q-format shift (matches Q8.8 magnitude)
 // P4/SL-1 settling-selection: viability tuning is separate concern (verdict-harness only).
 
+/// ENV-0a'-a1: spatial monopolization CONSTANT (resource patch grain).
+/// Spatial correlation length for patch-grain heterogeneity (cells). Fixed default for a1;
+/// swept in a2. Controls the frequency-dependent bistability landscape.
+const ENV_FRONTIER_PATCH_GRAIN: i64 = 4;
+
 /// D-2 (#270): the multicellular-predation cost↔benefit economy — the experiment substrate D-3
 /// sweeps for body-size emergence. D-5 evolution: now uses hazard-refuge predation (implicit
 /// external predator, per-entity per-tick drain) as a CONDITIONAL size-benefit (harder bodies drain
@@ -718,6 +723,18 @@ pub fn settling_config(seed: u64) -> SimConfig {
     cfg.econ.evolve_body_size = true;
     // P3-3: thermal_verdict_temps field (None → stock BIOME_TEMP behavior).
     cfg.thermal_verdict_temps = None;
+    cfg
+}
+
+/// ENV-0a'-a1: spatial monopolization config. Builds on driver_config + enables the priority-ration
+/// mechanic in `stage_interactions` phase 3: bonded multicellular bodies pre-empt resource before
+/// unbonded unicells, enabling frequency-dependent bistability. Fixed patch_grain for a1; swept in a2.
+/// Golden-touch (additive): a new deterministic scenario, not modifying existing shipped configs.
+pub fn env_frontier_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    cfg.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig {
+        patch_grain: ENV_FRONTIER_PATCH_GRAIN,
+    });
     cfg
 }
 

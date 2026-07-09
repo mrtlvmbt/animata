@@ -35,6 +35,20 @@ impl FieldId {
     }
 }
 
+// ── ENV-0a'-a1: spatial monopolization configuration (frontier-D5) ─────────────────────────────
+
+/// ENV-0a'-a1: environment frontier spatial monopolization config. Composes the D-5 hazard refuge
+/// with a patch-grain resource field to enable spatial bonded-monopolization mechanic (frequency-
+/// dependent bistability). When `Some`, enables priority-ration in `stage_interactions` phase 3:
+/// bonded multicellular bodies pre-empt resource uptake in contested cells before unbonded unicells.
+/// When `None` (default, all shipped configs), uptake is proportional (byte-identical trajectories).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnvFrontierConfig {
+    /// Spatial correlation length (cells) for patch-grain resource heterogeneity.
+    /// Default ~4 (small patch), tuned per-scenario in a2 sweep; fixed for a1.
+    pub patch_grain: i64,
+}
+
 // ── C-slice death-recycling constants ────────────────────────────────────────────────────────────
 
 /// Bit-mask for the `d0` background-death RNG draw. `D0_MASK = 2^20 − 1`.
@@ -390,6 +404,14 @@ pub struct EconParams {
     /// Energy cost per load unit per tick (burden_cost = genetic_load * burden_cost_k).
     /// Anchored to ≈2–3% of ~80 eu income → s≈0.025. Default 0 when enable_mutation_load=false (inert).
     pub burden_cost_k: i64,
+
+    // ── ENV-0a'-a1: spatial monopolization (frontier-D5) ────────────────────────────────────
+    /// Environment frontier spatial monopolization config (ENV-0a'-a1). `Some` enables the
+    /// priority-ration mechanism in `stage_interactions` phase 3: bonded multicellular bodies
+    /// pre-empt resource before unbonded unicells, enabling frequency-dependent bistability.
+    /// `None` (default, all existing production configs) → uptake remains proportional (all
+    /// contested-cell grants scale equally) → byte-identical goldens (the isolation gate).
+    pub env_frontier_config: Option<EnvFrontierConfig>,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -667,6 +689,8 @@ impl Default for EconParams {
             mut_load_ben_num: 2,     // beneficial rate ≪ deleterious (stub)
             mut_load_ben_den: 256,   // placeholder; swept in ga-load diagnostic
             burden_cost_k: 2,        // energy cost per load unit; anchored to ~2% of income (swept in diagnostic)
+            // ENV-0a'-a1: spatial monopolization OFF by default — None for all existing configs (byte-identical).
+            env_frontier_config: None,
         }
     }
 }

@@ -496,6 +496,7 @@ pub fn stage_interactions(
         pos: Vec2Fixed,
         layer: usize,
         demand: i64,
+        bonded: bool,      // ENV-0a'-a1: true if Σ module_cell_count > 1 (multicellular body)
     }
     let mut contestants: Vec<Contestant> = q.iter().map(|(e, pos, _g, ph, _)| {
         // E-1: read uptake_layer from the cached Phenotype (live consumer of the decode seam).
@@ -519,6 +520,8 @@ pub fn stage_interactions(
             demand * soma.max(1)
         } else { demand };
         let cell = field.0.cell_index(pos.0);
+        // ENV-0a'-a1: cache bonded status (Σ module_cell_count > 1) for phase 3 priority fill.
+        let bonded = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>() > 1;
         Contestant {
             cell_layer: cell * 4 + layer,
             entity_bits: e.to_bits(),
@@ -526,6 +529,7 @@ pub fn stage_interactions(
             pos: pos.0,
             layer,
             demand,
+            bonded,
         }
     }).collect();
     // Stable order: primary = cell_layer (groups contestants), secondary = entity_bits (tie-break).
@@ -556,8 +560,34 @@ pub fn stage_interactions(
             }
         } else if r_cell == 0 {
             // Empty cell: no grants (all zeros already).
+        } else if econ.env_frontier_config.is_some() {
+            // ENV-0a'-a1: Deficit with spatial monopolization enabled.
+            // Priority greedy fill: bonded contestants pre-empt in entity_bits order;
+            // unbonded split the remainder proportionally. Frequency-dependence emerges
+            // from this order, not from a parameter.
+            let mut remaining = r_cell;
+            // Phase 3a: bonded fill (pre-emption in existing entity_bits order).
+            for i in run_start..run_end {
+                if contestants[i].bonded {
+                    let grant = contestants[i].demand.min(remaining);
+                    grants[i] = grant;
+                    remaining -= grant;
+                }
+            }
+            // Phase 3b: unbonded proportional split of remainder.
+            let sigma_unbonded: i64 = (run_start..run_end)
+                .filter(|&i| !contestants[i].bonded)
+                .map(|i| contestants[i].demand)
+                .sum();
+            if remaining > 0 && sigma_unbonded > 0 {
+                for i in run_start..run_end {
+                    if !contestants[i].bonded {
+                        grants[i] = contestants[i].demand * remaining / sigma_unbonded;
+                    }
+                }
+            }
         } else {
-            // Deficit: proportional ration — ⌊U_i · R_cell / Σ⌋.
+            // Deficit: proportional ration — ⌊U_i · R_cell / Σ⌋ (original behavior when env_frontier_config OFF).
             for i in run_start..run_end {
                 grants[i] = contestants[i].demand * r_cell / sigma;
             }
