@@ -1,7 +1,7 @@
 //! Run parameters. `EconParams` are the on-the-shore economy numbers (economy/01); they are a
 //! documented cargo-tunable contract (re-pinning the golden after a change is cheap). All integer.
 
-use crate::{GrnSpec, MergeStrategy, MorphogenSpec, PredationSpec};
+use crate::{Genome, GrnSpec, MergeStrategy, MorphogenSpec, PredationSpec};
 use bevy_ecs::prelude::Resource;
 
 // ── Conserved field layer identifiers (P1-0 ШВ-1) ────────────────────────────────────────────────
@@ -696,6 +696,16 @@ pub struct SimConfig {
     /// (ONLY for verdict harness); `None` (default) uses stock BIOME_TEMP from world-gen.
     /// Passed to ProcgenWorld at construction; byte-identical when `None` (F1, golden-neutral gate).
     pub thermal_verdict_temps: Option<[i32; 13]>,
+    /// ENV-0a'-a0: Multi-genotype founder seeding (optional, golden-neutral gate).
+    /// When `Some(templates)`, founders are seeded from the caller-specified genome templates
+    /// with a deterministic integer count split. Each template's founders carry a distinct
+    /// SpeciesId (0, 1, 2, ...). When `None` (default, all existing production configs),
+    /// the legacy single-founder path is used: one template from `econ.grn`/`econ.morphogen`
+    /// with all `n_founders` assigned `SpeciesId(0)` — byte-identical to pre-ENV-0a' runs.
+    ///
+    /// Template seeds must sum to `n_founders` (strict integer accounting, no clamp).
+    /// Each template is spawned deterministically in index order with co-prime position strides.
+    pub founder_templates: Option<Vec<(Genome, u64)>>,
 }
 
 #[cfg(test)]
