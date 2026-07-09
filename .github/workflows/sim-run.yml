@@ -31,6 +31,7 @@ on:
           - dr0-gradient        # DR-0b (#349) resource-gradient diagnostic (scarcity sweep: u_max factor × seeds)
           - ga-load              # GA-LOAD-0 (#354) ratchet diagnostic (f_del sweep via del_den × burden_cost_k × seeds)
           - dc-diag             # DC-DIAG (#351) size-ceiling diagnostic (cap-bound vs driver-bound: base_hazard sweep, max_body_size)
+          - env-frontier         # ENV-0a'-a2 (#362) mutual-invasibility harness (patch-grain sweep, coexistence domain)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -240,6 +241,16 @@ jobs:
               cd v2
               DC_DIAG_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- dc_diag_size_ceiling --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            env-frontier)
+              # ENV-0a'-a2 (#362) mutual-invasibility measurement harness + grain sweep (spatial cloud gate).
+              # Breed-true harness (evolve_body_size=false, speciation frozen) sweeps patch_grain
+              # over {1,2,4,8,16,32} × seeds {1,2,3} to measure rare-invader trajectories (SpeciesId 1)
+              # and coexistence domain. Emits greppable MAP lines (grain, seed, direction, invader_start/end,
+              # N_opt_baseline_A/B). Analysis offline; no in-code verdict. Checks: run to horizon, counts ≥ 0.
+              cd v2
+              ENV_FRONTIER_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- env0a_a2_invasibility_sweep --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
