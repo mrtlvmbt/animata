@@ -33,21 +33,19 @@ fn multi_template_census_2template_9010() {
     // Multi-template: 90 from template 0, 10 from template 1
     config.founder_templates = Some(vec![(t0.clone(), 90), (t1.clone(), 10)]);
 
-    let sim = cli::build_sim(config);
+    let mut sim = cli::build_sim(config);
 
-    // Query at t=0 and verify:
-    // - Population = 100 total
-    // - 2 distinct species
-    let telemetry = sim.telemetry();
-    assert_eq!(telemetry.population, 100, "total population should be 100");
-    assert_eq!(telemetry.species_count, 2, "should have exactly 2 species");
+    // Query at t=0 using LIVE accessors (founders spawned by build_sim are live immediately):
+    // - Population = 100 total (via live population query)
+    // - 2 distinct species (via live species census)
+    let population = sim.population();
+    assert_eq!(population, 100, "total population should be 100");
 
-    // Check species census: sorted by id
-    let census = &telemetry.species_census;
+    let census = sim.species_census();
     assert_eq!(census.len(), 2, "census should have 2 entries");
-    assert_eq!(census[0].0, 0, "first species id should be 0");
+    assert_eq!(census[0].0.0, 0, "first species id should be 0");
     assert_eq!(census[0].1, 90, "species 0 should have 90 members");
-    assert_eq!(census[1].0, 1, "second species id should be 1");
+    assert_eq!(census[1].0.0, 1, "second species id should be 1");
     assert_eq!(census[1].1, 10, "species 1 should have 10 members");
 }
 

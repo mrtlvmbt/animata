@@ -675,6 +675,19 @@ impl Sim {
         q.iter(&self.world).count() as u64
     }
 
+    /// Per-SpeciesId population census at the current tick. Returns a vector of (SpeciesId, count)
+    /// pairs, sorted by SpeciesId. Read-only query; not fed to state hash or tick loop. Golden-NEUTRAL.
+    /// This queries live entities and reflects the CURRENT world state at the exact moment of call,
+    /// independent of `telemetry()` which is a post-step snapshot.
+    pub fn species_census(&mut self) -> Vec<(SpeciesId, u64)> {
+        let mut q = self.world.query::<&SpeciesId>();
+        let mut counts: std::collections::BTreeMap<SpeciesId, u64> = std::collections::BTreeMap::new();
+        for &species_id in q.iter(&self.world) {
+            *counts.entry(species_id).or_insert(0) += 1;
+        }
+        counts.into_iter().collect()
+    }
+
     /// (mean, max) genetic_load across all living creatures — diagnostic GA-LOAD helper.
     /// Mean is integer division (truncating). Empty population → (0, 0).
     /// Read-only query; not fed to state hash or tick loop. Golden-NEUTRAL.
