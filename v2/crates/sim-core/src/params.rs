@@ -689,6 +689,8 @@ impl Default for EconParams {
             mut_load_ben_num: 2,     // beneficial rate ≪ deleterious (stub)
             mut_load_ben_den: 256,   // placeholder; swept in ga-load diagnostic
             burden_cost_k: 2,        // energy cost per load unit; anchored to ~2% of income (swept in diagnostic)
+            // ENV-0a'-a1: spatial monopolization OFF by default — None for all existing configs (byte-identical).
+            env_frontier_config: None,
         }
     }
 }
