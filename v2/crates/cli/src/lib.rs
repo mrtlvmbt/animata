@@ -286,6 +286,7 @@ pub fn predation_config(seed: u64) -> SimConfig {
             }),
             ..EconParams::default()
         },
+        founder_templates: None,
         ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
     }
 }
@@ -534,6 +535,7 @@ pub fn oxygen_config(seed: u64) -> SimConfig {
             enable_oxygen: true,
             ..EconParams::default()
         },
+        founder_templates: None,
         ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
     }
 }
