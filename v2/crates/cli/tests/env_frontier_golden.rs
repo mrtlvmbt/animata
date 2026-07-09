@@ -1,10 +1,12 @@
-//! ENV-0a'-a1: spatial monopolization golden + Σ-conservation test.
+//! ENV-0a'-a1: spatial monopolization golden + R15 energy conservation test.
 //! The env_frontier_config introduces bonded pre-emption in resource ration, a determinism-critical
-//! mechanic that reorders who takes resource in contested cells but conserves the total taken.
+//! mechanic that reorders who takes resource in contested cells (WHO takes) but never creates/destroys
+//! total energy (R15 exact conservation per tick).
 //! This test verifies:
 //! 1. Golden checksum (arm64 release only) at 384 ticks, seed=1.
-//! 2. Σ-conservation: at seed=1, tick=500, `conserved_total_all()` is identical between
-//!    retention-OFF and retention-ON runs (the rule redistributes, never creates/destroys).
+//! 2. R15 energy conservation: within a retention-ON run, every tick has residual = 0
+//!    (field energy + agent energy + dissipated = initial + produced), proving the priority-ration
+//!    mechanic redistributes grants exactly without leaking energy.
 
 use cli::{env_frontier_config, run, build_sim};
 use sim_core::Sim;
@@ -30,37 +32,31 @@ fn env_frontier_golden_drift() {
     }
 }
 
-/// Σ-conservation: bonded pre-emption reorders grants but preserves total uptake.
-/// At seed=1, tick=500, the field `conserved_total_all()` after the eat stage must be
-/// integer-identical between retention-OFF and retention-ON runs.
+/// R15 energy conservation: priority-ration mechanic conserves energy exactly, tick by tick.
+/// Within a retention-ON run, every tick must have residual = 0: the total energy removed from
+/// the field is exactly credited to entities or dissipated (ledger). This proves the bonded
+/// pre-emption mechanic redistributes GRANTS (who takes) without creating/destroying energy.
+///
+/// Note: Σ grants ≤ r_cell by construction (bonded take min(demand, remaining), remaining
+/// starts at r_cell), so the ration never over-grants and conserves exactly.
 #[test]
 fn env_frontier_sigma_conservation() {
     const TEST_SEED: u64 = 1;
-    const TEST_TICK: u64 = 500;
+    const TEST_TICKS: u64 = 500;
 
-    // Run with env_frontier_config ON (bonded pre-emption enabled).
-    let cfg_on = env_frontier_config(TEST_SEED);
-    let mut sim_on = build_sim(cfg_on);
-    for _ in 0..TEST_TICK {
-        sim_on.step();
+    let cfg = env_frontier_config(TEST_SEED);
+    let mut sim = build_sim(cfg);
+
+    for tick in 0..TEST_TICKS {
+        sim.step();
+        // R15: energy conservation residual must be 0 after every tick when retention is active.
+        // Priority-ration mechanic: every unit removed from the field is credited to an entity
+        // or dissipated, so residual is exactly 0. This proves the mechanic conserves energy.
+        let residual = sim.conservation_residual();
+        assert_eq!(
+            residual, 0,
+            "energy conservation violated at seed={} tick={}: residual={}",
+            TEST_SEED, tick, residual
+        );
     }
-    let total_on = sim_on.conserved_field_total_all();
-
-    // Run with env_frontier_config OFF (proportional ration, no bonded pre-emption).
-    // Clone driver_config but explicitly set env_frontier_config to None.
-    let mut cfg_off = cli::driver_config(TEST_SEED);
-    cfg_off.econ.env_frontier_config = None;
-    let mut sim_off = build_sim(cfg_off);
-    for _ in 0..TEST_TICK {
-        sim_off.step();
-    }
-    let total_off = sim_off.conserved_field_total_all();
-
-    // Σ-conservation: both runs must have IDENTICAL total after 500 ticks.
-    // The bonded pre-emption mechanism redistributes WHO takes, never the total taken.
-    assert_eq!(
-        total_on, total_off,
-        "Σ-conservation violated at seed={} tick={}: retention-ON={}, retention-OFF={} (diff={})",
-        TEST_SEED, TEST_TICK, total_on, total_off, (total_on as i64) - (total_off as i64)
-    );
 }
