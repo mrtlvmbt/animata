@@ -6,6 +6,7 @@
 //!
 //! Harness config: breed-true (evolve_body_size=false, speciation frozen) to keep strategies
 //! cleanly distinguishable by founding SpeciesId (0=resident, 1=invader) across generations.
+//! Size variance (needed for selection) comes from multi-template seeding (N=1 and N=4), not evolution.
 //!
 //! Output format (space-separated fields, greppable MAP):
 //!   ENV-0a-a2 patch_grain seed direction invader_start invader_end n_opt_baseline_A n_opt_baseline_B
@@ -13,8 +14,8 @@
 //! - patch_grain: spatial grain value {1,2,4,8,16,32}
 //! - seed: random seed {1,2,3}
 //! - direction: "multi→uni" (resident=multicell, invader=unicell) or "uni→multi" (vice versa)
-//! - invader_start: rare lineage count at t=0 (start)
-//! - invader_end: rare lineage count at t=horizon (end)
+//! - invader_start: minority lineage count at t=0 (seeded at 10% start frequency)
+//! - invader_end: minority lineage count at t=horizon (growth trajectory)
 //! - n_opt_baseline_A: mean body size (fixed-point 256-scale) without env_frontier_config
 //! - n_opt_baseline_B: mean body size with env_frontier_config at current grain
 
@@ -142,6 +143,44 @@ fn env0a_a2_templates_construct_and_decode() {
     );
 }
 
+/// Non-ignored smoke test: breed-true config + multi-template seeding is runnable (catches F1 panic).
+/// Verifies that build_sim(env_frontier_invasibility_config + founder_templates) does NOT panic
+/// on the predation assertion: the assertion was relaxed to accept founder_templates as a source
+/// of size variance (in addition to evolve_body_size). This test proves the relaxation works (CI can run it).
+#[test]
+fn env0a_a2_breedtrue_config_is_runnable() {
+    let n_layers = 2;
+    let unicell = make_unicell_template(n_layers);
+    let multicell = make_multicell_template(n_layers);
+
+    let patch_grain = 4i64;
+    let seed = 42u64;
+
+    // Construct breed-true config with predation (hazard from driver_config)
+    let mut config = cli::env_frontier_invasibility_config(seed, patch_grain);
+    config.n_founders = 100;
+    config.founder_templates = Some(vec![
+        (multicell.clone(), 90),
+        (unicell.clone(), 10),
+    ]);
+
+    // This should NOT panic on the predation assertion. The assertion was relaxed to accept
+    // founder_templates.is_some() as a source of size variance (multi-template seeding creates
+    // variance: N=1 and N=4). If the assertion is broken, this line panics and the test fails.
+    let mut sim = cli::build_sim(config);
+
+    // Quick smoke: step a few ticks, verify population doesn't collapse
+    for _ in 0..20 {
+        sim.step();
+    }
+    let final_pop = sim.population();
+    assert!(
+        final_pop > 0,
+        "population must remain positive after 20 steps (got {})",
+        final_pop
+    );
+}
+
 /// ENV-0a'-a2 grain-sweep coexistence harness (cloud diagnostic MAP, #[ignore]).
 /// Sweeps patch_grain over FIXED set {1,2,4,8,16,32} × seeds {1,2,3}.
 /// For each combination, runs reciprocal seedings (multi→uni and uni→multi) to horizon.
@@ -219,8 +258,8 @@ fn env0a_a2_invasibility_sweep() {
                 .map(|(_, count)| *count)
                 .unwrap_or(0);
 
-            // Structural asserts
-            assert!(invader_end_dir1 >= 0, "dir1 invader_end must be >= 0");
+            // invader_end_dir1 is u64 (always >= 0 by type); this is a structural placeholder
+            // documenting the expectation (population counts are non-negative).
 
             // === Direction 2: resident = unicell (90%), invader = multicell (10%) ===
             let mut config2 = cli::env_frontier_invasibility_config(seed, patch_grain);
@@ -252,8 +291,8 @@ fn env0a_a2_invasibility_sweep() {
                 .map(|(_, count)| *count)
                 .unwrap_or(0);
 
-            // Structural asserts
-            assert!(invader_end_dir2 >= 0, "dir2 invader_end must be >= 0");
+            // invader_end_dir2 is u64 (always >= 0 by type); this is a structural placeholder
+            // documenting the expectation (population counts are non-negative).
 
             // === Emit greppable MAP lines ===
             println!(

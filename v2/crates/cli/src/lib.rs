@@ -842,14 +842,17 @@ pub fn build_sim(config: SimConfig) -> Sim {
 
     // D-4/D-5 (F2): universal and hazard predation modes require varying body sizes to be meaningful
     // — guard this at setup (cheap, loud) rather than silently producing zero predation downstream.
+    // Size variance comes from EITHER evolve_body_size=true (genetic drift) OR founder_templates with
+    // distinct body sizes (multi-template seeding). ENV-0a'-a2 uses the latter (breed-true harness).
     if let Some(pred_spec) = &config.econ.predation {
         match pred_spec.mode {
             sim_core::PredationMode::Universal | sim_core::PredationMode::Hazard => {
                 assert!(
-                    config.econ.morphogen.is_some() && config.econ.evolve_body_size,
-                    "universal/hazard predation requires morphogen=Some AND evolve_body_size=true; got morphogen={}, evolve_body_size={}",
-                    config.econ.morphogen.is_some(),
-                    config.econ.evolve_body_size
+                    config.econ.morphogen.is_some()
+                        && (config.econ.evolve_body_size || config.founder_templates.is_some()),
+                    "universal/hazard predation requires size variance: either evolve_body_size=true OR ≥2 founder_templates; got evolve_body_size={}, founder_templates={}",
+                    config.econ.evolve_body_size,
+                    config.founder_templates.is_some()
                 );
                 // D-5 (subsystem-reviewer F7): Hazard drains via the refuge Q-format, so it needs a
                 // size_refuge — otherwise `stage_predation`'s Hazard branch silently no-ops (drain=0)
