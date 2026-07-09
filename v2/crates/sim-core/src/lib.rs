@@ -638,6 +638,21 @@ impl Sim {
         q.iter(&self.world).count() as u64
     }
 
+    /// (mean, max) genetic_load across all living creatures — diagnostic GA-LOAD helper.
+    /// Mean is integer division (truncating). Empty population → (0, 0).
+    /// Read-only query; not fed to state hash or tick loop. Golden-NEUTRAL.
+    pub fn genetic_load_stats(&mut self) -> (i64, i64) {
+        let mut q = self.world.query::<&Genome>();
+        let genomes: Vec<_> = q.iter(&self.world).collect();
+        if genomes.is_empty() {
+            return (0, 0);
+        }
+        let sum: i64 = genomes.iter().map(|g| g.genetic_load as i64).sum();
+        let mean = sum / genomes.len() as i64;
+        let max = genomes.iter().map(|g| g.genetic_load as i64).max().unwrap_or(0);
+        (mean, max)
+    }
+
     /// (min_l1, max_l1) L1 brain-weight distance from a reference weight vector across all living
     /// creatures. Probe/calibration helper — not used in the deterministic tick loop or state hash.
     pub fn weight_l1_stats(&mut self, reference: &[i8; BRAIN_WEIGHTS]) -> (i64, i64) {
