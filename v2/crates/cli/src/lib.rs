@@ -106,6 +106,7 @@ pub fn config_with(seed: u64, sim_threads: usize, merge_strategy: MergeStrategy)
         n_layers: 2,
         layer_specs: [L0_SPEC, L1_ORGANICS_SPEC, LayerSpec::default(), LayerSpec::default()],
         thermal_verdict_temps: None,
+        founder_templates: None,
     }
 }
 
@@ -903,6 +904,7 @@ pub fn bench_config(seed: u64, n_founders: u64) -> SimConfig {
         n_layers: 1,
         layer_specs: [L0_SPEC, LayerSpec::default(), LayerSpec::default(), LayerSpec::default()],
         thermal_verdict_temps: None,
+        founder_templates: None,
     }
 }
 

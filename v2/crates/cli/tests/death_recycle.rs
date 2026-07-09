@@ -32,6 +32,7 @@ fn c_config(seed: u64, econ: EconParams, n_founders: u64, founder_energy: i64) -
         n_layers: 2,
         layer_specs: [l0, l1, LayerSpec::default(), LayerSpec::default()],
         thermal_verdict_temps: None,
+        founder_templates: None,
     }
 }
 

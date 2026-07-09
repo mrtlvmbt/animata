@@ -414,56 +414,88 @@ impl Sim {
         // `self.grn_spec`/`self.morphogen_spec` from here on (never `econ.grn`/`econ.morphogen`
         // directly). `GrnSpec` is `Arc`-wrapped for CoW; `MorphogenSpec` is `Copy`, no `Arc` needed.
         // P3-1: initialize ambient-tolerance genes from gate (founder=0 inert until gate is Some).
-        let founder = Genome::founder(config.n_layers)
-            .with_specs(econ.grn.clone().map(Arc::new), econ.morphogen)
-            .with_ambient_tolerance(econ.ambient_tolerance);
-        let has_mineral = econ.mineral_layer.is_some();
-        for i in 0..config.n_founders {
-            // Deterministic scatter across the domain (co-prime strides → spread, no float).
-            let x = ((i.wrapping_mul(7).wrapping_add(3)) % econ.world_dim as u64) as i64;
-            let z = ((i.wrapping_mul(13).wrapping_add(5)) % econ.world_dim as u64) as i64;
-            let p = Vec2Fixed(x, z);
-            // D′-3a: founders get MineralQuota(0) when mineral is active. The quota(0) does NOT
-            // change EnergyLedger.initial: quota=0 contributes nothing to the conserved sum.
-            // Non-dprime configs do NOT spawn MineralQuota → their archetype is unchanged →
-            // byte-identical goldens (no extra entity column, no hash perturbation).
-            // E-1: decode the founder genome once at birth; Ф0 always returns Some.
-            let founder_phenotype = founder.decode(&econ).expect("Ф0 founder decode must succeed");
-            // V-1: `Genome` is no longer `Copy` (heritable `Arc<GrnSpec>`) — each spawn needs its
-            // own clone; the last iteration's clone is cheap (CoW: an `Arc` refcount bump, not a
-            // deep copy — critic F14).
-            if has_mineral {
-                w.spawn((
-                    Position(p),
-                    PositionNext(p),
-                    Velocity::default(),
-                    VelocityNext::default(),
-                    Energy(config.founder_energy),
-                    founder.clone(),
-                    founder_phenotype, // E-1: cached cold phenotype
-                    SpeciesId(0),
-                    Sensors::default(),
-                    Intent::default(),
-                    BrainState::zeroed(),
-                    BrainOutput::zeroed(),
-                    MineralQuota(0),
-                ));
+
+        // ENV-0a'-a0: Multi-template founder seeding (golden-neutral gate).
+        // When founder_templates is None (legacy path, default for all existing configs),
+        // spawn all founders from a single template with SpeciesId(0) — byte-identical behavior.
+        // When founder_templates is Some, spawn from N templates with distinct SpeciesIds 0..N-1,
+        // with counts supplied by the caller (must sum to n_founders, strict validation).
+        let (templates_with_ids, num_templates): (Vec<(Genome, u64, u32)>, usize) =
+            if let Some(ref founder_templates) = config.founder_templates {
+                // Multi-template seeding: validate counts and assign SpeciesIds.
+                let total_count: u64 = founder_templates.iter().map(|(_, count)| count).sum();
+                assert_eq!(
+                    total_count, config.n_founders,
+                    "founder template counts ({}) do not sum to n_founders ({}): \
+                     counts must be exact integer split",
+                    total_count, config.n_founders
+                );
+                let with_ids: Vec<(Genome, u64, u32)> = founder_templates
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, (genome, count))| (genome.clone(), *count, idx as u32))
+                    .collect();
+                (with_ids, founder_templates.len())
             } else {
-                w.spawn((
-                    Position(p),
-                    PositionNext(p),
-                    Velocity::default(),
-                    VelocityNext::default(),
-                    Energy(config.founder_energy),
-                    founder.clone(),
-                    founder_phenotype, // E-1: cached cold phenotype
-                    SpeciesId(0),
-                    Sensors::default(),
-                    Intent::default(),
-                    // Spawn contract (D-Brain-2a): brain buffers start zeroed — same path as a newborn.
-                    BrainState::zeroed(),
-                    BrainOutput::zeroed(),
-                ));
+                // Legacy path: single founder from econ specs, all with SpeciesId(0).
+                // Byte-identical to pre-ENV-0a' behavior.
+                let founder = Genome::founder(config.n_layers)
+                    .with_specs(econ.grn.clone().map(Arc::new), econ.morphogen)
+                    .with_ambient_tolerance(econ.ambient_tolerance);
+                (vec![(founder, config.n_founders, 0)], 1)
+            };
+
+        let has_mineral = econ.mineral_layer.is_some();
+        let mut global_founder_index = 0u64;
+
+        for (template, template_count, species_id) in &templates_with_ids {
+            let template_phenotype = template.decode(&econ).expect("founder template decode must succeed");
+            for _ in 0..*template_count {
+                // Deterministic scatter across the domain (co-prime strides → spread, no float).
+                // Use global_founder_index to maintain deterministic spread across all templates.
+                let x = ((global_founder_index.wrapping_mul(7).wrapping_add(3)) % econ.world_dim as u64) as i64;
+                let z = ((global_founder_index.wrapping_mul(13).wrapping_add(5)) % econ.world_dim as u64) as i64;
+                let p = Vec2Fixed(x, z);
+
+                // D′-3a: founders get MineralQuota(0) when mineral is active. The quota(0) does NOT
+                // change EnergyLedger.initial: quota=0 contributes nothing to the conserved sum.
+                // Non-dprime configs do NOT spawn MineralQuota → their archetype is unchanged →
+                // byte-identical goldens (no extra entity column, no hash perturbation).
+                // E-1: decode the founder genome once at birth; Ф0 always returns Some.
+                if has_mineral {
+                    w.spawn((
+                        Position(p),
+                        PositionNext(p),
+                        Velocity::default(),
+                        VelocityNext::default(),
+                        Energy(config.founder_energy),
+                        template.clone(),
+                        template_phenotype.clone(), // E-1: cached cold phenotype
+                        SpeciesId(*species_id),
+                        Sensors::default(),
+                        Intent::default(),
+                        BrainState::zeroed(),
+                        BrainOutput::zeroed(),
+                        MineralQuota(0),
+                    ));
+                } else {
+                    w.spawn((
+                        Position(p),
+                        PositionNext(p),
+                        Velocity::default(),
+                        VelocityNext::default(),
+                        Energy(config.founder_energy),
+                        template.clone(),
+                        template_phenotype.clone(), // E-1: cached cold phenotype
+                        SpeciesId(*species_id),
+                        Sensors::default(),
+                        Intent::default(),
+                        // Spawn contract (D-Brain-2a): brain buffers start zeroed — same path as a newborn.
+                        BrainState::zeroed(),
+                        BrainOutput::zeroed(),
+                    ));
+                }
+                global_founder_index += 1;
             }
         }
 
@@ -493,8 +525,13 @@ impl Sim {
 
         // SpeciationState lives on the Sim struct (NOT in the ECS world) to avoid allocating an
         // extra bevy entity that would shift the fresh-entity counter and break the golden.
+        // ENV-0a'-a0: initialize with all seeded templates, and set next_id past the highest template id
+        // to avoid SpeciesId collision when speciation occurs later.
         let mut speciation = SpeciationState::default();
-        speciation.refs.insert(SpeciesId(0), founder);
+        speciation.next_id = num_templates as u32; // Allocate next speciation id past template ids
+        for (template, _, species_id) in &templates_with_ids {
+            speciation.refs.insert(SpeciesId(*species_id), template.clone());
+        }
 
         Self {
             world: w,
@@ -1127,6 +1164,7 @@ mod e1_gate_tests {
                 LayerSpec::default(),
             ],
             thermal_verdict_temps: None,
+            founder_templates: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
     }
@@ -1210,6 +1248,7 @@ mod e1_gate_tests {
                 LayerSpec::default(),
             ],
             thermal_verdict_temps: None,
+            founder_templates: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
     }
@@ -1244,6 +1283,7 @@ mod e1_gate_tests {
                 LayerSpec::default(),
             ],
             thermal_verdict_temps: None,
+            founder_templates: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(3, 100_000)), Box::new(StubBrain))
     }
@@ -1374,6 +1414,7 @@ mod e1_gate_tests {
                 LayerSpec::default(),
             ],
             thermal_verdict_temps: None,
+            founder_templates: None,
         };
         Sim::new(config, Box::new(StubWorld), Box::new(StubField::new(2, 100_000)), Box::new(StubBrain))
     }
