@@ -1,8 +1,5 @@
-task: ENVIRONMENT axis (PRIMARY) + GA-LOAD-0 #355 sent back (false done).
-phase: env measuring (long-horizon run) + GA-LOAD-0 rework
-result: ★ GA-LOAD-0 coder gave FALSE done — self-admitted "test compilation signature mismatch, CI will handle it". CI confirmed: v2 sim x86 + v2 golden arm64 FAILED. Cause: coder ran `cargo build --release` (lib/bin only) not `cargo test --no-run` (test crate) per TZ; mutate() gate-param change broke call sites. REJECTED per coder-verification-contract; resumed coder [aa9534ce] with diagnosis: fix ALL call sites, `cargo test --no-run` clean across workspace, confirm golden-neutral (if golden failed on CHECKSUM not compile → real bug, stop). Do NOT merge until clean.
-  ENV diagnosis (dive+web-research): predation IS coevolution-capable but SATURATES to low ESS (combat~2.3, body~3 cells). Root: bounded single-guild DYAD (lit: dyads→ESS, NETWORKS→sustained Red Queen) + low ceilings (combat 32, body 16) + rigid hierarchy + no spatial niches. Faithful fix = ecological NETWORK / escalating Red Queen (raise ceilings, fluid counter-adaptation, resource/competitor roles, spatial niches).
-blocked_on: GA-LOAD-0 rework [aa9534ce] → re-check CI. Long-horizon driver-emergence run 28932402788 [poller b15tjkf7m] (ticks=40000) → confirm saturation.
-next: (1) coder returns → verify cargo test --no-run clean + CI green → merge → cloud ratchet MAP. (2) long-run → confirm saturation crisply. (3) DESIGN env frontier: ecological-network Red Queen (faithful recipe) → critic → CODE (recalibrated discipline: run it).
-context: origin/main 85e3562. GA-LOAD-0 feat/ga-load-0 PR #355 (CI failing, being fixed). animata-pm main 557b576. Issues #354. NOTE: worktree coders clobber this file — restore after.
-updated: 2026-07-08 12:20
+task: #359 ENV-0a'-a1 spatial monopolization
+phase: CI (pass 1 - awaiting golden-arm64 value)
+blocked_on: CI golden-arm64 job output (placeholder → real value pass 2)
+next: Read .ci-report/failed.log for env_frontier_golden drift, update placeholder, push pass 2
+updated: 2026-07-10 16:30

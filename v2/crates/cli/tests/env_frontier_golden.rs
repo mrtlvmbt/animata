@@ -44,7 +44,7 @@ fn env_frontier_sigma_conservation() {
     for _ in 0..TEST_TICK {
         sim_on.step();
     }
-    let total_on = sim_on.field().conserved_total_all();
+    let total_on = sim_on.conserved_field_total_all();
 
     // Run with env_frontier_config OFF (proportional ration, no bonded pre-emption).
     // Clone driver_config but explicitly set env_frontier_config to None.
@@ -54,7 +54,7 @@ fn env_frontier_sigma_conservation() {
     for _ in 0..TEST_TICK {
         sim_off.step();
     }
-    let total_off = sim_off.field().conserved_total_all();
+    let total_off = sim_off.conserved_field_total_all();
 
     // Σ-conservation: both runs must have IDENTICAL total after 500 ticks.
     // The bonded pre-emption mechanism redistributes WHO takes, never the total taken.
