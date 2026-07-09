@@ -62,19 +62,18 @@ fn single_template_legacy_path_byte_identical() {
     // Legacy path: founder_templates = None (default)
     assert!(config.founder_templates.is_none(), "config should default to None");
 
-    let sim = cli::build_sim(config);
+    let mut sim = cli::build_sim(config);
 
-    // Verify t=0 state:
+    // Verify t=0 state using LIVE accessors (founders spawned by build_sim are live immediately):
     // - Population = 100
     // - All with SpeciesId(0)
     // - No other species
-    let telemetry = sim.telemetry();
-    assert_eq!(telemetry.population, 100, "population should be 100");
-    assert_eq!(telemetry.species_count, 1, "should have exactly 1 species (all founders)");
+    let population = sim.population();
+    assert_eq!(population, 100, "population should be 100");
 
-    let census = &telemetry.species_census;
+    let census = sim.species_census();
     assert_eq!(census.len(), 1, "census should have 1 entry");
-    assert_eq!(census[0].0, 0, "the single species should be id 0");
+    assert_eq!(census[0].0.0, 0, "the single species should be id 0");
     assert_eq!(census[0].1, 100, "species 0 should have all 100 founders");
 }
 
