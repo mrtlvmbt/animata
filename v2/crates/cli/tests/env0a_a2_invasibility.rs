@@ -215,7 +215,7 @@ fn env0a_a2_templates_construct_and_decode() {
 /// - Baseline A (retention-OFF, plain driver_config)
 /// - Baseline B (retention-ON, env_frontier_config at each grain)
 ///
-/// Emits greppable MAP lines: ENV-0a-a2p emergence <grain> <seed> retention-<OFF/ON> <pct-mc@mid> <mean-size@mid> <pct-mc@horizon> <mean-size@horizon>
+/// Emits greppable MAP lines: ENV-0a-a2p emergence <grain> <seed> retention-<OFF/ON> <pct-mc@mid> <mean-size@mid> <pop@mid> <pct-mc@end> <mean-size@end> <pop@end>
 #[test]
 #[ignore]  // Cloud-only diagnostic; runs via sim-run.yml env-frontier case
 fn env0a_a2p_emergence_sweep() {
