@@ -23,7 +23,7 @@
 //! No PASS/FAIL verdict; PM interprets density response of N* to diagnose mechanism.
 //! Conservation assertion: footprint cells must sum to zero residual (R15).
 
-use cli::{apply_overrides, build_sim, driver_config};
+use cli::{build_sim, driver_config};
 use sim_core::BODY_SIZE_SCALE;
 
 const DIAGNOSTIC_SEEDS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -243,10 +243,7 @@ fn ext0a_footprint_conservation() {
 
     // Build a sim with footprint ON on a simple driver config.
     let mut cfg = driver_config(1);
-    let mut econ = cfg.econ.clone();
-    apply_overrides(&mut econ, &[("body_footprint".to_string(), "true".to_string())])
-        .expect("body_footprint override must be valid");
-    cfg.econ = econ;
+    cfg.econ.body_footprint = true;
     cfg.n_founders = 10;
 
     let mut sim = build_sim(cfg);
