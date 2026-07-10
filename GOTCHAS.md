@@ -46,3 +46,17 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   in `MEMORY.md`, so recall never surfaces it (observed: `reality-is-existence-proof-never-terminal` had a
   file but no index line) → after every memory Write, add the `MEMORY.md` index line in the same pass; when
   auditing, `grep` each memory filename against `MEMORY.md` to catch orphans.
+
+- **A diagnostic re-implements the formula it is diagnosing, and the two silently disagree** → a test that
+  re-derives `drain(N)`/`net(N)` in its own body with hard-coded constants (observed: `d5_drift.rs` pinned
+  `const SHIFT = 11` while citing `DRIVER_REFUGE_SHIFT`, which is `8`; the sim ran at 8, the comparator at 11,
+  and 7 of 9 grid cells would have reported a false prediction-failure) → **call the public function under
+  study** (`sim_core::refuge_attenuate`) and **read every parameter from the `EconParams` actually handed to
+  `build_sim`**, never from a re-declared literal. Print the effective `(shift, refuge_k, base_hazard,
+  c_coord)` on each output line so a divergence is visible, and pin a table so a constant change fails loudly.
+  A re-implementation can only ever agree with the original by luck.
+
+- **A comment cites a constant by name but states a different value** → treat the citation as unverified until
+  you open the named file (observed: "shift=11 (DRIVER_REFUGE_SHIFT from lib.rs)" vs `lib.rs:377 = 8`) →
+  grep the name, read the line. This is the cheapest fabrication to catch and the most expensive to miss,
+  because a plausible number propagates into pinned predictions and published tables.
