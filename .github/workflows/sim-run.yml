@@ -243,14 +243,15 @@ jobs:
                 cargo test --release -p cli -- dc_diag_size_ceiling --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             env-frontier)
-              # ENV-0a'-a2 (#362) mutual-invasibility measurement harness + grain sweep (spatial cloud gate).
-              # Breed-true harness (evolve_body_size=false, speciation frozen) sweeps patch_grain
-              # over {1,2,4,8,16,32} × seeds {1,2,3} to measure rare-invader trajectories (SpeciesId 1)
-              # and coexistence domain. Emits greppable MAP lines (grain, seed, direction, invader_start/end,
-              # N_opt_baseline_A/B). Analysis offline; no in-code verdict. Checks: run to horizon, counts ≥ 0.
+              # ENV-0a'-a2' (#367) re-instrumented harness: TWO #[ignore] sweeps over patch_grain
+              # {1,2,4,8,16,32} × seeds {1,2,3} at ENV_FRONTIER_TICKS. (a) emergence sweep — %-multicellular
+              # from a unicellular EVOLVING start, retention-OFF vs -ON (the real-goal metric);
+              # (b) invasion sweep — true-rarity (2 fixed invaders) reciprocal invasibility via species_census.
+              # Filter `env0a_a2p` matches BOTH sweeps. Emits greppable `ENV-0a-a2p emergence|invasion ...`
+              # MAP lines. Analysis offline; no in-code verdict. Checks: run to horizon, counts ≥ 0.
               cd v2
               ENV_FRONTIER_TICKS="${{ inputs.ticks }}" \
-                cargo test --release -p cli -- env0a_a2_invasibility_sweep --nocapture --ignored 2>&1 | tee ../"$SUM"
+                cargo test --release -p cli -- env0a_a2p --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
