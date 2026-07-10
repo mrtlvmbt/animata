@@ -33,6 +33,7 @@ on:
           - dc-diag             # DC-DIAG (#351) size-ceiling diagnostic (cap-bound vs driver-bound: base_hazard sweep, max_body_size)
           - d5-drift            # D5-DRIFT (#374) pre-registered diagnostic (drift across plateau vs selection on gradient: refuge_k × base_hazard grid)
           - env-frontier         # ENV-0a'-a2 (#362) mutual-invasibility harness (patch-grain sweep, coexistence domain)
+          - ext-0a               # EXT-0a (#377) footprint harvest diagnostic (density-dependent body-size income, contention)
           - diff-probe           # DIFF-0 (#372) cell-type differentiation probe (T>=2 ever occur under stock driver_config?)
       seed:
         description: "World seed (evo-stats / perf)"
@@ -97,8 +98,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'diff-probe'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient / ga-load / dc-diag / d5-drift / ext-0a / diff-probe
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'ext-0a' || inputs.scenario == 'diff-probe'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -266,6 +267,22 @@ jobs:
               cd v2
               ENV_FRONTIER_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- env0a_a2p --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            ext-0a)
+              # EXT-0a (#377) footprint harvest diagnostic: does non-lethal body-size income gradient emerge
+              # from spatial footprint harvest and between-body contention? Arm A: footprint ON, density
+              # sweep {0.02, 0.05, 0.10} agents/cell, seeds 1..8. Arm B: footprint OFF (baseline, should
+              # show no density-dependent N* shift). Conservation check: R15 residual==0 with footprint ON.
+              # Emits greppable `EXT-0a_a density=... seed=... ...` (Arm A) and `EXT-0a_b` (Arm B) MAP lines.
+              # Analyzes: reads table per (density, seed), checks (a) direction (N* != cap at high density),
+              # (b) density monotonicity (N* shrinks as density rises), (c) contention rate correlation.
+              cd v2
+              EXT0A_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- ext0a_footprint_arm_a --nocapture --ignored 2>&1 | tee ../"$SUM"
+              EXT0A_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- ext0a_footprint_arm_b_control --nocapture --ignored 2>&1 | tee -a ../"$SUM"
+              EXT0A_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- ext0a_footprint_conservation --nocapture 2>&1 | tee -a ../"$SUM"
               ;;
             diff-probe)
               # DIFF-0 (#372) cell-type differentiation substrate probe: does T≥2 (distinct cell types)

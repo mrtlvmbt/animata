@@ -487,18 +487,23 @@ pub fn stage_interactions(
     // P5-D: light itself is now per-cell (depth-attenuated), computed in the apply loop.
     let km_photo: Option<i64> = econ.light.map(|ls| ls.km_photo);
 
-    // 1. Gather: one read per entity (Monod demand). No `conserved_take` yet.
+    // 1. Gather: one or more contestants per entity (Monod demand). No `conserved_take` yet.
     //    Sort key = cell_index * 4 + layer (B-2: layer ∈ 0..4); secondary = entity_bits.
+    //    EXT-0a: when body_footprint=true, an entity emits side² contestants (one per footprint cell,
+    //    where side = g_dev.max(1)), reading each cell's conserved level independently and competing
+    //    under the existing per-cell cap. Each footprint contestant maps to a DISTINCT field cell
+    //    (no self-overlap) due to g_dev ≤ 4 ≪ world_dim, so sort-key uniqueness is preserved.
     struct Contestant {
         cell_layer: usize, // cell_index * 4 + layer — the group key (B-2: layer ∈ 0..4)
         entity_bits: u64,
         entity: Entity,
-        pos: Vec2Fixed,
+        cell_pos: Vec2Fixed,  // EXT-0a: the FOOTPRINT cell (not entity pos) for footprint mode
         layer: usize,
         demand: i64,
         bonded: bool,      // ENV-0a'-a1: true if Σ module_cell_count > 1 (multicellular body)
+        is_footprint: bool,  // EXT-0a: true if this is a footprint contestant (not the entity's anchor)
     }
-    let mut contestants: Vec<Contestant> = q.iter().map(|(e, pos, _g, ph, _)| {
+    let mut contestants: Vec<Contestant> = q.iter().flat_map(|(e, pos, _g, ph, _)| {
         // E-1: read uptake_layer from the cached Phenotype (live consumer of the decode seam).
         // For Ф0: ph.uptake_layer == g.uptake_layer always (1:1 projection). This read proves
         // the seam is live — the field routes through Phenotype, not directly from Genome.
@@ -510,26 +515,89 @@ pub fn stage_interactions(
             "uptake_layer {} >= n_layers {} — must not route light through uptake_layer",
             layer, econ.n_layers
         );
-        let r = field.0.conserved_at(pos.0, layer);
-        let demand = monod_demand(econ.u_max, econ.km, r);
-        let demand = if econ.dol_economy {
-            // DR-0: soma cells scale demand (income ∝ soma). Founder has soma=0 (germ-only body),
-            // so max(soma,1) ensures bootstrap survival at baseline rate; soma≥1 gains income bonus.
-            let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
-                .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
-            demand * soma.max(1)
-        } else { demand };
-        let cell = field.0.cell_index(pos.0);
         // ENV-0a'-a1: cache bonded status (Σ module_cell_count > 1) for phase 3 priority fill.
         let bonded = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>() > 1;
-        Contestant {
-            cell_layer: cell * 4 + layer,
-            entity_bits: e.to_bits(),
-            entity: e,
-            pos: pos.0,
-            layer,
-            demand,
-            bonded,
+
+        // EXT-0a: determine footprint configuration
+        if econ.body_footprint {
+            let side = (ph.graph.g_dev).max(1) as u64;
+            // Debug assertion: body size must equal side² (F7 + F4)
+            let body_size = ph.graph.body_size();
+            debug_assert!(
+                body_size == (side * side) as i64,
+                "body_size {} must equal side²={} (side={})",
+                body_size,
+                side * side,
+                side
+            );
+            // Debug assertion: footprint must not wrap onto itself (F4)
+            debug_assert!(
+                econ.world_dim >= side as i64,
+                "world_dim {} >= side {} guard (wrap prevention)",
+                econ.world_dim,
+                side
+            );
+
+            // Generate footprint cells: block anchored at pos.0, toroidal-wrapped, row-major
+            let mut footprint_contestants = Vec::new();
+            let anchor_x = pos.0.0 as u64;
+            let anchor_z = pos.0.1 as u64;
+            let world_dim = econ.world_dim as u64;
+
+            for row in 0..side {
+                for col in 0..side {
+                    // Toroidal wrap using rem_euclid semantics
+                    let fx = ((anchor_x + col) % world_dim) as i64;
+                    let fz = ((anchor_z + row) % world_dim) as i64;
+                    let fp_pos = Vec2Fixed(fx, fz);
+
+                    // Read this footprint cell's resource level
+                    let r = field.0.conserved_at(fp_pos, layer);
+                    let demand = monod_demand(econ.u_max, econ.km, r);
+                    let demand = if econ.dol_economy {
+                        // DR-0: soma cells scale demand
+                        let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                            .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
+                        demand * soma.max(1)
+                    } else { demand };
+
+                    let footprint_cell = field.0.cell_index(fp_pos);
+                    footprint_contestants.push(Contestant {
+                        cell_layer: footprint_cell * 4 + layer,
+                        entity_bits: e.to_bits(),
+                        entity: e,
+                        cell_pos: fp_pos,
+                        layer,
+                        demand,
+                        bonded,
+                        is_footprint: true,
+                    });
+                }
+            }
+
+            footprint_contestants
+        } else {
+            // Non-footprint mode: single contestant at entity's anchor position
+            let r = field.0.conserved_at(pos.0, layer);
+            let demand = monod_demand(econ.u_max, econ.km, r);
+            let demand = if econ.dol_economy {
+                // DR-0: soma cells scale demand (income ∝ soma). Founder has soma=0 (germ-only body),
+                // so max(soma,1) ensures bootstrap survival at baseline rate; soma≥1 gains income bonus.
+                let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                    .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
+                demand * soma.max(1)
+            } else { demand };
+            let cell = field.0.cell_index(pos.0);
+            vec![Contestant {
+                cell_layer: cell * 4 + layer,
+                entity_bits: e.to_bits(),
+                entity: e,
+                cell_pos: pos.0,
+                layer,
+                demand,
+                bonded,
+                is_footprint: false,
+            }]
         }
     }).collect();
     // Stable order: primary = cell_layer (groups contestants), secondary = entity_bits (tie-break).
@@ -550,7 +618,7 @@ pub fn stage_interactions(
             run_end += 1;
         }
         // Snapshot R_cell once for this run (all contestants share the same cell+layer).
-        let r_cell = field.0.conserved_at(contestants[run_start].pos, contestants[run_start].layer);
+        let r_cell = field.0.conserved_at(contestants[run_start].cell_pos, contestants[run_start].layer);
         // Σ demand over this run.
         let sigma: i64 = contestants[run_start..run_end].iter().map(|c| c.demand).sum();
         if sigma <= r_cell {
@@ -602,8 +670,19 @@ pub fn stage_interactions(
     //    EXACT integers booked here. This is a read-only side-channel — never fed back to any
     //    conserved value or state hash. Non-dprime: photo=0 always → (0, gained) written.
     //    P1-2a: respiratory yield multiplier applied here (if respiratory_pathway exists).
+    //    EXT-0a (F1): per-entity income accumulator — sums over all footprint cells, emitted in
+    //    telemetry as a dedicated field (not via income_record clobber).
+    //    EXT-0a (F6): per-entity contention rate — fraction of footprint cells hitting deficit branch.
     tel.income_record.clear();
     let mut photo_total: i64 = 0;
+
+    // EXT-0a (F1): per-entity income accumulators (income_got maps entity_bits → Σ got over footprint)
+    let mut entity_income_map: DetMap<u64, i64> = DetMap::new();
+    let mut entity_photo_map: DetMap<u64, i64> = DetMap::new();
+
+    // EXT-0a (F6): per-entity contention tracking (entity_bits → (deficit_count, total_cells))
+    let mut entity_contention_map: DetMap<u64, (u64, u64)> = DetMap::new();
+
     for (i, c) in contestants.iter().enumerate() {
         #[cfg(feature = "perf")]
         { wc.field_takes += 1; }
@@ -625,9 +704,10 @@ pub fn stage_interactions(
         // configs → OOB panic + golden drift. Gating on the econ flag (which also gates the gene's
         // mutation) makes enable_oxygen=false a true no-op: resp_eff=256 → combined_eff=metabolism_eff.
         // P2-R-D: save the full RespiredChoice for O₂-consumption gating (acceptor + anoxic).
+        // EXT-0a (F2): read cell_pos for hypoxia/O₂/thermal to use footprint-cell values.
         let respired_choice = if econ.enable_oxygen {
             match &ph.respiratory_pathway {
-                Some(rp) => choose_respiratory_pathway(rp, &*field.0, c.pos, econ.n_layers),
+                Some(rp) => choose_respiratory_pathway(rp, &*field.0, c.cell_pos, econ.n_layers),
                 None => RespiredChoice { acceptor: crate::FieldId::Substrate, eff_x256: 256, anoxic: false },
             }
         } else {
@@ -646,7 +726,7 @@ pub fn stage_interactions(
         let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
         let hypoxia_x1000 = if econ.enable_oxygen && !econ.ablate_hypoxia && ph.respiratory_pathway.is_some() {
             let rp = &ph.respiratory_pathway.as_ref().unwrap();
-            let raw = compute_hypoxia_factor_x1000(rp.primary_layer, &*field.0, c.pos, n_cells, econ.o2_cap, econ.n_layers);
+            let raw = compute_hypoxia_factor_x1000(rp.primary_layer, &*field.0, c.cell_pos, n_cells, econ.o2_cap, econ.n_layers);
             // Calibration scale (dive §4.1 hypoxia_base_x1000): anchor to Ratcliffe −10%. Default 1000 → ×1.0.
             (raw as i64 * econ.hypoxia_base_x1000 / 1000).clamp(0, 1000) as i32
         } else {
@@ -662,25 +742,38 @@ pub fn stage_interactions(
         //   3. thermal_x256 (tolerance penalty on current T)
         //   4. gained = ((got × combined_eff / 256 × kept / 1000) × thermal_x256) / 256
         let thermal_x256 = if econ.ambient_tolerance.is_some() {
-            crate::params::tolerance_penalty(world.0.temp_at(c.pos), g.tol_optimum, g.tol_breadth) as i64
+            crate::params::tolerance_penalty(world.0.temp_at(c.cell_pos), g.tol_optimum, g.tol_breadth) as i64
         } else { 256 };
 
         // Take the FULL grant (original semantics), convert combined_eff to energy, dissipate rest.
         // Conserved (R15): got == gained + lost. Anoxic obligate → resp_eff=0 → gained=0 → starves (R34).
         // P1-2b: gained is now reduced by hypoxia through kept_x1000 factor.
         // P3-2: gained is further reduced by thermal_x256 factor (tolerance penalty).
-        let got = field.0.conserved_take(c.pos, grants[i], c.layer);
+        // EXT-0a (F6): detect deficit (grant < demand) for contention rate tracking.
+        let got = field.0.conserved_take(c.cell_pos, grants[i], c.layer);
         let gained = ((got * combined_eff_x256 / 256 * kept_x1000 / 1000) * thermal_x256) / 256;
         let lost = got - gained;  // metabolic inefficiency + hypoxia shortfall → dissipated (conserved)
         energy.0 += gained;
         ledger.dissipated += lost;
+
+        // EXT-0a (F1): accumulate income per entity (across all footprint cells)
+        *entity_income_map.entry(c.entity_bits).or_insert(0) += got;
+
+        // EXT-0a (F6): track contention (deficit = grant < demand)
+        {
+            let (deficit_count, total_cells) = entity_contention_map.entry(c.entity_bits).or_insert((0, 0));
+            if grants[i] < c.demand {
+                *deficit_count += 1;
+            }
+            *total_cells += 1;
+        }
 
         // P2-R-C: O₂ consumption (respiration). Gated on enable_oxygen && light.is_some().
         // Only when acceptor=O₂ and not anoxic: deb it O₂ proportional to respiratory energy.
         // Stagebit → solve() applies netto (clamp ≥ 0). Deterministic (read-old contract,
         // choose_respiratory_pathway saw O₂@t; consumption booked @t+1).
         if econ.enable_oxygen && econ.light.is_some() && respired_choice.acceptor == crate::FieldId::Oxygen && !respired_choice.anoxic {
-            let cell_idx = field.0.cell_index(c.pos);
+            let cell_idx = field.0.cell_index(c.cell_pos);
             // O₂ consumed proportional to energy gained from respiratory pathway (1:1 stoichiometry for P2).
             let o2_consumed = gained;
             field.0.deposit_conserved(cell_idx, -o2_consumed, crate::FieldId::Oxygen.as_usize());
@@ -691,7 +784,7 @@ pub fn stage_interactions(
         // L=0 at night, so the saving is in COST not income — see expressed_capacity doc).
         // P5-D: compute L(t) per-entity using per-cell height; when enable_photic=false this is
         // identical to the old uniform l_now (byte-identity guarantee).
-        let l_now = crate::params::light_at(econ.light.as_ref(), clock.tick, econ.enable_photic, world.0.height(c.pos.0, c.pos.1));
+        let l_now = crate::params::light_at(econ.light.as_ref(), clock.tick, econ.enable_photic, world.0.height(c.cell_pos.0, c.cell_pos.1));
         let photo = if let Some(km) = km_photo {
             let p = photo_demand(expressed_capacity(g, l_now), km, l_now);
             energy.0 += p;
@@ -701,15 +794,24 @@ pub fn stage_interactions(
             // Production proportional to photo-energy earned (1:1 stoichiometry for P2).
             // Stagebit → solve() applies netto. Day (l_now > 0) → production; night (l_now = 0) → 0.
             if econ.enable_oxygen && econ.light.is_some() {
-                let cell_idx = field.0.cell_index(c.pos);
+                let cell_idx = field.0.cell_index(c.cell_pos);
                 field.0.deposit_conserved(cell_idx, p, crate::FieldId::Oxygen.as_usize());
             }
 
             p
         } else { 0 };
-        // D′-3b: record income split (exact booked integers, read-only, never fed back).
-        tel.income_record.insert(c.entity_bits, (photo, gained));
+
+        // EXT-0a (F1): accumulate photo income per entity
+        *entity_photo_map.entry(c.entity_bits).or_insert(0) += photo;
     }
+
+    // EXT-0a (F1): emit per-entity accumulated income to income_record.
+    // For each entity, store (total_photo, total_got) so telemetry captures per-entity income.
+    for (entity_bits, total_got) in entity_income_map.iter() {
+        let total_photo = entity_photo_map.get(&entity_bits).copied().unwrap_or(0);
+        tel.income_record.insert(*entity_bits, (total_photo, *total_got));
+    }
+
     // D′-1: book photo energy as external source (non-conserved flux, like regen from field.solve()).
     // Uses the ACTUAL per-cell sum Σᵢ photo_energyᵢ — NOT N·U_photo — so the booked source matches
     // exactly the credited energy, leaving residual 0 (R15) even after photo_gain mutates per-cell.
