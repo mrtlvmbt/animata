@@ -347,6 +347,19 @@ pub struct EconParams {
     /// `morphogen_spec.is_some()` in `Genome::mutate`.
     pub evolve_body_size: bool,
 
+    // ── EXT-0b: morphogen cap and step-count as config parameters ────────────────────────────
+    /// Maximum g_dev (developmental grid side length) — the morphogen cap.
+    /// Default 4 (ships with g_dev ≤ 4, byte-identical to main). Swept to 5, 6 in diagnostic scenarios
+    /// (EXT-0b) to test whether body size saturates or settles below the cap.
+    /// Used at the g_dev mutate clamp site (genome.rs:888) — `clamp(1, econ.gdev_cap)`.
+    pub gdev_cap: usize,
+
+    /// Maximum reaction-diffusion steps (morphogen decode compute budget).
+    /// Default 8 (ships with n_dev = 8, byte-identical to main). Paired with g_dev in diagnostic
+    /// scenarios: (4→8, 5→10, 6→12) to satisfy the constraint `n_dev ≥ 2·g_dev − 2`.
+    /// Used in founder specs (cli/src/lib.rs) — replaces hardcoded `n_dev: 8`.
+    pub morphogen_steps: u32,
+
     // ── P3-1: ambient-tolerance thermal niche (heritable tol_optimum, tol_breadth) ───────────
     /// Ambient-tolerance specification (P3-1). `Some` enables thermal-tolerance genes
     /// (`tol_optimum`, `tol_breadth`) with mutation active and metabolic penalty applied.
@@ -679,6 +692,9 @@ impl Default for EconParams {
             // V-4: body-size axis OFF by default — false for all existing configs (driver_config
             // opts in explicitly).
             evolve_body_size: false,
+            // EXT-0b: morphogen cap and step-count. Defaults are shipped values, byte-identical to main.
+            gdev_cap: 4,           // default morphogen cap; swept to 5, 6 in EXT-0b diagnostic
+            morphogen_steps: 8,    // default reaction-diffusion steps; paired (4→8, 5→10, 6→12) in EXT-0b
             // P3-1: ambient-tolerance thermal niche OFF by default — None for all 6 existing configs.
             ambient_tolerance: None,
             // P4/SL-1: settling-selection OFF by default — None for all 6 existing configs.
