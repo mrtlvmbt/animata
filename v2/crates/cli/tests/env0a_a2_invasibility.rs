@@ -143,41 +143,90 @@ fn env0a_a2_templates_construct_and_decode() {
     );
 }
 
-/// Non-ignored smoke test: breed-true config + multi-template seeding is runnable (catches F1 panic).
-/// Verifies that build_sim(env_frontier_invasibility_config + founder_templates) does NOT panic
-/// on the predation assertion: the assertion was relaxed to accept founder_templates as a source
-/// of size variance (in addition to evolve_body_size). This test proves the relaxation works (CI can run it).
+/// Non-ignored smoke test: all 4 config paths used in env0a_a2_invasibility_sweep are runnable.
+/// Extends coverage to catch panics from any config shape: Baseline A/B (port-check) + Invasion dir1/dir2.
+/// Each path must step ~20 ticks, assert population > 0, and NOT panic on predation/build_sim assertions.
+/// This is the CI gate for the entire harness (the #[ignore] sweep lives in the cloud).
 #[test]
 fn env0a_a2_breedtrue_config_is_runnable() {
+    use cli::driver_config;
+
     let n_layers = 2;
     let unicell = make_unicell_template(n_layers);
     let multicell = make_multicell_template(n_layers);
 
     let patch_grain = 4i64;
     let seed = 42u64;
+    let n_founders = 100;
 
-    // Construct breed-true config with predation (hazard from driver_config)
-    let mut config = cli::env_frontier_invasibility_config(seed, patch_grain);
-    config.n_founders = 100;
-    config.founder_templates = Some(vec![
+    // === Config 1: Baseline A (retention-OFF, plain driver_config) ===
+    // Driver config has evolve_body_size=true and predation, so assertion always passes.
+    let config_baseline_a = driver_config(seed);
+    let mut sim_baseline_a = cli::build_sim(config_baseline_a);
+    for _ in 0..20 {
+        sim_baseline_a.step();
+    }
+    let pop_a = sim_baseline_a.population();
+    assert!(
+        pop_a > 0,
+        "Baseline A population must be > 0 after 20 steps (got {})",
+        pop_a
+    );
+
+    // === Config 2: Baseline B (retention-ON, EVOLVING) ===
+    // Baseline B must be EVOLVING (single genotype, size evolves under the mechanic at this grain).
+    // Build from driver_config(seed) + env_frontier_config; keep founder_templates=None.
+    // This allows evolve_body_size=true, satisfying the predation assertion.
+    let mut config_baseline_b = driver_config(seed);
+    config_baseline_b.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain });
+    // Note: baselines EVOLVE size (N_opt = evolved optimum); only invasion runs freeze size (breed-true).
+    let mut sim_baseline_b = cli::build_sim(config_baseline_b);
+    for _ in 0..20 {
+        sim_baseline_b.step();
+    }
+    let pop_b = sim_baseline_b.population();
+    assert!(
+        pop_b > 0,
+        "Baseline B population must be > 0 after 20 steps (got {})",
+        pop_b
+    );
+
+    // === Config 3: Invasion direction 1 (resident=multicell, invader=unicell) ===
+    // Breed-true with multi-template seeding; founder_templates.is_some() provides size variance.
+    let mut config_inv_dir1 = cli::env_frontier_invasibility_config(seed, patch_grain);
+    config_inv_dir1.n_founders = n_founders;
+    config_inv_dir1.founder_templates = Some(vec![
         (multicell.clone(), 90),
         (unicell.clone(), 10),
     ]);
-
-    // This should NOT panic on the predation assertion. The assertion was relaxed to accept
-    // founder_templates.is_some() as a source of size variance (multi-template seeding creates
-    // variance: N=1 and N=4). If the assertion is broken, this line panics and the test fails.
-    let mut sim = cli::build_sim(config);
-
-    // Quick smoke: step a few ticks, verify population doesn't collapse
+    let mut sim_inv_dir1 = cli::build_sim(config_inv_dir1);
     for _ in 0..20 {
-        sim.step();
+        sim_inv_dir1.step();
     }
-    let final_pop = sim.population();
+    let pop_inv_dir1 = sim_inv_dir1.population();
     assert!(
-        final_pop > 0,
-        "population must remain positive after 20 steps (got {})",
-        final_pop
+        pop_inv_dir1 > 0,
+        "Invasion dir1 population must be > 0 after 20 steps (got {})",
+        pop_inv_dir1
+    );
+
+    // === Config 4: Invasion direction 2 (resident=unicell, invader=multicell) ===
+    // Breed-true with multi-template seeding; founder_templates.is_some() provides size variance.
+    let mut config_inv_dir2 = cli::env_frontier_invasibility_config(seed, patch_grain);
+    config_inv_dir2.n_founders = n_founders;
+    config_inv_dir2.founder_templates = Some(vec![
+        (unicell.clone(), 90),
+        (multicell.clone(), 10),
+    ]);
+    let mut sim_inv_dir2 = cli::build_sim(config_inv_dir2);
+    for _ in 0..20 {
+        sim_inv_dir2.step();
+    }
+    let pop_inv_dir2 = sim_inv_dir2.population();
+    assert!(
+        pop_inv_dir2 > 0,
+        "Invasion dir2 population must be > 0 after 20 steps (got {})",
+        pop_inv_dir2
     );
 }
 
@@ -217,10 +266,13 @@ fn env0a_a2_invasibility_sweep() {
             // Structural assert: N_opt must be >= 0
             assert!(n_opt_a >= 0, "baseline A n_opt must be >= 0");
 
-            // === Port-check Baseline B: retention-ON at current grain (env_frontier_config) ===
-            let mut config_baseline_b = cli::env_frontier_invasibility_config(seed, patch_grain);
-            // Disable templates for baseline (test the mechanic alone)
-            config_baseline_b.founder_templates = None;
+            // === Port-check Baseline B: retention-ON at current grain (EVOLVING) ===
+            // Baseline B must be EVOLVING (single genotype, size evolves under the mechanic at this grain).
+            // Build from driver_config(seed) + env_frontier_config; keep founder_templates=None.
+            // This allows evolve_body_size=true, satisfying the predation assertion (not breed-true like invasion runs).
+            let mut config_baseline_b = driver_config(seed);
+            config_baseline_b.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain });
+            // Note: baselines EVOLVE size (N_opt = evolved optimum); only invasion runs freeze size (breed-true).
             let mut sim_baseline_b = cli::build_sim(config_baseline_b);
             for _ in 0..horizon_ticks {
                 sim_baseline_b.step();
