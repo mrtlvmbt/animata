@@ -1,9 +1,7 @@
 //! D5-DRIFT: is D-5's ~60% multicellularity drift across a neutral plateau, or selection on a gradient?
 //!
 //! Pre-registered diagnostic. The question is whether mean body size tracks the computed argmax of
-//! net(N) = -drain(N) - c_coord*N, where:
-//!   drain(N) = base_hazard * 2^shift / (2^shift + refuge_k * N)
-//!   c_coord = 1 (shipped)
+//! net(N) = -drain(N) - c_coord*N, where drain(N) is computed via the shipped sim_core::refuge_attenuate().
 //!
 //! At D-5 (k=128, base=10), net is **flat on [1,5]**, so its ~60% multicellularity is drift across
 //! a neutral plateau, not selection strength. But a **size gradient does exist** at k=128 as base
@@ -11,8 +9,8 @@
 //! where a gradient could ever appear **has never been run**.
 //!
 //! **Arm A:** full grid: refuge_k ∈ {2, 32, 128} × base_hazard ∈ {10, 20, 40} × seeds 1..8.
-//! Ticks: 8000. Report: per-cell pop@end, mean_cells, max_cells, mc_frac, body-size histogram (N=1..16),
-//! and the computed argmax set (which N values maximize net(N)).
+//! Ticks: 8000. Report: per-cell pop@end, shift, refuge_k, base_hazard, c_coord, mean_cells, max_cells,
+//! mc_frac, body-size histogram (N=1..16), and the computed argmax set (which N values maximize net(N)).
 //!
 //! **Arm B:** founder control — mspec.g_dev ∈ {1, 2} at k=128, base ∈ {10, 20}, seeds 1..8.
 //! Ticks: 8000. Same report format. The two arms differ in **exactly one factor** (founder body size).
@@ -23,45 +21,37 @@
 //! **Golden-neutral:** no shipped config, constant or default may change. DRIVER_BASE_HAZARD and
 //! DRIVER_REFUGE_K stay untouched. The 3 exact-golden tests must remain green.
 //!
-//! ### Pre-registered predictions (pin as a comment BEFORE the first run)
+//! ### Pre-registered predictions (computed at DRIVER_REFUGE_SHIFT=8, c_coord=1 — shipped values)
 //!
-//! | refuge_k | base_hazard | argmax | predicted mean | observed |
-//! |---|---|---|---|---|
-//! | 128 | 10 | {1..5} | ~3.0 | **3.3** (D-5 landmark) |
-//! | 128 | 20 | {4,5} | ~4.5 | — |
-//! | 128 | 40 | {7} | ~7.0 | — |
-//! | 32 | 10 | {1} | ~1.0 | — |
-//! | 32 | 20 | {3..7} | ~5.0 | — |
-//! | 2 | 10 | {1} | ~1.0 | **1.2** (DC-DIAG) |
+//! | refuge_k | base_hazard | argmax | predicted mean |
+//! |---|---|---|---|
+//! | 128 | 10 | {1..5} | ~3.0 |
+//! | 128 | 20 | {4,5} | ~4.5 |
+//! | 128 | 40 | {7} | ~7.0 |
+//! | 32 | 10 | {1} | ~1.0 |
+//! | 32 | 20 | {3..7} | ~5.0 |
+//! | 2 | 10 | {1} | ~1.0 |
 
 use cli::{apply_overrides, build_sim, driver_config};
-use sim_core::BODY_SIZE_SCALE;
+use sim_core::{refuge_attenuate, BODY_SIZE_SCALE};
 
 const DIAGNOSTIC_SEEDS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const DEFAULT_TICKS: u64 = 8000;
+const MAX_N: i64 = 16;
 
-/// Compute argmax of net(N) = -drain(N) - c_coord*N for a given refuge_k and base_hazard.
+/// Compute argmax of net(N) = -drain(N) - c_coord*N using the shipped refuge_attenuate function.
+/// Takes shift and c_coord from the actual config so the comparator cannot drift from the sim.
 /// Returns a string representation of the set of N values that maximize net(N).
-/// shift=11 (DRIVER_REFUGE_SHIFT from lib.rs).
-fn compute_argmax_set(base_hazard: i64, refuge_k: i32) -> String {
-    const SHIFT: u32 = 11;
-    const C_COORD: i64 = 1;
-    const MAX_N: i64 = 16;
-
+fn compute_argmax_set(base_hazard: i64, refuge_k: i32, shift: u32, c_coord: i64) -> String {
     let mut max_net = i64::MIN;
     let mut argmax_set = Vec::new();
 
     for n in 1..=MAX_N {
-        // drain(N) = base_hazard * 2^shift / (2^shift + refuge_k * N)
-        let shift_val: i128 = (1i128) << SHIFT;
-        let k = refuge_k as i128;
-        let numer: i128 = (base_hazard as i128) * shift_val;
-        let denom: i128 = shift_val + k * (n as i128);
-        let denom = denom.max(1);
-        let drain = (numer / denom) as i64;
+        // drain(N) = refuge_attenuate(base_hazard, n, shift, refuge_k) — the EXACT function the sim uses
+        let drain = refuge_attenuate(base_hazard, n, shift, refuge_k);
 
         // net(N) = -drain - c_coord * N
-        let net = -drain - C_COORD * n;
+        let net = -drain - c_coord * n;
 
         if net > max_net {
             max_net = net;
@@ -133,9 +123,6 @@ fn d5_drift_arm_a() {
 
     for &k in &refuge_ks {
         for &base_hazard in &base_hazards {
-            let argmax_str = compute_argmax_set(base_hazard, k);
-            println!("Arm A (k={}, base={}) argmax={}", k, base_hazard, argmax_str);
-
             for &seed in &DIAGNOSTIC_SEEDS {
                 // Apply refuge_k and base_hazard overrides to driver_config.
                 let mut cfg = driver_config(seed);
@@ -149,6 +136,30 @@ fn d5_drift_arm_a() {
                 apply_overrides(&mut econ, &overrides)
                     .expect("refuge_k and base_hazard overrides must be valid");
                 cfg.econ = econ;
+
+                // Extract the effective shift and c_coord from the config
+                // (the EXACT values the sim will use)
+                let shift = cfg.econ
+                    .predation
+                    .as_ref()
+                    .and_then(|p| p.size_refuge.as_ref())
+                    .map(|r| r.shift)
+                    .unwrap_or(8);
+                let c_coord = cfg.econ.c_coord;
+                let effective_k = cfg.econ
+                    .predation
+                    .as_ref()
+                    .and_then(|p| p.size_refuge.as_ref())
+                    .map(|r| r.refuge_k)
+                    .unwrap_or(k);
+                let effective_base = cfg.econ
+                    .predation
+                    .as_ref()
+                    .map(|p| p.base_hazard)
+                    .unwrap_or(base_hazard);
+
+                // Compute argmax AFTER applying overrides, using the actual config values
+                let argmax_str = compute_argmax_set(effective_base, effective_k, shift, c_coord);
 
                 // Run simulation to horizon.
                 let mut sim = build_sim(cfg);
@@ -164,11 +175,11 @@ fn d5_drift_arm_a() {
                 let pop = tel.population;
 
                 if pop == 0 {
-                    // Extinction: emit special report.
+                    // Extinction: emit special report (exclude from aggregates).
                     let histogram = compute_histogram(&[]);
                     println!(
-                        "d5_drift a k={:<6} bh={:<4} seed={:<2} pop=0 EXTINCT argmax={} hist={}",
-                        k, base_hazard, seed, argmax_str, histogram
+                        "d5_drift_a k={} base_hazard={} seed={} shift={} refuge_k={} c_coord={} pop=0 EXTINCT argmax={} hist={}",
+                        k, base_hazard, seed, shift, effective_k, c_coord, argmax_str, histogram
                     );
                 } else {
                     let mean_cells = tel.mean_body_size as f64 / BODY_SIZE_SCALE as f64;
@@ -190,15 +201,14 @@ fn d5_drift_arm_a() {
                     );
 
                     println!(
-                        "d5_drift a k={:<6} bh={:<4} seed={:<2} pop={:<6} mean={:>7.2} max={:>7.2} mc={:>6.1}% argmax={} hist={}",
-                        k, base_hazard, seed, pop, mean_cells, max_cells, mc_frac_pct, argmax_str, histogram
+                        "d5_drift_a k={} base_hazard={} seed={} shift={} refuge_k={} c_coord={} pop={} mean={:.2} max={:.2} mc={:.1}% argmax={} hist={}",
+                        k, base_hazard, seed, shift, effective_k, c_coord, pop, mean_cells, max_cells, mc_frac_pct, argmax_str, histogram
                     );
                 }
             }
         }
     }
 
-    println!("{}", "-".repeat(150));
     println!("D5-DRIFT ARM A complete. Analysis is PM's; no outcome verdict here.");
 }
 
@@ -226,28 +236,44 @@ fn d5_drift_arm_b() {
 
     for &g_dev in &g_devs {
         for &base_hazard in &base_hazards {
-            let argmax_str = compute_argmax_set(base_hazard, K);
-            println!(
-                "Arm B (g_dev={}, base={}, k=128) argmax={}",
-                g_dev, base_hazard, argmax_str
-            );
-
             for &seed in &DIAGNOSTIC_SEEDS {
-                // Apply base_hazard override to driver_config and ALSO override g_dev.
+                // Apply base_hazard override to driver_config
                 let mut cfg = driver_config(seed);
                 let mut econ = cfg.econ.clone();
 
-                let overrides =
-                    vec![("base_hazard".to_string(), base_hazard.to_string())];
+                let overrides = vec![("base_hazard".to_string(), base_hazard.to_string())];
 
                 apply_overrides(&mut econ, &overrides)
                     .expect("base_hazard override must be valid");
                 cfg.econ = econ;
 
-                // Override g_dev (founder body size) in the morphogen spec.
+                // Override g_dev (founder body size) in the morphogen spec — EXACTLY ONE factor differs from Arm A
                 if let Some(mspec) = cfg.econ.morphogen.as_mut() {
                     mspec.g_dev = g_dev;
                 }
+
+                // Extract the effective shift and c_coord from the config
+                let shift = cfg.econ
+                    .predation
+                    .as_ref()
+                    .and_then(|p| p.size_refuge.as_ref())
+                    .map(|r| r.shift)
+                    .unwrap_or(8);
+                let c_coord = cfg.econ.c_coord;
+                let effective_k = cfg.econ
+                    .predation
+                    .as_ref()
+                    .and_then(|p| p.size_refuge.as_ref())
+                    .map(|r| r.refuge_k)
+                    .unwrap_or(K);
+                let effective_base = cfg.econ
+                    .predation
+                    .as_ref()
+                    .map(|p| p.base_hazard)
+                    .unwrap_or(base_hazard);
+
+                // Compute argmax AFTER applying overrides, using the actual config values
+                let argmax_str = compute_argmax_set(effective_base, effective_k, shift, c_coord);
 
                 // Run simulation to horizon.
                 let mut sim = build_sim(cfg);
@@ -263,11 +289,11 @@ fn d5_drift_arm_b() {
                 let pop = tel.population;
 
                 if pop == 0 {
-                    // Extinction: emit special report.
+                    // Extinction: emit special report (exclude from aggregates).
                     let histogram = compute_histogram(&[]);
                     println!(
-                        "d5_drift b g_dev={:<6} bh={:<4} seed={:<2} EXTINCT argmax={} hist={}",
-                        g_dev, base_hazard, seed, argmax_str, histogram
+                        "d5_drift_b g_dev={} base_hazard={} seed={} shift={} refuge_k={} c_coord={} pop=0 EXTINCT argmax={} hist={}",
+                        g_dev, base_hazard, seed, shift, effective_k, c_coord, argmax_str, histogram
                     );
                 } else {
                     let mean_cells = tel.mean_body_size as f64 / BODY_SIZE_SCALE as f64;
@@ -289,14 +315,41 @@ fn d5_drift_arm_b() {
                     );
 
                     println!(
-                        "d5_drift b g_dev={:<6} bh={:<4} seed={:<2} mean={:>7.2} max={:>7.2} mc={:>6.1}% argmax={} hist={}",
-                        g_dev, base_hazard, seed, mean_cells, max_cells, mc_frac_pct, argmax_str, histogram
+                        "d5_drift_b g_dev={} base_hazard={} seed={} shift={} refuge_k={} c_coord={} pop={} mean={:.2} max={:.2} mc={:.1}% argmax={} hist={}",
+                        g_dev, base_hazard, seed, shift, effective_k, c_coord, pop, mean_cells, max_cells, mc_frac_pct, argmax_str, histogram
                     );
                 }
             }
         }
     }
 
-    println!("{}", "-".repeat(150));
     println!("D5-DRIFT ARM B complete. Analysis is PM's; no outcome verdict here.");
+}
+
+/// Verification: assert compute_argmax_set agrees with the pre-registered table for shift=8, c_coord=1.
+/// If DRIVER_REFUGE_SHIFT or DRIVER_C_COORD change, this test must be updated and the predictions re-certified.
+#[test]
+fn d5_drift_verify_comparator() {
+    const SHIFT: u32 = 8; // DRIVER_REFUGE_SHIFT (shipped value)
+    const C_COORD: i64 = 1; // shipped value
+
+    // Pre-registered predictions (computed at SHIFT=8, C_COORD=1)
+    let predictions = vec![
+        (128i32, 10i64, "{1..5}"),
+        (128, 20, "{4,5}"),
+        (128, 40, "{7}"),
+        (32, 10, "{1}"),
+        (32, 20, "{3..7}"),
+        (2, 10, "{1}"),
+    ];
+
+    for (refuge_k, base_hazard, expected_argmax) in predictions {
+        let computed = compute_argmax_set(base_hazard, refuge_k, SHIFT, C_COORD);
+        assert_eq!(
+            computed, expected_argmax,
+            "argmax mismatch for refuge_k={}, base_hazard={}: computed={}, expected={}",
+            refuge_k, base_hazard, computed, expected_argmax
+        );
+    }
+    println!("✓ compute_argmax_set verified against pre-registered table (SHIFT={}, C_COORD={})", SHIFT, C_COORD);
 }
