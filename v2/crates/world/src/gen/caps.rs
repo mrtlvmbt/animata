@@ -56,6 +56,7 @@ use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::drainage::is_river;
 use crate::gen::erosion::erode;
+use crate::gen::height::height_at;
 use crate::gen::material::MaterialId;
 use crate::gen::moisture::moisture_at;
 
@@ -105,6 +106,16 @@ const FERTILE_MOISTURE_THRESHOLD: i64 = 400;
 /// 0–5 units — a naive large threshold would never fire, the same lesson W-4's `REPOSE_THRESHOLD`
 /// recalibration already learned).
 const ROCK_SLOPE_THRESHOLD: i64 = 4;
+
+/// W-7: Spatial patchiness parameters for resource-cap heterogeneity (substrate-side spatial
+/// modulation, decorrelated from height via XOR salt — same pattern as `RESISTANCE_SALT` in
+/// erosion.rs).
+const PATCH_SEED_SALT: u64 = 0x5041_5443_484E_4553; // "PATCHNES" (ASCII, folded)
+/// Symmetric multiplicative scale range for patchiness: [192, 320] centered on 256.
+/// Maps to 0.75x–1.25x modulation, mean-neutral in the factor (integer clamp may skew slightly).
+const PATCH_SCALE_MIN: i64 = 192;
+const PATCH_SCALE_MAX: i64 = 320;
+const PATCH_SCALE_CENTER: i64 = 256;
 
 /// Azonal edaphic override: a fixed, documented INTEGER PRIORITY CASCADE (deterministic, no
 /// `HashMap` iteration) over EXPLICIT signals — never re-derives them internally, so the caller
@@ -206,6 +217,18 @@ pub fn oxygen_cap_from(biome: FinalBiome) -> i64 {
     oxygen_base_cap(biome).clamp(0, CAP_MAX)
 }
 
+/// W-7: Spatial patchiness multiplicative scale at `(x, z)` — a decorrelated integer noise field
+/// (via `height_at` on salted seed) normalized to `[PATCH_SCALE_MIN, PATCH_SCALE_MAX]`, symmetric
+/// around `PATCH_SCALE_CENTER` (256). Used to modulate per-cell base caps for substrate-side spatial
+/// heterogeneity (ecology can evolve genuine spatial niches). Pure function of `(x, z, seed, hmax)`.
+pub fn patchiness_at(x: i64, z: i64, seed: u64, hmax: i64) -> i64 {
+    let raw = height_at(x, z, seed ^ PATCH_SEED_SALT, hmax);
+    // Map [0, hmax] → [PATCH_SCALE_MIN, PATCH_SCALE_MAX]
+    // Symmetric around PATCH_SCALE_CENTER: min=192, center=256, max=320
+    let range = PATCH_SCALE_MAX - PATCH_SCALE_MIN; // 128
+    PATCH_SCALE_MIN + (raw * range) / hmax
+}
+
 /// The full W-5 output over a `dim × dim` grid (mirrors W-3/W-4's state shape, critic F5): the
 /// POST-erosion `height` (W-6's `ProcgenWorld` needs this for `WorldView::height`/`is_solid` —
 /// added here rather than having W-6 re-run `erode` a second time), the final post-override biome,
@@ -223,8 +246,10 @@ pub struct WorldFields {
 
 /// Sample `erode(seed, hmax, dim)` (W-4) and classify the FINAL biome + caps per cell: zonal biome
 /// on the post-erosion surface (via `climate_from_height` + `biome_at`) → azonal override (via
-/// moisture/material/slope/is_river) → `caps_from`. Pure function of `(seed, hmax, dim)` — no
-/// RNG-of-clock, no thread-dependence, no global mutable state.
+/// moisture/material/slope/is_river) → `caps_from` → **W-7 spatial patchiness modulation**. Pure
+/// function of `(seed, hmax, dim)` — no RNG-of-clock, no thread-dependence, no global mutable state.
+/// Final caps are spatially heterogeneous (autocorrelated neighbors) to enable ecology's evolution
+/// of genuine spatial niches.
 pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
     let erosion = erode(seed, hmax, dim);
     let n = dim * dim;
@@ -252,7 +277,14 @@ pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
 
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
             final_biome.push(final_b);
-            caps[idx] = caps_from(final_b, moisture, material);
+            let cap_base = caps_from(final_b, moisture, material);
+
+            // W-7: Apply spatial patchiness modulation (substrate-side heterogeneity).
+            // Modulate the base cap by a spatially-coherent factor: cap_modulated = clamp((cap_base * patch_scale + 128) / 256, 0, CAP_MAX)
+            // The +128 term implements round-half (removes floor bias); symmetric range [192, 320] centered on 256.
+            let patch_scale = patchiness_at(x as i64, z as i64, seed, hmax);
+            let cap_modulated = ((cap_base * patch_scale + 128) / 256).clamp(0, CAP_MAX);
+            caps[idx] = cap_modulated;
         }
     }
 
@@ -413,6 +445,136 @@ mod tests {
         for &(idx, exp_biome, exp_cap) in CASES {
             assert_eq!(fields.final_biome[idx], exp_biome, "golden drift: final_biome[{idx}]");
             assert_eq!(fields.caps[idx], exp_cap, "golden drift: caps[{idx}]");
+        }
+    }
+
+    // ── W-7 patchiness ──────────────────────────────────────────────────────────────────────────
+
+    /// W-7: patchiness_at returns values in the documented symmetric range [PATCH_SCALE_MIN, PATCH_SCALE_MAX].
+    #[test]
+    fn patchiness_at_is_bounded_to_patch_scale_range() {
+        for x in -20..20i64 {
+            for z in -20..20i64 {
+                let patch_scale = patchiness_at(x, z, SEED, HMAX);
+                assert!(
+                    (PATCH_SCALE_MIN..=PATCH_SCALE_MAX).contains(&patch_scale),
+                    "patchiness_at({x},{z})={patch_scale} out of [{PATCH_SCALE_MIN},{PATCH_SCALE_MAX}]"
+                );
+            }
+        }
+    }
+
+    /// W-7: patchiness_at is deterministic across repeated calls with identical inputs.
+    #[test]
+    fn patchiness_at_is_deterministic_across_repeated_calls() {
+        for &(x, z) in &[(0i64, 0i64), (5, -3), (127, 256)] {
+            let a = patchiness_at(x, z, SEED, HMAX);
+            let b = patchiness_at(x, z, SEED, HMAX);
+            assert_eq!(a, b, "patchiness_at({x},{z}) must be byte-identical across repeated calls");
+        }
+    }
+
+    /// W-7: spatial autocorrelation — neighbors' patchiness values should be more similar to each
+    /// other than to random values (Moran's I > 0). On a 32×32 grid, compute correlation between
+    /// neighbor pairs vs. random pairs; report must show positive correlation.
+    #[test]
+    fn patchiness_field_has_positive_spatial_autocorrelation() {
+        const DIM: usize = 32;
+        let mut patch_field = vec![0i64; DIM * DIM];
+        for z in 0..DIM {
+            for x in 0..DIM {
+                patch_field[z * DIM + x] = patchiness_at(x as i64, z as i64, SEED, HMAX);
+            }
+        }
+
+        // Compute mean neighbor correlation: for each interior cell, measure similarity to its 4-neighbors.
+        let mut neighbor_diffs = Vec::new();
+        for z in 1..DIM - 1 {
+            for x in 1..DIM - 1 {
+                let idx = z * DIM + x;
+                let center = patch_field[idx];
+                // 4-neighbors
+                for &(dx, dz) in &[(0, -1), (1, 0), (0, 1), (-1, 0)] {
+                    let nx = ((x as i64) + dx) as usize;
+                    let nz = ((z as i64) + dz) as usize;
+                    let nidx = nz * DIM + nx;
+                    neighbor_diffs.push((center - patch_field[nidx]).abs());
+                }
+            }
+        }
+
+        // Compute mean difference between neighbors.
+        let neighbor_mean_diff: i64 = neighbor_diffs.iter().sum::<i64>() / (neighbor_diffs.len() as i64).max(1);
+
+        // Compute mean difference between random non-neighbor pairs.
+        let mut random_diffs = Vec::new();
+        for z in 1..DIM - 1 {
+            for x in 1..DIM - 1 {
+                let idx = z * DIM + x;
+                let center = patch_field[idx];
+                // Sample a distant cell (far enough to not be a neighbor or second-order neighbor).
+                let dist_x = ((x + 16) % DIM) as i64;
+                let dist_z = ((z + 16) % DIM) as i64;
+                let rand_idx = (dist_z as usize) * DIM + (dist_x as usize);
+                random_diffs.push((center - patch_field[rand_idx]).abs());
+            }
+        }
+
+        let random_mean_diff: i64 = random_diffs.iter().sum::<i64>() / (random_diffs.len() as i64).max(1);
+
+        // Autocorrelation is positive if neighbors are MORE similar (smaller diff) than random.
+        assert!(
+            neighbor_mean_diff < random_mean_diff,
+            "Spatial autocorrelation FAILED: neighbor_mean_diff={} >= random_mean_diff={} (neighbors should be more similar)",
+            neighbor_mean_diff,
+            random_mean_diff
+        );
+    }
+
+    /// W-7: Metric verification on prod-scale grid (64×64). Compute and report MEAN, MEDIAN, and
+    /// clamp incidence (% cells hitting CAP_MAX) for the MODULATED caps field (the actual sim quantity).
+    /// This verifies no hidden structural issues and tracks mean supply for economy re-measure gate.
+    #[test]
+    #[ignore] // Informational test; run explicitly to measure metrics
+    fn patchiness_prod_grid_metrics() {
+        const DIM: usize = 64;
+        const PROD_SEED: u64 = 0xA11A_2A11;
+        const PROD_HMAX: i64 = 200;
+
+        // Compute full classify_and_caps on prod grid.
+        let fields = classify_and_caps(PROD_SEED, PROD_HMAX, DIM);
+
+        // Collect all caps into a sorted vec for median computation.
+        let mut all_caps = fields.caps.clone();
+        all_caps.sort_unstable();
+
+        let mean_cap: i64 = all_caps.iter().sum::<i64>() / (all_caps.len() as i64).max(1);
+        let median_cap = all_caps[all_caps.len() / 2];
+        let max_cap = *all_caps.iter().max().unwrap_or(&0);
+        let min_cap = *all_caps.iter().min().unwrap_or(&0);
+
+        // Count clamp incidence.
+        let clamp_max_count = all_caps.iter().filter(|&&c| c == CAP_MAX).count();
+        let clamp_min_count = all_caps.iter().filter(|&&c| c == 0).count();
+        let clamp_max_pct = (clamp_max_count as f64 / all_caps.len() as f64) * 100.0;
+        let clamp_min_pct = (clamp_min_count as f64 / all_caps.len() as f64) * 100.0;
+
+        eprintln!();
+        eprintln!("=== W-7 Patchiness Metrics (64×64 prod grid) ===");
+        eprintln!("MEAN cap:         {}", mean_cap);
+        eprintln!("MEDIAN cap:       {}", median_cap);
+        eprintln!("MIN cap:          {}", min_cap);
+        eprintln!("MAX cap:          {}", max_cap);
+        eprintln!("Cells at CAP_MAX: {} ({:.1}%)", clamp_max_count, clamp_max_pct);
+        eprintln!("Cells at 0:       {} ({:.1}%)", clamp_min_count, clamp_min_pct);
+        eprintln!();
+
+        // Sanity checks (not assertions, informational only).
+        if (mean_cap as f64 - 46.0).abs() > 46.0 * 0.05 {
+            eprintln!("⚠  MEAN cap drifted >±5% from baseline 46 (current: {})", mean_cap);
+        }
+        if clamp_max_pct > 15.0 {
+            eprintln!("⚠  Clamp incidence at CAP_MAX exceeds 15% (current: {:.1}%)", clamp_max_pct);
         }
     }
 }
