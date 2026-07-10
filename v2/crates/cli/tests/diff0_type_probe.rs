@@ -15,10 +15,12 @@
 //!
 //! **Output format (greppable MAP lines):**
 //! ```
-//! DIFF0 hist <seed> <tick> T=<t>,N=<n>:<count> …
-//! DIFF0 stats <seed> <tick> pop=<p> max_T=<maxT> first_T2_tick=<tick_or_none> min_iw0=<min> mean_iw0=<mean> max_iw0=<max>
+//! DIFF0 hist <seed> <tick> T=<t>,N=<n>,nA=<na>,nB=<nb>,nMixed=<nmx>,nDiff=<ndiff>:<count> …
+//! DIFF0 stats <seed> <tick> pop=<p> max_T=<maxT> max_T_strict=<maxTs> first_T2_tick=<tick_or_none> min_iw0=<min> mean_iw0=<mean> max_iw0=<max>
 //! ```
 //! where `iw0` = `|input_weights[0]|` from genomes with GRN specs.
+//! `T_strict` = distinct types among {A, B, Diff(i)} only; Mixed excluded (it is unresolved, not differentiated).
+//! Composition (nA, nB, nMixed, nDiff) enables metrology: distinguishes true differentiation {A,B} from false {A,Mixed}.
 
 #[test]
 #[ignore]  // Cloud-only diagnostic; runs via sim-run.yml diff-probe case
@@ -47,31 +49,32 @@ fn diff0_type_probe() {
 
             let current_tick = sim.tick();
 
-            // Get probe data at every tick to detect first T >= 2 across entire run
-            let (tn_histogram, (max_t, min_iw0, mean_iw0, max_iw0)) = sim.distinct_types_probe();
-
-            // Track first observation of T >= 2 (across all ticks, not just sample times)
-            if max_t >= 2 && first_t2_tick.is_none() {
+            // Track first observation of T >= 2 (cheap per-tick scan, no histogram)
+            let max_t_cheap = sim.max_distinct_types();
+            if max_t_cheap >= 2 && first_t2_tick.is_none() {
                 first_t2_tick = Some(current_tick);
             }
 
-            // Emit output only at midpoint and horizon
+            // Emit full diagnostic output only at midpoint and horizon
             if sample_ticks.contains(&current_tick) {
+                let (tn_histogram, (max_t, max_t_strict, min_iw0, mean_iw0, max_iw0)) = sim.distinct_types_probe();
                 let pop = sim.population();
 
-                // Emit histogram line
+                // Emit histogram line with full composition per (T, N, nA, nB, nMixed, nDiff) bucket
                 let hist_str = tn_histogram
                     .iter()
-                    .map(|((t, n), count)| format!("T={},N={}:{}", t, n, count))
+                    .map(|((t, n, na, nb, nmixed, ndiff), count)| {
+                        format!("T={},N={},nA={},nB={},nMixed={},nDiff={}:{}", t, n, na, nb, nmixed, ndiff, count)
+                    })
                     .collect::<Vec<_>>()
                     .join(" ");
                 println!("DIFF0 hist {} {} {}", seed, current_tick, hist_str);
 
-                // Emit stats line
+                // Emit stats line with max_T and max_T_strict
                 let first_t2_str = first_t2_tick.map_or("none".to_string(), |t| t.to_string());
                 println!(
-                    "DIFF0 stats {} {} pop={} max_T={} first_T2_tick={} min_iw0={} mean_iw0={} max_iw0={}",
-                    seed, current_tick, pop, max_t, first_t2_str, min_iw0, mean_iw0, max_iw0
+                    "DIFF0 stats {} {} pop={} max_T={} max_T_strict={} first_T2_tick={} min_iw0={} mean_iw0={} max_iw0={}",
+                    seed, current_tick, pop, max_t, max_t_strict, first_t2_str, min_iw0, mean_iw0, max_iw0
                 );
             }
         }

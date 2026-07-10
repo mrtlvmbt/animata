@@ -860,26 +860,41 @@ impl Sim {
         }
     }
 
-    /// DIFF-0: Probe distinct cell types. Returns Vec of ((distinct_type_count, body_size), count)
-    /// tuples representing the (T, N) histogram. Also returns (max_T, min_iw0, mean_iw0, max_iw0)
-    /// where iw0 = |input_weights[0]| from genomes with GRN specs.
-    /// Golden-neutral, read-only, not in state_hash or tick. Empty population → (Vec::new(), (0, 0, 0, 0)).
-    pub fn distinct_types_probe(&mut self) -> (Vec<((i64, i64), u64)>, (i64, i64, i64, i64)) {
+    /// DIFF-0: Cheap read-only accessor — maximum distinct type count across all entities.
+    /// Scans phenotypes only, no allocation, no genome queries, no histogram building.
+    /// Used for per-tick tracking of first T >= 2 occurrence. Golden-neutral, read-only.
+    pub fn max_distinct_types(&mut self) -> i64 {
+        let mut q = self.world.query::<&Phenotype>();
+        q.iter(&self.world).map(|ph| ph.graph.distinct_types()).max().unwrap_or(0)
+    }
+
+    /// DIFF-0: Full diagnostic probe — (T, N) histogram + composition + strict counts + input_weights.
+    /// Returns the complete (T, N) histogram with per-type module counts (nA, nB, nMixed, nDiff_total)
+    /// and (max_T, max_T_strict, min_iw0, mean_iw0, max_iw0).
+    /// `T_strict` = distinct types among {A, B, Diff(i)} only, excludes Mixed (unresolved).
+    /// Golden-neutral, read-only, not in state_hash or tick. Only call at sample ticks, not every tick.
+    pub fn distinct_types_probe(&mut self) -> (Vec<((i64, i64, u64, u64, u64, u64), u64)>, (i64, i64, i64, i64, i64)) {
         let mut q_phenotype = self.world.query::<&Phenotype>();
         let mut q_genome = self.world.query::<&Genome>();
 
         let phenotypes: Vec<_> = q_phenotype.iter(&self.world).collect();
         let genomes: Vec<_> = q_genome.iter(&self.world).collect();
 
-        // Collect (T, N) histogram
-        let mut tn_map: std::collections::BTreeMap<(i64, i64), u64> = std::collections::BTreeMap::new();
+        // Collect (T, N, nA, nB, nMixed, nDiff) histogram with per-type composition
+        type HistKey = (i64, i64, u64, u64, u64, u64); // (T, N, nA, nB, nMixed, nDiff)
+        let mut tn_map: std::collections::BTreeMap<HistKey, u64> = std::collections::BTreeMap::new();
         let mut max_t = 0i64;
+        let mut max_t_strict = 0i64;
 
         for ph in &phenotypes {
             let t = ph.graph.distinct_types();
+            let t_strict = ph.graph.distinct_types_strict();
             let n = ph.graph.body_size();
-            tn_map.entry((t, n)).and_modify(|c| *c += 1).or_insert(1);
+            let (na, nb, nmixed, ndiff) = ph.graph.distinct_types_composition();
+            let key = (t, n, na, nb, nmixed, ndiff);
+            tn_map.entry(key).and_modify(|c| *c += 1).or_insert(1);
             max_t = max_t.max(t);
+            max_t_strict = max_t_strict.max(t_strict);
         }
 
         // Collect input_weights[0] stats
@@ -903,7 +918,7 @@ impl Sim {
             (min, mean, max)
         };
 
-        (tn_map.into_iter().collect(), (max_t, min_iw0, mean_iw0, max_iw0))
+        (tn_map.into_iter().collect(), (max_t, max_t_strict, min_iw0, mean_iw0, max_iw0))
     }
 
     pub fn tick(&self) -> u64 {
