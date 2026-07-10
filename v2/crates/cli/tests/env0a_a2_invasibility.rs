@@ -5,11 +5,13 @@
 //!
 //! **Emergence arm:** `env0a_a2p_emergence_sweep()` (#[ignore])
 //! - Config: EVOLVING (evolve_body_size=true, single unicell founder)
-//! - Output: `ENV-0a-a2p emergence <grain> <seed> retention-<OFF/ON> <pct-mc@mid> <mean-size@mid> <pct-mc@end> <mean-size@end>`
+//! - Output: `ENV-0a-a2p emergence <grain> <seed> retention-<OFF/ON> <pct-mc@mid> <mean-size@mid> <pop@mid> <pct-mc@end> <mean-size@end> <pop@end>`
+//! - Population at mid and end disambiguates %-MC=0: pop>0 ⇒ alive-unicellular, pop=0 ⇒ extinct.
 //!
 //! **Invasibility arm:** `env0a_a2p_invasion_sweep()` (#[ignore])
 //! - Config: BREED-TRUE (evolve_body_size=false, speciation frozen, 2 fixed invaders)
-//! - Output: `ENV-0a-a2p invasion <grain> <seed> <direction> <invader_start> <invader_end>`
+//! - Output: `ENV-0a-a2p invasion <grain> <seed> <direction> <invader_start> <invader_end> <pop@end>`
+//! - Population at end disambiguates invader_end=0: pop>0 ⇒ extinct invader in live population, pop=0 ⇒ entire population extinct.
 //!
 //! **Smoke test:** `env0a_a2p_all_config_paths_are_runnable()` (non-ignored, CI gate)
 //! - Covers: emergence OFF/ON + invasion both directions
@@ -231,7 +233,7 @@ fn env0a_a2p_emergence_sweep() {
 
     // Sweep grid: patch_grain × seed
     let patch_grains = [1i64, 2, 4, 8, 16, 32];
-    let seeds = [1u64, 2, 3];
+    let seeds = [1u64, 2, 3, 4, 5, 6, 7, 8];
 
     for &patch_grain in &patch_grains {
         for &seed in &seeds {
@@ -244,12 +246,14 @@ fn env0a_a2p_emergence_sweep() {
                 sim_a.step();
             }
             let (pct_mc_a_mid, mean_size_a_mid) = sim_a.pct_multicellular();
+            let pop_a_mid = sim_a.population();
 
             // Continue to horizon
             for _ in midpoint_ticks..horizon_ticks {
                 sim_a.step();
             }
             let (pct_mc_a_end, mean_size_a_end) = sim_a.pct_multicellular();
+            let pop_a_end = sim_a.population();
 
             // === Baseline B: retention-ON at this grain (EVOLVING, single founder) ===
             let mut config_b = driver_config(seed);
@@ -261,21 +265,23 @@ fn env0a_a2p_emergence_sweep() {
                 sim_b.step();
             }
             let (pct_mc_b_mid, mean_size_b_mid) = sim_b.pct_multicellular();
+            let pop_b_mid = sim_b.population();
 
             // Continue to horizon
             for _ in midpoint_ticks..horizon_ticks {
                 sim_b.step();
             }
             let (pct_mc_b_end, mean_size_b_end) = sim_b.pct_multicellular();
+            let pop_b_end = sim_b.population();
 
             // === Emit greppable MAP lines ===
             println!(
-                "ENV-0a-a2p emergence {} {} retention-OFF {} {} {} {}",
-                patch_grain, seed, pct_mc_a_mid, mean_size_a_mid, pct_mc_a_end, mean_size_a_end
+                "ENV-0a-a2p emergence {} {} retention-OFF {} {} {} {} {} {}",
+                patch_grain, seed, pct_mc_a_mid, mean_size_a_mid, pop_a_mid, pct_mc_a_end, mean_size_a_end, pop_a_end
             );
             println!(
-                "ENV-0a-a2p emergence {} {} retention-ON {} {} {} {}",
-                patch_grain, seed, pct_mc_b_mid, mean_size_b_mid, pct_mc_b_end, mean_size_b_end
+                "ENV-0a-a2p emergence {} {} retention-ON {} {} {} {} {} {}",
+                patch_grain, seed, pct_mc_b_mid, mean_size_b_mid, pop_b_mid, pct_mc_b_end, mean_size_b_end, pop_b_end
             );
         }
     }
@@ -425,6 +431,7 @@ fn env0a_a2p_invasion_sweep() {
                 .find(|(id, _)| id.0 == 1)
                 .map(|(_, count)| *count)
                 .unwrap_or(0);
+            let pop_end_dir1 = sim1.population();
 
             // invader_end_dir1 is u64 (always >= 0 by type); this is a structural placeholder
             // documenting the expectation (population counts are non-negative).
@@ -458,18 +465,19 @@ fn env0a_a2p_invasion_sweep() {
                 .find(|(id, _)| id.0 == 1)
                 .map(|(_, count)| *count)
                 .unwrap_or(0);
+            let pop_end_dir2 = sim2.population();
 
             // invader_end_dir2 is u64 (always >= 0 by type); this is a structural placeholder
             // documenting the expectation (population counts are non-negative).
 
             // === Emit greppable MAP lines ===
             println!(
-                "ENV-0a-a2p invasion {} {} multi→uni {} {}",
-                patch_grain, seed, invader_start_dir1, invader_end_dir1
+                "ENV-0a-a2p invasion {} {} multi→uni {} {} {}",
+                patch_grain, seed, invader_start_dir1, invader_end_dir1, pop_end_dir1
             );
             println!(
-                "ENV-0a-a2p invasion {} {} uni→multi {} {}",
-                patch_grain, seed, invader_start_dir2, invader_end_dir2
+                "ENV-0a-a2p invasion {} {} uni→multi {} {} {}",
+                patch_grain, seed, invader_start_dir2, invader_end_dir2, pop_end_dir2
             );
         }
     }
