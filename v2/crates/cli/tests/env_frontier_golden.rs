@@ -13,7 +13,7 @@ use sim_core::Sim;
 
 /// Single folded trajectory checksum over the 384-tick run (arm64 release golden).
 /// Uses FNV-1a style fold: any single-tick drift changes the fold, validating the full trajectory.
-const ENV_FRONTIER_GOLDEN: u64 = 17981074702083343180; // pinned from CI golden-arm64 job pass 1
+const ENV_FRONTIER_GOLDEN: u64 = 2541130215646194956; // re-pinned for ENV-0a'-a1.5 patch-grain field (env_frontier trajectory intentionally changed; shipped goldens byte-identical)
 
 /// Golden drift (R19): arm64 release only. Skipped in debug (float-fusing differs).
 #[test]
