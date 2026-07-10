@@ -77,14 +77,10 @@ fn ext0a_footprint_arm_a() {
 
     for (label, _dens_frac, n_founders) in &densities {
         for &seed in &DIAGNOSTIC_SEEDS {
-            // Apply body_footprint=true override to driver_config.
+            // Apply body_footprint=true to driver_config (direct set, not via apply_overrides).
             let mut cfg = driver_config(seed);
-            let mut econ = cfg.econ.clone();
             cfg.n_founders = *n_founders;
-
-            apply_overrides(&mut econ, &[("body_footprint".to_string(), "true".to_string())])
-                .expect("body_footprint override must be valid");
-            cfg.econ = econ;
+            cfg.econ.body_footprint = true;  // EXT-0a flag ON for this arm
 
             // Run simulation to horizon.
             let mut sim = build_sim(cfg);
