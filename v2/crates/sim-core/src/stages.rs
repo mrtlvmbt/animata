@@ -812,6 +812,19 @@ pub fn stage_interactions(
         tel.income_record.insert(*entity_bits, (total_photo, *total_got));
     }
 
+    // EXT-0a (F6): emit per-entity contention rate to telemetry.
+    // For each entity, compute fraction of footprint cells that hit deficit (grant < demand).
+    // This metric separates three diagnostic outcomes: real gradient, no-gradient NULL, motility confound.
+    for (entity_bits, (deficit_count, total_cells)) in entity_contention_map.iter() {
+        if *total_cells > 0 {
+            let contention_rate = *deficit_count as f32 / *total_cells as f32;
+            tel.entity_contention_rate.insert(*entity_bits, contention_rate);
+        } else {
+            // Edge case: no footprint cells (shouldn't happen with footprint flag ON, but defensive).
+            tel.entity_contention_rate.insert(*entity_bits, 0.0);
+        }
+    }
+
     // D′-1: book photo energy as external source (non-conserved flux, like regen from field.solve()).
     // Uses the ACTUAL per-cell sum Σᵢ photo_energyᵢ — NOT N·U_photo — so the booked source matches
     // exactly the credited energy, leaving residual 0 (R15) even after photo_gain mutates per-cell.

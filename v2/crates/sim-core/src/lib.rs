@@ -218,6 +218,16 @@ pub struct Telemetry {
     /// never fed to state_hash or any conserved value; non-dprime entities always have (0, 0).
     pub income_record: DetMap<u64, (i64, i64)>,
 
+    // ── EXT-0a: per-entity contention rate ────────────────────────────────────────────────────────
+    /// EXT-0a (F6): entity_bits → contention_rate (fraction of footprint cells with deficit).
+    /// Populated in stage_interactions when body_footprint=true: per-entity count of footprint cells
+    /// where `grant < demand` (contested with other bodies), divided by total footprint cells (side²).
+    /// Cleared at the start of each stage_interactions call; 0 for non-footprint configs.
+    /// Purely observational — never fed to state_hash or any conserved value. Diagnostic: separates
+    /// three conditions: (a) contention↑ & N*↓ → real gradient, (b) contention↑ & N*→cap → no gradient,
+    /// (c) contention→0 → bodies dispersed or density too low to crowding.
+    pub entity_contention_rate: DetMap<u64, f32>,
+
     /// V-3-e: population diversity observable — mean [`genome_distance`] over CONSECUTIVE valid
     /// (`Some(grn_spec)`) genomes, entity-id order (computed by `stages::stage_observe`). `0` when
     /// fewer than 2 valid genomes exist (all non-phase2 configs; single-survivor populations).

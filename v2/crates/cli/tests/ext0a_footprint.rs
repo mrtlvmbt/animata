@@ -112,6 +112,14 @@ fn ext0a_footprint_arm_a() {
                 let mc_frac_pct = tel.multicellular_frac as f64 / BODY_SIZE_SCALE as f64 * 100.0;
                 let histogram = compute_histogram(&body_sizes);
 
+                // EXT-0a (F6): compute average contention rate across all entities this tick
+                let avg_contention = if tel.entity_contention_rate.is_empty() {
+                    0.0
+                } else {
+                    let sum: f32 = tel.entity_contention_rate.values().sum();
+                    sum / tel.entity_contention_rate.len() as f32
+                };
+
                 // Structural invariants (outcome-independent).
                 assert!(
                     max_cells >= mean_cells,
@@ -131,8 +139,8 @@ fn ext0a_footprint_arm_a() {
                 );
 
                 println!(
-                    "EXT-0a_a density={:<8} seed={:<2} pop={:<4} mean={:.2} max={:.2} mc={:.1}% hist={}",
-                    label, seed, pop, mean_cells, max_cells, mc_frac_pct, histogram
+                    "EXT-0a_a density={:<8} seed={:<2} pop={:<4} mean={:.2} max={:.2} mc={:.1}% contention={:.3} hist={}",
+                    label, seed, pop, mean_cells, max_cells, mc_frac_pct, avg_contention, histogram
                 );
             }
         }
@@ -196,6 +204,14 @@ fn ext0a_footprint_arm_b_control() {
                 let mc_frac_pct = tel.multicellular_frac as f64 / BODY_SIZE_SCALE as f64 * 100.0;
                 let histogram = compute_histogram(&body_sizes);
 
+                // EXT-0a (F6): compute average contention rate (should be ~0 for flag-OFF arm)
+                let avg_contention = if tel.entity_contention_rate.is_empty() {
+                    0.0
+                } else {
+                    let sum: f32 = tel.entity_contention_rate.values().sum();
+                    sum / tel.entity_contention_rate.len() as f32
+                };
+
                 // Structural invariants.
                 assert!(
                     max_cells >= mean_cells,
@@ -210,8 +226,8 @@ fn ext0a_footprint_arm_b_control() {
                 );
 
                 println!(
-                    "EXT-0a_b density={:<8} seed={:<2} pop={:<4} mean={:.2} max={:.2} mc={:.1}% hist={}",
-                    label, seed, pop, mean_cells, max_cells, mc_frac_pct, histogram
+                    "EXT-0a_b density={:<8} seed={:<2} pop={:<4} mean={:.2} max={:.2} mc={:.1}% contention={:.3} hist={}",
+                    label, seed, pop, mean_cells, max_cells, mc_frac_pct, avg_contention, histogram
                 );
             }
         }
