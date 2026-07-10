@@ -1286,13 +1286,35 @@ pub fn apply_overrides(econ: &mut EconParams, sets: &[(String, String)]) -> Resu
                     }
                 }
             }
+            // EXT-0b: gdev_cap — g_dev (morphogen grid side length) cap for diagnostic sweeps.
+            // Default 4; swept to 5, 6 to test if body size saturates or settles below the cap.
+            "gdev_cap" => {
+                let v = p::<usize>(key, val)?;
+                if v < 1 {
+                    return Err(format!(
+                        "error: --set gdev_cap={v}: must be ≥ 1 (g_dev must have at least size 1×1)"
+                    ));
+                }
+                econ.gdev_cap = v;
+            }
+            // EXT-0b: morphogen_steps — reaction-diffusion step-count budget for diagnostic sweeps.
+            // Default 8; paired with g_dev: (4→8, 5→10, 6→12) to satisfy n_dev ≥ 2·g_dev - 2.
+            "morphogen_steps" => {
+                let v = p::<u32>(key, val)?;
+                if v < 1 {
+                    return Err(format!(
+                        "error: --set morphogen_steps={v}: must be ≥ 1 (need at least 1 decode step)"
+                    ));
+                }
+                econ.morphogen_steps = v;
+            }
             _ => {
                 return Err(format!(
                     "error: --set {key}=…: not an overridable calibration knob. \
                      Valid keys: km, u_max, base_metab, c_div, e_cell, k_size_metab, \
                      k_move_cost, k_sense_cost, excrete, recycle_num, speciation_threshold, \
                      brain_period, metab_period, d0_scaled, pheromone, reg_gain_max, c_coord, \
-                     refuge_k, bite_shift, base_hazard."
+                     refuge_k, bite_shift, base_hazard, gdev_cap, morphogen_steps."
                 ));
             }
         }
