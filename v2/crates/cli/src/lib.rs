@@ -4,7 +4,7 @@
 
 use brain::FixedBrain;
 use fields::{flux_k_from_alpha, CpuFieldStore};
-use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN};
+use sim_core::{EconParams, LayerSpec, LightSpec, MergeStrategy, Sim, SimConfig, Vec2Fixed, WorldView, D0_MASK, RECYCLE_DEN, fnv_mix, FNV_OFFSET};
 use world::ProcgenWorld;
 
 /// Fixed timestep dt = 1/64 s, integer microseconds (the loop driver does no float).
@@ -822,6 +822,55 @@ pub fn ga_load_config(seed: u64) -> SimConfig {
     }
 }
 
+/// Generate a deterministic binary patch field for layer-0 resource caps.
+/// When env_frontier_config is Some, replaces the uniform world_caps with a grain-parameterized
+/// patch field: each block (patch_grain × patch_grain cells) is RICH or POOR based on a deterministic
+/// integer hash of (block_x, block_z, seed). RICH and POOR caps are chosen to preserve the mean
+/// of world_caps (so only spatial autocorrelation changes, not total resource). Uses a fixed 3:1
+/// contrast ratio (C_rich : C_poor = 3:1) for consistency.
+///
+/// Determinism: pure integer hashing (fnv_mix), no float, no RNG, no HashMap.
+/// Grain varies field structure: patch_grain=1 → salt-and-pepper, patch_grain=N → large blocks.
+fn build_patch_field(world_caps: &[i64], grid_w: i64, patch_grain: i64, seed: u64) -> Vec<i64> {
+    let n = (grid_w * grid_w) as usize;
+    if n == 0 || world_caps.len() != n {
+        return world_caps.to_vec();
+    }
+
+    // Compute baseline mean to preserve it in the patch field.
+    let total_resource: i64 = world_caps.iter().sum();
+    let baseline_mean = total_resource / n as i64;
+
+    // Set C_rich and C_poor with a fixed 3:1 contrast ratio, symmetric about the baseline mean.
+    // We want: (rich_frac * C_rich + poor_frac * C_poor) ≈ baseline_mean
+    // With rich_frac ≈ poor_frac ≈ 0.5 (roughly 50% rich, 50% poor):
+    // (C_rich + C_poor) / 2 = baseline_mean
+    // Let C_rich = 1.5 * baseline_mean, C_poor = 0.5 * baseline_mean (3:1 ratio).
+    // Then: (1.5 * baseline_mean + 0.5 * baseline_mean) / 2 = baseline_mean ✓
+    let c_rich = (baseline_mean * 3) / 2;  // 1.5 × baseline_mean
+    let c_poor = baseline_mean / 2;         // 0.5 × baseline_mean
+
+    let mut patch_field = Vec::with_capacity(n);
+    for cz in 0..grid_w {
+        for cx in 0..grid_w {
+            // Block coordinates: each block is patch_grain × patch_grain cells.
+            let bx = cx / patch_grain;
+            let bz = cz / patch_grain;
+
+            // Deterministic hash of (block_x, block_z, seed) using fnv_mix (R14: integer-only).
+            let mut h = FNV_OFFSET;
+            h = fnv_mix(h, bx as u64);
+            h = fnv_mix(h, bz as u64);
+            h = fnv_mix(h, seed);
+
+            // Assign RICH or POOR based on hash: ~50% rich (hash & 1 == 0).
+            let cap = if (h & 1) == 0 { c_rich } else { c_poor };
+            patch_field.push(cap);
+        }
+    }
+
+    patch_field
+}
 
 pub fn build_sim(config: SimConfig) -> Sim {
     // B-2: sync econ.n_layers = config.n_layers so stage_birth_death can clamp layer-trait mutations.
@@ -894,7 +943,13 @@ pub fn build_sim(config: SimConfig) -> Sim {
         flux_ks.push(flux_k_from_alpha(spec.flux_alpha_num, spec.flux_alpha_den, FLUX_F));
         regen_rates.push(spec.regen_rate);
         let caps = if l == 0 {
-            world_caps.clone()
+            // ENV-0a'-a1.5: Apply patch-grain resource field when env_frontier_config is Some.
+            // The patch field is deterministic, integer-only, and mean-preserving.
+            if let Some(env_cfg) = econ.env_frontier_config {
+                build_patch_field(&world_caps, grid_w, env_cfg.patch_grain, config.seed)
+            } else {
+                world_caps.clone()
+            }
         } else if econ.enable_oxygen && l == 2 && spec.world_cap_mult > 0 {
             // P1-0: if oxygen is enabled and this is layer 2 (O₂) with world_cap_mult, use O₂-caps
             oxygen_caps.clone()
