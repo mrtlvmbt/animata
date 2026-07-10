@@ -1,23 +1,19 @@
-//! ENV-0a'-a2: mutual-invasibility measurement harness (the spatial cloud gate).
+//! ENV-0a'-a2': re-instrumented measurement harness (the spatial cloud gate).
 //!
-//! Reciprocal-invasibility diagnostic for coexistence measurement between unicell and multicell strategies
-//! under spatial monopolization (a1 mechanic + patch-grain sweep). This is a cloud diagnostic MAP
-//! (#[ignore], run via sim-run.sh env-frontier scenario).
+//! Two arms: emergence (measures multicellularity emergence under evolution) and invasibility
+//! (measures rare-invader dynamics with fixed 2-individual seeding, breed-true).
 //!
-//! Harness config: breed-true (evolve_body_size=false, speciation frozen) to keep strategies
-//! cleanly distinguishable by founding SpeciesId (0=resident, 1=invader) across generations.
-//! Size variance (needed for selection) comes from multi-template seeding (N=1 and N=4), not evolution.
+//! **Emergence arm:** `env0a_a2p_emergence_sweep()` (#[ignore])
+//! - Config: EVOLVING (evolve_body_size=true, single unicell founder)
+//! - Output: `ENV-0a-a2p emergence <grain> <seed> retention-<OFF/ON> <pct-mc@mid> <mean-size@mid> <pct-mc@end> <mean-size@end>`
 //!
-//! Output format (space-separated fields, greppable MAP):
-//!   ENV-0a-a2 patch_grain seed direction invader_start invader_end n_opt_baseline_A n_opt_baseline_B
+//! **Invasibility arm:** `env0a_a2p_invasion_sweep()` (#[ignore])
+//! - Config: BREED-TRUE (evolve_body_size=false, speciation frozen, 2 fixed invaders)
+//! - Output: `ENV-0a-a2p invasion <grain> <seed> <direction> <invader_start> <invader_end>`
 //!
-//! - patch_grain: spatial grain value {1,2,4,8,16,32}
-//! - seed: random seed {1,2,3}
-//! - direction: "multi→uni" (resident=multicell, invader=unicell) or "uni→multi" (vice versa)
-//! - invader_start: minority lineage count at t=0 (seeded at 10% start frequency)
-//! - invader_end: minority lineage count at t=horizon (growth trajectory)
-//! - n_opt_baseline_A: mean body size (fixed-point 256-scale) without env_frontier_config
-//! - n_opt_baseline_B: mean body size with env_frontier_config at current grain
+//! **Smoke test:** `env0a_a2p_all_config_paths_are_runnable()` (non-ignored, CI gate)
+//! - Covers: emergence OFF/ON + invasion both directions
+//! - Each path: step ~20 ticks, assert pop>0
 
 use sim_core::{Genome, GrnSpec, MorphogenSpec, Boundary, EconParams};
 use std::sync::Arc;
