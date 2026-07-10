@@ -31,6 +31,7 @@ on:
           - dr0-gradient        # DR-0b (#349) resource-gradient diagnostic (scarcity sweep: u_max factor × seeds)
           - ga-load              # GA-LOAD-0 (#354) ratchet diagnostic (f_del sweep via del_den × burden_cost_k × seeds)
           - dc-diag             # DC-DIAG (#351) size-ceiling diagnostic (cap-bound vs driver-bound: base_hazard sweep, max_body_size)
+          - d5-drift            # D5-DRIFT (#374) pre-registered diagnostic (drift across plateau vs selection on gradient: refuge_k × base_hazard grid)
           - env-frontier         # ENV-0a'-a2 (#362) mutual-invasibility harness (patch-grain sweep, coexistence domain)
           - diff-probe           # DIFF-0 (#372) cell-type differentiation probe (T>=2 ever occur under stock driver_config?)
       seed:
@@ -97,7 +98,7 @@ jobs:
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
       - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'diff-probe'
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'diff-probe'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -242,6 +243,18 @@ jobs:
               cd v2
               DC_DIAG_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- dc_diag_size_ceiling --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            d5-drift)
+              # D5-DRIFT (#374) pre-registered diagnostic: is D-5's ~60% multicellularity drift across
+              # a neutral plateau, or selection on a gradient? Arm A: refuge_k×base_hazard grid
+              # (k={2,32,128} × base={10,20,40} × seeds 1..8, ticks 8000). Arm B: founder control
+              # (g_dev={1,2} × base={10,20} × seeds 1..8, k=128 fixed). Pre-declared predictions pinned
+              # in test code. Diagnostic: reports mean/max body size + histogram per cell; no PASS/FAIL verdict.
+              cd v2
+              D5_DRIFT_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- d5_drift_arm_a --nocapture --ignored 2>&1 | tee ../"$SUM"
+              D5_DRIFT_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- d5_drift_arm_b --nocapture --ignored 2>&1 | tee -a ../"$SUM"
               ;;
             env-frontier)
               # ENV-0a'-a2' (#367) re-instrumented harness: TWO #[ignore] sweeps over patch_grain
