@@ -111,10 +111,12 @@ const ROCK_SLOPE_THRESHOLD: i64 = 4;
 /// modulation, decorrelated from height via XOR salt — same pattern as `RESISTANCE_SALT` in
 /// erosion.rs). Distinct salt ensures patchiness noise is independent from height field.
 const PATCH_SEED_SALT: u64 = 0x5041_5443_484E_4553; // "PATCHNES" (intentional ASCII truncation, folded like RESISTANCE_SALT in erosion.rs:84)
-/// Symmetric multiplicative scale range for patchiness: [192, 320] centered on 256.
-/// Maps to 0.75x–1.25x modulation, mean-neutral in the factor (integer clamp may skew slightly).
-const PATCH_SCALE_MIN: i64 = 192;
-const PATCH_SCALE_MAX: i64 = 320;
+/// Symmetric multiplicative scale range for patchiness: [224, 288] centered on 256.
+/// Maps to 0.875x–1.125x modulation (±12.5%), mean-neutral in the factor. Calibrated to be
+/// a faithful substrate enrichment (spatial variance, not capacity shock): variance tight enough
+/// to keep ecological perturbation within ±10% of baseline equilibrium (population gating).
+const PATCH_SCALE_MIN: i64 = 224;
+const PATCH_SCALE_MAX: i64 = 288;
 const PATCH_SCALE_CENTER: i64 = 256;
 
 /// Azonal edaphic override: a fixed, documented INTEGER PRIORITY CASCADE (deterministic, no
