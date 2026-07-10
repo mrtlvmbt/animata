@@ -228,10 +228,16 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
 }
 
 /// Create a vertex with directional shading applied based on the face normal.
-/// The normal MUST be normalized.
+/// The normal MUST be normalized. Stores the normal in the vertex for potential shader use.
 fn vertex(position: Vec3, color: Color, normal: Vec3) -> Vertex {
     let shaded_color = apply_directional_shading(color, normal);
-    Vertex { position, uv: Vec2::ZERO, color: shaded_color.into(), normal: Vec4::ZERO }
+    // Pack the normalized normal (Vec3) into Vec4, with w=1.0 to indicate validity
+    Vertex {
+        position,
+        uv: Vec2::ZERO,
+        color: shaded_color.into(),
+        normal: Vec4::new(normal.x, normal.y, normal.z, 1.0),
+    }
 }
 
 #[cfg(test)]
