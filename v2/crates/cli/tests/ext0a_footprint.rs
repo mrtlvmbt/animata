@@ -80,7 +80,7 @@ fn ext0a_footprint_arm_a() {
             // Apply body_footprint=true override to driver_config.
             let mut cfg = driver_config(seed);
             let mut econ = cfg.econ.clone();
-            cfg.n_founders = n_founders;
+            cfg.n_founders = *n_founders;
 
             apply_overrides(&mut econ, &[("body_footprint".to_string(), "true".to_string())])
                 .expect("body_footprint override must be valid");
@@ -167,7 +167,7 @@ fn ext0a_footprint_arm_b_control() {
         for &seed in &DIAGNOSTIC_SEEDS {
             // Driver config with body_footprint=false (explicit default, byte-identical).
             let mut cfg = driver_config(seed);
-            cfg.n_founders = n_founders;
+            cfg.n_founders = *n_founders;
 
             // No override needed; default is body_footprint=false (isolation gate).
 
