@@ -46,15 +46,18 @@ fn diff0_type_probe() {
             sim.step();
 
             let current_tick = sim.tick();
-            if sample_ticks.contains(&current_tick) {
-                // Get probe data
-                let (tn_histogram, (max_t, min_iw0, mean_iw0, max_iw0)) = sim.distinct_types_probe();
-                let pop = sim.population();
 
-                // Track first observation of T >= 2
-                if max_t >= 2 && first_t2_tick.is_none() {
-                    first_t2_tick = Some(current_tick);
-                }
+            // Get probe data at every tick to detect first T >= 2 across entire run
+            let (tn_histogram, (max_t, min_iw0, mean_iw0, max_iw0)) = sim.distinct_types_probe();
+
+            // Track first observation of T >= 2 (across all ticks, not just sample times)
+            if max_t >= 2 && first_t2_tick.is_none() {
+                first_t2_tick = Some(current_tick);
+            }
+
+            // Emit output only at midpoint and horizon
+            if sample_ticks.contains(&current_tick) {
+                let pop = sim.population();
 
                 // Emit histogram line
                 let hist_str = tn_histogram
