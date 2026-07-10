@@ -237,14 +237,17 @@ fn d5_drift_arm_b() {
     for &g_dev in &g_devs {
         for &base_hazard in &base_hazards {
             for &seed in &DIAGNOSTIC_SEEDS {
-                // Apply base_hazard override to driver_config
+                // Apply overrides to driver_config (refuge_k=128 fixed, base_hazard varies)
                 let mut cfg = driver_config(seed);
                 let mut econ = cfg.econ.clone();
 
-                let overrides = vec![("base_hazard".to_string(), base_hazard.to_string())];
+                let overrides = vec![
+                    ("refuge_k".to_string(), "128".to_string()),
+                    ("base_hazard".to_string(), base_hazard.to_string()),
+                ];
 
                 apply_overrides(&mut econ, &overrides)
-                    .expect("base_hazard override must be valid");
+                    .expect("refuge_k and base_hazard overrides must be valid");
                 cfg.econ = econ;
 
                 // Override g_dev (founder body size) in the morphogen spec — EXACTLY ONE factor differs from Arm A
