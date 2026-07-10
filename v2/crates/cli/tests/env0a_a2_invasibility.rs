@@ -123,6 +123,70 @@ fn make_multicell_template(n_layers: usize) -> Genome {
     g
 }
 
+/// Unit test: pct_multicellular accessor returns correct fraction and mean body size.
+/// Constructs a small sim, verifies unicells give 0%, multicells give 100%, and mixed pop
+/// returns correct intermediate fractions (all scaled by 256).
+#[test]
+fn test_pct_multicellular_accessor() {
+    use cli::build_sim;
+
+    let n_layers = 2;
+    let unicell = make_unicell_template(n_layers);
+    let multicell = make_multicell_template(n_layers);
+
+    // Test 1: pure unicell population
+    let mut config = cli::driver_config(42);
+    config.n_founders = 50;
+    config.founder_templates = Some(vec![(unicell.clone(), 50)]);
+    let mut sim = build_sim(config);
+    sim.step(); // Let population stabilize
+    let (pct, mean_size) = sim.pct_multicellular();
+    assert_eq!(
+        pct, 0,
+        "pure unicell population must have 0% multicellular (got pct={})",
+        pct
+    );
+    assert_eq!(
+        mean_size, 0,
+        "pure unicell population must have mean_size=0 (got {})",
+        mean_size
+    );
+
+    // Test 2: pure multicell population
+    let mut config = cli::driver_config(42);
+    config.n_founders = 50;
+    config.founder_templates = Some(vec![(multicell.clone(), 50)]);
+    let mut sim = build_sim(config);
+    sim.step();
+    let (pct, mean_size) = sim.pct_multicellular();
+    assert!(
+        pct > 250, // Should be close to 256 (100% × 256), allowing for slight variation
+        "pure multicell population must have high %-mc (got pct={}, expected ~256)",
+        pct
+    );
+    assert!(
+        mean_size > 1 * 256, // Should be > 1*256
+        "pure multicell population must have mean_size > 256 (got {})",
+        mean_size
+    );
+
+    // Test 3: empty population returns (0, 0)
+    let mut config = cli::driver_config(42);
+    config.n_founders = 1;
+    config.founder_energy = 1i64; // Force quick extinction
+    let mut sim = build_sim(config);
+    // Step until empty
+    for _ in 0..1000 {
+        sim.step();
+        if sim.population() == 0 {
+            break;
+        }
+    }
+    let (pct, mean_size) = sim.pct_multicellular();
+    assert_eq!(pct, 0, "empty population must return pct=0");
+    assert_eq!(mean_size, 0, "empty population must return mean_size=0");
+}
+
 /// Sanity test: verify template construction doesn't panic and decodes correctly.
 #[test]
 fn env0a_a2_templates_construct_and_decode() {

@@ -827,6 +827,39 @@ impl Sim {
         if count == 0 { 0 } else { (total_cells * BODY_SIZE_SCALE) / count as i64 }
     }
 
+    /// ENV-0a'-a2: multicellular population fraction and mean body size of multicells.
+    /// Returns `(pct_multicellular_times_256, mean_multicell_body_size_times_256)`.
+    /// Pct = (count of entities with body_size > 1 / total population) × 256.
+    /// Mean = (sum of body_sizes for entities > 1 cell / count of multicells) × 256.
+    /// Golden-neutral, read-only, not in state_hash or tick. Empty population or no multicells → (0, 0).
+    pub fn pct_multicellular(&mut self) -> (i64, i64) {
+        let mut q = self.world.query::<&Phenotype>();
+        let mut total_pop = 0u64;
+        let mut mc_count = 0u64;
+        let mut mc_total_size = 0i64;
+
+        for ph in q.iter(&self.world) {
+            let body_size = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>();
+            total_pop += 1;
+            if body_size > 1 {
+                mc_count += 1;
+                mc_total_size += body_size;
+            }
+        }
+
+        if total_pop == 0 {
+            (0, 0)
+        } else {
+            let pct_mc = (mc_count as i64 * BODY_SIZE_SCALE) / total_pop as i64;
+            let mean_mc_size = if mc_count == 0 {
+                0
+            } else {
+                (mc_total_size * BODY_SIZE_SCALE) / mc_count as i64
+            };
+            (pct_mc, mean_mc_size)
+        }
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }
