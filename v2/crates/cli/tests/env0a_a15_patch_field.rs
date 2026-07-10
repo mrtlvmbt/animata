@@ -2,6 +2,7 @@
 //! Verifies that the patch field is deterministic, integer-only, mean-preserving, and varies with grain.
 
 use cli::build_sim;
+use sim_core;
 
 /// Test that sim builds without panic with different grain values.
 /// (Full field inspection would require adding read-only accessors to FieldStore;
@@ -11,9 +12,13 @@ use cli::build_sim;
 fn patch_field_configs_build_without_panic() {
     let seed = 42u64;
 
-    // Build configs with different patch grains but otherwise identical.
-    let config_grain1 = cli::env_frontier_invasibility_config(seed, 1);
-    let config_grain16 = cli::env_frontier_invasibility_config(seed, 16);
+    // Build configs with different patch grains from driver_config (keeps evolve_body_size=true
+    // to avoid assertion failure on hazard predation + size variance requirement).
+    let mut config_grain1 = cli::driver_config(seed);
+    config_grain1.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain: 1 });
+
+    let mut config_grain16 = cli::driver_config(seed);
+    config_grain16.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain: 16 });
 
     let _sim_grain1 = build_sim(config_grain1);
     let _sim_grain16 = build_sim(config_grain16);
