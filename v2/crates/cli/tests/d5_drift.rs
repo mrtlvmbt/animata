@@ -66,13 +66,14 @@ fn compute_argmax_set(base_hazard: i64, refuge_k: i32, shift: u32, c_coord: i64)
         "{1}".to_string()
     } else if argmax_set.len() == 1 {
         format!("{{{}}}", argmax_set[0])
-    } else if argmax_set.len() > 1
-        && argmax_set[argmax_set.len() - 1] - argmax_set[0] + 1 == argmax_set.len() as i64
-    {
-        // It's a contiguous range
+    } else if argmax_set.len() == 2 {
+        // Two elements: use comma notation {N,M} (per pre-registered table)
+        format!("{{{},{}}}", argmax_set[0], argmax_set[1])
+    } else if argmax_set[argmax_set.len() - 1] - argmax_set[0] + 1 == argmax_set.len() as i64 {
+        // Three or more contiguous: use range notation {N..M} (per pre-registered table)
         format!("{{{}..{}}}", argmax_set[0], argmax_set[argmax_set.len() - 1])
     } else {
-        // Non-contiguous set
+        // Non-contiguous set: use comma notation
         let elems: Vec<String> = argmax_set.iter().map(|x| x.to_string()).collect();
         format!("{{{}}}", elems.join(","))
     }
