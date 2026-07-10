@@ -1,23 +1,19 @@
-//! ENV-0a'-a2: mutual-invasibility measurement harness (the spatial cloud gate).
+//! ENV-0a'-a2': re-instrumented measurement harness (the spatial cloud gate).
 //!
-//! Reciprocal-invasibility diagnostic for coexistence measurement between unicell and multicell strategies
-//! under spatial monopolization (a1 mechanic + patch-grain sweep). This is a cloud diagnostic MAP
-//! (#[ignore], run via sim-run.sh env-frontier scenario).
+//! Two arms: emergence (measures multicellularity emergence under evolution) and invasibility
+//! (measures rare-invader dynamics with fixed 2-individual seeding, breed-true).
 //!
-//! Harness config: breed-true (evolve_body_size=false, speciation frozen) to keep strategies
-//! cleanly distinguishable by founding SpeciesId (0=resident, 1=invader) across generations.
-//! Size variance (needed for selection) comes from multi-template seeding (N=1 and N=4), not evolution.
+//! **Emergence arm:** `env0a_a2p_emergence_sweep()` (#[ignore])
+//! - Config: EVOLVING (evolve_body_size=true, single unicell founder)
+//! - Output: `ENV-0a-a2p emergence <grain> <seed> retention-<OFF/ON> <pct-mc@mid> <mean-size@mid> <pct-mc@end> <mean-size@end>`
 //!
-//! Output format (space-separated fields, greppable MAP):
-//!   ENV-0a-a2 patch_grain seed direction invader_start invader_end n_opt_baseline_A n_opt_baseline_B
+//! **Invasibility arm:** `env0a_a2p_invasion_sweep()` (#[ignore])
+//! - Config: BREED-TRUE (evolve_body_size=false, speciation frozen, 2 fixed invaders)
+//! - Output: `ENV-0a-a2p invasion <grain> <seed> <direction> <invader_start> <invader_end>`
 //!
-//! - patch_grain: spatial grain value {1,2,4,8,16,32}
-//! - seed: random seed {1,2,3}
-//! - direction: "multi→uni" (resident=multicell, invader=unicell) or "uni→multi" (vice versa)
-//! - invader_start: minority lineage count at t=0 (seeded at 10% start frequency)
-//! - invader_end: minority lineage count at t=horizon (growth trajectory)
-//! - n_opt_baseline_A: mean body size (fixed-point 256-scale) without env_frontier_config
-//! - n_opt_baseline_B: mean body size with env_frontier_config at current grain
+//! **Smoke test:** `env0a_a2p_all_config_paths_are_runnable()` (non-ignored, CI gate)
+//! - Covers: emergence OFF/ON + invasion both directions
+//! - Each path: step ~20 ticks, assert pop>0
 
 use sim_core::{Genome, GrnSpec, MorphogenSpec, Boundary, EconParams};
 use std::sync::Arc;
@@ -123,6 +119,70 @@ fn make_multicell_template(n_layers: usize) -> Genome {
     g
 }
 
+/// Unit test: pct_multicellular accessor returns correct fraction and mean body size.
+/// Constructs a small sim, verifies unicells give 0%, multicells give 100%, and mixed pop
+/// returns correct intermediate fractions (all scaled by 256).
+#[test]
+fn test_pct_multicellular_accessor() {
+    use cli::build_sim;
+
+    let n_layers = 2;
+    let unicell = make_unicell_template(n_layers);
+    let multicell = make_multicell_template(n_layers);
+
+    // Test 1: pure unicell population
+    let mut config = cli::driver_config(42);
+    config.n_founders = 50;
+    config.founder_templates = Some(vec![(unicell.clone(), 50)]);
+    let mut sim = build_sim(config);
+    sim.step(); // Let population stabilize
+    let (pct, mean_size) = sim.pct_multicellular();
+    assert_eq!(
+        pct, 0,
+        "pure unicell population must have 0% multicellular (got pct={})",
+        pct
+    );
+    assert_eq!(
+        mean_size, 0,
+        "pure unicell population must have mean_size=0 (got {})",
+        mean_size
+    );
+
+    // Test 2: pure multicell population
+    let mut config = cli::driver_config(42);
+    config.n_founders = 50;
+    config.founder_templates = Some(vec![(multicell.clone(), 50)]);
+    let mut sim = build_sim(config);
+    sim.step();
+    let (pct, mean_size) = sim.pct_multicellular();
+    assert!(
+        pct > 250, // Should be close to 256 (100% × 256), allowing for slight variation
+        "pure multicell population must have high %-mc (got pct={}, expected ~256)",
+        pct
+    );
+    assert!(
+        mean_size > 1 * 256, // Should be > 1*256
+        "pure multicell population must have mean_size > 256 (got {})",
+        mean_size
+    );
+
+    // Test 3: empty population returns (0, 0)
+    let mut config = cli::driver_config(42);
+    config.n_founders = 1;
+    config.founder_energy = 1i64; // Force quick extinction
+    let mut sim = build_sim(config);
+    // Step until empty
+    for _ in 0..1000 {
+        sim.step();
+        if sim.population() == 0 {
+            break;
+        }
+    }
+    let (pct, mean_size) = sim.pct_multicellular();
+    assert_eq!(pct, 0, "empty population must return pct=0");
+    assert_eq!(mean_size, 0, "empty population must return mean_size=0");
+}
+
 /// Sanity test: verify template construction doesn't panic and decodes correctly.
 #[test]
 fn env0a_a2_templates_construct_and_decode() {
@@ -143,12 +203,91 @@ fn env0a_a2_templates_construct_and_decode() {
     );
 }
 
-/// Non-ignored smoke test: all 4 config paths used in env0a_a2_invasibility_sweep are runnable.
-/// Extends coverage to catch panics from any config shape: Baseline A/B (port-check) + Invasion dir1/dir2.
+/// ENV-0a'-a2' emergence-arm diagnostic (cloud diagnostic MAP, #[ignore]).
+/// Measures whether multicellularity EMERGES and takes over from a unicellular start under the
+/// retention mechanic vs D-5 baseline (retention-OFF). Tests the REAL goal: not mutual invasibility,
+/// but emergence from single-genotype evolution.
+///
+/// Config: EVOLVING (evolve_body_size=true, single unicell founder).
+/// Runs two scenarios for each grain:
+/// - Baseline A (retention-OFF, plain driver_config)
+/// - Baseline B (retention-ON, env_frontier_config at each grain)
+///
+/// Emits greppable MAP lines: ENV-0a-a2p emergence <grain> <seed> retention-<OFF/ON> <pct-mc@mid> <mean-size@mid> <pct-mc@horizon> <mean-size@horizon>
+#[test]
+#[ignore]  // Cloud-only diagnostic; runs via sim-run.yml env-frontier case
+fn env0a_a2p_emergence_sweep() {
+    use cli::driver_config;
+
+    let n_layers = 2;
+    let unicell = make_unicell_template(n_layers);
+
+    // Read horizon ticks from environment (default: 8000)
+    let horizon_ticks = env::var("ENV_FRONTIER_TICKS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(8000);
+    let midpoint_ticks = horizon_ticks / 2;
+
+    // Sweep grid: patch_grain × seed
+    let patch_grains = [1i64, 2, 4, 8, 16, 32];
+    let seeds = [1u64, 2, 3];
+
+    for &patch_grain in &patch_grains {
+        for &seed in &seeds {
+            // === Baseline A: retention-OFF (plain driver_config, EVOLVING) ===
+            let config_a = driver_config(seed);
+            let mut sim_a = cli::build_sim(config_a);
+
+            // Measure at midpoint
+            for _ in 0..midpoint_ticks {
+                sim_a.step();
+            }
+            let (pct_mc_a_mid, mean_size_a_mid) = sim_a.pct_multicellular();
+
+            // Continue to horizon
+            for _ in midpoint_ticks..horizon_ticks {
+                sim_a.step();
+            }
+            let (pct_mc_a_end, mean_size_a_end) = sim_a.pct_multicellular();
+
+            // === Baseline B: retention-ON at this grain (EVOLVING, single founder) ===
+            let mut config_b = driver_config(seed);
+            config_b.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain });
+            let mut sim_b = cli::build_sim(config_b);
+
+            // Measure at midpoint
+            for _ in 0..midpoint_ticks {
+                sim_b.step();
+            }
+            let (pct_mc_b_mid, mean_size_b_mid) = sim_b.pct_multicellular();
+
+            // Continue to horizon
+            for _ in midpoint_ticks..horizon_ticks {
+                sim_b.step();
+            }
+            let (pct_mc_b_end, mean_size_b_end) = sim_b.pct_multicellular();
+
+            // === Emit greppable MAP lines ===
+            println!(
+                "ENV-0a-a2p emergence {} {} retention-OFF {} {} {} {}",
+                patch_grain, seed, pct_mc_a_mid, mean_size_a_mid, pct_mc_a_end, mean_size_a_end
+            );
+            println!(
+                "ENV-0a-a2p emergence {} {} retention-ON {} {} {} {}",
+                patch_grain, seed, pct_mc_b_mid, mean_size_b_mid, pct_mc_b_end, mean_size_b_end
+            );
+        }
+    }
+}
+
+/// Non-ignored smoke test: all 4 config paths (emergence + invasion with true rarity) are runnable.
+/// Covers all new config shapes: Emergence retention-OFF, Emergence retention-ON,
+/// Invasion dir1 (2 fixed invaders), Invasion dir2 (2 fixed invaders).
 /// Each path must step ~20 ticks, assert population > 0, and NOT panic on predation/build_sim assertions.
 /// This is the CI gate for the entire harness (the #[ignore] sweep lives in the cloud).
 #[test]
-fn env0a_a2_breedtrue_config_is_runnable() {
+fn env0a_a2p_all_config_paths_are_runnable() {
     use cli::driver_config;
 
     let n_layers = 2;
@@ -158,46 +297,42 @@ fn env0a_a2_breedtrue_config_is_runnable() {
     let patch_grain = 4i64;
     let seed = 42u64;
     let n_founders = 100;
+    let n_invaders = 2u64;
 
-    // === Config 1: Baseline A (retention-OFF, plain driver_config) ===
-    // Driver config has evolve_body_size=true and predation, so assertion always passes.
-    let config_baseline_a = driver_config(seed);
-    let mut sim_baseline_a = cli::build_sim(config_baseline_a);
+    // === Config 1: Emergence retention-OFF (evolve_body_size=true, driver_config only) ===
+    let config_em_off = driver_config(seed);
+    let mut sim_em_off = cli::build_sim(config_em_off);
     for _ in 0..20 {
-        sim_baseline_a.step();
+        sim_em_off.step();
     }
-    let pop_a = sim_baseline_a.population();
+    let pop_em_off = sim_em_off.population();
     assert!(
-        pop_a > 0,
-        "Baseline A population must be > 0 after 20 steps (got {})",
-        pop_a
+        pop_em_off > 0,
+        "Emergence retention-OFF population must be > 0 after 20 steps (got {})",
+        pop_em_off
     );
 
-    // === Config 2: Baseline B (retention-ON, EVOLVING) ===
-    // Baseline B must be EVOLVING (single genotype, size evolves under the mechanic at this grain).
-    // Build from driver_config(seed) + env_frontier_config; keep founder_templates=None.
-    // This allows evolve_body_size=true, satisfying the predation assertion.
-    let mut config_baseline_b = driver_config(seed);
-    config_baseline_b.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain });
-    // Note: baselines EVOLVE size (N_opt = evolved optimum); only invasion runs freeze size (breed-true).
-    let mut sim_baseline_b = cli::build_sim(config_baseline_b);
+    // === Config 2: Emergence retention-ON (evolve_body_size=true, env_frontier_config) ===
+    let mut config_em_on = driver_config(seed);
+    config_em_on.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain });
+    let mut sim_em_on = cli::build_sim(config_em_on);
     for _ in 0..20 {
-        sim_baseline_b.step();
+        sim_em_on.step();
     }
-    let pop_b = sim_baseline_b.population();
+    let pop_em_on = sim_em_on.population();
     assert!(
-        pop_b > 0,
-        "Baseline B population must be > 0 after 20 steps (got {})",
-        pop_b
+        pop_em_on > 0,
+        "Emergence retention-ON population must be > 0 after 20 steps (got {})",
+        pop_em_on
     );
 
-    // === Config 3: Invasion direction 1 (resident=multicell, invader=unicell) ===
-    // Breed-true with multi-template seeding; founder_templates.is_some() provides size variance.
+    // === Config 3: Invasion direction 1 (resident=multicell, invader=unicell, true rarity) ===
+    // Breed-true with multi-template seeding (2 fixed invaders).
     let mut config_inv_dir1 = cli::env_frontier_invasibility_config(seed, patch_grain);
     config_inv_dir1.n_founders = n_founders;
     config_inv_dir1.founder_templates = Some(vec![
-        (multicell.clone(), 90),
-        (unicell.clone(), 10),
+        (multicell.clone(), n_founders - n_invaders),
+        (unicell.clone(), n_invaders),
     ]);
     let mut sim_inv_dir1 = cli::build_sim(config_inv_dir1);
     for _ in 0..20 {
@@ -210,13 +345,13 @@ fn env0a_a2_breedtrue_config_is_runnable() {
         pop_inv_dir1
     );
 
-    // === Config 4: Invasion direction 2 (resident=unicell, invader=multicell) ===
-    // Breed-true with multi-template seeding; founder_templates.is_some() provides size variance.
+    // === Config 4: Invasion direction 2 (resident=unicell, invader=multicell, true rarity) ===
+    // Breed-true with multi-template seeding (2 fixed invaders).
     let mut config_inv_dir2 = cli::env_frontier_invasibility_config(seed, patch_grain);
     config_inv_dir2.n_founders = n_founders;
     config_inv_dir2.founder_templates = Some(vec![
-        (unicell.clone(), 90),
-        (multicell.clone(), 10),
+        (unicell.clone(), n_founders - n_invaders),
+        (multicell.clone(), n_invaders),
     ]);
     let mut sim_inv_dir2 = cli::build_sim(config_inv_dir2);
     for _ in 0..20 {
@@ -230,62 +365,43 @@ fn env0a_a2_breedtrue_config_is_runnable() {
     );
 }
 
-/// ENV-0a'-a2 grain-sweep coexistence harness (cloud diagnostic MAP, #[ignore]).
+/// ENV-0a'-a2p true-rarity invasion arm (cloud diagnostic MAP, #[ignore]).
 /// Sweeps patch_grain over FIXED set {1,2,4,8,16,32} × seeds {1,2,3}.
-/// For each combination, runs reciprocal seedings (multi→uni and uni→multi) to horizon.
-/// Measures rare-invader (SpeciesId 1) trajectory and port-check baselines.
+/// For each combination, runs reciprocal seedings with TRUE RARITY (2 fixed invaders, not 10%):
+/// (multi→uni: 98% multicell + 2 unicell invaders) and (uni→multi: 98% unicell + 2 multicell invaders).
+/// Breed-true config (evolve_body_size=false, speciation frozen).
+/// Measures rare-invader (SpeciesId 1) trajectory via species_census.
 /// Emits greppable MAP lines; structural asserts only (no PASS/FAIL verdict).
 #[test]
 #[ignore]  // Cloud-only diagnostic; runs via sim-run.yml env-frontier case
-fn env0a_a2_invasibility_sweep() {
+fn env0a_a2p_invasion_sweep() {
     use cli::driver_config;
 
     let n_layers = 2;
     let unicell = make_unicell_template(n_layers);
     let multicell = make_multicell_template(n_layers);
 
-    // Read horizon ticks from environment (default: 2000 ≈ ~1000 generations)
+    // Read horizon ticks from environment (default: 8000)
     let horizon_ticks = env::var("ENV_FRONTIER_TICKS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(2000);
+        .unwrap_or(8000);
 
     // Sweep grid: patch_grain × seed (pre-declared fixed set per issue)
     let patch_grains = [1i64, 2, 4, 8, 16, 32];
     let seeds = [1u64, 2, 3];
+    // Fixed invader count (true rarity)
+    let n_invaders = 2u64;
+    let n_founders_per_run = 100u64;
 
     for &patch_grain in &patch_grains {
         for &seed in &seeds {
-            // === Port-check Baseline A: retention-OFF (plain driver_config, no env_frontier) ===
-            let config_baseline_a = driver_config(seed);
-            let mut sim_baseline_a = cli::build_sim(config_baseline_a);
-            for _ in 0..horizon_ticks {
-                sim_baseline_a.step();
-            }
-            let n_opt_a = sim_baseline_a.n_opt(); // fixed-point 256-scale
-            // Structural assert: N_opt must be >= 0
-            assert!(n_opt_a >= 0, "baseline A n_opt must be >= 0");
-
-            // === Port-check Baseline B: retention-ON at current grain (EVOLVING) ===
-            // Baseline B must be EVOLVING (single genotype, size evolves under the mechanic at this grain).
-            // Build from driver_config(seed) + env_frontier_config; keep founder_templates=None.
-            // This allows evolve_body_size=true, satisfying the predation assertion (not breed-true like invasion runs).
-            let mut config_baseline_b = driver_config(seed);
-            config_baseline_b.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain });
-            // Note: baselines EVOLVE size (N_opt = evolved optimum); only invasion runs freeze size (breed-true).
-            let mut sim_baseline_b = cli::build_sim(config_baseline_b);
-            for _ in 0..horizon_ticks {
-                sim_baseline_b.step();
-            }
-            let n_opt_b = sim_baseline_b.n_opt();
-            assert!(n_opt_b >= 0, "baseline B n_opt must be >= 0");
-
-            // === Direction 1: resident = multicell (90%), invader = unicell (10%) ===
+            // === Direction 1: resident = multicell, invader = unicell (true rarity: 2 individuals) ===
             let mut config1 = cli::env_frontier_invasibility_config(seed, patch_grain);
-            config1.n_founders = 100;
+            config1.n_founders = n_founders_per_run;
             config1.founder_templates = Some(vec![
-                (multicell.clone(), 90),
-                (unicell.clone(), 10),
+                (multicell.clone(), n_founders_per_run - n_invaders),
+                (unicell.clone(), n_invaders),
             ]);
             let mut sim1 = cli::build_sim(config1);
 
@@ -313,12 +429,12 @@ fn env0a_a2_invasibility_sweep() {
             // invader_end_dir1 is u64 (always >= 0 by type); this is a structural placeholder
             // documenting the expectation (population counts are non-negative).
 
-            // === Direction 2: resident = unicell (90%), invader = multicell (10%) ===
+            // === Direction 2: resident = unicell, invader = multicell (true rarity: 2 individuals) ===
             let mut config2 = cli::env_frontier_invasibility_config(seed, patch_grain);
-            config2.n_founders = 100;
+            config2.n_founders = n_founders_per_run;
             config2.founder_templates = Some(vec![
-                (unicell.clone(), 90),
-                (multicell.clone(), 10),
+                (unicell.clone(), n_founders_per_run - n_invaders),
+                (multicell.clone(), n_invaders),
             ]);
             let mut sim2 = cli::build_sim(config2);
 
@@ -348,12 +464,12 @@ fn env0a_a2_invasibility_sweep() {
 
             // === Emit greppable MAP lines ===
             println!(
-                "ENV-0a-a2 {} {} multi→uni {} {} {} {}",
-                patch_grain, seed, invader_start_dir1, invader_end_dir1, n_opt_a, n_opt_b
+                "ENV-0a-a2p invasion {} {} multi→uni {} {}",
+                patch_grain, seed, invader_start_dir1, invader_end_dir1
             );
             println!(
-                "ENV-0a-a2 {} {} uni→multi {} {} {} {}",
-                patch_grain, seed, invader_start_dir2, invader_end_dir2, n_opt_a, n_opt_b
+                "ENV-0a-a2p invasion {} {} uni→multi {} {}",
+                patch_grain, seed, invader_start_dir2, invader_end_dir2
             );
         }
     }
