@@ -860,6 +860,52 @@ impl Sim {
         }
     }
 
+    /// DIFF-0: Probe distinct cell types. Returns Vec of ((distinct_type_count, body_size), count)
+    /// tuples representing the (T, N) histogram. Also returns (max_T, min_iw0, mean_iw0, max_iw0)
+    /// where iw0 = |input_weights[0]| from genomes with GRN specs.
+    /// Golden-neutral, read-only, not in state_hash or tick. Empty population → (Vec::new(), (0, 0, 0, 0)).
+    pub fn distinct_types_probe(&mut self) -> (Vec<((i64, i64), u64)>, (i64, i64, i64, i64)) {
+        let mut q_phenotype = self.world.query::<&Phenotype>();
+        let mut q_genome = self.world.query::<&Genome>();
+
+        let phenotypes: Vec<_> = q_phenotype.iter(&self.world).collect();
+        let genomes: Vec<_> = q_genome.iter(&self.world).collect();
+
+        // Collect (T, N) histogram
+        let mut tn_map: std::collections::BTreeMap<(i64, i64), u64> = std::collections::BTreeMap::new();
+        let mut max_t = 0i64;
+
+        for ph in &phenotypes {
+            let t = ph.graph.distinct_types();
+            let n = ph.graph.body_size();
+            tn_map.entry((t, n)).and_modify(|c| *c += 1).or_insert(1);
+            max_t = max_t.max(t);
+        }
+
+        // Collect input_weights[0] stats
+        let mut iw0_vals: Vec<i64> = Vec::new();
+        for g in &genomes {
+            if let Some(gspec) = &g.grn_spec {
+                if !gspec.input_weights.is_empty() {
+                    let iw0 = (gspec.input_weights[0].abs()) as i64;
+                    iw0_vals.push(iw0);
+                }
+            }
+        }
+
+        let (min_iw0, mean_iw0, max_iw0) = if iw0_vals.is_empty() {
+            (0, 0, 0)
+        } else {
+            let sum_iw0: i64 = iw0_vals.iter().sum();
+            let mean = sum_iw0 / iw0_vals.len() as i64;
+            let min = iw0_vals.iter().copied().min().unwrap_or(0);
+            let max = iw0_vals.iter().copied().max().unwrap_or(0);
+            (min, mean, max)
+        };
+
+        (tn_map.into_iter().collect(), (max_t, min_iw0, mean_iw0, max_iw0))
+    }
+
     pub fn tick(&self) -> u64 {
         self.world.resource::<SimClock>().tick
     }

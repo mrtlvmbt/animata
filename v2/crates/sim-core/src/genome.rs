@@ -201,6 +201,27 @@ impl CellGraph {
         self.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1)
     }
 
+    /// DIFF-0: Count of distinct `CellType`s among this body's modules. Integer-only, no HashMap.
+    /// Uses a small sorted Vec of observed types, then counts unique entries.
+    /// Returns 0 for empty graph (no modules), or the count of distinct types otherwise.
+    /// E.g. a unicellular body with all modules type `A` returns 1; a body with both `A` and `B`
+    /// modules returns 2. For `CellType::Diff(i)`, each distinct `i` counts as a separate type.
+    pub fn distinct_types(&self) -> i64 {
+        if self.module_type.is_empty() {
+            return 0;
+        }
+        // Collect all types into a Vec, sort, and count runs.
+        let mut types: Vec<CellType> = self.module_type.clone();
+        types.sort_by_key(|ct| match ct {
+            CellType::A => 0,
+            CellType::B => 1,
+            CellType::Mixed => 2,
+            CellType::Diff(i) => 3 + *i as i32,
+        });
+        types.dedup();
+        types.len() as i64
+    }
+
     /// Empty graph (zero modules, e.g. for non-phase2 configs where the graph is not computed).
     pub fn empty() -> Self {
         CellGraph {

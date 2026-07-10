@@ -32,6 +32,7 @@ on:
           - ga-load              # GA-LOAD-0 (#354) ratchet diagnostic (f_del sweep via del_den × burden_cost_k × seeds)
           - dc-diag             # DC-DIAG (#351) size-ceiling diagnostic (cap-bound vs driver-bound: base_hazard sweep, max_body_size)
           - env-frontier         # ENV-0a'-a2 (#362) mutual-invasibility harness (patch-grain sweep, coexistence domain)
+          - diff-probe           # DIFF-0 (#372) cell-type differentiation probe (T>=2 ever occur under stock driver_config?)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -96,7 +97,7 @@ jobs:
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
       - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag'
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'diff-probe'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -252,6 +253,16 @@ jobs:
               cd v2
               ENV_FRONTIER_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- env0a_a2p --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            diff-probe)
+              # DIFF-0 (#372) cell-type differentiation substrate probe: does T≥2 (distinct cell types)
+              # ever occur under stock driver_config? Seeds 1..8, horizon DIFF0_TICKS. Measures joint (T,N)
+              # histogram, input_weights drift, and first T≥2 observation. Prior: input_weights=[0,0] (drive
+              # dead) → every cell same GRN attractor → T==1 always (NULL expectation).
+              # Emits greppable DIFF0 hist/stats MAP lines. Analysis offline; no in-code verdict.
+              cd v2
+              DIFF0_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- diff0_type_probe --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
