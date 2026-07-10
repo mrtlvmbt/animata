@@ -201,6 +201,90 @@ impl CellGraph {
         self.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1)
     }
 
+    /// DIFF-0: Count of distinct `CellType`s among this body's modules. Integer-only, no HashMap,
+    /// no allocation. Uses a fixed-size bitmask over {A, B, Mixed} and a bounded u32 set for Diff(i).
+    /// Returns 0 for empty graph.
+    ///
+    /// **IMPORTANT:** `CellType::Mixed` is counted as a distinct type but is NOT a differentiated cell type.
+    /// `Mixed` is the label for a GRN attractor that did not resolve to A or B (unresolved). Consumers must
+    /// examine the full composition (via `distinct_types_composition()`) to distinguish {A, B} from {A, Mixed}.
+    /// For metrology: see also `distinct_types_strict()` which excludes Mixed.
+    pub fn distinct_types(&self) -> i64 {
+        if self.module_type.is_empty() {
+            return 0;
+        }
+        // Fixed-size bitmask for {A=0, B=1, Mixed=2}
+        let mut seen = 0u8;
+        let mut diff_mask = 0u32; // Bounded set for Diff(i): each bit represents one i value (0..31)
+
+        for &ct in &self.module_type {
+            match ct {
+                CellType::A => seen |= 1u8 << 0,
+                CellType::B => seen |= 1u8 << 1,
+                CellType::Mixed => seen |= 1u8 << 2,
+                CellType::Diff(i) => {
+                    if i < 32 {
+                        diff_mask |= 1u32 << i;
+                    } else {
+                        // Rare case: Diff with i >= 32. Count it as an extra type (conservative).
+                        diff_mask |= 1u32 << 31; // Overflow marker
+                    }
+                }
+            }
+        }
+
+        (seen.count_ones() as i64) + (diff_mask.count_ones() as i64)
+    }
+
+    /// DIFF-0: Per-type module counts (composition). Returns (nA, nB, nMixed, nDiff_total).
+    /// Used to interpret the (T, N) histogram: {A, B} vs {A, Mixed} are different substrate states.
+    /// `nDiff_total` is the COUNT of Diff-type modules (not the number of distinct Diff(i) variants).
+    pub fn distinct_types_composition(&self) -> (u64, u64, u64, u64) {
+        let mut na = 0u64;
+        let mut nb = 0u64;
+        let mut nmixed = 0u64;
+        let mut ndiff = 0u64;
+
+        for &ct in &self.module_type {
+            match ct {
+                CellType::A => na += 1,
+                CellType::B => nb += 1,
+                CellType::Mixed => nmixed += 1,
+                CellType::Diff(_) => ndiff += 1,
+            }
+        }
+
+        (na, nb, nmixed, ndiff)
+    }
+
+    /// DIFF-0: Strict differentiation count — number of distinct types among {A, B, Diff(i)} only,
+    /// excluding `Mixed` (which is an unresolved attractor, not a differentiated type).
+    /// This answers the core question: "does true differentiation occur?"
+    pub fn distinct_types_strict(&self) -> i64 {
+        if self.module_type.is_empty() {
+            return 0;
+        }
+        let mut seen = 0u8;
+        let mut diff_mask = 0u32;
+
+        for &ct in &self.module_type {
+            match ct {
+                CellType::A => seen |= 1u8 << 0,
+                CellType::B => seen |= 1u8 << 1,
+                CellType::Mixed => {}, // Skip Mixed
+                CellType::Diff(i) => {
+                    if i < 32 {
+                        diff_mask |= 1u32 << i;
+                    } else {
+                        diff_mask |= 1u32 << 31;
+                    }
+                }
+            }
+        }
+
+        (seen.count_ones() as i64) + (diff_mask.count_ones() as i64)
+    }
+
     /// Empty graph (zero modules, e.g. for non-phase2 configs where the graph is not computed).
     pub fn empty() -> Self {
         CellGraph {
