@@ -412,6 +412,15 @@ pub struct EconParams {
     /// `None` (default, all existing production configs) → uptake remains proportional (all
     /// contested-cell grants scale equally) → byte-identical goldens (the isolation gate).
     pub env_frontier_config: Option<EnvFrontierConfig>,
+
+    // ── EXT-0a: body footprint harvest (spatial extent income) ──────────────────────────────
+    /// Body footprint mechanism (EXT-0a). `true` enables footprint-based harvest: a multicellular
+    /// body occupies `side²` field cells (where `side = g_dev.max(1)`) and harvests from all of them,
+    /// making income non-lethally grow in N. `false` (default, all existing production configs) →
+    /// footprint inert, `side² = 1` contestant per entity, grant pooled to single cell → income flat in N
+    /// regardless of body size → byte-identical goldens (the isolation gate).
+    /// Determinism: the footprint is a pure function of (Position, g_dev, world_dim) — no RNG/HashMap.
+    pub body_footprint: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -691,6 +700,8 @@ impl Default for EconParams {
             burden_cost_k: 2,        // energy cost per load unit; anchored to ~2% of income (swept in diagnostic)
             // ENV-0a'-a1: spatial monopolization OFF by default — None for all existing configs (byte-identical).
             env_frontier_config: None,
+            // EXT-0a: body footprint harvest OFF by default — false for all 5 existing configs (byte-identical).
+            body_footprint: false,
         }
     }
 }
