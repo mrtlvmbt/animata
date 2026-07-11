@@ -48,6 +48,9 @@ on:
       morphogen_steps:
         description: "ext-0b — morphogen steps (default 8)"
         default: "8"
+      c_coord:
+        description: "ext-0b — coordination cost per cell (default 1, matching DRIVER_C_COORD)"
+        default: "1"
       bench_pop:
         description: "perf / v2-perf — pre-stuff N founders to time step() at scale (e.g. 5000); blank = natural pop"
         default: ""
@@ -292,12 +295,12 @@ jobs:
                 cargo test --release -p cli -- ext0a_footprint_conservation --nocapture 2>&1 | tee -a ../"$SUM"
               ;;
             ext-0b)
-              # EXT-0b (#385) sweep harness: parameterize footprint arm by gdev_cap/morphogen_steps.
+              # EXT-0b (#385) sweep harness: parameterize footprint arm by gdev_cap/morphogen_steps/c_coord.
               # Same density sweep and structure as Arm A, but allows raised morphogen cap to test saturation
-              # (cap-bound vs emergent optimum). Runs Arm A with EXT0B_GDEV_CAP and EXT0B_MORPH_STEPS overrides.
-              # Pass-2 of EXT-0b (sweep harness); pass-1 merged config knobs (#383).
+              # (cap-bound vs emergent optimum), and c_coord sweep to gate income-monotonicity. Runs Arm A with
+              # EXT0B_GDEV_CAP, EXT0B_MORPH_STEPS, and EXT0B_C_COORD overrides. Pass-2 of EXT-0b (#394).
               cd v2
-              EXT0A_TICKS="${{ inputs.ticks }}" EXT0B_GDEV_CAP="${{ inputs.gdev_cap }}" EXT0B_MORPH_STEPS="${{ inputs.morphogen_steps }}" \
+              EXT0A_TICKS="${{ inputs.ticks }}" EXT0B_GDEV_CAP="${{ inputs.gdev_cap }}" EXT0B_MORPH_STEPS="${{ inputs.morphogen_steps }}" EXT0B_C_COORD="${{ inputs.c_coord }}" \
                 cargo test --release -p cli -- ext0a_footprint_arm_a --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             diff-probe)
