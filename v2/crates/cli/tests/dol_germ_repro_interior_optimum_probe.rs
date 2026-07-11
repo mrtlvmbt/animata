@@ -105,7 +105,8 @@ fn measure_fitness_proxy(
     let demand = u_max * r / (r + km);
 
     // Income scales by soma (not body_size) per stages.rs:563 / 591
-    let total_income = demand * soma_count.max(1);
+    // soma_count can be 0 (all-germ case), creating zero income → natural parabola shape
+    let total_income = demand * soma_count;
     let repro_bar = compute_repro_bar(graph, repro_threshold);
 
     let fitness = if repro_bar == i64::MAX {
