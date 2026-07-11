@@ -11,6 +11,11 @@
 //! **W-6 status**: `gen::caps::classify_and_caps` now backs the production `ProcgenWorld`
 //! (`world/src/lib.rs`) — the pipeline is WIRED. `NoiseWorld`, the last `f64 sin` in the world
 //! path, is deleted.
+//!
+//! **W-SIM-4a (#396, `worldgen-relief` branch):** `tectonics` is the first landform slice — a
+//! deterministic fault network consumed by `erosion::erode_with_tectonics` (fault-scarp height step
+//! + fault-aligned resistance-lineament override), opt-in and default-off (`enable_tectonics`
+//! threads `erode` → `classify_and_caps` → `ProcgenWorld::new`).
 
 pub mod biome;
 pub mod caps;
@@ -20,3 +25,4 @@ pub mod erosion;
 pub mod height;
 pub mod material;
 pub mod moisture;
+pub mod tectonics;
