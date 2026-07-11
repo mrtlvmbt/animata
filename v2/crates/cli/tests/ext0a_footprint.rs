@@ -58,42 +58,25 @@ fn compute_histogram(body_sizes: &[i64]) -> String {
 }
 
 /// Compute measured income(N) observable: per-body-size mean income from booked telemetry.
-/// Bins entities by realized cell count (graph.body_size()), sums booked income (photo + chem),
-/// and returns a sorted map: cell_count → (mean_income, count).
+/// Bins entities by realized cell count (graph.body_size()), sums booked income (total_photo +
+/// total_got), and returns a sorted map: cell_count → (mean_income, count).
 ///
-/// CRITICAL FIX: body_size_probe() returns unordered sizes (Query order), while income_record
-/// iterates sorted by entity_bits key. We cannot zip them directly.
-/// SOLUTION: Build a HashMap mapping sorted body_sizes index → size, then iterate income_record
-/// to look up the correct size for each entity. Actually simpler: we just build the map by
-/// consuming income_record directly and looking up sizes by position.
-/// ACTUAL SOLUTION: Both queries must iterate the same entity set. Use income_record's keys
-/// (entity_bits) to match. But body_size_probe doesn't give us entity_bits.
-/// WORKAROUND: Sort body_sizes by entity index to match income_record's sorted order.
-/// For safety, we build the observable from income_record only, using the count of entities.
+/// Joins by entity IDENTITY (entity_bits), not position: `body_sizes` comes from
+/// `Sim::body_size_entity_probe()` (entity_bits → body_size, F1 fix) and is looked up per key
+/// while iterating `income_record` (a `DetMap`, sorted by entity_bits). `body_size_probe()`'s plain
+/// `Vec<i64>` is unordered Query output and must never be zipped against `income_record` directly —
+/// that pairs the i-th entity of one iteration order with the i-th of the other.
 fn compute_income_by_size(
-    body_sizes: &[i64],
+    body_sizes: &DetMap<u64, i64>,
     income_record: &DetMap<u64, (i64, i64)>,
 ) -> BTreeMap<i64, (i64, usize)> {
     let mut income_by_size: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
 
-    // CRITICAL: body_sizes comes from body_size_probe() (unordered Query iteration),
-    // income_record is BTreeMap (sorted by entity_bits). Zipping them pairs the i-th body size
-    // with the i-th income entry, but they're in different iteration orders!
-    // FIX: Both vectors should have identical length (both over live entities). If lengths differ,
-    // the zip silently truncates to the shorter one, causing data loss.
-    // For now, we trust that both iterate the same entity count. Future improvement: use Sim
-    // reference to get both values together and build the observable without zipping.
-
-    assert_eq!(
-        body_sizes.len(),
-        income_record.len(),
-        "Entity mismatch: body_sizes ({}) != income_record ({}); observable unreliable",
-        body_sizes.len(),
-        income_record.len()
-    );
-
-    for (size, (photo_in, chem_in)) in body_sizes.iter().zip(income_record.values()) {
-        let total_income = photo_in + chem_in;
+    for (entity_bits, (total_photo, total_got)) in income_record.iter() {
+        let size = body_sizes
+            .get(entity_bits)
+            .expect("income_record and body_size_entity_probe must observe the same live entity set");
+        let total_income = total_photo + total_got;
         income_by_size.entry(*size).or_insert_with(Vec::new).push(total_income);
     }
 
@@ -171,6 +154,7 @@ fn ext0a_footprint_arm_a() {
             cfg.econ.gdev_cap = gdev_cap;
             cfg.econ.morphogen_steps = morphogen_steps;
             cfg.econ.c_coord = c_coord;  // EXT-0b: apply c_coord knob
+            let body_footprint_gate = cfg.econ.body_footprint;
 
             // Run simulation to horizon.
             let mut sim = build_sim(cfg);
@@ -180,6 +164,12 @@ fn ext0a_footprint_arm_a() {
 
             // Collect body sizes for histogram.
             let body_sizes = sim.body_size_probe();
+
+            // EXT-0b (F1): entity-keyed body-size readout for the income join, own explicit
+            // econ.body_footprint gate — unlike income_record (always-on), this probe is only
+            // built when the flag enables the footprint contestant path this test exercises.
+            let body_sizes_by_entity =
+                if body_footprint_gate { Some(sim.body_size_entity_probe()) } else { None };
 
             // Read telemetry at horizon.
             let tel = sim.telemetry();
@@ -207,11 +197,12 @@ fn ext0a_footprint_arm_a() {
                 };
 
                 // EXT-0b: compute measured income(N) observable from telemetry.
-                // Gate-check: income must be measured (not analytic) from booked income_record.
-                // CRITICAL FIX: income_record is sorted by entity_bits, body_sizes is unordered from Query.
-                // We pair them by zipping, which assumes both visit the same entity set in some order.
-                // For correctness: Both should have same length; if lengths differ, observable is unreliable.
-                let income_by_size = compute_income_by_size(&body_sizes, &tel.income_record);
+                // Gate-check: income must be measured (not analytic) from booked income_record,
+                // joined to body size by entity identity (F1 fix; see compute_income_by_size doc).
+                let income_by_size = body_sizes_by_entity
+                    .as_ref()
+                    .map(|bs| compute_income_by_size(bs, &tel.income_record))
+                    .unwrap_or_default();
                 let income_summary = if income_by_size.is_empty() {
                     "no_income_data".to_string()
                 } else {

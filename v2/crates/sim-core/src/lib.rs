@@ -829,6 +829,18 @@ impl Sim {
         q.iter(&self.world).map(|ph| ph.graph.body_size()).collect()
     }
 
+    /// EXT-0b (F1): entity-keyed body-size readout — `entity_bits → graph.body_size()` for every
+    /// live entity, using the same `Entity::to_bits()` derivation `income_record` keys on
+    /// (`stages.rs` `entity_income_map`/`entity_photo_map`). Lets a caller join body size to
+    /// `Telemetry::income_record` by entity IDENTITY instead of position: `body_size_probe`'s Query
+    /// order is unordered while `income_record` (a `DetMap`) iterates sorted by entity_bits, so a
+    /// positional zip of the two pairs the wrong entities together. Test-only probe: read-only, no
+    /// state mutation, not on the tick path, not in state_hash (mirrors `income_record`).
+    pub fn body_size_entity_probe(&mut self) -> DetMap<u64, i64> {
+        let mut q = self.world.query::<(Entity, &Phenotype)>();
+        q.iter(&self.world).map(|(e, ph)| (e.to_bits(), ph.graph.body_size())).collect()
+    }
+
     /// ENV-0a'-a2: population-mean cells-per-body (Σ entities module_cell_count / population).
     /// Mirror `population()`/`species_census()` — golden-neutral, read-only, not in state_hash or tick.
     /// Empty population → 0. Fixed-point BODY_SIZE_SCALE (256) to match telemetry scale.
