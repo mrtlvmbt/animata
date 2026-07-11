@@ -271,6 +271,12 @@ pub struct CreatureDot {
     /// layer the creature feeds from. Copy snapshot for render consistency. May support future biome/
     /// layer-driven coloring.
     pub uptake_layer: i32,
+    /// Actual cell count (R-11): read from `CellGraph::body_size()` in `observe_render`.
+    /// The real multicellular body size (∈ {1,4,9,16,25,36} for phase2). Distinct from `size` which
+    /// is the genome Kleiber trait [1,32]. Used to render the body as N cells instead of a single
+    /// sphere. Copy snapshot, not a borrow (critic F5). Golden-neutral: computed from the already-
+    /// produced Phenotype, never fed to state_hash (R-1).
+    pub body_size: i32,
 }
 
 /// T-2: Snapshot of life statistics — population-level metrics collected from live entities.
@@ -962,6 +968,8 @@ impl Sim {
                 // R-4: read size and uptake_layer from the genome/phenotype for LOD rendering.
                 let size = genome.size;
                 let uptake_layer = phenotype.uptake_layer;
+                // R-11: read actual body cell count from CellGraph for multicell rendering.
+                let body_size = phenotype.graph.body_size() as i32;
                 Some(CreatureDot {
                     id: e.id().to_bits(),
                     pos: pos.0,
@@ -970,6 +978,7 @@ impl Sim {
                     cell_type,
                     size,
                     uptake_layer,
+                    body_size,
                 })
             })
             .collect();

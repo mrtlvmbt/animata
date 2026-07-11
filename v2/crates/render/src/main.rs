@@ -236,47 +236,101 @@ async fn main() {
                     // Creatures so tiny they're unresolvable. Draw a minimal dot.
                     draw_sphere(creature_pos, 0.04, None, color);
                 } else if px_per_m < PX_PER_M_MID_THRESHOLD {
-                    // ─── MID tier: cell-type-colored sphere (R-3 behavior) ─────────────────────────────
-                    // Standard rendering: a sphere scaled by `size` and energy. This is the workhorse tier.
-                    // Size is [1..32], so scale by (size / 16.0) for a base of ~0.1 world units at size=16.
-                    let size_scale = c.size as f32 / 16.0;
-                    let energy_factor = (c.energy as f32).max(0.0).sqrt() / 100.0; // Rough energy visual cue.
-                    let radius = (size_scale * energy_factor).max(0.08); // Clamp to visible minimum.
-                    draw_sphere(creature_pos, radius, None, color);
+                    // ─── MID tier: multicell cluster sphere (R-11 body_size rendering) ──────────────────
+                    // R-11: Draw body as `body_size` cells in a packed cluster arrangement.
+                    // Each cell is a small sphere; cluster is arranged in a square grid.
+                    let body_count = c.body_size.max(1) as usize;
+                    let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                    let cell_radius = 0.03; // Small sub-cell radius
+                    let spacing = cell_radius * 2.2; // Slight spacing between cells
+
+                    // Compute grid offset to center the cluster
+                    let grid_size = (grid_side - 1) as f32 * spacing;
+                    let offset_x = -grid_size / 2.0;
+                    let offset_z = -grid_size / 2.0;
+
+                    // Draw cells in a square grid pattern
+                    let mut drawn = 0;
+                    for row in 0..grid_side {
+                        for col in 0..grid_side {
+                            if drawn >= body_count {
+                                break;
+                            }
+                            let cell_x = offset_x + col as f32 * spacing;
+                            let cell_z = offset_z + row as f32 * spacing;
+                            let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
+                            draw_sphere(cell_pos, cell_radius, None, color);
+                            drawn += 1;
+                        }
+                        if drawn >= body_count {
+                            break;
+                        }
+                    }
                 } else {
-                    // ─── NEAR tier: minimal cell-type morphology + uptake_layer base color ───────────────
-                    // Each cell_type has a small distinctive form, sized by creature's `size`.
-                    // Base color is uptake_layer (feeding guild); morphology reflects cell_type (if available).
+                    // ─── NEAR tier: cell-type morphology + multicell body representation ──────────────────
+                    // R-4/R-11: Scale morphology by `size` (Kleiber); draw body as `body_size` cells.
+                    // Each cell_type has a distinctive form; base color is uptake_layer (feeding guild).
                     let size_scale = c.size as f32 / 16.0;
                     let base_size = 0.15 * size_scale;
+                    let body_count = c.body_size.max(1) as usize;
 
-                    match c.cell_type {
-                        Some(sim_core::CellType::A) => {
-                            // Type A: main body + upper accent sphere (a small top ball).
-                            draw_sphere(creature_pos, base_size, None, color);
-                            // Accent in a brighter shade of the uptake_layer color
-                            let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
-                            draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
+                    // For multicellular bodies (body_count > 1), render a small cluster around the main form.
+                    // This makes multicellularity visible while preserving the cell_type morphology signal.
+                    if body_count > 1 {
+                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                        let cell_radius = 0.04;
+                        let spacing = cell_radius * 2.0;
+                        let grid_size = (grid_side - 1) as f32 * spacing;
+                        let offset_x = -grid_size / 2.0;
+                        let offset_z = -grid_size / 2.0;
+
+                        // Draw cells in a compact grid, with cell_type morphology only on the main cell.
+                        let mut drawn = 0;
+                        for row in 0..grid_side {
+                            for col in 0..grid_side {
+                                if drawn >= body_count {
+                                    break;
+                                }
+                                let cell_x = offset_x + col as f32 * spacing;
+                                let cell_z = offset_z + row as f32 * spacing;
+                                let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
+                                // Render each cell as a small sphere in the base color
+                                draw_sphere(cell_pos, cell_radius, None, color);
+                                drawn += 1;
+                            }
+                            if drawn >= body_count {
+                                break;
+                            }
                         }
-                        Some(sim_core::CellType::B) => {
-                            // Type B: main body + side accent sphere (a small offset ball).
-                            draw_sphere(creature_pos, base_size, None, color);
-                            let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
-                            draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
-                        }
-                        Some(sim_core::CellType::Mixed) => {
-                            // Type Mixed: main body + front accent sphere (a small forward ball).
-                            draw_sphere(creature_pos, base_size, None, color);
-                            let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
-                            draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
-                        }
-                        Some(sim_core::CellType::Diff(_)) => {
-                            // Diff: differentiated cell, render as neutral sphere (same as None for now)
-                            draw_sphere(creature_pos, base_size, None, color);
-                        }
-                        None => {
-                            // Neutral: single sphere (for non-morphogen configs).
-                            draw_sphere(creature_pos, base_size, None, color);
+                    } else {
+                        // Unicellular: draw the full cell_type morphology
+                        match c.cell_type {
+                            Some(sim_core::CellType::A) => {
+                                // Type A: main body + upper accent sphere (a small top ball).
+                                draw_sphere(creature_pos, base_size, None, color);
+                                let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
+                                draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
+                            }
+                            Some(sim_core::CellType::B) => {
+                                // Type B: main body + side accent sphere (a small offset ball).
+                                draw_sphere(creature_pos, base_size, None, color);
+                                let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
+                                draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
+                            }
+                            Some(sim_core::CellType::Mixed) => {
+                                // Type Mixed: main body + front accent sphere (a small forward ball).
+                                draw_sphere(creature_pos, base_size, None, color);
+                                let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
+                                draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
+                            }
+                            Some(sim_core::CellType::Diff(_)) => {
+                                // Diff: differentiated cell, render as neutral sphere (same as None for now)
+                                draw_sphere(creature_pos, base_size, None, color);
+                            }
+                            None => {
+                                // Neutral: single sphere (for non-morphogen configs).
+                                draw_sphere(creature_pos, base_size, None, color);
+                            }
                         }
                     }
                 }
