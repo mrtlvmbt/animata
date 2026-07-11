@@ -75,11 +75,16 @@ must be committed+pushed to animata-pm or it exists only on this machine.
 - **Merge ONLY when `ci-report.sh` exits 0.** That replaces the old "run the full `--release` suite
   locally" gate. Do NOT run the full `./scripts/test-bar.sh` suite locally — that is exactly the
   machine-load CI exists to remove.
-- CI is two jobs (determinism is per-arch — see the `.github/workflows/tests.yml` header): `test-x86`
-  (ubuntu, the corridors + everything except the 3 exact-golden tests) and `golden-arm64`
-  (macos-latest, matched arch, the 3 `state_checksum`/golden locks). It covers **`animata-sim` only**.
-  The `animata` render bin is deliberately out of CI, so UI/render changes still verify locally
-  (clippy + in-app — see the `animata-ui` skill).
+- CI is four jobs (determinism is per-arch). Two guard the **v1 `animata-sim`** regression shield:
+  `test-x86` (ubuntu, the corridors + everything except the 3 exact-golden tests) and `golden-arm64`
+  (macos-latest, matched arch, the 3 `state_checksum`/golden locks). Two guard the **active v2 program**
+  (`v2/crates/**` — `sim-core`/`cli`/…, where all current mechanic work lands): `v2-sim-x86` (invariants +
+  R14 1-vs-N) and `v2-golden-arm64` (the `v2_golden_conserved_*` determinism pins). The overall run is
+  green iff **all four** pass. The render bin is deliberately out of CI, so UI/render changes still verify
+  locally (clippy + in-app — see the `animata-ui` skill).
+  > ⚠ The rest of this section (re-pin / `golden.rs` / `test-bar.sh`) still describes the **v1**
+  > `animata-sim` machinery; the v2 goldens are `v2_golden_conserved_*`. The v1↔v2 testing contract wants a
+  > dedicated refresh — this note only corrects the "two jobs / animata-sim only" claim, which was false.
 - **Re-pinning the golden:** read the new `left:`/`right:` from `.ci-report/failed.log` (the
   `golden-arm64` job), not a local run.
 
