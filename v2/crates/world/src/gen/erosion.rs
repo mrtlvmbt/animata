@@ -831,10 +831,6 @@ mod tests {
         let faults = crate::gen::tectonics::build_faults(SEED, DIM);
         let b_excl = steep_edge_count_excluding_scarp(&b.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
         let c_excl = steep_edge_count_excluding_scarp(&c.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
-        // Reveal probe (temporary, this CI round only): forces a panic printing the exact observed
-        // b_excl/c_excl so the real margin can be pinned below in the SAME round the golden vectors
-        // above are also being revealed in — avoids burning a second CI round just for this number.
-        assert_eq!((b_excl, c_excl), (usize::MAX, usize::MAX), "REVEAL PROBE b_excl,c_excl");
         const MIN_MARGIN: usize = 1;
         assert!(
             c_excl >= b_excl + MIN_MARGIN,
