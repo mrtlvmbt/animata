@@ -2877,7 +2877,7 @@ mod tests {
         
         for i in 0..100 {
             let seed = 0x1234_5678 + (i as u64);
-            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, gdev_cap);
+            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
             
             // If grn_spec exists, n_genes should stay at 2
             if let Some(spec) = &g.grn_spec {
@@ -2898,8 +2898,8 @@ mod tests {
         let econ = EconParams::default();
         
         // Mutate both with flag=false
-        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0);
-        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, gdev_cap);
+        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
+        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
         
         // They should be byte-identical (determinism check)
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
@@ -3076,7 +3076,7 @@ mod tests {
         // Find a seed that triggers duplication
         for i in 0..1000 {
             let seed = 0xCAFE_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3293,7 +3293,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x8888_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes != 2 {
                     let _ph = m.decode(&econ); // must not panic; Some or None both fine
@@ -3578,7 +3578,7 @@ mod tests {
 
         for i in 0..2000u64 {
             let seed = 0xA000_0000 + i;
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
                     let ph = m.decode(&econ).expect("post-translocation genome must decode to Some");
