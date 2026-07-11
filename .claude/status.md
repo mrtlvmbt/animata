@@ -1,42 +1,39 @@
-task: #391 TOPO-DIFF Rung-0 corrected probe — multi-entity deficit (consensus verdict fix 2026-07-11)
-phase: design-complete, pre-registration ready (NOT dispatched yet)
-blocked_on: PM review + approval of 7-check pre-registration validity gates (all 7 passed)
-next: Once PM clears: dispatch to cloud via sim-run.sh scenario topo-diff (GitHub Actions, 5 seeds)
-updated: 2026-07-11 14:45
+task: TOPO-DIFF Rung-0 probe validity gate (stand-down: fatal capability flaw caught pre-dispatch)
+phase: blocked (do NOT dispatch, do NOT merge)
+blocked_on: direction (pivot back to user — economy has no germ marginal return structure)
+next: user decision on differentiation strategy (economy is monotone-decreasing in germ by construction)
+updated: 2026-07-11 14:55 (validity gate check 1 failure confirmed by PM + adversarial reviewer)
 
-## Design & Pre-Registration Complete
+## VALIDITY GATE FAILURE: Check 1 (Capability)
 
-**Previous Rung-0:** Degenerate (single entity, R=100 surplus) → NULL by construction
-**Corrected Rung-0:** Multi-entity deficit (20 clones, R=10/cell, footprints enabled)
+**Finding (PM + adversarial reviewer, 2026-07-11 14:55):**
+Under `fate_economy`, germ has ZERO positive marginal return in EVERY resource regime:
+- Income: monotone in soma (deficit saturation makes soma concave but never reverses it)
+- Reproduction: binary germ>0 gate (no fecundity modulation)
+- Death: energy-driven (germ-heavy bodies starve MORE, not less)
+- Predation: body-size driven
 
-**Deliverables (committed to branch):**
-✅ topo_diff_rung0_multientity_deficit_probe.rs (test scaffold, compiles green)
-✅ topo-rung0-deficit-probe-preregistration.md (detailed 7-check analysis)
-✅ PR #391 comment (pre-registration summary, all 7 checks)
-✅ Commit: e322ff5
+**Consequence:** germ:soma fitness curve is monotone-decreasing in germ
+- Maximum always at germ=1 (lowest fertile point)
+- Interior PEAK impossible by construction
+- Probe could not fire; running would waste computational resources on foreordained NULL
 
-## All Critical Bugs Fixed
+**My Error:**
+❌ Marked check 1 "✅ Capability: interior split CAN beat both extremes under deficit saturation"
+- Identified deficit saturation makes soma's return concave (TRUE)
+- Missed: germ has ZERO positive return to pair with it (FALSE PREMISE)
+- Confusion: Concave soma ≠ interior optimum; need BOTH arms to have positive returns
 
-### Code-Critic Round 1 (F1–F5 inventory)
-✅ F1: .fate_germ_soma_counts() → replaced with iterator pattern (114c05b)
-✅ F2: Format string braces → fixed with format!() macro (114c05b)
-✅ F3: Dead variable per_cell_soma → removed (114c05b)
-✅ F5: module_is_germ=vec![false] → now encodes split (germ=true, soma=false) (114c05b)
-✅ Measurement validation: Added docstring proving formula matches real stages (114c05b)
-✅ Robustness check: Added fate_economy=FALSE arm for state-leakage detection (114c05b)
+**Lesson Internalized:**
+"Capability" = naming the mechanism by which TREATMENT WINS, not where baseline weakens.
+Interior optimum requires DUAL leverage: both germ AND soma must have positive returns somewhere.
+One concave curve + one zero-return curve = monotone, not optimum.
 
-### PM Critical Feedback (Classifier + Seed Theater)
-✅ FALSE PASS BUG: Classifier was accepting sterile cliff (germ=0→1) as rising shoulder
-   - Root: empty windows(2) → vacuous .all() = true
-   - Fix: Analyze fertile subdomain only (fertility>0 points)
-   - germ=1 correctly classified as EDGE (fertile domain boundary) → NULL (e8de6d7)
+**Status of Deliverables (left as-is, NOT merged):**
+- ✅ topo_diff_rung0_multientity_deficit_probe.rs (valid test scaffold)
+- ✅ topo-rung0-deficit-probe-preregistration.md (honest analysis; shows fatal flaw)
+- ✅ PR #391 (open, unmerged; gate comment visible to PM)
 
-✅ SEED THEATER: All 3 seeds produce identical curves (no RNG in measure_fitness)
-   - Root: measure_fitness has zero randomness
-   - Fix: Simplified to single deterministic run (TEST_SEED)
-   - Honest reporting: one curve per body size, actual classification (e8de6d7)
-
-### Current Test Status
-- ✅ Compiles to release without errors
-- ⏳ CI running (test-x86 + golden-arm64 corridors, run #29153866658)
-- Ready to dispatch once: CI passes + PR merges to main
+**Outcome:**
+Validity gate did its job — caught fatal flaw PRE-DISPATCH, not after a wasted run.
+Pivot direction returns to user. No further action until user decides on differentiation strategy.
