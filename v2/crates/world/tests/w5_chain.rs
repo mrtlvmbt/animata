@@ -38,8 +38,8 @@ fn chain_hash(fields: &world::gen::caps::WorldFields) -> u64 {
 /// Re-run identity: the full chain is byte-identical across repeated calls, at prod scale.
 #[test]
 fn chain_is_deterministic_across_repeated_calls() {
-    let a = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM);
-    let b = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM);
+    let a = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM, false);
+    let b = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM, false);
     assert_eq!(a, b, "classify_and_caps must be byte-identical across repeated calls at prod scale");
 }
 
@@ -47,7 +47,7 @@ fn chain_is_deterministic_across_repeated_calls() {
 /// classify normally on their low local moisture, no special case, no crash).
 #[test]
 fn caps_are_nonneg_and_bounded_at_prod_scale() {
-    let fields = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM);
+    let fields = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM, false);
     for (i, &c) in fields.caps.iter().enumerate() {
         assert!(
             (0..=world::gen::caps::CAP_MAX).contains(&c),
@@ -62,7 +62,7 @@ fn caps_are_nonneg_and_bounded_at_prod_scale() {
 /// climate/override/caps encoding mistake) reddens HERE.
 #[test]
 fn w5_chain_golden_final_biome_and_caps() {
-    let fields = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM);
+    let fields = classify_and_caps(CHAIN_SEED, W5_CHAIN_HMAX, W5_CHAIN_DIM, false);
 
     // Sanity: the entry point actually consumed W-1's heightmap (indirectly, via erosion) — the
     // grid is fully populated at the documented dim.
@@ -70,6 +70,8 @@ fn w5_chain_golden_final_biome_and_caps() {
     assert_eq!(fields.caps.len(), W5_CHAIN_DIM * W5_CHAIN_DIM);
     let _ = height_at(0, 0, CHAIN_SEED, W5_CHAIN_HMAX); // same seed/hmax family as the chain
 
+    // W-7 gate (patchiness default-off): hash reverts to pre-W-7 byte-identical value.
+    // Height/biome fields unchanged; spot values are canonical pre-patchiness values.
     const GOLDEN_HASH: u64 = 0x2705_C8AE_0DE7_1117;
     let hash = chain_hash(&fields);
     assert_eq!(hash, GOLDEN_HASH, "W-5 chain golden drift: got {hash:#018x}, expected {GOLDEN_HASH:#018x}");

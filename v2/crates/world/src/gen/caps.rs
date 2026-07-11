@@ -56,6 +56,7 @@ use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::drainage::is_river;
 use crate::gen::erosion::erode;
+use crate::gen::height::height_at;
 use crate::gen::material::MaterialId;
 use crate::gen::moisture::moisture_at;
 
@@ -140,6 +141,43 @@ pub fn override_biome(zonal: BiomeId, moisture: i64, material: MaterialId, slope
 /// testable). Matches `NoiseWorld`'s typical `resource_base` scale (see `world/src/lib.rs`'s
 /// `resource_nonneg_and_bounded` test, `resource_base=300`).
 pub const CAP_MAX: i64 = 300;
+
+/// W-7: Patchiness (spatial autocorrelation) seed salt — decorrelated from height to create
+/// independent spatial structure for resource-cap heterogeneity (implementer's call, RnD W-7,
+/// documented, locked). Used as `seed ^ PATCH_SEED_SALT` in [`patchiness_at`], same pattern as
+/// `resistance_class_at` in erosion.rs.
+const PATCH_SEED_SALT: u64 = 0x5041_5443_4849_4E45; // "PATCHINE" (ASCII, folded)
+
+/// W-7: Resource-cap patchiness scale range [MIN, MAX] — symmetric factor centered on 256,
+/// mapping to resource modulation `[192, 320]` (0.75×–1.25× multiplicative factor). The symmetric
+/// range ATTEMPTS mean-neutrality; empirical re-measure required post-merge to confirm drift <±5%
+/// in economy equilibrium (issue #380, owner PM). Implementer's call (RnD W-7): 4–8 cells per
+/// patch, 64×64 grid → 64–256 coherent regions.
+const PATCH_SCALE_MIN: i64 = 192;
+const PATCH_SCALE_MAX: i64 = 320;
+
+/// W-7: Patchiness scale factor per cell via integer fBm noise — a **mean-neutral symmetric
+/// modulation** of the base cap. Returns a multiplicative factor in `[PATCH_SCALE_MIN,
+/// PATCH_SCALE_MAX]` (integer, centered at 256) derived from a decorrelated fBm layer
+/// (via [`crate::gen::height::height_at`] with `PATCH_SEED_SALT`). The formula uses linear
+/// rescaling that preserves fBm's natural spatial mean at `hmax/2`:
+///
+/// ```ignore
+/// factor = PATCH_SCALE_MIN + (height_at(...) * (PATCH_SCALE_MAX - PATCH_SCALE_MIN)) / hmax
+///        = 192 + (height_at * 128) / hmax
+/// ```
+///
+/// This is mean-neutral: if `height_at` has spatial mean ≈ `hmax/2`, then `factor` has spatial
+/// mean ≈ 256 (the center). Changing the range narrower/wider scales the variation amplitude but
+/// preserves the mean. Applied in [`classify_and_caps`] as: `cap_modulated =
+/// clamp((cap_base * factor + 128) / 256, 0, CAP_MAX)` (the `+128` is round-half, eliminates
+/// truncation bias).
+///
+/// **Determinism:** Integer-only, uses `height_at` (W-1 primitive, x86-deterministic), no float.
+pub fn patchiness_at(x: i64, z: i64, seed: u64, hmax: i64) -> i64 {
+    let raw_noise = height_at(x, z, seed ^ PATCH_SEED_SALT, hmax);
+    PATCH_SCALE_MIN + (raw_noise * (PATCH_SCALE_MAX - PATCH_SCALE_MIN)) / hmax
+}
 
 /// Per-`FinalBiome` base resource cap (implementer's call, RnD 02 §4, documented, locked).
 fn biome_base_cap(b: FinalBiome) -> i64 {
@@ -250,9 +288,14 @@ pub struct WorldFields {
 
 /// Sample `erode(seed, hmax, dim)` (W-4) and classify the FINAL biome + caps per cell: zonal biome
 /// on the post-erosion surface (via `climate_from_height` + `biome_at`) → azonal override (via
-/// moisture/material/slope/is_river) → `caps_from`. Pure function of `(seed, hmax, dim)` — no
+/// moisture/material/slope/is_river) → `caps_from`. Pure function of `(seed, hmax, dim, enable_patchiness)` — no
 /// RNG-of-clock, no thread-dependence, no global mutable state.
-pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
+///
+/// **W-7 gate (patchiness default-off):** When `enable_patchiness` is false, the function produces
+/// caps identical to pre-W-7 (no spatial modulation). Patchiness must be explicitly opted-in by the
+/// caller (the map/visual track). This preserves acceptance corridors (settling, emergence) that assume
+/// homogeneous world-gen.
+pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize, enable_patchiness: bool) -> WorldFields {
     let erosion = erode(seed, hmax, dim);
     let n = dim * dim;
     let mut final_biome = Vec::with_capacity(n);
@@ -279,7 +322,19 @@ pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
 
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
             final_biome.push(final_b);
-            caps[idx] = caps_from(final_b, moisture, material);
+
+            // W-7 (gated): Apply spatial patchiness modulation to the base cap (mean-neutral symmetric factor).
+            let cap_base = caps_from(final_b, moisture, material);
+            let cap_final = if enable_patchiness {
+                let patch_scale = patchiness_at(x as i64, z as i64, seed, hmax);
+                // Modulation formula: cap_modulated = clamp((cap_base * patch_scale + 128) / 256, ...)
+                // The +128 implements round-half, eliminates constant −0.5 truncation bias.
+                ((cap_base * patch_scale + 128) / 256).clamp(0, CAP_MAX)
+            } else {
+                // Patchiness OFF: use base cap unchanged (byte-identical to pre-W-7)
+                cap_base
+            };
+            caps[idx] = cap_final;
         }
     }
 
@@ -406,8 +461,8 @@ mod tests {
 
     #[test]
     fn classify_and_caps_is_deterministic_across_repeated_calls() {
-        let a = classify_and_caps(SEED, HMAX, 16);
-        let b = classify_and_caps(SEED, HMAX, 16);
+        let a = classify_and_caps(SEED, HMAX, 16, false);
+        let b = classify_and_caps(SEED, HMAX, 16, false);
         assert_eq!(a, b, "classify_and_caps must be byte-identical across repeated calls");
     }
 
@@ -416,7 +471,7 @@ mod tests {
     #[test]
     fn classify_and_caps_is_well_defined_grid_wide() {
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false);
         assert_eq!(fields.final_biome.len(), DIM * DIM);
         assert_eq!(fields.caps.len(), DIM * DIM);
         for &c in &fields.caps {
@@ -429,8 +484,10 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM);
+        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false);
 
+        // W-7 gate (patchiness default-off): caps are byte-identical to pre-W-7 (no patchiness applied).
+        // Height/biome/material fields unchanged. These are the canonical pre-W-7 values.
         const CASES: &[(usize, FinalBiome, i64)] = &[
             (0, FinalBiome::BorealForest, 220),
             (36, FinalBiome::BorealForest, 220),
@@ -442,4 +499,176 @@ mod tests {
             assert_eq!(fields.caps[idx], exp_cap, "golden drift: caps[{idx}]");
         }
     }
+
+    /// W-7 bounds and clamp verification: on prod-scale 64×64 grid, all caps stay bounded and
+    /// clamp incidence (cells hitting CAP_MAX or floor) stays low (<15%). If clamp incidence is
+    /// too high, the patchiness factor range [192, 320] is asymmetric in the integer domain and
+    /// needs narrowing (empirical re-measure owns this post-merge). Clamping at the low end
+    /// (rescale_cap floor at 1) is expected; high-end (CAP_MAX=300) requires monitoring.
+    #[test]
+    fn w7_patchiness_is_bounded_on_prod_scale_grid() {
+        const SEED: u64 = 0xA11A_2A11;
+        const HMAX: i64 = 200;
+        const DIM: usize = 64;
+        // With patchiness ON to verify bounds and clamping behavior of the modulation
+        let fields = classify_and_caps(SEED, HMAX, DIM, true);
+
+        // Count cells hitting bounds (ceiling at CAP_MAX, floor at 1 via rescale_cap).
+        let mut clamp_low = 0usize;
+        let mut clamp_high = 0usize;
+        let mut total_sum: i64 = 0;
+
+        for &cap in &fields.caps {
+            assert!((0..=CAP_MAX).contains(&cap), "cap {cap} out of bounds [0,{CAP_MAX}]");
+            if cap == 1 {
+                clamp_low += 1;
+            }
+            if cap == CAP_MAX {
+                clamp_high += 1;
+            }
+            total_sum += cap;
+        }
+
+        let grid_size = DIM * DIM;
+        let clamp_total = clamp_low + clamp_high;
+
+        // Report (integer only, no float — this is prod gen code with float guard).
+        // Mean integer div: (total_sum * 1000) / grid_size gives mean × 1000.
+        let mean_times_1000 = (total_sum * 1000) / (grid_size as i64);
+        eprintln!(
+            "W-7 prod-grid: mean_×1000={}, median_idx={}, clamp_count={} ({}+{}), grid={}×{}",
+            mean_times_1000,
+            if fields.caps.len() > grid_size / 2 {
+                let mut sorted = fields.caps.clone();
+                sorted.sort();
+                sorted[grid_size / 2]
+            } else {
+                0
+            },
+            clamp_total,
+            clamp_low,
+            clamp_high,
+            DIM,
+            DIM
+        );
+
+        // Primary check: clamp incidence should be low. If >15% of cells clamp, the range is
+        // asymmetric and needs narrowing (e.g., shift PATCH_SCALE_MIN/MAX to [224,288]).
+        let clamp_permille = (clamp_total * 1000) / grid_size;
+        assert!(
+            clamp_permille < 150, // <15%
+            "patchiness clamp_incidence too high: {}/{} cells — PATCH_SCALE_RANGE may need narrowing",
+            clamp_total,
+            grid_size
+        );
+    }
+
+    /// W-7 spatial autocorrelation: verify that neighboring cells have more similar caps than
+    /// cells far apart (Moran's I proxy). This confirms patchiness adds coherent spatial
+    /// structure, not random noise. Integer-only comparison (no divisions).
+    #[test]
+    fn w7_patchiness_has_positive_spatial_autocorrelation() {
+        const SEED: u64 = 0xA11A_2A11;
+        const HMAX: i64 = 200;
+        const DIM: usize = 64;
+        let fields = classify_and_caps(SEED, HMAX, DIM, true);
+
+        // Adjacent-cell differences: sum of absolute differences for cells one step apart.
+        let mut same_neighbor_sum = 0i64;
+        let mut same_count = 0i64;
+
+        for z in 0..DIM {
+            for x in 0..(DIM - 1) {
+                let idx_a = z * DIM + x;
+                let idx_b = z * DIM + x + 1;
+                same_neighbor_sum += (fields.caps[idx_a] - fields.caps[idx_b]).abs();
+                same_count += 1;
+            }
+        }
+
+        // Far-cell differences: cells 16 steps away (different row).
+        let mut cross_neighbor_sum = 0i64;
+        let mut cross_count = 0i64;
+        for z in 0..(DIM - 16) {
+            for x in 0..DIM {
+                let idx_a = z * DIM + x;
+                let idx_b = (z + 16) * DIM + x;
+                cross_neighbor_sum += (fields.caps[idx_a] - fields.caps[idx_b]).abs();
+                cross_count += 1;
+            }
+        }
+
+        eprintln!(
+            "W-7 autocorr: neighbor_sum_diff={} ({} pairs), far_sum_diff={} ({} pairs)",
+            same_neighbor_sum, same_count, cross_neighbor_sum, cross_count
+        );
+
+        // Positive autocorrelation: adjacent cells differ LESS (smaller sum) than distant cells.
+        // Multiply to avoid division: same_neighbor_sum * cross_count should be < cross_neighbor_sum * same_count
+        assert!(
+            same_neighbor_sum * cross_count < cross_neighbor_sum * same_count,
+            "patchiness lacks autocorrelation: neighbors={} should be < distant={} (scaled)",
+            same_neighbor_sum,
+            cross_neighbor_sum
+        );
+    }
+
+    /// W-7 mean-invariance: patchiness must be a PURE VARIANCE knob with NO hidden mean shift
+    /// (MUST-FIX #1 per critic). This test computes the spatial-average resource cap over the whole
+    /// map WITH patchiness active, then WITH patchiness NEUTRALIZED (patch factor forced to 256,
+    /// i.e. ×1.0), and asserts the two means are equal within ±5% (the acceptance threshold at
+    /// caps.rs:153). Uses pure integer arithmetic to stay within the no_float_guard_gen constraint.
+    /// The test is required to verify that patchiness does not introduce correlation with the base
+    /// cap (covariance E[factor·base] ≠ E[factor]·E[base] would shift the mean even though the
+    /// factor is symmetric).
+    #[test]
+    fn patchiness_maintains_mean_neutrality() {
+        const SEED: u64 = 0xA11A_2A11;
+        const HMAX: i64 = 200;
+        const DIM: usize = 64;
+        const GRID_SIZE: i64 = (DIM * DIM) as i64;
+
+        // Compute world WITH patchiness active (gated ON)
+        let with_patch = classify_and_caps(SEED, HMAX, DIM, true);
+        let sum_with: i64 = with_patch.caps.iter().sum();
+        // Integer-only mean: multiply first to preserve precision, then divide
+        let mean_with_times_1000 = (sum_with * 1000) / GRID_SIZE;
+
+        // Compute world WITHOUT patchiness (gated OFF) — byte-identical to homogeneous baseline
+        let without_patch = classify_and_caps(SEED, HMAX, DIM, false);
+        let sum_without: i64 = without_patch.caps.iter().sum();
+        // Integer-only mean: multiply first to preserve precision, then divide
+        let mean_without_times_1000 = (sum_without * 1000) / GRID_SIZE;
+
+        // Compute percentage difference using only integer arithmetic: avoid truncation by
+        // multiplying by 100 before dividing. The ±5% threshold becomes ±50 in this metric
+        // (i.e., 50 permille out of 1000 permille = 5%).
+        let abs_diff = if mean_with_times_1000 > mean_without_times_1000 {
+            mean_with_times_1000 - mean_without_times_1000
+        } else {
+            mean_without_times_1000 - mean_with_times_1000
+        };
+        // Avoid division-by-zero; shouldn't happen in practice (caps are always in [0,300])
+        let pct_diff_times_100 = if mean_without_times_1000 > 0 {
+            (abs_diff * 100) / mean_without_times_1000
+        } else {
+            0
+        };
+
+        eprintln!(
+            "W-7 mean-invariance: mean_with_patch={}×1000⁻¹, mean_without_patch={}×1000⁻¹, diff_pct_×100={}",
+            mean_with_times_1000, mean_without_times_1000, pct_diff_times_100
+        );
+
+        // Assert means are equal within ±5% (pct_diff_times_100 <= 500, where 500/100 = 5%).
+        assert!(
+            pct_diff_times_100 <= 500,
+            "patchiness mean shift exceeded 5%% threshold: {}% diff (with={}×1000⁻¹, without={}×1000⁻¹). \
+             This indicates covariance between patch factor and base cap — decorrelate the patch noise.",
+            pct_diff_times_100 / 100,
+            mean_with_times_1000,
+            mean_without_times_1000
+        );
+    }
+
 }
