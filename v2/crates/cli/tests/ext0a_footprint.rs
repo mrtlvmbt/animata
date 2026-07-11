@@ -28,19 +28,21 @@ use sim_core::BODY_SIZE_SCALE;
 
 const DIAGNOSTIC_SEEDS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const DEFAULT_TICKS: u64 = 8000;
-const MAX_N: i64 = 16;
+const MAX_N: i64 = 36;
 
-/// Compute histogram of body sizes (N=1..16) from a slice of body sizes.
+/// Compute histogram of body sizes (N=1..36) from a slice of body sizes.
+/// Bins up to 36 to capture raised cap saturation (gdev_cap=6 → 6²=36).
+/// Keeps labels for quantized sizes: {1,4,9,16,25,36}.
 fn compute_histogram(body_sizes: &[i64]) -> String {
-    let mut counts = vec![0u64; 17]; // N=0 unused, N=1..16
+    let mut counts = vec![0u64; 37]; // N=0 unused, N=1..36
     for &size in body_sizes {
-        if size > 0 && size <= 16 {
+        if size > 0 && size <= 36 {
             counts[size as usize] += 1;
         }
     }
 
     let mut parts = Vec::new();
-    for n in 1..=16 {
+    for n in 1..=36 {
         if counts[n] > 0 {
             parts.push(format!("{}:{}", n, counts[n]));
         }
@@ -56,13 +58,29 @@ fn compute_histogram(body_sizes: &[i64]) -> String {
 /// EXT-0a Arm A: footprint ON density sweep (initial population varies to change density).
 /// Sweeps n_founders to create densities at world_dim=64: 0.02 (shipped) → 0.05 → 0.10 (high).
 /// Heavy (3 densities × 8 seeds × 8000 ticks) — `#[ignore]`d in CI; run via `scripts/sim-run.sh ext-0a`.
+///
+/// EXT-0b: reads EXT0B_GDEV_CAP (default 4) and EXT0B_MORPH_STEPS (default 8) from env,
+/// applies them to cfg.econ.gdev_cap and cfg.econ.morphogen_steps. Defaults byte-identical to current arm_a.
 #[test]
 #[ignore]
 fn ext0a_footprint_arm_a() {
+    const DEFAULT_GDEV_CAP: usize = 4;
+    const DEFAULT_MORPH_STEPS: u32 = 8;
+
     let ticks = std::env::var("EXT0A_TICKS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_TICKS);
+
+    let gdev_cap = std::env::var("EXT0B_GDEV_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_GDEV_CAP);
+
+    let morphogen_steps = std::env::var("EXT0B_MORPH_STEPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_MORPH_STEPS);
 
     // Density levels: shipped 0.02, medium 0.05, high 0.10 agents/cell.
     // world_dim=64 → 4096 cells → founders = density × 4096
@@ -74,6 +92,16 @@ fn ext0a_footprint_arm_a() {
 
     println!("\nEXT-0a ARM A: footprint ON, density sweep (body_footprint=true)");
     println!("Sweep: density {{0.02, 0.05, 0.10}} agents/cell × seed {{1..8}}, world_dim=64, ticks={ticks}");
+    println!("EXT-0b config: gdev_cap={}, morphogen_steps={}", gdev_cap, morphogen_steps);
+
+    // Constraint check: n_dev >= 2*g_dev - 2
+    if morphogen_steps < (2 * gdev_cap as u32 - 2) {
+        eprintln!(
+            "WARN: morphogen_steps {} < 2*gdev_cap - 2 = {}; constraint violation risk",
+            morphogen_steps,
+            2 * gdev_cap as u32 - 2
+        );
+    }
 
     for (label, _dens_frac, n_founders) in &densities {
         for &seed in &DIAGNOSTIC_SEEDS {
@@ -81,6 +109,8 @@ fn ext0a_footprint_arm_a() {
             let mut cfg = driver_config(seed);
             cfg.n_founders = *n_founders;
             cfg.econ.body_footprint = true;  // EXT-0a flag ON for this arm
+            cfg.econ.gdev_cap = gdev_cap;
+            cfg.econ.morphogen_steps = morphogen_steps;
 
             // Run simulation to horizon.
             let mut sim = build_sim(cfg);
@@ -117,6 +147,7 @@ fn ext0a_footprint_arm_a() {
                 };
 
                 // Structural invariants (outcome-independent).
+                let max_cells_cap = (gdev_cap as f64) * (gdev_cap as f64);
                 assert!(
                     max_cells >= mean_cells,
                     "max_body_size ({}) must be >= mean_body_size ({})",
@@ -124,9 +155,10 @@ fn ext0a_footprint_arm_a() {
                     mean_cells
                 );
                 assert!(
-                    (0.0..=32.0).contains(&max_cells),
-                    "max_cells={} must be in valid range [0, 32]",
-                    max_cells
+                    (0.0..=max_cells_cap).contains(&max_cells),
+                    "max_cells={} must be in valid range [0, {}]",
+                    max_cells,
+                    max_cells_cap
                 );
                 assert!(
                     pop > 0,
@@ -174,6 +206,8 @@ fn ext0a_footprint_arm_b_control() {
             cfg.n_founders = *n_founders;
 
             // No override needed; default is body_footprint=false (isolation gate).
+            // Extract gdev_cap before cfg is moved.
+            let gdev_cap_control = cfg.econ.gdev_cap;
 
             // Run simulation to horizon.
             let mut sim = build_sim(cfg);
@@ -209,6 +243,7 @@ fn ext0a_footprint_arm_b_control() {
                 };
 
                 // Structural invariants.
+                let max_cells_cap = (gdev_cap_control as f64) * (gdev_cap_control as f64);
                 assert!(
                     max_cells >= mean_cells,
                     "max_body_size ({}) must be >= mean_body_size ({})",
@@ -216,9 +251,10 @@ fn ext0a_footprint_arm_b_control() {
                     mean_cells
                 );
                 assert!(
-                    (0.0..=32.0).contains(&max_cells),
-                    "max_cells={} must be in valid range [0, 32]",
-                    max_cells
+                    (0.0..=max_cells_cap).contains(&max_cells),
+                    "max_cells={} must be in valid range [0, {}]",
+                    max_cells,
+                    max_cells_cap
                 );
 
                 println!(
