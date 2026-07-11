@@ -34,6 +34,7 @@ on:
           - d5-drift            # D5-DRIFT (#374) pre-registered diagnostic (drift across plateau vs selection on gradient: refuge_k × base_hazard grid)
           - env-frontier         # ENV-0a'-a2 (#362) mutual-invasibility harness (patch-grain sweep, coexistence domain)
           - ext-0a               # EXT-0a (#377) footprint harvest diagnostic (density-dependent body-size income, contention)
+          - ext-0b               # EXT-0b (#385) sweep harness parameterizing footprint arm by gdev_cap/morphogen_steps
           - diff-probe           # DIFF-0 (#372) cell-type differentiation probe (T>=2 ever occur under stock driver_config?)
       seed:
         description: "World seed (evo-stats / perf)"
@@ -41,6 +42,12 @@ on:
       ticks:
         description: "Ticks to run"
         default: "8000"
+      gdev_cap:
+        description: "ext-0b — morphogen gdev cap (default 4)"
+        default: "4"
+      morphogen_steps:
+        description: "ext-0b — morphogen steps (default 8)"
+        default: "8"
       bench_pop:
         description: "perf / v2-perf — pre-stuff N founders to time step() at scale (e.g. 5000); blank = natural pop"
         default: ""
@@ -98,8 +105,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient / ga-load / dc-diag / d5-drift / ext-0a / diff-probe
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'ext-0a' || inputs.scenario == 'diff-probe'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient / ga-load / dc-diag / d5-drift / ext-0a / ext-0b / diff-probe
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'ext-0a' || inputs.scenario == 'ext-0b' || inputs.scenario == 'diff-probe'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -283,6 +290,15 @@ jobs:
                 cargo test --release -p cli -- ext0a_footprint_arm_b_control --nocapture --ignored 2>&1 | tee -a ../"$SUM"
               EXT0A_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- ext0a_footprint_conservation --nocapture 2>&1 | tee -a ../"$SUM"
+              ;;
+            ext-0b)
+              # EXT-0b (#385) sweep harness: parameterize footprint arm by gdev_cap/morphogen_steps.
+              # Same density sweep and structure as Arm A, but allows raised morphogen cap to test saturation
+              # (cap-bound vs emergent optimum). Runs Arm A with EXT0B_GDEV_CAP and EXT0B_MORPH_STEPS overrides.
+              # Pass-2 of EXT-0b (sweep harness); pass-1 merged config knobs (#383).
+              cd v2
+              EXT0A_TICKS="${{ inputs.ticks }}" EXT0B_GDEV_CAP="${{ inputs.gdev_cap }}" EXT0B_MORPH_STEPS="${{ inputs.morphogen_steps }}" \
+                cargo test --release -p cli -- ext0a_footprint_arm_a --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             diff-probe)
               # DIFF-0 (#372) cell-type differentiation substrate probe: does T≥2 (distinct cell types)
