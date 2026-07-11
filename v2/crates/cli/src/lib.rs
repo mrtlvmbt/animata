@@ -473,11 +473,13 @@ pub fn dr0_config(seed: u64) -> SimConfig {
     cfg
 }
 
-/// TOPO-DIFF Rung 0: fate-keyed germ/soma economy (test-only, diagnostic, golden-NEUTRAL).
+/// TOPO-DIFF Rung 0: fate-economy diagnostic (test-only, evolutionary observation, golden-NEUTRAL).
+/// **SECONDARY config — NOT the Rung-0 gate.** This is an evolutionary observation for comparison.
+/// The ACTUAL Rung-0 gate is the IMPOSED-SPLIT verdict probe (hand-built bodies, measured fitness).
+///
 /// Combines D-5 hazard-refuge + ENV-0a′ spatial monopolization + fate economy gate.
-/// Tests the ECONOMY question in isolation (R-B): does fate-keyed germ/soma yield a group-fitness
-/// DoL gain under the existing economy with an imposed within-body fate split?
-/// Live-drives GRN with input_weights=[8,0] and germ_threshold for comparison baseline.
+/// Live-drives GRN with input_weights=[8,0], hoping differentiation emerges naturally.
+/// Used as a secondary evolutionary baseline to compare against the imposed-split verdict result.
 /// Determinism: integer-only, byte-identical when gate off (fate_economy=false by default).
 pub fn fate_economy_config(seed: u64) -> SimConfig {
     let mut cfg = driver_config(seed);
