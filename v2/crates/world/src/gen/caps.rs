@@ -174,7 +174,7 @@ const PATCH_SCALE_MAX: i64 = 320;
 /// truncation bias).
 ///
 /// **Determinism:** Integer-only, uses `height_at` (W-1 primitive, x86-deterministic), no float.
-fn patchiness_at(x: i64, z: i64, seed: u64, hmax: i64) -> i64 {
+pub fn patchiness_at(x: i64, z: i64, seed: u64, hmax: i64) -> i64 {
     let raw_noise = height_at(x, z, seed ^ PATCH_SEED_SALT, hmax);
     PATCH_SCALE_MIN + (raw_noise * (PATCH_SCALE_MAX - PATCH_SCALE_MIN)) / hmax
 }
@@ -599,6 +599,77 @@ mod tests {
             "patchiness lacks autocorrelation: neighbors={} should be < distant={} (scaled)",
             same_neighbor_sum,
             cross_neighbor_sum
+        );
+    }
+
+    /// W-7 mean-invariance: patchiness must be a PURE VARIANCE knob with NO hidden mean shift
+    /// (MUST-FIX #1 per critic). This test computes the spatial-average resource cap over the whole
+    /// map WITH patchiness active, then WITH patchiness NEUTRALIZED (patch factor forced to 256,
+    /// i.e. ×1.0), and asserts the two means are equal within ±5% (the acceptance threshold at
+    /// caps.rs:153). The test is required to verify that patchiness does not introduce correlation
+    /// with the base cap (covariance E[factor·base] ≠ E[factor]·E[base] would shift the mean even
+    /// though the factor is symmetric).
+    #[test]
+    fn patchiness_maintains_mean_neutrality() {
+        const SEED: u64 = 0xA11A_2A11;
+        const HMAX: i64 = 200;
+        const DIM: usize = 64;
+
+        // Compute world WITH patchiness active
+        let with_patch = classify_and_caps(SEED, HMAX, DIM);
+        let sum_with: i64 = with_patch.caps.iter().sum();
+        let mean_with = sum_with as f64 / (DIM * DIM) as f64;
+
+        // Compute world WITHOUT patchiness (patch factor forced to 256 = identity)
+        // We replicate the classify_and_caps logic but with patch_scale = 256.
+        // This requires re-running the full pipeline with neutralized patchiness.
+        let mut without_patch_caps = Vec::new();
+        let erosion = erode(SEED, HMAX, DIM);
+        for z in 0..DIM {
+            for x in 0..DIM {
+                let idx = z * DIM + x;
+                let h_cell = erosion.height[idx];
+                let x_src = (x as i64 - WIND_DX).max(0) as usize;
+                let h_west = erosion.height[z * DIM + x_src];
+                let (t, p) = climate_from_height(h_cell, h_west, x as i64, z as i64, SEED);
+                let zonal = biome_at(t, p);
+
+                let area = erosion.drainage.area[idx];
+                let moisture = moisture_at(area);
+                let material = erosion.surface_material[idx];
+                let riparian = is_river(area);
+                let slope = match erosion.drainage.downstream[idx] {
+                    Some(d) => (erosion.height[idx] - erosion.height[d]).max(0),
+                    None => 0,
+                };
+
+                let final_b = override_biome(zonal, moisture, material, slope, riparian);
+                let cap_base = caps_from(final_b, moisture, material);
+
+                // W-7: Apply NO patchiness (patch_scale = 256 = identity modulation)
+                let patch_scale = 256i64; // Neutralized: no modulation
+                let cap_modulated = ((cap_base * patch_scale + 128) / 256).clamp(0, CAP_MAX);
+                without_patch_caps.push(cap_modulated);
+            }
+        }
+
+        let sum_without: i64 = without_patch_caps.iter().sum();
+        let mean_without = sum_without as f64 / (DIM * DIM) as f64;
+
+        eprintln!(
+            "W-7 mean-invariance: mean_with_patch={:.2}, mean_without_patch={:.2}, diff_pct={:.2}%",
+            mean_with,
+            mean_without,
+            ((mean_with - mean_without).abs() / mean_without * 100.0)
+        );
+
+        // Assert means are equal within ±5% (the documented acceptance threshold).
+        let pct_diff = (mean_with - mean_without).abs() / mean_without * 100.0;
+        assert!(
+            pct_diff <= 5.0,
+            "patchiness mean shift exceeded ±5%: {:.2}% diff (with={:.2}, without={:.2}). \
+             This indicates covariance between patch factor and base cap — decorrelate the patch noise.",
+            pct_diff, mean_with, mean_without
         );
     }
 
