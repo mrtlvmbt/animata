@@ -1,8 +1,8 @@
 task: #391 DOL-Germ-Repro First Probe (diagnostic on LIVE code, different mechanic)
-phase: pre-registration complete, awaiting PM review
-blocked_on: PM review of 7-check pre-registration (checks 1/2/3 authoritative)
-next: After PM clearance → dispatch cloud run via sim-run.sh + GitHub Actions
-updated: 2026-07-11 15:05 (pre-registration posted to PR #391)
+phase: cloud run executing (Run #29158865296)
+blocked_on: Cloud run completion (5 seeds × 2 body sizes, each ~2000 ticks)
+next: Fetch results, parse fitness curves, classify PEAK vs NULL
+updated: 2026-07-11 15:25 UTC (cloud run dispatched; awaiting completion)
 
 ## DOL-Germ-Repro First Probe (Fresh diagnostic, different mechanic)
 
@@ -30,4 +30,14 @@ updated: 2026-07-11 15:05 (pre-registration posted to PR #391)
 - **PASS (≥2/3 seeds PEAK):** reward landscape works → size ceiling (Rung B) is next
 - **NULL (edge/plateau):** germ-reward insufficient → soma-shield (Rung C) becomes target
 
-**Committed:** e39c7de feat(dol-germ-repro): add first probe diagnostic...
+**Commits:**
+- e39c7de feat(dol-germ-repro): add first probe diagnostic
+- a42c5a9 ci(dol-germ-repro): wire first probe scenario to sim-run.yml workflow
+- bb8c3a1 refactor(dol-germ-repro): implement real simulation harness
+
+**Cloud Dispatch:**
+- Run #29158865296 (nonce: 1783785422-37798-6141)
+- Scenario: dol-germ-repro-interior-optimum
+- Reference: feat/topo-diff-rung0 branch
+- Status: IN PROGRESS (estimated 30–60 min for 5 seeds × 2 sizes)
+- Artifacts: sim-run/summary.txt (per-size verdict) + greppable MAP lines
