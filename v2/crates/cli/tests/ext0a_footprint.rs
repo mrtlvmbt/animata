@@ -147,6 +147,7 @@ fn ext0a_footprint_arm_a() {
                 };
 
                 // Structural invariants (outcome-independent).
+                let max_cells_cap = (gdev_cap as f64) * (gdev_cap as f64);
                 assert!(
                     max_cells >= mean_cells,
                     "max_body_size ({}) must be >= mean_body_size ({})",
@@ -154,9 +155,10 @@ fn ext0a_footprint_arm_a() {
                     mean_cells
                 );
                 assert!(
-                    (0.0..=32.0).contains(&max_cells),
-                    "max_cells={} must be in valid range [0, 32]",
-                    max_cells
+                    (0.0..=max_cells_cap).contains(&max_cells),
+                    "max_cells={} must be in valid range [0, {}]",
+                    max_cells,
+                    max_cells_cap
                 );
                 assert!(
                     pop > 0,
@@ -204,6 +206,8 @@ fn ext0a_footprint_arm_b_control() {
             cfg.n_founders = *n_founders;
 
             // No override needed; default is body_footprint=false (isolation gate).
+            // Extract gdev_cap before cfg is moved.
+            let gdev_cap_control = cfg.econ.gdev_cap;
 
             // Run simulation to horizon.
             let mut sim = build_sim(cfg);
@@ -239,6 +243,7 @@ fn ext0a_footprint_arm_b_control() {
                 };
 
                 // Structural invariants.
+                let max_cells_cap = (gdev_cap_control as f64) * (gdev_cap_control as f64);
                 assert!(
                     max_cells >= mean_cells,
                     "max_body_size ({}) must be >= mean_body_size ({})",
@@ -246,9 +251,10 @@ fn ext0a_footprint_arm_b_control() {
                     mean_cells
                 );
                 assert!(
-                    (0.0..=32.0).contains(&max_cells),
-                    "max_cells={} must be in valid range [0, 32]",
-                    max_cells
+                    (0.0..=max_cells_cap).contains(&max_cells),
+                    "max_cells={} must be in valid range [0, {}]",
+                    max_cells,
+                    max_cells_cap
                 );
 
                 println!(
