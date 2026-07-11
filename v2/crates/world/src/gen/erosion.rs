@@ -847,10 +847,7 @@ mod tests {
     /// proves determinism of the FULL production path (not just the isolated `tectonics.rs` unit),
     /// mirrors `golden_vector_matches_pinned_erosion_fixture` above.
     ///
-    /// **PLACEHOLDER (pass 2 of 2, per issue #396):** local test EXECUTION is blocked on this
-    /// machine (`no-local-sim` hook); the real values are read from CI's `left:`/`right:` (a SINGLE
-    /// whole-array assert so one failing CI round reveals all four indices at once, not just the
-    /// first) and pinned then.
+    /// Pinned from `v2-golden-arm64` CI (run #29170719244, commit cde3c68), per issue #396 pass 2.
     #[test]
     fn golden_vector_matches_pinned_tectonic_on_erosion_fixture() {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
@@ -859,7 +856,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [i64::MIN, i64::MIN, i64::MIN, i64::MIN];
+        const EXPECTED: [i64; 4] = [112, 108, 98, 90];
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
