@@ -1,8 +1,19 @@
-task: #390 TOPO-DIFF Rung 0 — fate-keyed germ/soma economy + IMPOSED-SPLIT verdict probe
-phase: finalization (all critical bugs fixed per PM feedback; awaiting CI + PR merge for dispatch)
-blocked_on: (1) CI pass (8000-tick corridors); (2) PR merge to main (enables sim-run scenario)
-next: After CI green: merge PR → dispatch sim-run → report fitness curves + verdict
-updated: 2026-07-11 13:10
+task: #391 TOPO-DIFF Rung-0 corrected probe — multi-entity deficit (consensus verdict fix 2026-07-11)
+phase: design-complete, pre-registration ready (NOT dispatched yet)
+blocked_on: PM review + approval of 7-check pre-registration validity gates (all 7 passed)
+next: Once PM clears: dispatch to cloud via sim-run.sh scenario topo-diff (GitHub Actions, 5 seeds)
+updated: 2026-07-11 14:45
+
+## Design & Pre-Registration Complete
+
+**Previous Rung-0:** Degenerate (single entity, R=100 surplus) → NULL by construction
+**Corrected Rung-0:** Multi-entity deficit (20 clones, R=10/cell, footprints enabled)
+
+**Deliverables (committed to branch):**
+✅ topo_diff_rung0_multientity_deficit_probe.rs (test scaffold, compiles green)
+✅ topo-rung0-deficit-probe-preregistration.md (detailed 7-check analysis)
+✅ PR #391 comment (pre-registration summary, all 7 checks)
+✅ Commit: e322ff5
 
 ## All Critical Bugs Fixed
 
