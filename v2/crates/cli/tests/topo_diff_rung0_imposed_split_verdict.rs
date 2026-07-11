@@ -99,22 +99,35 @@ fn build_generalist_body(body_size: i64) -> CellGraph {
 fn measure_fitness(graph: &CellGraph, econ: &sim_core::EconParams) -> (i64, i64) {
     // Income measurement: stage_interactions computes demand scaling.
     // For simplicity, read per-cell soma (fate-keyed when fate_economy=true).
-    let (soma, _germ) = graph.fate_germ_soma_counts();
+    // Compute germ/soma counts by iterating module_cell_count and module_is_germ.
+    let soma: i32 = graph
+        .module_cell_count
+        .iter()
+        .zip(graph.module_is_germ.iter())
+        .filter(|(_, &is_germ)| !is_germ)
+        .map(|(count, _)| count)
+        .sum();
+    let germ: i32 = graph
+        .module_cell_count
+        .iter()
+        .zip(graph.module_is_germ.iter())
+        .filter(|(_, &is_germ)| is_germ)
+        .map(|(count, _)| count)
+        .sum();
+
     let soma_active = soma.max(1);  // bootstrap
-    let per_cell_soma = if soma > 0 { soma } else { 1 };
 
     // Monod demand at a nominal resource level (R=100, typical world).
     let r = 100i64;
     let u_max = econ.u_max;
     let km = econ.km;
     let demand = u_max * r / (r + km);  // monod_demand inline
-    let demand_scaled = demand * soma_active;
+    let demand_scaled = demand * (soma_active as i64);
     let income_per_cell = demand_scaled / graph.body_size().max(1);
 
     // Repro measurement: stage_birth_death gates on germ count.
     // Germ=0 → sterile (repro_bar = i64::MAX, fertility=0).
     // Germ>0 → flat threshold (repro_bar = genome.repro_threshold, normalized to baseline).
-    let (_soma, germ) = graph.fate_germ_soma_counts();
     let fertility = if germ == 0 { 0 } else { 1 };  // 0=sterile, 1=can reproduce
 
     (income_per_cell, fertility)
@@ -292,9 +305,9 @@ fn topo_diff_rung0_imposed_split_verdict() {
     println!(
         "\nTOPO-DIFF RUNG 0 VERDICT: {}",
         if rung0_pass {
-            "PASS (≥{}/{} seeds showed PEAK — fate-keyed DoL genuinely pays)"
+            format!("PASS (≥{}/{} seeds showed PEAK — fate-keyed DoL genuinely pays)", seeds_pass.len(), VERDICT_SEEDS.len())
         } else {
-            "NULL (most seeds showed PLATEAU/EDGE — economy does not reward differentiation)"
+            format!("NULL (most seeds showed PLATEAU/EDGE — economy does not reward differentiation; {}/{} seeds failed)", seeds_fail.len(), VERDICT_SEEDS.len())
         }
     );
 
