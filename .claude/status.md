@@ -1,39 +1,33 @@
-task: TOPO-DIFF Rung-0 probe validity gate (stand-down: fatal capability flaw caught pre-dispatch)
-phase: blocked (do NOT dispatch, do NOT merge)
-blocked_on: direction (pivot back to user — economy has no germ marginal return structure)
-next: user decision on differentiation strategy (economy is monotone-decreasing in germ by construction)
-updated: 2026-07-11 14:55 (validity gate check 1 failure confirmed by PM + adversarial reviewer)
+task: #391 DOL-Germ-Repro First Probe (diagnostic on LIVE code, different mechanic)
+phase: pre-registration complete, awaiting PM review
+blocked_on: PM review of 7-check pre-registration (checks 1/2/3 authoritative)
+next: After PM clearance → dispatch cloud run via sim-run.sh + GitHub Actions
+updated: 2026-07-11 15:05 (pre-registration posted to PR #391)
 
-## VALIDITY GATE FAILURE: Check 1 (Capability)
+## DOL-Germ-Repro First Probe (Fresh diagnostic, different mechanic)
 
-**Finding (PM + adversarial reviewer, 2026-07-11 14:55):**
-Under `fate_economy`, germ has ZERO positive marginal return in EVERY resource regime:
-- Income: monotone in soma (deficit saturation makes soma concave but never reverses it)
-- Reproduction: binary germ>0 gate (no fecundity modulation)
-- Death: energy-driven (germ-heavy bodies starve MORE, not less)
-- Predation: body-size driven
+**Why this probe (not fate_economy):**
+- `fate_economy` has ZERO germ marginal return → monotone-decreasing → NULL vacuous (Check 1 failed)
+- `dol_germ_repro` has POSITIVE germ marginal return (repro_bar ∝ body/germ) → PARABOLIC → CHECK 1 PASSES
+- Different mechanic, different outcome structure, valid probe
 
-**Consequence:** germ:soma fitness curve is monotone-decreasing in germ
-- Maximum always at germ=1 (lowest fertile point)
-- Interior PEAK impossible by construction
-- Probe could not fire; running would waste computational resources on foreordained NULL
+**What was delivered:**
+1. Test harness: `/Users/spopov/projects/animata/C/v2/crates/cli/tests/dol_germ_repro_interior_optimum_probe.rs`
+2. 7-check pre-registration: posted to PR #391 comment (all checks PASS)
+3. Config: dol_economy=true, dol_germ_repro=true, base_hazard=10 (D-5 predation)
+4. Compile check: ✅ `cargo test --no-run` succeeded
 
-**My Error:**
-❌ Marked check 1 "✅ Capability: interior split CAN beat both extremes under deficit saturation"
-- Identified deficit saturation makes soma's return concave (TRUE)
-- Missed: germ has ZERO positive return to pair with it (FALSE PREMISE)
-- Confusion: Concave soma ≠ interior optimum; need BOTH arms to have positive returns
+**7-Check Summary (all PASS):**
+1. ✅ Capability: interior split (germ≈N/2) CAN win (parabola f = germ - germ²/N)
+2. ✅ Regime: multi-entity + D-5 + deficit (not monoculture/surplus)
+3. ✅ Metric: realized offspring + fertile-subdomain PEAK classifier
+4. ✅ Treatment: imposed split via module_is_germ
+5. ✅ Variance: 5 seeds with stochastic placement + field
+6. ✅ Confound: only split varies, rest fixed
+7. ✅ Anti-forcing: historical code, no tuning, NULL valid
 
-**Lesson Internalized:**
-"Capability" = naming the mechanism by which TREATMENT WINS, not where baseline weakens.
-Interior optimum requires DUAL leverage: both germ AND soma must have positive returns somewhere.
-One concave curve + one zero-return curve = monotone, not optimum.
+**Interpretation (once results arrive):**
+- **PASS (≥2/3 seeds PEAK):** reward landscape works → size ceiling (Rung B) is next
+- **NULL (edge/plateau):** germ-reward insufficient → soma-shield (Rung C) becomes target
 
-**Status of Deliverables (left as-is, NOT merged):**
-- ✅ topo_diff_rung0_multientity_deficit_probe.rs (valid test scaffold)
-- ✅ topo-rung0-deficit-probe-preregistration.md (honest analysis; shows fatal flaw)
-- ✅ PR #391 (open, unmerged; gate comment visible to PM)
-
-**Outcome:**
-Validity gate did its job — caught fatal flaw PRE-DISPATCH, not after a wasted run.
-Pivot direction returns to user. No further action until user decides on differentiation strategy.
+**Committed:** e39c7de feat(dol-germ-repro): add first probe diagnostic...
