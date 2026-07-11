@@ -554,8 +554,12 @@ pub fn stage_interactions(
                     // Read this footprint cell's resource level
                     let r = field.0.conserved_at(fp_pos, layer);
                     let demand = monod_demand(econ.u_max, econ.km, r);
-                    let demand = if econ.dol_economy {
-                        // DR-0: soma cells scale demand
+                    let demand = if econ.fate_economy {
+                        // TOPO-DIFF Rung 0: soma cells scale demand (fate-keyed germ/soma).
+                        let (soma, _germ) = ph.graph.fate_germ_soma_counts();
+                        demand * soma.max(1)
+                    } else if econ.dol_economy {
+                        // DR-0: soma cells scale demand (module-size-keyed)
                         let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
                             .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
                         demand * soma.max(1)
@@ -580,9 +584,16 @@ pub fn stage_interactions(
             // Non-footprint mode: single contestant at entity's anchor position
             let r = field.0.conserved_at(pos.0, layer);
             let demand = monod_demand(econ.u_max, econ.km, r);
-            let demand = if econ.dol_economy {
-                // DR-0: soma cells scale demand (income ∝ soma). Founder has soma=0 (germ-only body),
-                // so max(soma,1) ensures bootstrap survival at baseline rate; soma≥1 gains income bonus.
+            let demand = if econ.fate_economy {
+                // TOPO-DIFF Rung 0: soma cells scale demand (fate-keyed germ/soma).
+                // Founder has all-soma (default A type), so max(soma,1) ensures bootstrap survival;
+                // soma≥1 gains income (soma cells contribute to harvest pool).
+                let (soma, _germ) = ph.graph.fate_germ_soma_counts();
+                demand * soma.max(1)
+            } else if econ.dol_economy {
+                // DR-0: soma cells scale demand (income ∝ soma, module-size-keyed).
+                // Founder has soma=0 (germ-only body), so max(soma,1) ensures bootstrap survival at
+                // baseline rate; soma≥1 gains income bonus.
                 let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
                     .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
                 demand * soma.max(1)
@@ -1413,14 +1424,21 @@ pub fn stage_birth_death(
             true // no mineral economy → gate always open
         };
 
-        let repro_bar = if econ.division_of_labor && econ.dol_germ_repro {
-            // OLD DL-M inverted mechanic — PRESERVED for the historical DL-V/DL-C harnesses
+        let repro_bar = if econ.fate_economy {
+            // TOPO-DIFF Rung 0: germ = flat fertility gate (fate-keyed germ/soma).
+            // germ=0 → sterile; germ≥1 → flat threshold. Founder has default A type (soma),
+            // so germ=0 initially, but max(germ, 1) for bootstrap would violate the sterileness gate.
+            // That's OK — founders should not have germ for any economy variant (they're all-soma).
+            let (_soma, germ) = ph.graph.fate_germ_soma_counts();
+            if germ == 0 { i64::MAX } else { genome.repro_threshold as i64 }
+        } else if econ.division_of_labor && econ.dol_germ_repro {
+            // OLD DL-M inverted mechanic — PRESERVED for the historical DL-V/DL-C harnesses (module-size-keyed)
             let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
             let germ = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
                 .filter_map(|(&c, &g)| if g { Some(c as i64) } else { None }).sum::<i64>();
             if germ == 0 { i64::MAX } else { genome.repro_threshold as i64 * body / germ }
         } else if econ.dol_economy {
-            // NEW: germ = flat fertility gate. germ=0 → sterile; germ≥1 → flat threshold (no body/germ tax).
+            // NEW: germ = flat fertility gate (module-size-keyed). germ=0 → sterile; germ≥1 → flat threshold.
             let germ: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
                 .filter_map(|(&c, &g)| if g { Some(c as i64) } else { None }).sum();
             if germ == 0 { i64::MAX } else { genome.repro_threshold as i64 }
@@ -2704,5 +2722,64 @@ mod tests {
         // econ.settling is NOT in the call signature → cost is INDEPENDENT of the settling toggle state.
         // This is structural independence, not empirical (it does not depend on running a sim and
         // comparing settling-on vs settling-off populations).
+    }
+
+    /// TOPO-DIFF Rung 0: fate economy basic sanity check. Verifies that fate_germ_soma_counts
+    /// correctly maps CellType to germ/soma roles.
+    #[test]
+    fn fate_economy_cell_type_mapping() {
+        use crate::CellGraph;
+
+        // All-A body (generalist/soma-only)
+        let all_a = CellGraph {
+            g_dev: 2,
+            module_type: vec![CellType::A, CellType::A, CellType::A],
+            module_cell_count: vec![2, 3, 1],  // total 6 cells, all A
+            module_is_germ: vec![false, false, false],
+            module_reachable: vec![true, true, true],
+            module_consortium: vec![0, 1, 2],
+        };
+        let (soma_a, germ_a) = all_a.fate_germ_soma_counts();
+        assert_eq!(soma_a, 6, "all-A body should have soma=6 (sum of all cells)");
+        assert_eq!(germ_a, 0, "all-A body should have germ=0");
+
+        // All-B body (specialist/germ-only)
+        let all_b = CellGraph {
+            g_dev: 2,
+            module_type: vec![CellType::B, CellType::B],
+            module_cell_count: vec![2, 4],  // total 6 cells, all B
+            module_is_germ: vec![true, true],
+            module_reachable: vec![true, true],
+            module_consortium: vec![0, 1],
+        };
+        let (soma_b, germ_b) = all_b.fate_germ_soma_counts();
+        assert_eq!(soma_b, 0, "all-B body should have soma=0");
+        assert_eq!(germ_b, 6, "all-B body should have germ=6 (sum of all cells)");
+
+        // Mixed A/B specialist body (2 A + 4 B = 6 total)
+        let specialist = CellGraph {
+            g_dev: 2,
+            module_type: vec![CellType::A, CellType::B, CellType::B],
+            module_cell_count: vec![2, 2, 2],  // 2 soma + 4 germ
+            module_is_germ: vec![false, true, true],
+            module_reachable: vec![true, true, true],
+            module_consortium: vec![0, 1, 2],
+        };
+        let (soma_s, germ_s) = specialist.fate_germ_soma_counts();
+        assert_eq!(soma_s, 2, "specialist body should have soma=2");
+        assert_eq!(germ_s, 4, "specialist body should have germ=4");
+
+        // Mixed body includes other types (Mixed, Diff) which default to soma
+        let mixed_types = CellGraph {
+            g_dev: 2,
+            module_type: vec![CellType::A, CellType::B, CellType::Mixed, CellType::Diff(1)],
+            module_cell_count: vec![1, 1, 1, 1],  // 1 A + 1 Mixed + 1 Diff → soma; 1 B → germ
+            module_is_germ: vec![false, true, false, false],
+            module_reachable: vec![true, true, true, true],
+            module_consortium: vec![0, 1, 2, 3],
+        };
+        let (soma_m, germ_m) = mixed_types.fate_germ_soma_counts();
+        assert_eq!(soma_m, 3, "mixed types body should treat Mixed/Diff as soma (1 A + 1 Mixed + 1 Diff = 3)");
+        assert_eq!(germ_m, 1, "mixed types body should have germ=1 (1 B)");
     }
 }

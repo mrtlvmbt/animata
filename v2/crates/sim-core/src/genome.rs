@@ -285,6 +285,26 @@ impl CellGraph {
         (seen.count_ones() as i64) + (diff_mask.count_ones() as i64)
     }
 
+    /// TOPO-DIFF Rung 0: fate-keyed germ/soma counts. Per-cell fate reduction (pre-union-find logic):
+    /// maps `CellType → {germ, soma}` — `A → soma`, `B → germ`, others treated as soma by default.
+    /// Returns `(soma_count, germ_count)` where each is the sum of cell counts across modules of that fate.
+    /// This is a STRUCTURAL coupling: fate (cell type) drives role, NOT module size.
+    pub fn fate_germ_soma_counts(&self) -> (i64, i64) {
+        let mut soma_count: i64 = 0;
+        let mut germ_count: i64 = 0;
+
+        for (ct, &cell_count) in self.module_type.iter().zip(self.module_cell_count.iter()) {
+            let count = cell_count as i64;
+            match ct {
+                CellType::A => soma_count += count,
+                CellType::B => germ_count += count,
+                CellType::Mixed | CellType::Diff(_) => soma_count += count,  // default to soma
+            }
+        }
+
+        (soma_count, germ_count)
+    }
+
     /// Empty graph (zero modules, e.g. for non-phase2 configs where the graph is not computed).
     pub fn empty() -> Self {
         CellGraph {

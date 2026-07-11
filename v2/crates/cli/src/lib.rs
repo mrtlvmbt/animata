@@ -473,6 +473,31 @@ pub fn dr0_config(seed: u64) -> SimConfig {
     cfg
 }
 
+/// TOPO-DIFF Rung 0: fate-keyed germ/soma economy (test-only, diagnostic, golden-NEUTRAL).
+/// Combines D-5 hazard-refuge + ENV-0a′ spatial monopolization + fate economy gate.
+/// Tests the ECONOMY question in isolation (R-B): does fate-keyed germ/soma yield a group-fitness
+/// DoL gain under the existing economy with an imposed within-body fate split?
+/// Live-drives GRN with input_weights=[8,0] and germ_threshold for comparison baseline.
+/// Determinism: integer-only, byte-identical when gate off (fate_economy=false by default).
+pub fn fate_economy_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    // ENV-0a′: spatial monopolization (bonus for multicellular bodies under resource contention)
+    cfg.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig {
+        patch_grain: ENV_FRONTIER_PATCH_GRAIN,
+    });
+    // TOPO-DIFF Rung 0: fate-keyed germ/soma (A→soma, B→germ)
+    cfg.econ.fate_economy = true;
+    // Live-drive GRN to encourage A/B differentiation (input_weights=[8,0])
+    if let Some(gspec) = cfg.econ.grn.as_mut() {
+        gspec.input_weights = vec![8, 0];
+    }
+    // Keep germ_threshold for the SIZE-KEYED baseline (when fate_economy is OFF)
+    if let Some(mspec) = cfg.econ.morphogen.as_mut() {
+        mspec.germ_threshold = Some(5);
+    }
+    cfg
+}
+
 /// DL-C composition verdict config (test-only, opt-in, golden-NEUTRAL): merges D-5 hazard-refuge +
 /// settling + O₂-hypoxia + DOL into a single world. Tests the substrate-enrichment program's
 /// thesis: complexity emerges from the ECOLOGY of many mechanisms together. Builds on

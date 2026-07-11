@@ -434,6 +434,15 @@ pub struct EconParams {
     /// regardless of body size → byte-identical goldens (the isolation gate).
     /// Determinism: the footprint is a pure function of (Position, g_dev, world_dim) — no RNG/HashMap.
     pub body_footprint: bool,
+
+    // ── TOPO-DIFF Rung 0: fate-keyed germ/soma economy ─────────────────────────────────────
+    /// Fate-keyed germ/soma economy (TOPO-DIFF Rung 0). `true` enables germ/soma role assignment
+    /// based on cell fate (`CellType`) via a pre-union-find per-cell reduction (e.g. `A → soma`,
+    /// `B → germ`), NOT on module size. When ON, income aggregation and reproduction gates read
+    /// per-cell fate roles instead of module-based roles. `false` (default, all existing production
+    /// configs) → fate economy inert, module-size-keyed germ/soma persists, byte-identical goldens
+    /// (the isolation gate).
+    pub fate_economy: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -718,6 +727,8 @@ impl Default for EconParams {
             env_frontier_config: None,
             // EXT-0a: body footprint harvest OFF by default — false for all 5 existing configs (byte-identical).
             body_footprint: false,
+            // TOPO-DIFF Rung 0: fate economy OFF by default — false for all existing configs (byte-identical).
+            fate_economy: false,
         }
     }
 }
