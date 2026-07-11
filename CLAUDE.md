@@ -107,6 +107,19 @@ the rtk proxy that swallows test output), honours `.cargo/config.toml`'s `RUST_T
 passes failure detail through; in a non-TTY run it prints checkpoint lines instead of a `\r` bar
 (cadence `BAR_EVERY=N`).
 
+**Compilation is NOT a heavy run — gate it LOCALLY before every push.** "The gate is cloud CI, not a
+local run" is about the 8000-tick corridors and goldens, NOT about whether the code compiles. Before
+you push (and before you write "compiles" / "builds" anywhere), run **`bash scripts/compile-check.sh`**
+— it does a raw `cargo test --no-run --workspace --locked` (builds every test target, runs nothing:
+seconds, no sim load) and prints `PASS` or `FAIL: EXIT=<n>` with the real cargo error tail. Two things
+it exists to kill: (1) the **rtk proxy** swallows top-level `cargo` error output so a broken build reads
+as "ok" — `compile-check.sh` runs cargo inside a script, which rtk does not touch; (2) `cargo check`
+does NOT build test targets, exactly where stale call-sites live after a rebase from main. A green CI is
+still the merge gate; this is the cheap pre-push gate that stops a broken build from burning a ~15-min
+CI round. Run it from the workspace your change lives in — **`cd v2 && bash ../scripts/compile-check.sh`**
+for sim-lane work (matches CI's `--workspace`), and `cd v2/crates/render && bash ../../../scripts/compile-check.sh`
+for the standalone render lane.
+
 ## Final-report contract (coders A/B/C — mandatory)
 
 The last line of every session/dispatch final report must be exactly one of:
@@ -122,6 +135,11 @@ STATUS: blocked@<step>: <what is needed to continue>
   A-4 — placeholder pin pushed, PR not created, reported done; PM fixed it by hand).
 - Two-pass tasks (value is born in CI: golden re-pin and kin) report pass 1 as
   `STATUS: blocked@N: awaiting CI (pass 2 of 2)` — this is honest and the gate permits it.
+- **Any claim that the code compiles/builds must be BACKED by a fresh `scripts/compile-check.sh` PASS.**
+  An rtk summary or a `cargo check` is NOT proof of compilation (rtk swallows the errors; `check`
+  skips test targets). If a report/status says "compiles ✓" it must be quoting `compile-check.sh`
+  output; otherwise it is a format violation and PM returns the handoff (see Handoff intake). This
+  gates the *pre-push* claim; `done-check.sh` still gates the *final* `STATUS: done` on green CI.
 - "Done" mid-session ("step 2 done, moving on") is not a final report; the gate does not touch it.
 - Intentional gate bypass: create `.claude/.done-allow` and retry — the bypass is one-shot and logged
   in `.claude/done-gate.log` (mirrors `KIT_ALLOW_DIRTY`).
@@ -164,6 +182,9 @@ the final report — they are separate channels (report = handoff, file = live s
 - Before accepting "done", PM inspects the coder's `.claude/done-gate.log`: an entry `BLOCKED-OVERRIDE`
   (repeated `STATUS: done` after a block) or a fresh `ALLOW` triggers a hard-fail: handoff is not
   accepted until the cause is reviewed.
+- A report asserting the code "compiles"/"builds" WITHOUT a quoted `scripts/compile-check.sh` PASS is
+  an **automatic return** — same class as a missing `STATUS:` token. PM does not spend a CI round to
+  disprove a compile claim; the coder owns the local `compile-check.sh` proof.
 
 ## Known review false-positives (ground-checked — cite precedent, do not re-derive)
 
