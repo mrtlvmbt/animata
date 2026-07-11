@@ -674,6 +674,7 @@ pub fn stage_interactions(
     //    telemetry as a dedicated field (not via income_record clobber).
     //    EXT-0a (F6): per-entity contention rate — fraction of footprint cells hitting deficit branch.
     tel.income_record.clear();
+    tel.income_probe.clear(); // STEP-A0 (#398): mirrors income_record, never drained (see Telemetry doc)
     let mut photo_total: i64 = 0;
 
     // EXT-0a (F1): per-entity income accumulators (income_got maps entity_bits → Σ got over footprint)
@@ -810,6 +811,8 @@ pub fn stage_interactions(
     for (entity_bits, total_got) in entity_income_map.iter() {
         let total_photo = entity_photo_map.get(&entity_bits).copied().unwrap_or(0);
         tel.income_record.insert(*entity_bits, (total_photo, *total_got));
+        // STEP-A0 (#398): same values, but this channel is never drained (see Telemetry::income_probe doc).
+        tel.income_probe.insert(*entity_bits, (total_photo, *total_got));
     }
 
     // EXT-0a (F6): emit per-entity contention rate to telemetry.
