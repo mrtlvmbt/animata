@@ -13,7 +13,8 @@
 //!   invalid keys or out-of-range values exit with `error:` and code 1.
 //!   Whitelisted knobs: km, u_max, base_metab, c_div, e_cell, k_size_metab, k_move_cost,
 //!   k_sense_cost, excrete, recycle_num, speciation_threshold, brain_period, metab_period,
-//!   d0_scaled, pheromone. Structural fields (n_layers, world_dim, …) are rejected.
+//!   d0_scaled, pheromone, reg_gain_max, c_coord, refuge_k, bite_shift, base_hazard,
+//!   gdev_cap, morphogen_steps. Structural fields (n_layers, world_dim, …) are rejected.
 //!
 //! **R27**: `dt` is fixed at `DT_MICROS` (1/64 s). Time-acceleration in headless mode means
 //! running ticks as fast as the CPU allows (no vsync). The multi-rate K/N periods
