@@ -606,19 +606,22 @@ mod tests {
     /// (MUST-FIX #1 per critic). This test computes the spatial-average resource cap over the whole
     /// map WITH patchiness active, then WITH patchiness NEUTRALIZED (patch factor forced to 256,
     /// i.e. ×1.0), and asserts the two means are equal within ±5% (the acceptance threshold at
-    /// caps.rs:153). The test is required to verify that patchiness does not introduce correlation
-    /// with the base cap (covariance E[factor·base] ≠ E[factor]·E[base] would shift the mean even
-    /// though the factor is symmetric).
+    /// caps.rs:153). Uses pure integer arithmetic to stay within the no_float_guard_gen constraint.
+    /// The test is required to verify that patchiness does not introduce correlation with the base
+    /// cap (covariance E[factor·base] ≠ E[factor]·E[base] would shift the mean even though the
+    /// factor is symmetric).
     #[test]
     fn patchiness_maintains_mean_neutrality() {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
+        const GRID_SIZE: i64 = (DIM * DIM) as i64;
 
         // Compute world WITH patchiness active
         let with_patch = classify_and_caps(SEED, HMAX, DIM);
         let sum_with: i64 = with_patch.caps.iter().sum();
-        let mean_with = sum_with as f64 / (DIM * DIM) as f64;
+        // Integer-only mean: multiply first to preserve precision, then divide
+        let mean_with_times_1000 = (sum_with * 1000) / GRID_SIZE;
 
         // Compute world WITHOUT patchiness (patch factor forced to 256 = identity)
         // We replicate the classify_and_caps logic but with patch_scale = 256.
@@ -654,22 +657,37 @@ mod tests {
         }
 
         let sum_without: i64 = without_patch_caps.iter().sum();
-        let mean_without = sum_without as f64 / (DIM * DIM) as f64;
+        // Integer-only mean: multiply first to preserve precision, then divide
+        let mean_without_times_1000 = (sum_without * 1000) / GRID_SIZE;
+
+        // Compute percentage difference using only integer arithmetic: avoid truncation by
+        // multiplying by 100 before dividing. The ±5% threshold becomes ±50 in this metric
+        // (i.e., 50 permille out of 1000 permille = 5%).
+        let abs_diff = if mean_with_times_1000 > mean_without_times_1000 {
+            mean_with_times_1000 - mean_without_times_1000
+        } else {
+            mean_without_times_1000 - mean_with_times_1000
+        };
+        // Avoid division-by-zero; shouldn't happen in practice (caps are always in [0,300])
+        let pct_diff_times_100 = if mean_without_times_1000 > 0 {
+            (abs_diff * 100) / mean_without_times_1000
+        } else {
+            0
+        };
 
         eprintln!(
-            "W-7 mean-invariance: mean_with_patch={:.2}, mean_without_patch={:.2}, diff_pct={:.2}%",
-            mean_with,
-            mean_without,
-            ((mean_with - mean_without).abs() / mean_without * 100.0)
+            "W-7 mean-invariance: mean_with_patch={}×1000⁻¹, mean_without_patch={}×1000⁻¹, diff_pct_×100={}",
+            mean_with_times_1000, mean_without_times_1000, pct_diff_times_100
         );
 
-        // Assert means are equal within ±5% (the documented acceptance threshold).
-        let pct_diff = (mean_with - mean_without).abs() / mean_without * 100.0;
+        // Assert means are equal within ±5% (pct_diff_times_100 <= 500, where 500/100 = 5%).
         assert!(
-            pct_diff <= 5.0,
-            "patchiness mean shift exceeded ±5%: {:.2}% diff (with={:.2}, without={:.2}). \
+            pct_diff_times_100 <= 500,
+            "patchiness mean shift exceeded 5%% threshold: {}% diff (with={}×1000⁻¹, without={}×1000⁻¹). \
              This indicates covariance between patch factor and base cap — decorrelate the patch noise.",
-            pct_diff, mean_with, mean_without
+            pct_diff_times_100 / 100,
+            mean_with_times_1000,
+            mean_without_times_1000
         );
     }
 
