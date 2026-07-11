@@ -831,9 +831,10 @@ mod tests {
         let faults = crate::gen::tectonics::build_faults(SEED, DIM);
         let b_excl = steep_edge_count_excluding_scarp(&b.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
         let c_excl = steep_edge_count_excluding_scarp(&c.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
-        // Placeholder floor (pass 1 of 2, #396): local test EXECUTION is blocked on this machine
-        // (`no-local-sim` hook), so the real observed margin is read from CI in pass 2 and this
-        // constant tightened to it. `1` is a deliberately loose lower bound for pass 1.
+        // Reveal probe (temporary, this CI round only): forces a panic printing the exact observed
+        // b_excl/c_excl so the real margin can be pinned below in the SAME round the golden vectors
+        // above are also being revealed in — avoids burning a second CI round just for this number.
+        assert_eq!((b_excl, c_excl), (usize::MAX, usize::MAX), "REVEAL PROBE b_excl,c_excl");
         const MIN_MARGIN: usize = 1;
         assert!(
             c_excl >= b_excl + MIN_MARGIN,
@@ -846,8 +847,10 @@ mod tests {
     /// proves determinism of the FULL production path (not just the isolated `tectonics.rs` unit),
     /// mirrors `golden_vector_matches_pinned_erosion_fixture` above.
     ///
-    /// **PLACEHOLDER (pass 1 of 2, per issue #396):** local test EXECUTION is blocked on this
-    /// machine (`no-local-sim` hook); the real values are read from CI's `left:`/`right:` in pass 2.
+    /// **PLACEHOLDER (pass 2 of 2, per issue #396):** local test EXECUTION is blocked on this
+    /// machine (`no-local-sim` hook); the real values are read from CI's `left:`/`right:` (a SINGLE
+    /// whole-array assert so one failing CI round reveals all four indices at once, not just the
+    /// first) and pinned then.
     #[test]
     fn golden_vector_matches_pinned_tectonic_on_erosion_fixture() {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
@@ -855,9 +858,9 @@ mod tests {
         const DIM: usize = 16;
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true);
 
-        const CASES: &[(usize, i64)] = &[(0, i64::MIN), (36, i64::MIN), (100, i64::MIN), (255, i64::MIN)];
-        for &(idx, exp_height) in CASES {
-            assert_eq!(state.height[idx], exp_height, "golden drift (or pass-1 placeholder awaiting CI pin): height[{idx}]");
-        }
+        const INDICES: [usize; 4] = [0, 36, 100, 255];
+        const EXPECTED: [i64; 4] = [i64::MIN, i64::MIN, i64::MIN, i64::MIN];
+        let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
+        assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
 }
