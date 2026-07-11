@@ -103,7 +103,9 @@ impl ProcgenWorld {
     /// for the thermal-niche verdict harness. `None` (default) uses stock BIOME_TEMP; `Some(array)`
     /// injects custom temps (verdict-only, never shipped). Gated at world-gen time (immutable post-gen).
     pub fn new(dim: i64, hmax: i64, resource_base: i64, seed: u64, thermal_verdict_temps: Option<[i32; 13]>) -> Self {
-        let fields = classify_and_caps(seed, hmax, dim as usize);
+        // W-7 gate: patchiness defaults OFF for acceptance corridors (homogeneous baseline).
+        // Specific scenarios (map-gen, visualization) can opt-in by calling with enable_patchiness=true.
+        let fields = classify_and_caps(seed, hmax, dim as usize, false);
         // W-6b Phase A: DECOUPLE resource from solid_level (RnD 01 §40,43: is_solid=movement,
         // resource=food are SEPARATE queries). solid_level → ONLY movement/collision (is_solid).
         // resource() → DIRECT rescale_cap(caps[idx]), independent of height.

@@ -288,9 +288,14 @@ pub struct WorldFields {
 
 /// Sample `erode(seed, hmax, dim)` (W-4) and classify the FINAL biome + caps per cell: zonal biome
 /// on the post-erosion surface (via `climate_from_height` + `biome_at`) → azonal override (via
-/// moisture/material/slope/is_river) → `caps_from`. Pure function of `(seed, hmax, dim)` — no
+/// moisture/material/slope/is_river) → `caps_from`. Pure function of `(seed, hmax, dim, enable_patchiness)` — no
 /// RNG-of-clock, no thread-dependence, no global mutable state.
-pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
+///
+/// **W-7 gate (patchiness default-off):** When `enable_patchiness` is false, the function produces
+/// caps identical to pre-W-7 (no spatial modulation). Patchiness must be explicitly opted-in by the
+/// caller (the map/visual track). This preserves acceptance corridors (settling, emergence) that assume
+/// homogeneous world-gen.
+pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize, enable_patchiness: bool) -> WorldFields {
     let erosion = erode(seed, hmax, dim);
     let n = dim * dim;
     let mut final_biome = Vec::with_capacity(n);
@@ -318,13 +323,18 @@ pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize) -> WorldFields {
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
             final_biome.push(final_b);
 
-            // W-7: Apply spatial patchiness modulation to the base cap (mean-neutral symmetric factor).
+            // W-7 (gated): Apply spatial patchiness modulation to the base cap (mean-neutral symmetric factor).
             let cap_base = caps_from(final_b, moisture, material);
-            let patch_scale = patchiness_at(x as i64, z as i64, seed, hmax);
-            // Modulation formula: cap_modulated = clamp((cap_base * patch_scale + 128) / 256, ...)
-            // The +128 implements round-half, eliminates constant −0.5 truncation bias.
-            let cap_modulated = ((cap_base * patch_scale + 128) / 256).clamp(0, CAP_MAX);
-            caps[idx] = cap_modulated;
+            let cap_final = if enable_patchiness {
+                let patch_scale = patchiness_at(x as i64, z as i64, seed, hmax);
+                // Modulation formula: cap_modulated = clamp((cap_base * patch_scale + 128) / 256, ...)
+                // The +128 implements round-half, eliminates constant −0.5 truncation bias.
+                ((cap_base * patch_scale + 128) / 256).clamp(0, CAP_MAX)
+            } else {
+                // Patchiness OFF: use base cap unchanged (byte-identical to pre-W-7)
+                cap_base
+            };
+            caps[idx] = cap_final;
         }
     }
 
@@ -451,8 +461,8 @@ mod tests {
 
     #[test]
     fn classify_and_caps_is_deterministic_across_repeated_calls() {
-        let a = classify_and_caps(SEED, HMAX, 16);
-        let b = classify_and_caps(SEED, HMAX, 16);
+        let a = classify_and_caps(SEED, HMAX, 16, false);
+        let b = classify_and_caps(SEED, HMAX, 16, false);
         assert_eq!(a, b, "classify_and_caps must be byte-identical across repeated calls");
     }
 
@@ -461,7 +471,7 @@ mod tests {
     #[test]
     fn classify_and_caps_is_well_defined_grid_wide() {
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false);
         assert_eq!(fields.final_biome.len(), DIM * DIM);
         assert_eq!(fields.caps.len(), DIM * DIM);
         for &c in &fields.caps {
@@ -474,15 +484,15 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM);
+        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false);
 
-        // W-7 re-pin: caps drifted due to spatial patchiness modulation (multiplicative factor,
-        // symmetric range [192, 320], centered at 256). Height/biome/material fields unchanged.
+        // W-7 gate (patchiness default-off): caps are byte-identical to pre-W-7 (no patchiness applied).
+        // Height/biome/material fields unchanged. These are the canonical pre-W-7 values.
         const CASES: &[(usize, FinalBiome, i64)] = &[
-            (0, FinalBiome::BorealForest, 229),
-            (36, FinalBiome::BorealForest, 226),
-            (100, FinalBiome::BorealForest, 223),
-            (255, FinalBiome::TemperateGrassland, 187),
+            (0, FinalBiome::BorealForest, 220),
+            (36, FinalBiome::BorealForest, 220),
+            (100, FinalBiome::BorealForest, 220),
+            (255, FinalBiome::TemperateGrassland, 180),
         ];
         for &(idx, exp_biome, exp_cap) in CASES {
             assert_eq!(fields.final_biome[idx], exp_biome, "golden drift: final_biome[{idx}]");
@@ -500,7 +510,8 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM);
+        // With patchiness ON to verify bounds and clamping behavior of the modulation
+        let fields = classify_and_caps(SEED, HMAX, DIM, true);
 
         // Count cells hitting bounds (ceiling at CAP_MAX, floor at 1 via rescale_cap).
         let mut clamp_low = 0usize;
@@ -560,7 +571,7 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM);
+        let fields = classify_and_caps(SEED, HMAX, DIM, true);
 
         // Adjacent-cell differences: sum of absolute differences for cells one step apart.
         let mut same_neighbor_sum = 0i64;
@@ -617,46 +628,15 @@ mod tests {
         const DIM: usize = 64;
         const GRID_SIZE: i64 = (DIM * DIM) as i64;
 
-        // Compute world WITH patchiness active
-        let with_patch = classify_and_caps(SEED, HMAX, DIM);
+        // Compute world WITH patchiness active (gated ON)
+        let with_patch = classify_and_caps(SEED, HMAX, DIM, true);
         let sum_with: i64 = with_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_with_times_1000 = (sum_with * 1000) / GRID_SIZE;
 
-        // Compute world WITHOUT patchiness (patch factor forced to 256 = identity)
-        // We replicate the classify_and_caps logic but with patch_scale = 256.
-        // This requires re-running the full pipeline with neutralized patchiness.
-        let mut without_patch_caps = Vec::new();
-        let erosion = erode(SEED, HMAX, DIM);
-        for z in 0..DIM {
-            for x in 0..DIM {
-                let idx = z * DIM + x;
-                let h_cell = erosion.height[idx];
-                let x_src = (x as i64 - WIND_DX).max(0) as usize;
-                let h_west = erosion.height[z * DIM + x_src];
-                let (t, p) = climate_from_height(h_cell, h_west, x as i64, z as i64, SEED);
-                let zonal = biome_at(t, p);
-
-                let area = erosion.drainage.area[idx];
-                let moisture = moisture_at(area);
-                let material = erosion.surface_material[idx];
-                let riparian = is_river(area);
-                let slope = match erosion.drainage.downstream[idx] {
-                    Some(d) => (erosion.height[idx] - erosion.height[d]).max(0),
-                    None => 0,
-                };
-
-                let final_b = override_biome(zonal, moisture, material, slope, riparian);
-                let cap_base = caps_from(final_b, moisture, material);
-
-                // W-7: Apply NO patchiness (patch_scale = 256 = identity modulation)
-                let patch_scale = 256i64; // Neutralized: no modulation
-                let cap_modulated = ((cap_base * patch_scale + 128) / 256).clamp(0, CAP_MAX);
-                without_patch_caps.push(cap_modulated);
-            }
-        }
-
-        let sum_without: i64 = without_patch_caps.iter().sum();
+        // Compute world WITHOUT patchiness (gated OFF) — byte-identical to homogeneous baseline
+        let without_patch = classify_and_caps(SEED, HMAX, DIM, false);
+        let sum_without: i64 = without_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_without_times_1000 = (sum_without * 1000) / GRID_SIZE;
 
