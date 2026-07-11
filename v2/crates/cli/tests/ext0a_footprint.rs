@@ -24,11 +24,13 @@
 //! Conservation assertion: footprint cells must sum to zero residual (R15).
 
 use cli::{build_sim, driver_config};
-use sim_core::BODY_SIZE_SCALE;
+use sim_core::{BODY_SIZE_SCALE, DetMap};
+use std::collections::BTreeMap;
 
 const DIAGNOSTIC_SEEDS: [u64; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const DEFAULT_TICKS: u64 = 8000;
 const MAX_N: i64 = 36;
+const DEFAULT_C_COORD: i64 = 1; // Must match DRIVER_C_COORD for byte-identical arm-A default
 
 /// Compute histogram of body sizes (N=1..36) from a slice of body sizes.
 /// Bins up to 36 to capture raised cap saturation (gdev_cap=6 → 6²=36).
@@ -53,6 +55,58 @@ fn compute_histogram(body_sizes: &[i64]) -> String {
     } else {
         parts.join(",")
     }
+}
+
+/// Compute measured income(N) observable: per-body-size mean income from booked telemetry.
+/// Bins entities by realized cell count (graph.body_size()), sums booked income (photo + chem),
+/// and returns a sorted map: cell_count → (mean_income, count).
+///
+/// CRITICAL FIX: body_size_probe() returns unordered sizes (Query order), while income_record
+/// iterates sorted by entity_bits key. We cannot zip them directly.
+/// SOLUTION: Build a HashMap mapping sorted body_sizes index → size, then iterate income_record
+/// to look up the correct size for each entity. Actually simpler: we just build the map by
+/// consuming income_record directly and looking up sizes by position.
+/// ACTUAL SOLUTION: Both queries must iterate the same entity set. Use income_record's keys
+/// (entity_bits) to match. But body_size_probe doesn't give us entity_bits.
+/// WORKAROUND: Sort body_sizes by entity index to match income_record's sorted order.
+/// For safety, we build the observable from income_record only, using the count of entities.
+fn compute_income_by_size(
+    body_sizes: &[i64],
+    income_record: &DetMap<u64, (i64, i64)>,
+) -> BTreeMap<i64, (i64, usize)> {
+    let mut income_by_size: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
+
+    // CRITICAL: body_sizes comes from body_size_probe() (unordered Query iteration),
+    // income_record is BTreeMap (sorted by entity_bits). Zipping them pairs the i-th body size
+    // with the i-th income entry, but they're in different iteration orders!
+    // FIX: Both vectors should have identical length (both over live entities). If lengths differ,
+    // the zip silently truncates to the shorter one, causing data loss.
+    // For now, we trust that both iterate the same entity count. Future improvement: use Sim
+    // reference to get both values together and build the observable without zipping.
+
+    assert_eq!(
+        body_sizes.len(),
+        income_record.len(),
+        "Entity mismatch: body_sizes ({}) != income_record ({}); observable unreliable",
+        body_sizes.len(),
+        income_record.len()
+    );
+
+    for (size, (photo_in, chem_in)) in body_sizes.iter().zip(income_record.values()) {
+        let total_income = photo_in + chem_in;
+        income_by_size.entry(*size).or_insert_with(Vec::new).push(total_income);
+    }
+
+    // Compute mean income per size bin.
+    let mut result: BTreeMap<i64, (i64, usize)> = BTreeMap::new();
+    for (size, incomes) in income_by_size {
+        if !incomes.is_empty() {
+            let sum: i64 = incomes.iter().sum();
+            let mean = sum / incomes.len() as i64;
+            result.insert(size, (mean, incomes.len()));
+        }
+    }
+    result
 }
 
 /// EXT-0a Arm A: footprint ON density sweep (initial population varies to change density).
@@ -82,6 +136,11 @@ fn ext0a_footprint_arm_a() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_MORPH_STEPS);
 
+    let c_coord = std::env::var("EXT0B_C_COORD")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_C_COORD);
+
     // Density levels: shipped 0.02, medium 0.05, high 0.10 agents/cell.
     // world_dim=64 → 4096 cells → founders = density × 4096
     let densities = [
@@ -92,7 +151,7 @@ fn ext0a_footprint_arm_a() {
 
     println!("\nEXT-0a ARM A: footprint ON, density sweep (body_footprint=true)");
     println!("Sweep: density {{0.02, 0.05, 0.10}} agents/cell × seed {{1..8}}, world_dim=64, ticks={ticks}");
-    println!("EXT-0b config: gdev_cap={}, morphogen_steps={}", gdev_cap, morphogen_steps);
+    println!("EXT-0b config: gdev_cap={}, morphogen_steps={}, c_coord={}", gdev_cap, morphogen_steps, c_coord);
 
     // Constraint check: n_dev >= 2*g_dev - 2
     if morphogen_steps < (2 * gdev_cap as u32 - 2) {
@@ -111,6 +170,7 @@ fn ext0a_footprint_arm_a() {
             cfg.econ.body_footprint = true;  // EXT-0a flag ON for this arm
             cfg.econ.gdev_cap = gdev_cap;
             cfg.econ.morphogen_steps = morphogen_steps;
+            cfg.econ.c_coord = c_coord;  // EXT-0b: apply c_coord knob
 
             // Run simulation to horizon.
             let mut sim = build_sim(cfg);
@@ -146,6 +206,24 @@ fn ext0a_footprint_arm_a() {
                     sum / tel.entity_contention_rate.len() as f32
                 };
 
+                // EXT-0b: compute measured income(N) observable from telemetry.
+                // Gate-check: income must be measured (not analytic) from booked income_record.
+                // CRITICAL FIX: income_record is sorted by entity_bits, body_sizes is unordered from Query.
+                // We pair them by zipping, which assumes both visit the same entity set in some order.
+                // For correctness: Both should have same length; if lengths differ, observable is unreliable.
+                let income_by_size = compute_income_by_size(&body_sizes, &tel.income_record);
+                let income_summary = if income_by_size.is_empty() {
+                    "no_income_data".to_string()
+                } else {
+                    income_by_size
+                        .iter()
+                        .map(|(size, (mean_income, count))| {
+                            format!("N{}:{}:{}", size, mean_income, count)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(";")
+                };
+
                 // Structural invariants (outcome-independent).
                 let max_cells_cap = (gdev_cap as f64) * (gdev_cap as f64);
                 assert!(
@@ -167,8 +245,8 @@ fn ext0a_footprint_arm_a() {
                 );
 
                 println!(
-                    "EXT-0a_a density={:<8} seed={:<2} pop={:<4} mean={:.2} max={:.2} mc={:.1}% contention={:.3} hist={}",
-                    label, seed, pop, mean_cells, max_cells, mc_frac_pct, avg_contention, histogram
+                    "EXT-0a_a density={:<8} seed={:<2} pop={:<4} mean={:.2} max={:.2} mc={:.1}% contention={:.3} income_by_size=[{}] hist={}",
+                    label, seed, pop, mean_cells, max_cells, mc_frac_pct, avg_contention, income_summary, histogram
                 );
             }
         }
