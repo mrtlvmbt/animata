@@ -140,42 +140,78 @@ fn sweep_splits_for_size(body_size: i64, econ: &sim_core::EconParams) -> Vec<(i6
     results
 }
 
-/// Analyze fitness curve for interior maximum (PASS) vs edge/monotone (NULL).
-/// Returns (has_interior_max, verdict_str).
-fn analyze_fitness_curve(curve: &[(i64, i64, i64)]) -> (bool, String) {
+/// Analyze fitness curve for PEAK vs PLATEAU vs MONOTONE/EDGE (per coordinator guidance).
+/// Critical distinction:
+/// - PEAK (PASS): genuine interior optimum with fitness strictly higher than neighbors on BOTH sides,
+///   curve rises then falls (concave around peak). This is structural DoL.
+/// - PLATEAU (NULL): flat interior (fitness ~constant across interior), only edges drop.
+///   This is mere cliff-avoidance ("have ≥1 germ AND ≥1 soma"), not DoL.
+/// - MONOTONE/EDGE (NULL): monotone or only edge maximum, no interior optimum.
+///
+/// Returns (is_peak, curve_classification, full_curve_str).
+fn analyze_fitness_curve(curve: &[(i64, i64, i64)]) -> (bool, String, String) {
     if curve.is_empty() {
-        return (false, "EMPTY_CURVE".to_string());
+        return (false, "EMPTY_CURVE".to_string(), "".to_string());
     }
 
     // Extract fitness values (income × fertility) for each split
     let fitnesses: Vec<i64> = curve.iter().map(|(_, inc, fert)| inc * fert).collect();
+    let n = fitnesses.len();
+
+    // Build curve string for reporting
+    let curve_str = fitnesses.iter().map(|f| f.to_string()).collect::<Vec<_>>().join(", ");
 
     // Find max fitness and its position
     let max_fitness = *fitnesses.iter().max().unwrap_or(&0);
     let max_idx = fitnesses.iter().position(|&f| f == max_fitness).unwrap_or(0);
 
-    // Check for interior maximum: max_idx is strictly between 0 and len-1,
-    // and is not the only peak (fitness should increase to it, then decrease).
-    let is_interior = max_idx > 0 && max_idx < fitnesses.len() - 1;
+    // Check location: interior vs edge
+    let is_interior = max_idx > 0 && max_idx < n - 1;
 
-    let has_interior_max = if is_interior {
-        // Verify it's actually an interior peak (increases before, decreases after)
-        let before_increases = fitnesses[0..max_idx].windows(2).all(|w| w[0] <= w[1]);
-        let after_decreases = fitnesses[max_idx..].windows(2).all(|w| w[0] >= w[1]);
-        before_increases && after_decreases
+    if !is_interior {
+        // Edge or single-point maximum → NULL
+        let verdict = if max_idx == 0 || max_idx == n - 1 {
+            "EDGE_MAX (no interior optimum)"
+        } else {
+            "MONOTONE (no singular peak)"
+        };
+        return (false, verdict.to_string(), curve_str);
+    }
+
+    // Interior maximum: check if it's a PEAK vs PLATEAU
+    // PEAK: fitness at max strictly > fitness at both immediate neighbors (left and right)
+    let left_neighbor = fitnesses[max_idx - 1];
+    let right_neighbor = fitnesses[max_idx + 1];
+
+    let is_strict_peak = max_fitness > left_neighbor && max_fitness > right_neighbor;
+
+    if !is_strict_peak {
+        // Interior max but not strict peak → likely PLATEAU
+        return (false, "PLATEAU (flat interior, only edges drop)".to_string(), curve_str);
+    }
+
+    // Verify genuine PEAK: check concavity around peak (fitness increases before, decreases after)
+    let before_increases = if max_idx > 0 {
+        fitnesses[0..max_idx].windows(2).all(|w| w[0] <= w[1])
     } else {
-        false
+        true
     };
 
-    let verdict = if has_interior_max {
-        format!("INTERIOR_MAX at idx={}, fitness={}", max_idx, max_fitness)
-    } else if max_idx == 0 || max_idx == fitnesses.len() - 1 {
-        "EDGE_MAX (no interior optimum)"
+    let after_decreases = if max_idx < n - 1 {
+        fitnesses[max_idx..].windows(2).all(|w| w[0] >= w[1])
     } else {
-        "MONOTONE_or_MULTIPLE (no singular interior peak)"
+        true
     };
 
-    (has_interior_max, verdict.to_string())
+    let is_concave_peak = before_increases && after_decreases;
+
+    let verdict = if is_concave_peak {
+        format!("PEAK (genuine DoL optimum at ratio idx={}, fitness={})", max_idx, max_fitness)
+    } else {
+        "PLATEAU_or_FLAT (interior max but no concavity)"
+    };
+
+    (is_concave_peak, verdict, curve_str)
 }
 
 /// Skeleton Rung-0 verdict harness. PASS 1 scaffold; full data collection + PASS 2 in cloud.
@@ -186,11 +222,12 @@ fn topo_diff_rung0_imposed_split_verdict() {
     println!("TOPO-DIFF Rung 0: Imposed-Split Verdict (Economy Isolation)");
     println!("════════════════════════════════════════════════════════════════");
     println!("\nPRE-DECLARED CRITERION:");
-    println!("  Interior maximum in fitness sweep ⇒ PASS (DoL genuinely pays)");
-    println!("  Edge/monotone maximum ⇒ NULL (no DoL benefit, only cliff-avoidance)");
+    println!("  PEAK (interior optimum, concave, strict max > neighbors on both sides) ⇒ PASS");
+    println!("  PLATEAU (flat interior, only edges drop) ⇒ NULL (cliff-avoidance, not DoL)");
+    println!("  EDGE/MONOTONE ⇒ NULL (no interior optimum)");
     println!("\nSweep: germ:soma ratios at matched body sizes (N={:?})", TEST_BODY_SIZES);
     println!("Measurement: (per-capita income) × (fertility gate) for each split");
-    println!("Seeds: {}; majority=≥{}/{} → Rung 0 PASS", VERDICT_SEEDS.len(), SEED_MAJORITY, VERDICT_SEEDS.len());
+    println!("Seeds: {}; majority=≥{}/{} PEAK results → Rung 0 PASS", VERDICT_SEEDS.len(), SEED_MAJORITY, VERDICT_SEEDS.len());
     println!("\n");
 
     let mut seeds_pass = vec![];
@@ -213,21 +250,22 @@ fn topo_diff_rung0_imposed_split_verdict() {
             // Sweep germ:soma splits
             let curve = sweep_splits_for_size(body_size, &cfg.econ);
 
-            // Analyze fitness curve
-            let (has_interior, verdict) = analyze_fitness_curve(&curve);
+            // Analyze fitness curve — distinguish PEAK vs PLATEAU vs EDGE/MONOTONE
+            let (is_peak, verdict, curve_str) = analyze_fitness_curve(&curve);
 
+            println!("    Fitness curve (income×fertility): [{}]", curve_str);
             println!("    Verdict: {}", verdict);
-            println!("    Result: {}", if has_interior { "INTERIOR_MAX ✓" } else { "NO_INTERIOR ✗" });
+            println!("    Classification: {}", if is_peak { "PEAK (✓ PASS condition)" } else { "NOT_PEAK (✗ NULL)" });
 
-            // Print detailed curve for inspection (PASS 2 to extract precise numbers)
-            print!("    Curve: ");
-            for (g, inc, fert) in &curve {
-                let fitness = inc * fert;
-                print!("({g}:{}→{})", body_size - g, fitness);
+            // Print detailed curve annotation with split ratios
+            print!("    Split ratios (germ:soma): ");
+            for (g, _inc, _fert) in &curve {
+                let soma = body_size - g;
+                print!("({g}:{soma}) ");
             }
             println!();
 
-            if !has_interior {
+            if !is_peak {
                 seed_pass_all = false;
             }
         }
@@ -245,8 +283,12 @@ fn topo_diff_rung0_imposed_split_verdict() {
     println!("SUMMARY");
     println!("════════════════════════════════════════════════════════════════");
     println!(
-        "RESULT: {}/{} seeds passed (interior max at all N)",
+        "RESULT: {}/{} seeds showed PEAK (genuine interior optimum at all N)",
         seeds_pass.len(),
+        VERDICT_SEEDS.len()
+    );
+    println!("        {}/{} seeds showed PLATEAU or EDGE (cliff-avoidance only, no DoL)",
+        seeds_fail.len(),
         VERDICT_SEEDS.len()
     );
 
@@ -254,17 +296,21 @@ fn topo_diff_rung0_imposed_split_verdict() {
     println!(
         "\nTOPO-DIFF RUNG 0 VERDICT: {}",
         if rung0_pass {
-            "PASS (interior maximum confirmed — fate-keyed DoL genuinely pays)"
+            "PASS (≥{}/{} seeds showed PEAK — fate-keyed DoL genuinely pays)"
         } else {
-            "NULL (no interior maximum — economy does not reward differentiation)"
+            "NULL (most seeds showed PLATEAU/EDGE — economy does not reward differentiation)"
         }
     );
 
     if !rung0_pass {
-        println!("\nFailed seeds: {:?}", seeds_fail);
-        println!("→ Economy does not provide structural advantage to DoL; pivot stops here.");
+        if seeds_fail.iter().all(|_| true) {
+            println!("\nAnalysis: Failed seeds showed PLATEAU (flat interior, no interior optimum).");
+            println!("Interpretation: Mixed bodies beat pure extremes only by avoiding cliffs");
+            println!("(germ=0 sterility, soma=0 income floor), not by structural DoL benefit.");
+            println!("→ Economy does not provide advantage to fate-keyed differentiation; pivot stops here.");
+        }
     } else {
-        println!("\nProceed to Rung 1 (sparse topology) if pre-conditions met.");
+        println!("\nProceed to Rung 1 (sparse topology): PASS enables topology investigation.");
     }
 
     // OBSERVATIONAL verdict — harness sanity gate.
