@@ -128,38 +128,32 @@ fn build_generalist_body(body_size: i64) -> CellGraph {
 /// - If PLATEAU/EDGE: no DoL advantage to imposed splits, pure cliff-avoidance
 /// - The test can only reach PEAK if the formula correctly reflects the real economy
 fn measure_fitness(graph: &CellGraph, econ: &sim_core::EconParams) -> (i64, i64) {
-    // Compute germ/soma counts by iterating module_cell_count and module_is_germ.
-    let soma: i32 = graph
-        .module_cell_count
-        .iter()
-        .zip(graph.module_is_germ.iter())
-        .filter(|(_, &is_germ)| !is_germ)
-        .map(|(count, _)| count)
-        .sum();
-    let germ: i32 = graph
-        .module_cell_count
-        .iter()
-        .zip(graph.module_is_germ.iter())
-        .filter(|(_, &is_germ)| is_germ)
-        .map(|(count, _)| count)
-        .sum();
+    // Use the real graph method to count germ/soma (F3 fix: don't hand-count on module_is_germ)
+    let (soma, germ) = graph.fate_germ_soma_counts();
 
-    let soma_active = soma.max(1);  // bootstrap (avoid division by zero if soma=0)
-
-    // Income measurement: Monod demand at nominal R=100.
-    // fate_economy=true: income scales by soma cells only (germ don't forage).
+    // Base Monod demand at nominal R=100 (typical world resource level)
     let r = 100i64;
     let u_max = econ.u_max;
     let km = econ.km;
     let demand = u_max * r / (r + km);  // monod_demand inline (matches stage_interactions)
-    let demand_scaled = demand * (soma_active as i64);
-    let income_per_cell = demand_scaled / graph.body_size().max(1);
 
-    // Repro measurement: germ count gates fertility.
-    // Germ=0 → sterile (fertility=0).
-    // Germ>0 → can reproduce (fertility=1).
-    // (Normalized to binary for this verdict; actual repro_bar is genome-specific)
-    let fertility = if germ == 0 { 0 } else { 1 };  // 0=sterile, 1=can reproduce
+    // BRANCH ON FATE_ECONOMY FLAG (F1+F2 fix: gate the measurement)
+    let (income_per_cell, fertility) = if econ.fate_economy {
+        // TRUE ARM (Rung-0 gate ON): income scales by soma, fertility gates on germ
+        // Matches real stage_interactions behavior with fate economy enabled
+        let soma_active = soma.max(1);  // bootstrap (avoid division by zero if soma=0)
+        let demand_scaled = demand * (soma_active as i64);
+        let income = demand_scaled / graph.body_size().max(1);
+        let fert = if germ == 0 { 0 } else { 1 };  // germ gate: germ=0→sterile
+        (income, fert)
+    } else {
+        // FALSE ARM (Rung-0 gate OFF): income is base demand (no soma scaling), fertility always ON
+        // Matches real stage_interactions/stage_birth_death behavior with fate economy disabled
+        // See stages.rs:600 (income_per_capita when fate_economy off) and stages.rs:1445 (repro gate)
+        let income = demand / graph.body_size().max(1);  // No soma scaling when gate is OFF
+        let fert = 1;  // No germ gate when economy is inert to differentiation
+        (income, fert)
+    };
 
     (income_per_cell, fertility)
 }
