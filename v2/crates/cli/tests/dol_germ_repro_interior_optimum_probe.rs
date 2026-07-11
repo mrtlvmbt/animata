@@ -85,31 +85,27 @@ fn compute_repro_bar(graph: &CellGraph, repro_threshold: i64) -> i64 {
     }
 }
 
-/// Compute income per cell using REAL Monod kinetics (matching stage_interactions).
-/// Formula: demand = u_max * R / (R + k_m), scaled by soma count when fate_economy=true.
-/// For dol_germ_repro (which has fate_economy=false), income is uniform across body:
-///   income_per_cell = demand / body_size
-fn compute_income_per_cell(graph: &CellGraph, econ: &sim_core::EconParams) -> i64 {
-    let r = 100i64;  // typical world resource level
-    let u_max = econ.u_max;
-    let km = econ.km;
-    let demand = u_max * r / (r + km);  // monod demand inline
-
-    let body_size = graph.body_size().max(1);
-    demand / body_size
-}
-
 /// Fitness proxy = (total income) / (repro_bar)
 /// Higher income, lower repro cost = higher fitness.
+/// Income scales by SOMA count (stages.rs:563 demand * soma), not body_size.
 /// Returns (income_total, repro_bar, fitness_proxy).
 fn measure_fitness_proxy(
     graph: &CellGraph,
     econ: &sim_core::EconParams,
     repro_threshold: i64,
 ) -> (i64, i64, f64) {
-    let income_per_cell = compute_income_per_cell(graph, econ);
     let body_size = graph.body_size();
-    let total_income = income_per_cell * body_size;
+    let (soma, germ) = graph.fate_germ_soma_counts();
+    let soma_count = soma as i64;
+
+    // Monod demand (real formula from stages.rs:563)
+    let r = 100i64;
+    let u_max = econ.u_max;
+    let km = econ.km;
+    let demand = u_max * r / (r + km);
+
+    // Income scales by soma (not body_size) per stages.rs:563 / 591
+    let total_income = demand * soma_count.max(1);
     let repro_bar = compute_repro_bar(graph, repro_threshold);
 
     let fitness = if repro_bar == i64::MAX {
