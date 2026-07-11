@@ -26,12 +26,8 @@
 //!
 //! Determinism: integer-only, hand-built bodies, no evolution — output is reproducible per seed.
 
-use cli::{build_sim, driver_config};
-use sim_core::{
-    CellGraph, CellType, Energy, EnergyLedger, Genome, Phenotype, Position, SimClock, Telemetry,
-    Vec2Fixed, WorldRes, WorldView, FieldRes, Deposit, MergeStrategy,
-};
-use bevy_ecs::prelude::*;
+use cli::driver_config;
+use sim_core::{CellGraph, CellType, Vec2Fixed, WorldView};
 
 const VERDICT_SEEDS: [u64; 3] = [0xD1FF_0001, 0xD1FF_0002, 0xD1FF_0003];
 const SEED_MAJORITY: usize = 2;  // ≥2/3 seeds must pass → Rung 0 PASS
@@ -171,11 +167,11 @@ fn analyze_fitness_curve(curve: &[(i64, i64, i64)]) -> (bool, String, String) {
     if !is_interior {
         // Edge or single-point maximum → NULL
         let verdict = if max_idx == 0 || max_idx == n - 1 {
-            "EDGE_MAX (no interior optimum)"
+            "EDGE_MAX (no interior optimum)".to_string()
         } else {
-            "MONOTONE (no singular peak)"
+            "MONOTONE (no singular peak)".to_string()
         };
-        return (false, verdict.to_string(), curve_str);
+        return (false, verdict, curve_str);
     }
 
     // Interior maximum: check if it's a PEAK vs PLATEAU
@@ -208,7 +204,7 @@ fn analyze_fitness_curve(curve: &[(i64, i64, i64)]) -> (bool, String, String) {
     let verdict = if is_concave_peak {
         format!("PEAK (genuine DoL optimum at ratio idx={}, fitness={})", max_idx, max_fitness)
     } else {
-        "PLATEAU_or_FLAT (interior max but no concavity)"
+        "PLATEAU_or_FLAT (interior max but no concavity)".to_string()
     };
 
     (is_concave_peak, verdict, curve_str)
