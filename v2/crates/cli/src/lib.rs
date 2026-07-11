@@ -978,6 +978,13 @@ pub fn build_sim(config: SimConfig) -> Sim {
         config.econ.o2_cap = avg_o2_cap;
     }
 
+    // EXT-0b: make morphogen_steps authoritative over MorphogenSpec.n_dev.
+    // This ensures --set morphogen_steps=N overrides the hardcoded n_dev in config functions.
+    // Default: morphogen_steps=8 == hardcoded n_dev=8 → byte-identical, golden-neutral.
+    if let Some(ref mut mspec) = config.econ.morphogen {
+        mspec.n_dev = config.econ.morphogen_steps;
+    }
+
     let field = CpuFieldStore::new_layered(
         econ.world_dim, M_FIELD, caps_per_layer, regen_rates, flux_ks, FLUX_F, SIGNAL_DECAY,
     );
