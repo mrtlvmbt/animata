@@ -36,6 +36,7 @@ on:
           - ext-0a               # EXT-0a (#377) footprint harvest diagnostic (density-dependent body-size income, contention)
           - ext-0b               # EXT-0b (#385) sweep harness parameterizing footprint arm by gdev_cap/morphogen_steps
           - diff-probe           # DIFF-0 (#372) cell-type differentiation probe (T>=2 ever occur under stock driver_config?)
+          - topo-diff            # TOPO-DIFF Rung 0 (#391) imposed-split verdict (PEAK vs PLATEAU classification)
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -105,8 +106,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient / ga-load / dc-diag / d5-drift / ext-0a / ext-0b / diff-probe
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'ext-0a' || inputs.scenario == 'ext-0b' || inputs.scenario == 'diff-probe'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient / ga-load / dc-diag / d5-drift / ext-0a / ext-0b / diff-probe / topo-diff
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'ext-0a' || inputs.scenario == 'ext-0b' || inputs.scenario == 'diff-probe' || inputs.scenario == 'topo-diff'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -309,6 +310,16 @@ jobs:
               cd v2
               DIFF0_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- diff0_type_probe --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            topo-diff)
+              # TOPO-DIFF Rung 0 (#391) imposed-split verdict: does fate-keyed germ/soma DoL
+              # pay under the D-5⊕ENV-0a′ economy? Hand-builds matched-N bodies with imposed splits
+              # (0:N to N:0 germ:soma ratios), runs through economy stages, measures group fitness curve.
+              # Pre-declared PASS: interior maximum (PEAK — strict max > neighbors on both sides, concave).
+              # Pre-declared NULL: flat interior (PLATEAU) or edge/monotone maximum (no interior optimum).
+              # Verdict: ≥2/3 seeds showing PEAK at all test sizes → Rung 0 PASS (proceed to Rung 1).
+              cd v2
+              cargo test --release -p cli -- topo_diff_rung0_imposed_split_verdict --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
