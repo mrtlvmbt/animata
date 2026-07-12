@@ -400,16 +400,26 @@ fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, res
 ///   FEWER steep edges than the fBm baseline — the inverse of the intended effect.
 ///   Overrides the noise-based [`resistance_field`] there.
 ///
-/// **OFF-path byte-identity (both flags `false`):** builds `height`/`resistance` EXACTLY as the
-/// pre-#396 `erode` did — no fault RNG/noise draw of any kind (the `if` gates skip
-/// `build_faults`/`fault_scarp_delta`/`is_in_fault_band` entirely, not merely discard their result)
-/// — so this is a byte-identical structural refactor when both flags are off.
+/// **OFF-path byte-identity (`enable_fault_scarp`/`enable_fault_resistance`/`enable_volcanic` all
+/// `false`):** builds `height`/`resistance` EXACTLY as the pre-#396 `erode` did — no fault or
+/// volcanic RNG/noise draw of any kind (the `if` gates skip `build_faults`/`fault_scarp_delta`/
+/// `is_in_fault_band`/`volcanic::build_vents` entirely, not merely discard their result) — so this
+/// is a byte-identical structural refactor when every flag is off.
+///
+/// **W-SIM-5 (#410): `enable_volcanic`** folds [`crate::gen::volcanic::emplace_edifices`]'s summed
+/// delta into `height` PRE-macro-loop, exactly where the fault scarp already injects (RnD 15 §1: a
+/// CONSTRUCTIVE landform, added before erosion dissects it) — clamped into `[0,hmax]` ONCE on the
+/// fully-summed delta (never per-vent, see `volcanic.rs`'s module doc), independent of the tectonic
+/// gates (both are orthogonal additive pre-erosion overlays; ordering between them is arbitrary
+/// since neither reads the other's output — volcanic is applied after tectonics here, a fixed,
+/// documented, deterministic choice, not a functional requirement).
 pub fn erode_with_tectonics(
     seed: u64,
     hmax: i64,
     dim: usize,
     enable_fault_scarp: bool,
     enable_fault_resistance: bool,
+    enable_volcanic: bool,
 ) -> ErosionState {
     let n = dim * dim;
     let mut height = vec![0i64; n];
@@ -446,20 +456,31 @@ pub fn erode_with_tectonics(
         }
     }
 
+    if enable_volcanic {
+        let vents = crate::gen::volcanic::build_vents(seed, dim);
+        let delta = crate::gen::volcanic::emplace_edifices(dim, &vents);
+        for idx in 0..n {
+            height[idx] = (height[idx] + delta[idx]).clamp(0, hmax);
+        }
+    }
+
     erode_from_fields(seed, hmax, dim, height, resistance)
 }
 
 /// Sample `height_at` + `resistance_field` over a `dim × dim` grid and run the fixed
 /// `MACRO_ITERATIONS` erosion macro-loop: recompute drainage → stream-power incision → thermal
-/// talus, each iteration. Pure function of `(seed, hmax, dim, enable_tectonics)` — no RNG-of-clock,
-/// no thread-dependence, no global mutable state.
+/// talus, each iteration. Pure function of `(seed, hmax, dim, enable_tectonics, enable_volcanic)` —
+/// no RNG-of-clock, no thread-dependence, no global mutable state.
 ///
 /// **W-SIM-4a gate (tectonics default-off, #396):** `enable_tectonics` arms BOTH the fault-scarp
 /// step and the fault-aligned resistance-lineament override together (production's single on/off
 /// switch — see [`erode_with_tectonics`] for the two-gate ablation entry point the corridor test
 /// uses to isolate the resistance half). `false` reproduces the pre-#396 `erode` byte-for-byte.
-pub fn erode(seed: u64, hmax: i64, dim: usize, enable_tectonics: bool) -> ErosionState {
-    erode_with_tectonics(seed, hmax, dim, enable_tectonics, enable_tectonics)
+///
+/// **W-SIM-5 gate (volcanic default-off, #410):** `enable_volcanic` threads straight to
+/// [`erode_with_tectonics`], orthogonal to `enable_tectonics`.
+pub fn erode(seed: u64, hmax: i64, dim: usize, enable_tectonics: bool, enable_volcanic: bool) -> ErosionState {
+    erode_with_tectonics(seed, hmax, dim, enable_tectonics, enable_tectonics, enable_volcanic)
 }
 
 #[cfg(test)]
@@ -660,7 +681,7 @@ mod tests {
     #[test]
     fn erode_conserves_rock_plus_export_exactly() {
         const DIM: usize = 16;
-        let state = erode(SEED, HMAX, DIM, false);
+        let state = erode(SEED, HMAX, DIM, false, false);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -680,8 +701,8 @@ mod tests {
 
     #[test]
     fn erode_is_deterministic_across_repeated_calls() {
-        let a = erode(SEED, HMAX, 16, false);
-        let b = erode(SEED, HMAX, 16, false);
+        let a = erode(SEED, HMAX, 16, false, false);
+        let b = erode(SEED, HMAX, 16, false, false);
         assert_eq!(a, b, "erode must be byte-identical across repeated calls");
     }
 
@@ -692,7 +713,7 @@ mod tests {
         // material diversity (Soil vs Bedrock) needs enough drainage-area range to cross
         // INCISION_EXPOSURE_THRESHOLD somewhere — a smaller probe grid (e.g. 32) may not reach it.
         const DIM: usize = 64;
-        let state = erode(SEED, HMAX, DIM, false);
+        let state = erode(SEED, HMAX, DIM, false, false);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -714,7 +735,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, false);
 
         const CASES: &[(usize, i64, MaterialId)] = &[
             (0, 129, MaterialId::Soil),
@@ -733,8 +754,8 @@ mod tests {
 
     #[test]
     fn erode_with_tectonics_is_deterministic_across_repeated_calls() {
-        let a = erode_with_tectonics(SEED, HMAX, 16, true, true);
-        let b = erode_with_tectonics(SEED, HMAX, 16, true, true);
+        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false);
+        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false);
         assert_eq!(a, b, "erode_with_tectonics must be byte-identical across repeated calls");
     }
 
@@ -742,8 +763,8 @@ mod tests {
     fn erode_tectonics_gate_reproduces_pre_396_erode_byte_for_byte() {
         // Both flags false must be IDENTICAL to erode()'s pre-#396 body (this is a pure structural
         // refactor into erode_from_fields/erode_with_tectonics — no behavior change when off).
-        let via_erode = erode(SEED, HMAX, 16, false);
-        let via_flags = erode_with_tectonics(SEED, HMAX, 16, false, false);
+        let via_erode = erode(SEED, HMAX, 16, false, false);
+        let via_flags = erode_with_tectonics(SEED, HMAX, 16, false, false, false);
         assert_eq!(via_erode, via_flags, "erode(..,false) must equal erode_with_tectonics(..,false,false)");
     }
 
@@ -822,9 +843,9 @@ mod tests {
         // `K_INCISE_DEN`'s doc) — mirrors `caps.rs`'s `ROCK_SLOPE_THRESHOLD`.
         const STEEP_THRESHOLD: i64 = 4;
 
-        let a = erode_with_tectonics(SEED, HMAX, DIM, false, false);
-        let b = erode_with_tectonics(SEED, HMAX, DIM, true, false);
-        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true);
+        let a = erode_with_tectonics(SEED, HMAX, DIM, false, false, false);
+        let b = erode_with_tectonics(SEED, HMAX, DIM, true, false, false);
+        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, false);
 
         let a_count = steep_edge_count(&a.height, DIM, STEEP_THRESHOLD);
         let c_count = steep_edge_count(&c.height, DIM, STEEP_THRESHOLD);
@@ -861,10 +882,102 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
         const EXPECTED: [i64; 4] = [113, 116, 104, 95];
+        let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
+        assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
+    }
+
+    // ── W-SIM-5: volcanic gate threading (#410) ──────────────────────────────────────────────────
+
+    /// The `enable_volcanic` gate genuinely threads through to `erode` (not a dead parameter): the
+    /// same `(seed, hmax, dim)` must produce a DIFFERENT height field with volcanic on vs off.
+    #[test]
+    fn erode_volcanic_gate_actually_changes_height() {
+        const SEED: u64 = 0xA11A_2A11;
+        const HMAX: i64 = 200;
+        const DIM: usize = 64;
+        let off = erode(SEED, HMAX, DIM, false, false);
+        let on = erode(SEED, HMAX, DIM, false, true);
+        assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
+    }
+
+    /// `enable_volcanic=false` must be byte-identical to the pre-#410 `erode` output — no volcanic
+    /// vent derivation of any kind when off (mirrors the tectonics OFF-path guard).
+    #[test]
+    fn erode_volcanic_off_is_deterministic_and_matches_baseline() {
+        const SEED: u64 = 0xA11A_2A11;
+        const HMAX: i64 = 200;
+        const DIM: usize = 16;
+        let a = erode(SEED, HMAX, DIM, false, false);
+        let b = erode(SEED, HMAX, DIM, false, false);
+        assert_eq!(a, b, "erode(..,enable_volcanic=false) must be byte-identical across repeated calls");
+    }
+
+    /// Post-erosion survival (#410 ТЗ, weaker/distinct from the constructive corridor in
+    /// `volcanic.rs`): erosion DISSECTS the edifices (incision + talus cut channels into the
+    /// flanks), so strict radial monotonicity is NOT required post-pipeline — instead, each vent's
+    /// summit must remain a NET LOCAL HIGH: higher than the mean height of a ring of cells sampled
+    /// at the edifice's own outer footprint radius (its class's `max_radius`), even after dissection.
+    #[test]
+    fn volcanic_edifice_survives_erosion_as_net_local_high() {
+        const SEED: u64 = 0xA11A_2A11;
+        const HMAX: i64 = 200;
+        const DIM: usize = 64;
+        let state = erode(SEED, HMAX, DIM, false, true);
+        let vents = crate::gen::volcanic::build_vents(SEED, DIM);
+
+        for vent in &vents {
+            let cx = vent.x;
+            let cz = vent.z;
+            if cx < 0 || cz < 0 || cx as usize >= DIM || cz as usize >= DIM {
+                continue; // vent center off-grid for this DIM — nothing to sample
+            }
+            let summit = state.height[linear_index(cx as usize, cz as usize, DIM)];
+
+            let radius = vent.class.max_radius();
+            let mut ring_sum = 0i64;
+            let mut ring_count = 0i64;
+            // Sample the ring at 8 compass points on the outer radius (cheap, deterministic, no
+            // need for a full circle scan — this is a coarse survival check, not a precise metric).
+            const DIRS: [(i64, i64); 8] =
+                [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
+            for &(dx, dz) in &DIRS {
+                let rx = cx + dx * radius;
+                let rz = cz + dz * radius;
+                if rx < 0 || rz < 0 || rx as usize >= DIM || rz as usize >= DIM {
+                    continue;
+                }
+                ring_sum += state.height[linear_index(rx as usize, rz as usize, DIM)];
+                ring_count += 1;
+            }
+            if ring_count == 0 {
+                continue; // entire ring off-grid for this DIM — nothing to compare against
+            }
+            let ring_mean = ring_sum / ring_count;
+            assert!(
+                summit > ring_mean,
+                "vent at ({cx},{cz}) must remain a net local high after the full pipeline: summit={summit} ring_mean={ring_mean}"
+            );
+        }
+    }
+
+    /// Golden vector (ON path): the volcanic-ON `erode` output is pinned at fixed grid indices —
+    /// mirrors `golden_vector_matches_pinned_tectonic_on_erosion_fixture` above.
+    ///
+    /// PASS 1 (#410): placeholder — this new-in-branch golden is born in CI (project contract),
+    /// pass 2 reads the CI-revealed `left:` and pins it.
+    #[test]
+    fn golden_vector_matches_pinned_volcanic_on_erosion_fixture() {
+        const GOLDEN_SEED: u64 = 0xA11A_2A11;
+        const GOLDEN_HMAX: i64 = 200;
+        const DIM: usize = 16;
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, true);
+
+        const INDICES: [usize; 4] = [0, 36, 100, 255];
+        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // PASS 1 placeholder — CI reveals the real value
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }

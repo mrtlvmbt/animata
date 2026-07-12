@@ -24,6 +24,9 @@ use crate::gen::climate::climate_at;
 use crate::gen::height::height_at;
 
 /// Baseline material at a voxel. Small `#[repr(u8)]` id, append-only (matches `BiomeId`'s idiom).
+/// `Basalt`/`Tuff` (W-SIM-5, #410) are volcanic primary substrates, written by
+/// `gen::volcanic::edifice_material_mask` — appended, never reorder (existing discriminants
+/// `Air..Bedrock` unchanged).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MaterialId {
@@ -32,6 +35,8 @@ pub enum MaterialId {
     Permafrost = 2,
     Soil = 3,
     Bedrock = 4,
+    Basalt = 5,
+    Tuff = 6,
 }
 
 /// Depth (in `height_at` integer units) below the surface at which subsoil transitions to bedrock.
