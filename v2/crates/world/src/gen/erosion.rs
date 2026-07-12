@@ -836,10 +836,11 @@ mod tests {
         let faults = crate::gen::tectonics::build_faults(SEED, DIM);
         let b_excl = steep_edge_count_excluding_scarp(&b.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
         let c_excl = steep_edge_count_excluding_scarp(&c.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
-        // Measured on this golden grid (post-#397 hard-fault fix): B=1866 C=1892, a margin of 26.
-        // Locked below that with headroom (not the bare placeholder `1`) so the assertion actually
-        // guards the resistance-lineament effect size, not just its sign.
-        const MIN_MARGIN: usize = 20;
+        // PASS 1 (#397): FAULT_STEP_DEN reverted 8→12 (scarp-step crank dropped, PM decision) —
+        // resistance flip alone changes b_excl/c_excl, so this margin is stale. Forced-impossible
+        // sentinel to reveal the real b_excl/c_excl from the CI failure message; pass 2 pins a real
+        // floor below the revealed margin.
+        const MIN_MARGIN: usize = 1_000_000;
         assert!(
             c_excl >= b_excl + MIN_MARGIN,
             "(ii) resistance-lineament structure must contribute INDEPENDENTLY of the scarp step: \
@@ -851,9 +852,10 @@ mod tests {
     /// proves determinism of the FULL production path (not just the isolated `tectonics.rs` unit),
     /// mirrors `golden_vector_matches_pinned_erosion_fixture` above.
     ///
-    /// Re-pinned for #397 (fault-band resistance flipped soft→hard + scarp step widened
-    /// `FAULT_STEP_DEN` 12→8 — see this file's `erode_with_tectonics` doc): a local run, this golden
-    /// class is integer-deterministic and arch-independent (mirrors the original #396 pin method).
+    /// PASS 1 (#397): fault-band resistance flip (soft→hard, kept) + `FAULT_STEP_DEN` reverted to
+    /// its pre-#397 value 12 (scarp-step crank dropped, PM decision) — this exact combination was
+    /// never pinned before, so it needs a fresh CI reveal (golden values are born in CI, not a local
+    /// run — PM contract). Placeholder below; pass 2 pins the CI-revealed `left:` value.
     #[test]
     fn golden_vector_matches_pinned_tectonic_on_erosion_fixture() {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
@@ -862,7 +864,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [104, 105, 92, 82];
+        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // PASS 1 placeholder — CI reveals the real value
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
