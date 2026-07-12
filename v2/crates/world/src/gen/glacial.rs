@@ -397,10 +397,12 @@ fn deposit_till(dim: usize, excavated_total: i64, margin: &[usize]) -> Vec<i64> 
 }
 
 /// The full W-SIM-6 glacial output: post-glacial `height` (incised then till-deposited, clamped
-/// into `[0,hmax]` — `hmax` provided only for that final defensive clamp, see the doc on
-/// `debug_assert` below), the primary-substrate `material` mask (`Some(Till)` on any cell that
-/// received a nonzero deposit, `None` elsewhere), and the conserved `excavated_total`/
-/// `deposited_total` ledger pair (conservation test: they must be EXACTLY equal).
+/// into `[0,hmax]`), the primary-substrate `material` mask (`Some(Till)` on any cell that received a
+/// nonzero deposit, `None` elsewhere), and the conserved `excavated_total`/`deposited_total` ledger
+/// pair. `deposited_total` is derived from the ACTUALLY-APPLIED (post-clamp) height delta, not the
+/// raw intended deposit (`run_glacial`'s doc) — so the conservation test (they must be EXACTLY
+/// equal) is a real physical-conservation check in every build profile, not a budget-only one that
+/// could paper over a silently-clamped cell.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GlacialState {
     pub height: Vec<i64>,
@@ -427,24 +429,25 @@ pub fn run_glacial(seed: u64, dim: usize, hmax: i64, height: &[i64]) -> GlacialS
     let (incised_height, excavated_total) = ice_incision_pass(dim, height.to_vec(), &mask, &interior);
 
     let deposit = deposit_till(dim, excavated_total, &margin);
-    let deposited_total: i64 = deposit.iter().sum();
 
+    // `deposited_total` is computed from the ACTUALLY-APPLIED delta (post-clamp), never the raw
+    // pre-clamp `deposit` array (code-critic finding, #416: a pre-clamp sum would silently overstate
+    // the ledger if a margin cell's deposit ever overflowed `hmax` — the `[0,hmax]` clamp would then
+    // truncate the height field, but a pre-clamp-derived `deposited_total` would still read as
+    // "fully conserved", hiding real mass loss in EVERY build profile, not just debug). Deriving it
+    // from the applied delta makes the exact-equality conservation test below a TRUE physical claim,
+    // in release too: any future calibration drift that overflows a cell makes `deposited_total`
+    // honestly fall short of `excavated_total`, and the test correctly fails instead of lying.
     let mut final_height = vec![0i64; n];
     let mut material = vec![None; n];
+    let mut deposited_total = 0i64;
     for idx in 0..n {
-        // Defensive clamp only (module doc: calibration keeps this a no-op in practice — the
-        // conservation invariant is about the LEDGER totals, not a per-cell headroom guarantee, so
-        // this clamp is not expected to ever trigger; a debug_assert below catches it if it does).
         final_height[idx] = (incised_height[idx] + deposit[idx]).clamp(0, hmax);
+        deposited_total += final_height[idx] - incised_height[idx];
         if deposit[idx] > 0 {
             material[idx] = Some(MaterialId::Till);
         }
     }
-    debug_assert!(
-        (0..n).all(|idx| incised_height[idx] + deposit[idx] == final_height[idx]),
-        "till deposition overflowed [0,hmax] on at least one cell — recalibrate K_ICE_NUM/DEN or \
-         N_GLACIAL_ITERATIONS so the excavated budget never overfills a margin cell"
-    );
 
     GlacialState { height: final_height, material, excavated_total, deposited_total }
 }
