@@ -60,3 +60,31 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   you open the named file (observed: "shift=11 (DRIVER_REFUGE_SHIFT from lib.rs)" vs `lib.rs:377 = 8`) →
   grep the name, read the line. This is the cheapest fabrication to catch and the most expensive to miss,
   because a plausible number propagates into pinned predictions and published tables.
+
+- **A newborn/spawn-tick assertion is off by exactly `excrete` (default 8), or a per-tick id-set equality check
+  spuriously fails at a birth/stillbirth tick** → same-tick stage ordering + Bevy command-buffer deferral
+  (observed: R30-1.1b, 7 CI rounds). `stage_field_scatter` (excrete, stage 8) runs AFTER `stage_birth_death`
+  and deducts one `econ.excrete` from the just-spawned child before a post-`step()` probe reads it, so an exact
+  endowment-value read is `N·e_cell − excrete`, not `N·e_cell`; and a child spawned by a SUCCESSFUL division on
+  tick T−1 only materializes in the ECS at the next command-buffer flush (start of T), so a `live_ids` equality
+  check at a stillbirth tick T sees that neighbor child and fails → for an exact birth-ENERGY value, set
+  `excrete: 0` in that fixture (conserved field deposit, R15-neutral — isolates the VALUE, not affordability);
+  for a "no phantom child" invariant, assert `conservation_residual()==0` (a spurious child would MINT undebited
+  endowment ⇒ nonzero residual) instead of a timing-fragile per-tick id-set equality. Prefer controlled
+  single-entity scenarios over emergent multi-agent populations for asserting exact mechanism invariants.
+
+- **A test "not in the CI failure list" is assumed passing, but was actually SKIPPED** → nextest fail-fast
+  CANCELS all remaining tests after the first failure (observed: R30-1.1b — a latent `excrete`-pollution bug in
+  test 1 stayed hidden for 5 rounds because tests 2/3 failed first and cancelled it; it surfaced only once they
+  went green) → when a CI round is RED, a passing-looking sibling test in the same binary may be UNRUN, not
+  green. Fix every reported failure, but also read the sibling tests for the SAME bug class before concluding
+  the suite is otherwise clean. Local sim runs are forbidden (cloud is the gate), so you cannot pre-flight with
+  `--no-fail-fast` locally — reason about the shared failure class instead.
+
+- **A gated economy mechanic (income/cost/endowment ∝ N) "cannot reproduce" / starves under a default fixture**
+  → the three extent-economy axes are COUPLED: `endowment ∝ N` (or `cost ∝ N`) is only affordable when income
+  ALSO scales with N (`IncomeMode::Extent`); under the default `IncomeMode::Anchor` (flat, 1-cell income) an
+  N>1 body can never bank `N·e_cell` to divide (observed: R30-1.1b) → test/probe a gated ∝N axis inside the
+  FULL coherent economy (all ∝N flags on together) with a real regenerating flat resource layer routed to the
+  body's uptake (reuse `r30_1_1_income_extent.rs::ring_extent_config`'s flat-layer pattern + `regen_rate>0`),
+  not one axis in isolation, or reproduction is suppressed by construction and the fixture starves.
