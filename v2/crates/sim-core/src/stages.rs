@@ -235,8 +235,18 @@ pub fn stage_metabolism(
         let burden_cost = if econ.enable_mutation_load {
             g.genetic_load as i64 * econ.burden_cost_k
         } else { 0 };
+        // R30-1.1a (#412): Kleiber consumer split — metabolism reads the LIVE body (n_cells) when
+        // gated on; viability/reproduction/state_hash stay wired to the `size` GENE regardless
+        // (only this consumer moves). n_cells ≤ g_dev² ≤ 16 ⇒ the i64→i32 cast is lossless; no
+        // clamp needed (size_pow_three_quarters floors size.max(1), so n_cells=0 is a valid
+        // fully-apoptosed body, not a panic).
+        let metab_units = if econ.metab_reads_n_cells {
+            crate::genome::size_pow_three_quarters(n_cells as i32)
+        } else {
+            g.metab_units()
+        };
         let base_cost = (econ.base_metab
-            + econ.k_size_metab * g.metab_units()
+            + econ.k_size_metab * metab_units
             + econ.k_move_cost * g.move_speed as i64
             + econ.k_sense_cost * g.sense_range as i64
             + econ.c_coord * n_cells
