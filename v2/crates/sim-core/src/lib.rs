@@ -851,6 +851,16 @@ impl Sim {
         q.iter(&self.world).map(|(e, ph)| (e.to_bits(), ph.graph.body_size())).collect()
     }
 
+    /// R30-1.1b (#414): entity-keyed energy readout — `entity_bits → Energy.0` for every live
+    /// entity, mirroring `body_size_entity_probe`'s entity-identity join contract (never zip an
+    /// unordered Query against a `DetMap`). Lets a newborn-endowment test read a SPECIFIC entity's
+    /// exact energy (joined by id, not inferred from `avg_energy()` arithmetic). Test-only probe:
+    /// read-only, no state mutation, not on the tick path, not in state_hash.
+    pub fn energy_entity_probe(&mut self) -> DetMap<u64, i64> {
+        let mut q = self.world.query::<(Entity, &Energy)>();
+        q.iter(&self.world).map(|(e, en)| (e.to_bits(), en.0)).collect()
+    }
+
     /// STEP-A0 (#398): entity-keyed SOMA cell count — `entity_bits → Σ module_cell_count` over
     /// non-germ modules (`!module_is_germ`), mirroring `body_size_entity_probe`'s entity-identity
     /// join contract (F1 lesson from #395: never zip an unordered Query against a `DetMap`). Test-only

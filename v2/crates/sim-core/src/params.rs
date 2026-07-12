@@ -468,6 +468,16 @@ pub struct EconParams {
     /// identical goldens (the isolation gate). `Genome::size` stays wired to viability, mutation,
     /// and `state_hash` regardless of this flag — only the metabolic consumer moves.
     pub metab_reads_n_cells: bool,
+
+    // ── R30-1.1b (#414): newborn endowment welded to live body size, transferred from parent ────
+    /// When `true`, a newborn's starting energy is `e_cell · body_size(child)` (a 1-cell child
+    /// still gets the flat `e_cell` baseline; an N-cell child gets N times it) instead of the flat
+    /// `e_cell`, and is TRANSFERRED from the parent (parent debits `endowment + c_div`) under a
+    /// STRUCTURAL affordability gate (`energy ≥ endowment + c_div`, alongside `repro_bar`) — no
+    /// clamp, no forced death: a parent that cannot yet afford the N-scaled endowment simply does
+    /// not divide this tick and keeps accumulating. `false` (default, all existing production
+    /// configs) → the flat `e_cell` endowment, byte-identical goldens (the isolation gate).
+    pub newborn_energy_per_cell: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -759,6 +769,9 @@ impl Default for EconParams {
             // R30-1.1a (#412): Kleiber-reads-n_cells OFF by default — false for all existing
             // production configs (byte-identical; metab term stays gene-based).
             metab_reads_n_cells: false,
+            // R30-1.1b (#414): newborn-energy-per-cell OFF by default — false for all existing
+            // production configs (byte-identical; endowment stays flat e_cell).
+            newborn_energy_per_cell: false,
         }
     }
 }

@@ -1493,7 +1493,101 @@ pub fn stage_birth_death(
             if germ == 0 { i64::MAX } else { genome.repro_threshold as i64 }
         } else { genome.repro_threshold as i64 };
 
-        if energy.0 >= repro_bar
+        if econ.newborn_energy_per_cell {
+            // ── R30-1.1b (#414): N-scaled endowment, transferred from parent, structural gate. ──
+            // Affordability depends on N_child, known only AFTER decode — so on this path decode
+            // runs BEFORE any debit (mutate/decode is a pure, RNG-free-of-side-effects function;
+            // SALT_MUT is a counter-based per-(entity,tick) draw, not a stream, so moving it ahead
+            // of the affordability check perturbs no RNG order — R14 safe). Only `repro_bar` +
+            // `mineral_gate_passes` gate WHETHER an attempt is made at all (mirrors the OFF path's
+            // pre-decode gates); the N-scaled term replaces the OFF path's flat `e_cell+c_div` term
+            // and is evaluated AFTER decode, once `endowment` is known.
+            if energy.0 >= repro_bar && mineral_gate_passes {
+                let pos_c = *pos;
+                let child_genome =
+                    genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, econ.enable_body_plan);
+                let species_c = *species;
+
+                match child_genome.decode(&econ) {
+                    None => {
+                        // Stillbirth: no child materializes ⇒ no endowment is granted (nothing was
+                        // pre-committed to a child on this path — critic F4). Only `c_div` (+
+                        // `q_mineral` if mineral is active) is spent → dissipated; nothing is
+                        // `lost`. Δ = −c_div + c_div(dissipated) = 0 (and analogously for mineral).
+                        // This legitimately DIFFERS from the OFF path's `e_cell → lost` (which
+                        // pre-debits before decode); here the debit is deferred past decode, so
+                        // there is nothing orphaned to book as lost.
+                        energy.0 -= econ.c_div;
+                        ledger.dissipated += econ.c_div;
+                        if has_mineral {
+                            if let Ok(mut quota) = qmin.get_mut(e) {
+                                quota.0 -= econ.q_mineral;
+                                ledger.dissipated += econ.q_mineral;
+                            }
+                        }
+                        if child_genome.is_stillbirth_by_size_criterion() {
+                            repro.stillbirths += 1;
+                        }
+                    }
+                    Some(child_phenotype) => {
+                        let n_child = child_phenotype.graph.body_size();
+                        let endowment = econ.e_cell * n_child;
+                        if energy.0 >= endowment + econ.c_div {
+                            // Success: parent debits the FULL endowment it grants + c_div; child
+                            // receives exactly `endowment`; c_div dissipated. Δ = −(endowment+c_div)
+                            // + endowment(child) + c_div(dissipated) = 0 (conserved, any N).
+                            energy.0 -= endowment + econ.c_div;
+                            ledger.dissipated += econ.c_div;
+                            if has_mineral {
+                                if let Ok(mut quota) = qmin.get_mut(e) {
+                                    ledger.dissipated += econ.q_mineral;
+                                    quota.0 -= econ.q_mineral;
+                                }
+                            }
+                            repro.parents.insert(bits);
+                            if has_mineral {
+                                commands.spawn((
+                                    Position(pos_c.0),
+                                    PositionNext(pos_c.0),
+                                    Velocity::default(),
+                                    VelocityNext::default(),
+                                    Energy(endowment),
+                                    child_genome,
+                                    child_phenotype,
+                                    species_c,
+                                    Sensors::default(),
+                                    Intent::default(),
+                                    BrainState::zeroed(),
+                                    BrainOutput::zeroed(),
+                                    MineralQuota(0),
+                                    PendingSpeciation,
+                                ));
+                            } else {
+                                commands.spawn((
+                                    Position(pos_c.0),
+                                    PositionNext(pos_c.0),
+                                    Velocity::default(),
+                                    VelocityNext::default(),
+                                    Energy(endowment),
+                                    child_genome,
+                                    child_phenotype,
+                                    species_c,
+                                    Sensors::default(),
+                                    Intent::default(),
+                                    BrainState::zeroed(),
+                                    BrainOutput::zeroed(),
+                                    PendingSpeciation,
+                                ));
+                            }
+                        }
+                        // else: cannot yet afford the N-scaled endowment (critic F2) — NO clamp, NO
+                        // forced death, NO debit at all. The parent simply does not divide this
+                        // tick; it keeps accumulating energy and retries next tick. Residual
+                        // trivially 0 (nothing happened).
+                    }
+                }
+            }
+        } else if energy.0 >= repro_bar
             && energy.0 >= econ.e_cell + econ.c_div
             && mineral_gate_passes
         {
