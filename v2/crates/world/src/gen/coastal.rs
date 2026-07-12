@@ -511,7 +511,7 @@ mod tests {
         let state = run_coastal(SEED, DIM, HMAX, &height);
 
         const INDICES: [usize; 4] = [0, 500, 1500, 4000];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // PASS 1 placeholder — CI reveals the real value
+        const EXPECTED: [i64; 4] = [129, 59, 75, 79]; // CI-pinned (#423 pass 2; arm64 + x86 agree)
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
