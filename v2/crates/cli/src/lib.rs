@@ -759,6 +759,70 @@ pub fn env_frontier_invasibility_config(seed: u64, patch_grain: i64) -> SimConfi
     cfg
 }
 
+// ── R30-1 (#419): extent-economy size-selection probe (harness, pass 1 of 2) ────────────────────
+
+/// EXT-0b-validated morphogen cap for the extent-economy probe — 6 (⇒ 36-cell max), the headroom
+/// ext-0b demonstrated above the ~3-4-cell baseline (params.rs:740 "swept to 5, 6"); NOT 8 (g_dev≥7
+/// is untested). SAME value in both Arm A arms and Arm B (critic F3/F10) — pub so the cli-crate test
+/// suite can assert the pairing instead of re-declaring the literal (GOTCHAS.md re-implementation lesson).
+pub const EXTENT_ECONOMY_GDEV_CAP: usize = 6;
+
+/// `morphogen_steps` paired to `EXTENT_ECONOMY_GDEV_CAP` (critic F11; params.rs:741 "6→12") — at
+/// gdev_cap=6 the 6×6 reaction-diffusion grid needs 12 steps or bodies are step-limited (illusory
+/// headroom), not economy-limited. SAME value in both Arm A arms.
+pub const EXTENT_ECONOMY_MORPHOGEN_STEPS: u32 = 12;
+
+/// Arm A EXTENT config: `driver_config` + the coherent extent economy — all THREE ∝N axes ON
+/// together (`income_mode=Extent`, `metab_reads_n_cells=true`, `newborn_energy_per_cell=true`). A
+/// partial arm is vacuous (R30-1.1b's income/endowment coupling — GOTCHAS.md "gated economy mechanic
+/// … cannot reproduce"): the ∝N endowment is only affordable when income also scales with N.
+/// Raises `gdev_cap`/`morphogen_steps` for headroom (see consts above) — applied symmetrically to
+/// the FLAT arm too, so the cap change itself cannot move the contrast (critic F3).
+/// Phase-2, `evolve_body_size=true` (inherited from `driver_config`'s g_dev=1 heritable founder).
+pub fn extent_economy_extent_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    cfg.econ.income_mode = sim_core::IncomeMode::Extent;
+    cfg.econ.metab_reads_n_cells = true;
+    cfg.econ.newborn_energy_per_cell = true;
+    cfg.econ.gdev_cap = EXTENT_ECONOMY_GDEV_CAP;
+    cfg.econ.morphogen_steps = EXTENT_ECONOMY_MORPHOGEN_STEPS;
+    cfg
+}
+
+/// Arm A FLAT config: the MEASURED neutral-drift baseline (critic F3 — NOT an assumed ≤4 ceiling).
+/// `driver_config` at the SAME raised `gdev_cap`/`morphogen_steps` as the EXTENT arm, but all three
+/// economy flags left at their shipped default (Anchor income, Kleiber-on-`size`-gene, flat
+/// endowment) — N is under zero economic selection, so its evolved distribution is pure drift.
+/// Flips ONLY the three economy flags relative to `extent_economy_extent_config` (critic F6):
+/// same world, same seeds, same cap, same every other param.
+pub fn extent_economy_flat_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    cfg.econ.gdev_cap = EXTENT_ECONOMY_GDEV_CAP;
+    cfg.econ.morphogen_steps = EXTENT_ECONOMY_MORPHOGEN_STEPS;
+    cfg
+}
+
+/// Arm B base config: the invasion-fitness diagnostic. Reuses ONLY the breed-true PLUMBING of
+/// `env_frontier_invasibility_config` (`evolve_body_size=false`, `speciation_threshold=i64::MAX`,
+/// `founder_templates`-driven seeding read via `species_census()`) — NOT the ENV-0a′ frontier
+/// economy it welds in. **CRITICAL (critic F9): `env_frontier_config` stays `None`** — enabling it
+/// here would measure a CONFOUNDED extent⊗frontier gradient instead of the extent gradient alone.
+/// Enables ONLY the three EXTENT flags (the economy under test), at the same raised cap/steps as
+/// Arm A. `founder_templates` is left for the caller to set (small-N residents + graded-N invaders
+/// per the g_dev sweep level).
+pub fn extent_economy_invasion_config(seed: u64) -> SimConfig {
+    let mut cfg = driver_config(seed);
+    cfg.econ.env_frontier_config = None; // critic F9: strip the frontier economy, do NOT weld it in
+    cfg.econ.evolve_body_size = false;
+    cfg.econ.speciation_threshold = i64::MAX;
+    cfg.econ.income_mode = sim_core::IncomeMode::Extent;
+    cfg.econ.metab_reads_n_cells = true;
+    cfg.econ.newborn_energy_per_cell = true;
+    cfg.econ.gdev_cap = EXTENT_ECONOMY_GDEV_CAP;
+    cfg.econ.morphogen_steps = EXTENT_ECONOMY_MORPHOGEN_STEPS;
+    cfg
+}
+
 /// P5-0 NO₃-field infrastructure config (L=4): substrate + organics + O₂ + NO₃ fields (test-only,
 /// acceptance harness for P5-0). Enables the NO₃ (nitrate) static inert layer derived from biome
 /// (INVERSE of O₂). Layer 0=substrate, Layer 1=organics, Layer 2=O₂ (static), Layer 3=NO₃ (inert).
