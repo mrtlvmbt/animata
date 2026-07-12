@@ -904,10 +904,18 @@ mod tests {
         assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
     }
 
-    /// `enable_volcanic=false` must be byte-identical to the pre-#410 `erode` output — no volcanic
-    /// vent derivation of any kind when off (mirrors the tectonics OFF-path guard).
+    /// `enable_volcanic=false` is deterministic across repeated calls (this test's actual scope —
+    /// code-critic finding: the name/doc previously overclaimed a literal byte-for-byte comparison
+    /// against a frozen pre-#410 snapshot, which this assertion doesn't perform). The ACTUAL
+    /// byte-identity-to-pre-#410 guarantee comes from two other places: structurally, the
+    /// `if enable_volcanic { .. }` gate in `erode_with_tectonics` SKIPS `volcanic::build_vents`/
+    /// `emplace_edifices` entirely when off (not merely discards their result — mirrors the
+    /// tectonics gate's own OFF-path construction); empirically, every PRE-EXISTING pinned golden
+    /// in this file and `w4_chain.rs`'s golden hash call `erode`/`erode_with_tectonics` with
+    /// `enable_volcanic=false` and remain UNCHANGED by this PR (still green) — that is the concrete
+    /// frozen-baseline proof, not this test.
     #[test]
-    fn erode_volcanic_off_is_deterministic_and_matches_baseline() {
+    fn erode_volcanic_off_is_deterministic_across_repeated_calls() {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 16;

@@ -879,9 +879,12 @@ mod tests {
         assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
     }
 
-    /// `enable_volcanic=false` must be byte-identical to the pre-#410 `classify_and_caps` output —
-    /// no volcanic vent derivation of any kind when off, and no Basalt/Tuff ever emitted (mirrors
-    /// the tectonics/aeolian OFF-path guards).
+    /// `enable_volcanic=false` is deterministic across repeated calls AND never emits Basalt/Tuff —
+    /// the two properties this test actually asserts. (The literal byte-identity-to-pre-#410
+    /// guarantee is structural — `classify_and_caps`'s `if enable_volcanic` gate skips
+    /// `volcanic::build_vents`/`edifice_material_mask` entirely when off — and is empirically
+    /// confirmed by every PRE-EXISTING pinned golden/chain-hash in this crate, computed with
+    /// `enable_volcanic=false`, remaining unchanged by this PR.)
     #[test]
     fn classify_and_caps_volcanic_off_matches_baseline_and_never_emits_volcanic_material() {
         const DIM: usize = 64;
