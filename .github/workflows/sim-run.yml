@@ -37,6 +37,7 @@ on:
           - ext-0b               # EXT-0b (#385) sweep harness parameterizing footprint arm by gdev_cap/morphogen_steps
           - diff-probe           # DIFF-0 (#372) cell-type differentiation probe (T>=2 ever occur under stock driver_config?)
           - step-a0              # STEP A0 (#398) concavity pre-gate: income(soma) shape under dol_economy (bounded vs linear), routing verdict
+          - extent-economy       # R30-1 (#419) extent-economy size-selection probe: Arm A EXTENT-vs-FLAT evolutionary contrast + Arm B invasion-fitness diagnostic
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -109,8 +110,8 @@ jobs:
       # D′-2c/D′-3b/D-3b driver-emergence: pre-compile the cli test suite (fast subsequent
       # `cargo test --no-run` → compile only). The verdict tests are #[ignore] so they never run in
       # CI; these scenarios invoke them explicitly.
-      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient / ga-load / dc-diag / d5-drift / ext-0a / ext-0b / diff-probe / step-a0
-        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'ext-0a' || inputs.scenario == 'ext-0b' || inputs.scenario == 'diff-probe' || inputs.scenario == 'step-a0'
+      - name: Build v2 cli tests for dprime-2c / dprime-3b / driver-emergence / hypoxia-verdict / settling-verdict / dol-verdict / composition-verdict / dr0-diag / dr0-gradient / ga-load / dc-diag / d5-drift / ext-0a / ext-0b / diff-probe / step-a0 / extent-economy
+        if: inputs.scenario == 'dprime-2c' || inputs.scenario == 'dprime-3b' || inputs.scenario == 'driver-emergence' || inputs.scenario == 'hypoxia-verdict' || inputs.scenario == 'settling-verdict' || inputs.scenario == 'dol-verdict' || inputs.scenario == 'composition-verdict' || inputs.scenario == 'dr0-diag' || inputs.scenario == 'dr0-gradient' || inputs.scenario == 'ga-load' || inputs.scenario == 'dc-diag' || inputs.scenario == 'd5-drift' || inputs.scenario == 'ext-0a' || inputs.scenario == 'ext-0b' || inputs.scenario == 'diff-probe' || inputs.scenario == 'step-a0' || inputs.scenario == 'extent-economy'
         run: cd v2 && cargo test --release -p cli --no-run
 
       - name: Run scenario
@@ -322,6 +323,20 @@ jobs:
               cd v2
               STEP_A0_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- step_a0_concavity_pregate --nocapture --ignored 2>&1 | tee ../"$SUM"
+              ;;
+            extent-economy)
+              # R30-1 (#419) extent-economy size-selection probe: Arm A (EXTENT-vs-FLAT evolutionary
+              # contrast, gdev_cap=6/morphogen_steps=12, ≥8 seeds, last-third live-N distribution) +
+              # Arm B (invasion-fitness diagnostic — graded-N invader sweep g_dev∈{2,3,4,6}, breed-true,
+              # frontier economy stripped, invader SpeciesId census-count frequency trajectory).
+              # Emits greppable `EXTENT-ECON armA ...` / `EXTENT-ECON armB ...` MAP lines. Analysis
+              # (the pre-declared rank test vs FLAT's measured drift + the invasion-gradient read) is
+              # offline (PM, pass 2 of #419) — this run only produces the raw distributions/trajectories.
+              cd v2
+              EXTENT_ECONOMY_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- extent_economy_arm_a_evolutionary_contrast --nocapture --ignored 2>&1 | tee ../"$SUM"
+              EXTENT_ECONOMY_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- extent_economy_arm_b_invasion_diagnostic --nocapture --ignored 2>&1 | tee -a ../"$SUM"
               ;;
             sweep)
               cargo build -p animata-sim --bin sweep --release
