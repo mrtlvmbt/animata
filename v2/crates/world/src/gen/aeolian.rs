@@ -473,20 +473,24 @@ mod tests {
         );
     }
 
-    /// Golden vector: pinned exact aeolian-ON `sand_depth`/`height` at fixed grid indices for the
-    /// golden `(seed, dim)` fixture, over the SAME synthetic sand-seeded fixture the other tests in
-    /// this module use (self-contained — does not depend on the full erosion/classify pipeline).
+    /// Golden vector: pinned exact aeolian-ON `sand_depth` at fixed grid indices for the golden
+    /// `(seed, dim)` fixture, over the SAME synthetic sand-seeded fixture the other tests in this
+    /// module use (self-contained — does not depend on the full erosion/classify pipeline).
+    /// Indices 0/100/500/2000 land outside the dune zone (mostly-zero, still catches determinism
+    /// drift); index 10 lands squarely in the migrated dune band, so the lock also covers real
+    /// nonzero dune output, not only empty cells.
     ///
-    /// PASS 1 (#403): placeholder — this new-in-branch golden is born in CI (project contract, see
-    /// CLAUDE.md's re-pinning discipline), pass 2 reads the CI-revealed `left:` and pins it.
+    /// Re-pinned for #403 pass 2: CI-sourced — `left:` from both x86 debug (`v2 sim` job) and
+    /// arm64 release (`v2 golden` job), run #29183595801, commit 15de74c; both arches agree
+    /// (integer + counter-based keyed hash, arch-stable).
     #[test]
     fn golden_vector_matches_pinned_aeolian_fixture() {
         let (rock, sand) = seeded_fixture();
         let state = run_aeolian(SEED, DIM, &rock, sand);
 
-        const INDICES: [usize; 4] = [0, 100, 500, 2000];
-        const EXPECTED_SAND: [i64; 4] = [0, 0, 0, 0]; // PASS 1 placeholder — CI reveals the real value
-        let actual_sand: [i64; 4] = std::array::from_fn(|i| state.sand_depth[INDICES[i]]);
+        const INDICES: [usize; 5] = [0, 100, 500, 2000, 10];
+        const EXPECTED_SAND: [i64; 5] = [0, 0, 0, 1, 4];
+        let actual_sand: [i64; 5] = std::array::from_fn(|i| state.sand_depth[INDICES[i]]);
         assert_eq!(actual_sand, EXPECTED_SAND, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
 }
