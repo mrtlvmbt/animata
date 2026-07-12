@@ -369,8 +369,9 @@ mod tests {
     /// Golden vector: pinned exact volcanic emplacement (delta + material) at fixed grid indices for
     /// the golden `(seed, dim)` fixture.
     ///
-    /// PASS 1 (#410): placeholder — this new-in-branch golden is born in CI (project contract), pass
-    /// 2 reads the CI-revealed `left:` and pins it.
+    /// Re-pinned for #410 pass 2b: CI-sourced — `left:` from both x86 debug (`v2 sim` job) and
+    /// arm64 release (`v2 golden` job), run #29186984874, commit 5d82049; both arches agree
+    /// (integer, arch-stable).
     #[test]
     fn golden_vector_matches_pinned_volcanic_fixture() {
         let dim = 16usize;
@@ -378,7 +379,7 @@ mod tests {
         let delta = emplace_edifices(dim, &vents);
 
         const INDICES: [usize; 4] = [0, 36, 100, 200];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // PASS 1 placeholder — CI reveals the real value
+        const EXPECTED: [i64; 4] = [6, 0, 0, 10];
         let actual: [i64; 4] = std::array::from_fn(|i| delta[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
