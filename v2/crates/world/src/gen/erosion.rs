@@ -392,8 +392,13 @@ fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, res
 /// - `enable_fault_scarp`: fold [`crate::gen::tectonics::fault_scarp_delta`] into the height field
 ///   BEFORE the macro-loop runs, clamped into `[0, hmax]` (so erosion then dissects the raw scarp).
 /// - `enable_fault_resistance`: force [`crate::gen::tectonics::is_in_fault_band`] cells to the
-///   SOFTEST resistance class (`0` — fault gouge is geologically the WEAKEST rock, not the hardest),
-///   overriding the noise-based [`resistance_field`] there.
+///   HARDEST resistance class (`N_RESIST_CLASSES - 1`). RnD 17 §3 (differential erosion): a
+///   relief-INCREASING fault must resist incision more than the surrounding rock, not less — a
+///   HARD fault stands proud as the soft surrounding rock strips away around it (models a
+///   cemented/mineralized fault, valid for active orogens), producing steep edges along the fault
+///   line. A SOFT fault band (the pre-#397 assignment) instead carves a smooth diffuse valley with
+///   FEWER steep edges than the fBm baseline — the inverse of the intended effect.
+///   Overrides the noise-based [`resistance_field`] there.
 ///
 /// **OFF-path byte-identity (both flags `false`):** builds `height`/`resistance` EXACTLY as the
 /// pre-#396 `erode` did — no fault RNG/noise draw of any kind (the `if` gates skip
@@ -434,7 +439,7 @@ pub fn erode_with_tectonics(
                 for x in 0..dim {
                     let idx = linear_index(x, z, dim);
                     if crate::gen::tectonics::is_in_fault_band(x as i64, z as i64, &faults) {
-                        resistance[idx] = 0; // softest class — fault gouge, load-bearing (module doc)
+                        resistance[idx] = N_RESIST_CLASSES - 1; // hardest class — resistant fault stands proud (module doc, RnD 17 §3)
                     }
                 }
             }
@@ -831,7 +836,10 @@ mod tests {
         let faults = crate::gen::tectonics::build_faults(SEED, DIM);
         let b_excl = steep_edge_count_excluding_scarp(&b.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
         let c_excl = steep_edge_count_excluding_scarp(&c.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
-        const MIN_MARGIN: usize = 1;
+        // Measured on this golden grid (post-#397 hard-fault fix): B=1866 C=1892, a margin of 26.
+        // Locked below that with headroom (not the bare placeholder `1`) so the assertion actually
+        // guards the resistance-lineament effect size, not just its sign.
+        const MIN_MARGIN: usize = 20;
         assert!(
             c_excl >= b_excl + MIN_MARGIN,
             "(ii) resistance-lineament structure must contribute INDEPENDENTLY of the scarp step: \
@@ -843,7 +851,9 @@ mod tests {
     /// proves determinism of the FULL production path (not just the isolated `tectonics.rs` unit),
     /// mirrors `golden_vector_matches_pinned_erosion_fixture` above.
     ///
-    /// Pinned from `v2-golden-arm64` CI (run #29170719244, commit cde3c68), per issue #396 pass 2.
+    /// Re-pinned for #397 (fault-band resistance flipped soft→hard + scarp step widened
+    /// `FAULT_STEP_DEN` 12→8 — see this file's `erode_with_tectonics` doc): a local run, this golden
+    /// class is integer-deterministic and arch-independent (mirrors the original #396 pin method).
     #[test]
     fn golden_vector_matches_pinned_tectonic_on_erosion_fixture() {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
@@ -852,7 +862,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [112, 108, 98, 90];
+        const EXPECTED: [i64; 4] = [104, 105, 92, 82];
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
