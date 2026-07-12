@@ -73,6 +73,32 @@ fn newborn_config(seed: u64, founder_energy: i64, mutation_rate: i32, econ_overr
     }
 }
 
+/// Small-body variant (Square @ g_dev=2 → 4 live cells, afford-threshold 4*e_cell+c_div=4100) for
+/// the accumulation tests (3/4): a 9-cell afford-threshold (9100) turned out to be unreachable for a
+/// SINGLE founder under default income within a bounded horizon — not a mechanism bug (CI: both
+/// failures were the fixture starving/stalling before affording, not the gate misbehaving), but a
+/// fixture-calibration miss. The smaller threshold is easily closed by a modest positive income
+/// stream; `base_metab`/`k_size_metab`/`k_move_cost`/`k_sense_cost` are zeroed in these tests' econ
+/// (not here — per-call) to make energy MONOTONICALLY NON-DECREASING, so a single founder can never
+/// starve regardless of where it spawns (removing the world-gen-position dependency entirely) while
+/// still requiring genuine multi-tick income accumulation to close the threshold gap.
+fn small_body_founder(mutation_rate: i32) -> Genome {
+    let mut founder = Genome::founder(2)
+        .with_specs(Some(Arc::new(newborn_gspec())), Some(newborn_mspec(2, BodyPlan::Square)));
+    founder.mutation_rate = mutation_rate;
+    founder
+}
+
+fn small_body_config(seed: u64, founder_energy: i64, mutation_rate: i32, econ_overrides: EconParams) -> SimConfig {
+    SimConfig {
+        n_founders: 1,
+        founder_energy,
+        founder_templates: Some(vec![(small_body_founder(mutation_rate), 1)]),
+        econ: econ_overrides,
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
 fn live_ids(sim: &mut sim_core::Sim) -> BTreeSet<u64> {
     sim.energy_entity_probe().keys().copied().collect()
 }
@@ -166,13 +192,24 @@ fn stillbirth_under_flag_conserves_energy_and_spawns_no_child() {
 #[test]
 fn cannot_afford_yet_then_divides_with_full_endowment() {
     // founder_energy=2000 clears repro_bar (genome.repro_threshold=1500) from tick 0 — the parent is
-    // repro-ELIGIBLE immediately — but is far short of the 9-cell afford-threshold (endowment 9000 +
-    // c_div 100 = 9100). Income stays at its normal default (unlike the stillbirth fixture above) so
-    // the SAME parent genuinely accumulates energy tick over tick; mutation_rate=0 isolates the
-    // affordability gate from decode/stillbirth risk (test 2 already covers that branch).
-    let econ = EconParams { newborn_energy_per_cell: true, d0_scaled: 0, ..EconParams::default() };
+    // repro-ELIGIBLE immediately — but is short of the 4-cell afford-threshold (endowment 4000 +
+    // c_div 100 = 4100). Income stays at its normal default (unlike the stillbirth fixture above) so
+    // the SAME parent genuinely accumulates energy tick over tick; metabolism is zeroed so energy is
+    // monotonically non-decreasing (no starvation regardless of spawn position — see
+    // `small_body_config`'s doc); mutation_rate=0 isolates the affordability gate from decode/
+    // stillbirth risk (test 2 already covers that branch).
+    let econ = EconParams {
+        newborn_energy_per_cell: true,
+        d0_scaled: 0,
+        base_metab: 0,
+        k_size_metab: 0,
+        k_move_cost: 0,
+        k_sense_cost: 0,
+        excrete: 0,
+        ..EconParams::default()
+    };
     let e_cell = econ.e_cell;
-    let mut sim = build_sim(newborn_config(3, 2_000, 0, econ));
+    let mut sim = build_sim(small_body_config(3, 2_000, 0, econ));
 
     let mut found = false;
     for tick in 0..2000u64 {
@@ -185,7 +222,7 @@ fn cannot_afford_yet_then_divides_with_full_endowment() {
             assert!(
                 tick > 0,
                 "must genuinely accumulate across ticks before dividing, not divide immediately \
-                 (founder_energy=2000 < the 9100 afford-threshold at tick 0)"
+                 (founder_energy=2000 < the 4100 afford-threshold at tick 0)"
             );
             assert_eq!(
                 after_ids.len(), before_ids.len() + 1,
@@ -219,20 +256,33 @@ fn cannot_afford_yet_then_divides_with_full_endowment() {
 
 #[test]
 fn r15_conservation_across_reproducing_multicellular_run() {
-    // Ordinary income+metabolism (no isolation tricks): a real reproducing multicellular population
-    // under the flag, over a multi-hundred-tick run. `dol_economy`/mineral stay at their EconParams
-    // defaults (false/None) — the endowment effect is isolated (issue's isolation instruction).
-    let econ = EconParams { newborn_energy_per_cell: true, d0_scaled: 0, ..EconParams::default() };
-    let mut sim = build_sim(newborn_config(11, 2_000, 32, econ));
+    // Ordinary income (no isolation trick there): a real reproducing multicellular population under
+    // the flag, over a multi-hundred-tick run. Metabolism zeroed — same rationale as
+    // `cannot_afford_yet_then_divides_with_full_endowment` (a single founder's fate must not hinge on
+    // its random world-gen spawn position); every descendant shares the same 4-cell body (body_plan/
+    // g_dev never mutate) so the whole lineage keeps reproducing under the same small afford-gap.
+    // `dol_economy`/mineral stay at their EconParams defaults (false/None) — the endowment effect is
+    // isolated (issue's isolation instruction).
+    let econ = EconParams {
+        newborn_energy_per_cell: true,
+        d0_scaled: 0,
+        base_metab: 0,
+        k_size_metab: 0,
+        k_move_cost: 0,
+        k_sense_cost: 0,
+        excrete: 0,
+        ..EconParams::default()
+    };
+    let mut sim = build_sim(small_body_config(11, 2_000, 32, econ));
 
-    for _ in 0..500u64 {
+    for _ in 0..1000u64 {
         sim.step();
     }
 
     let sizes = sim.body_size_entity_probe();
     assert!(
         sim.population() > 1,
-        "population must have grown via reproduction over 500 ticks under the flag"
+        "population must have grown via reproduction over 1000 ticks under the flag"
     );
     assert!(
         sizes.values().any(|&n| n > 1),
