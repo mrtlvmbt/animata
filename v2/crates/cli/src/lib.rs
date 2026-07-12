@@ -665,8 +665,12 @@ pub fn p2_config(seed: u64) -> SimConfig {
 pub fn p3_verdict_config(seed: u64) -> SimConfig {
     const BREADTH_COST_K_PROVISIONAL: i64 = 5; // Provisional, calibrated in pass 2 from criterion (c)
 
-    // P3-3 high-gradient biome temperatures (centidegrees).
-    const BIOME_TEMP_P3_VERDICT: [i32; 13] = [
+    // P3-3 high-gradient biome temperatures (centidegrees). Widened from 13 to 14 entries
+    // alongside W-SIM-7 (#423)'s `FinalBiome::Ocean` (index 13) — this verdict harness is about
+    // TERRESTRIAL biome-temperature gradient extremes, so Ocean reuses the same neutral stock
+    // placeholder `world::ProcgenWorld`'s own `BIOME_TEMP` uses (no coastal cells exist in this
+    // config; the entry only needs to exist so the array stays in bounds for `FinalBiome::Ocean`).
+    const BIOME_TEMP_P3_VERDICT: [i32; 14] = [
         -3000,  // 0: Tundra (zonal, extreme cold −30°C)
         -2000,  // 1: BorealForest (zonal, cold −20°C)
         500,    // 2: TemperateGrassland (zonal, cool +5°C)
@@ -680,6 +684,7 @@ pub fn p3_verdict_config(seed: u64) -> SimConfig {
         -500,   // 10: Rock (azonal, cold exposed)
         1200,   // 11: Fertile (azonal, temperate)
         2500,   // 12: Dune (azonal, desert sand)
+        1000,   // 13: Ocean (submerged, W-SIM-7 #423 — neutral placeholder, unreachable in this config)
     ];
 
     SimConfig {
@@ -917,7 +922,7 @@ pub fn build_sim(config: SimConfig) -> Sim {
         }
     }
     let econ = config.econ.clone();
-    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT, config.thermal_verdict_temps, false, false, false, false);
+    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT, config.thermal_verdict_temps, false, false, false, false, false);
     let grid_w = econ.world_dim / M_FIELD;
     let n = (grid_w * grid_w) as usize;
 

@@ -31,11 +31,17 @@
 //! ELA-gated ice-incision (subtractive) + till-deposition (additive) pass run POST-erosion,
 //! PRE-aeolian by `caps::classify_and_caps`, opt-in and default-off (`enable_glacial`, orthogonal to
 //! `enable_tectonics`/`enable_aeolian`/`enable_volcanic`).
+//!
+//! **W-SIM-7 (#423, `worldgen-relief` branch):** `coastal` is the fifth and LAST landform slice — a
+//! sea-level datum (the world's first water) + cliff/wave-cut-platform pass run POST-aeolian,
+//! PRE-final-classify by `caps::classify_and_caps`, opt-in and default-off (`enable_coastal`,
+//! orthogonal to `enable_tectonics`/`enable_aeolian`/`enable_volcanic`/`enable_glacial`).
 
 pub mod aeolian;
 pub mod biome;
 pub mod caps;
 pub mod climate;
+pub mod coastal;
 pub mod drainage;
 pub mod erosion;
 pub mod glacial;
