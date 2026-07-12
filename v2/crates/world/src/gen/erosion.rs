@@ -852,10 +852,10 @@ mod tests {
     /// proves determinism of the FULL production path (not just the isolated `tectonics.rs` unit),
     /// mirrors `golden_vector_matches_pinned_erosion_fixture` above.
     ///
-    /// PASS 1 (#397): fault-band resistance flip (soft→hard, kept) + `FAULT_STEP_DEN` reverted to
-    /// its pre-#397 value 12 (scarp-step crank dropped, PM decision) — this exact combination was
-    /// never pinned before, so it needs a fresh CI reveal (golden values are born in CI, not a local
-    /// run — PM contract). Placeholder below; pass 2 pins the CI-revealed `left:` value.
+    /// Re-pinned for #397 pass 2: fault-band resistance flip (soft→hard, kept) + `FAULT_STEP_DEN`
+    /// reverted to its pre-#397 value 12 (scarp-step crank dropped, PM decision). CI-sourced —
+    /// `left:` from both x86 debug (`v2 sim` job) and arm64 release (`v2 golden` job), run
+    /// #29180057376, commit 66400ac; both arches agree (integer, arch-stable).
     #[test]
     fn golden_vector_matches_pinned_tectonic_on_erosion_fixture() {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
@@ -864,7 +864,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // PASS 1 placeholder — CI reveals the real value
+        const EXPECTED: [i64; 4] = [113, 116, 104, 95];
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
