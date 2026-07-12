@@ -19,7 +19,9 @@
 //!   multi-hundred-tick flag-ON run with a reproducing multicellular population.
 
 use cli::{build_sim, config_with, DEFAULT_THREADS};
-use sim_core::{BodyPlan, Boundary, EconParams, Genome, GrnSpec, MergeStrategy, MorphogenSpec, SimConfig};
+use sim_core::{
+    BodyPlan, Boundary, EconParams, Genome, GrnSpec, LayerSpec, MergeStrategy, MorphogenSpec, SimConfig,
+};
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -74,25 +76,47 @@ fn newborn_config(seed: u64, founder_energy: i64, mutation_rate: i32, econ_overr
 }
 
 /// Small-body variant (Square @ g_dev=2 → 4 live cells, afford-threshold 4*e_cell+c_div=4100) for
-/// the accumulation tests (3/4): a 9-cell afford-threshold (9100) turned out to be unreachable for a
-/// SINGLE founder under `IncomeMode::Anchor` (flat, N-independent income) within a bounded horizon —
-/// not a mechanism bug, but a fixture regime mismatch (the endowment cost scales with N but Anchor
-/// income does not, for ANY N>1 body). These tests pair this smaller body with `IncomeMode::Extent`
-/// (one income contestant per LIVE cell — income actually scales with N too), the coherent regime
-/// the N-scaled endowment assumes; the smaller threshold gives a comfortable margin on top.
+/// the accumulation tests (3/4). Two prior CI rounds root-caused two DISTINCT fixture bugs here, not
+/// a mechanism bug — the mechanism was already proven by `success_multicellular_newborn_gets_n_scaled_endowment`
+/// (round 1) and `stillbirth_under_flag_conserves_energy_and_spawns_no_child` (still green throughout):
+/// (a) `IncomeMode::Anchor` books flat, N-independent income while this flag's endowment cost scales
+///     with N — unaffordable for ANY N>1 body regardless of cost tuning. Fixed by `IncomeMode::Extent`
+///     (one contestant per LIVE cell — income scales with N too).
+/// (b) `newborn_gspec` resolves every cell to `CellType::B`, and E-4b-i's `cell_type_uptake_layer`
+///     UNCONDITIONALLY routes `CellType::B` to layer 1 (`genome.rs`: `CellType::B => 1.min(max_layer)`)
+///     — overriding the raw `Genome.uptake_layer` regardless of what it's set to. `config_with`'s
+///     default layer 1 (`L1_ORGANICS_SPEC`) is `regen_rate=0, flat_cap=0` — EMPTY forever. So income
+///     was EXACTLY ZERO every tick, for (a)'s Anchor AND (b)'s Extent runs alike (Extent alone did not
+///     fix it — round 3 still starved, on schedule for a founder bleeding ~10/tick metab against zero
+///     income with founder_energy=2000: ~200 ticks, matching the observed tick-196 death). Fixed by
+///     giving layer 1 a real `flat_cap`+`regen_rate` (mirrors `r30_1_1_income_extent.rs`'s
+///     `ring_extent_config`, whose `founder.uptake_layer=1` is likewise belt-and-suspenders — the
+///     REAL router is the CellType resolution, not the raw gene) — deterministic, world-noise-
+///     independent income, closing the small afford-gap within a couple of ticks.
 fn small_body_founder(mutation_rate: i32) -> Genome {
     let mut founder = Genome::founder(2)
         .with_specs(Some(Arc::new(newborn_gspec())), Some(newborn_mspec(2, BodyPlan::Square)));
     founder.mutation_rate = mutation_rate;
+    founder.uptake_layer = 1;
     founder
 }
 
 fn small_body_config(seed: u64, founder_energy: i64, mutation_rate: i32, econ_overrides: EconParams) -> SimConfig {
+    // Layer 1: flat, uniform, REGENERATING resource (flat_cap=8000 -> initial mass 4000/cell,
+    // world_cap_mult=0 -> independent of ProcgenWorld terrain/seed; regen_rate=100 keeps it topped up
+    // across a multi-tick accumulation window). Layer 0 is unused (uptake routes to layer 1 — see
+    // `small_body_founder`'s doc) but `build_sim` still computes `flux_k_from_alpha` for every layer
+    // index < n_layers, so it needs a non-zero `flux_alpha_den` (mirrors `ring_extent_config`'s inert
+    // layer-0 spec).
+    let layer1_flat = LayerSpec { regen_rate: 100, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 8000, world_cap_mult: 0 };
+    let layer0_inert = LayerSpec { flux_alpha_num: 0, flux_alpha_den: 1, ..LayerSpec::default() };
     SimConfig {
         n_founders: 1,
         founder_energy,
         founder_templates: Some(vec![(small_body_founder(mutation_rate), 1)]),
         econ: econ_overrides,
+        n_layers: 2,
+        layer_specs: [layer0_inert, layer1_flat, LayerSpec::default(), LayerSpec::default()],
         ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
     }
 }
