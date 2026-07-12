@@ -49,6 +49,27 @@ pub fn biome_color(id: u8) -> Color {
     }
 }
 
+/// `MaterialId` byte (`world::gen::material::MaterialId`, `0..=8`) → top-face color. This is the
+/// PRIMARY terrain palette: the renderer colours by physical surface material, not biome, because
+/// biome misses the landform substrates the diverse-relief terragen produces — Ocean water, aeolian
+/// sand, glacial till, volcanic basalt/tuff (biome=13 Ocean alone already fell off `biome_color`'s
+/// `0..=12` table → magenta sea). Mirrors `world/src/bin/map_dump.rs`'s palette so the interactive
+/// 3D view and the headless PPM preview read identically. `_ => UNKNOWN` keeps the no-panic contract.
+pub fn material_color(m: u8) -> Color {
+    match m {
+        0 => Color::from_rgba(180, 180, 190, 255), // Air (above-surface empty) — pale grey
+        1 => Color::from_rgba(222, 200, 120, 255), // Sand (aeolian dune) — tan
+        2 => Color::from_rgba(205, 232, 240, 255), // Permafrost — pale ice
+        3 => Color::from_rgba(96, 132, 66, 255),   // Soil — green
+        4 => Color::from_rgba(128, 128, 132, 255), // Bedrock — grey
+        5 => Color::from_rgba(58, 52, 62, 255),    // Basalt (volcanic) — near-black
+        6 => Color::from_rgba(172, 150, 138, 255), // Tuff (volcanic) — light brown
+        7 => Color::from_rgba(184, 194, 206, 255), // Till (glacial) — grey-blue
+        8 => Color::from_rgba(40, 70, 130, 255),   // Water (coastal/ocean) — blue
+        _ => UNKNOWN,
+    }
+}
+
 /// Cliff (side-quad) shade: a fixed darkening of the top-face color — a cheap "AO-ish" cue (RnD
 /// `rendering/02` §3's baked-shading idea, without an actual light/AO bake) so columns read as
 /// stepped 3D prisms rather than flat-shaded slabs of one hue.

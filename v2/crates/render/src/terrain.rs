@@ -8,14 +8,21 @@
 //!
 //! R-3: Each chunk carries a world-space AABB for frustum culling.
 
-use crate::biome_palette::{biome_color, cliff_shade, apply_directional_shading};
+use crate::biome_palette::{material_color, cliff_shade, apply_directional_shading};
 use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE};
 use macroquad::models::{Mesh, Vertex};
 use macroquad::prelude::*;
 use sim_core::{Vec2Fixed, WorldView};
 use std::f32::consts::PI;
 
-const ROWS_PER_CHUNK: i64 = 8;
+/// Rows per chunk, adaptive to `world_dim` so no single chunk mesh exceeds the u16 index space
+/// (macroquad batches with `u16` indices — see `main.rs`'s `gl_set_drawcall_buffer_capacity` note).
+/// Worst case ≤30 verts/cell (6 top + up to 6×4 cliff); keep a chunk under ~50k verts (safely below
+/// the 60k drawcall cap): `rows = 50000 / (world_dim * 30)`, clamped to `[1, 8]`. At `world_dim=64`
+/// this is the historical 8; at 512 it drops to ~3.
+pub(crate) fn rows_per_chunk(world_dim: i64) -> i64 {
+    (50_000 / (world_dim.max(1) * 30)).clamp(1, 8)
+}
 
 /// A terrain chunk: mesh + world-space AABB for frustum culling.
 pub struct TerrainChunk {
@@ -27,9 +34,10 @@ pub struct TerrainChunk {
 /// Each chunk carries its own AABB (computed once at build).
 pub fn build_hex_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<TerrainChunk> {
     let mut chunks = Vec::new();
+    let rpc = rows_per_chunk(world_dim);
     let mut row0 = 0i64;
     while row0 < world_dim {
-        let row1 = (row0 + ROWS_PER_CHUNK).min(world_dim);
+        let row1 = (row0 + rpc).min(world_dim);
         chunks.push(build_chunk(world_dim, world, row0, row1));
         row0 = row1;
     }
@@ -44,7 +52,7 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
         for col in 0..world_dim {
             let h = world.height(col, row) as f32 * HEIGHT_SCALE;
             let (cx, cz) = hex_center(col, row);
-            let top_color = biome_color(world.biome(Vec2Fixed(col, row)));
+            let top_color = material_color(world.surface_material(Vec2Fixed(col, row)));
 
             // Top face: 6 corners, fan-triangulated from corner 0 (4 triangles, 6 unique verts).
             let base = vertices.len() as u16;

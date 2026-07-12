@@ -10,22 +10,23 @@
 //! Same `ROWS_PER_CHUNK` chunking + u16-index assert as hex terrain (`terrain.rs`).
 //! Built ONCE at startup — cold terrain immutable for the run.
 
-use crate::biome_palette::{biome_color, cliff_shade, apply_directional_shading};
+use crate::biome_palette::{material_color, cliff_shade, apply_directional_shading};
 use crate::hex::HEIGHT_SCALE;
 use crate::terrain::TerrainChunk;
 use macroquad::models::{Mesh, Vertex};
 use macroquad::prelude::*;
 use sim_core::{Vec2Fixed, WorldView};
 
-const ROWS_PER_CHUNK: i64 = 8;
-
 /// Build the whole `world_dim × world_dim` cube terrain as row-band chunks.
 /// Each chunk carries its own AABB (reuses `terrain::TerrainChunk`).
+/// Chunk height is adaptive to `world_dim` (shared with hex terrain) so no chunk mesh exceeds the
+/// u16 index space macroquad batches with — see `terrain::rows_per_chunk` + `main.rs`.
 pub fn build_cube_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<TerrainChunk> {
     let mut chunks = Vec::new();
+    let rpc = crate::terrain::rows_per_chunk(world_dim);
     let mut row0 = 0i64;
     while row0 < world_dim {
-        let row1 = (row0 + ROWS_PER_CHUNK).min(world_dim);
+        let row1 = (row0 + rpc).min(world_dim);
         chunks.push(build_chunk(world_dim, world, row0, row1));
         row0 = row1;
     }
@@ -40,7 +41,7 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
     let cols = world_dim as usize;
     let band_rows = (row1 - row0) as usize;
 
-    // Cache (height, biome_color) per cell in this band — read once, reused by both
+    // Cache (height, material_color) per cell in this band — read once, reused by both
     // the greedy top-face pass and the per-cell cliff pass below.
     let mut heights = vec![vec![0f32; cols]; band_rows];
     let mut colors = vec![vec![WHITE; cols]; band_rows];
@@ -48,7 +49,7 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
         let row = row0 + local_row as i64;
         for col in 0..world_dim {
             heights[local_row][col as usize] = world.height(col, row) as f32 * HEIGHT_SCALE;
-            colors[local_row][col as usize] = biome_color(world.biome(Vec2Fixed(col, row)));
+            colors[local_row][col as usize] = material_color(world.surface_material(Vec2Fixed(col, row)));
         }
     }
 
@@ -244,11 +245,12 @@ fn vertex(position: Vec3, color: Color, normal: Vec3) -> Vertex {
 mod tests {
     use super::*;
 
-    /// Fixed `dim × dim` grid — height/biome given per (col, row).
+    /// Fixed `dim × dim` grid — height/material given per (col, row). The cube mesh colours by
+    /// surface material (not biome), so the greedy-merge tests key on `materials`.
     struct GridWorld {
         dim: i64,
         heights: Vec<i64>,
-        biomes: Vec<u8>,
+        materials: Vec<u8>,
     }
 
     impl GridWorld {
@@ -264,8 +266,8 @@ mod tests {
         fn height(&self, x: i64, z: i64) -> i64 {
             self.heights[self.idx(x, z)]
         }
-        fn biome(&self, pos: Vec2Fixed) -> u8 {
-            self.biomes[self.idx(pos.0, pos.1)]
+        fn biome(&self, _pos: Vec2Fixed) -> u8 {
+            0 // unused: the mesh colours by surface_material, not biome
         }
         fn resource(&self, _pos: Vec2Fixed) -> i64 {
             0
@@ -273,12 +275,15 @@ mod tests {
         fn temp_at(&self, _pos: Vec2Fixed) -> i32 {
             1500 // P3-1: stub returns mesophile (15°C)
         }
+        fn surface_material(&self, pos: Vec2Fixed) -> u8 {
+            self.materials[self.idx(pos.0, pos.1)]
+        }
     }
 
     /// Flat (height 0 everywhere) so hidden-face culling drops ALL cliffs (nh=0 >= h=0) —
     /// isolates the mesh to top-face vertices only, making vertex counts directly comparable.
-    fn flat_world(dim: i64, biomes: Vec<u8>) -> GridWorld {
-        GridWorld { dim, heights: vec![0; (dim * dim) as usize], biomes }
+    fn flat_world(dim: i64, materials: Vec<u8>) -> GridWorld {
+        GridWorld { dim, heights: vec![0; (dim * dim) as usize], materials }
     }
 
     #[test]
@@ -292,7 +297,7 @@ mod tests {
         // Naive per-cell top faces would emit dim*dim quads (4 verts, 6 indices each).
         let naive_vertices = (dim * dim * 4) as usize;
         assert!(mesh.vertices.len() < naive_vertices, "greedy must reduce vertex count");
-        // Whole region shares (height, biome) → merges into exactly ONE quad.
+        // Whole region shares (height, material) → merges into exactly ONE quad.
         assert_eq!(mesh.vertices.len(), 4);
         assert_eq!(mesh.indices.len(), 6);
 
@@ -301,13 +306,13 @@ mod tests {
     }
 
     #[test]
-    fn greedy_does_not_merge_across_biome_boundary() {
-        // 2×2, columns differ in biome; each column's 2 rows share (height, biome) and merge vertically.
-        let world = flat_world(2, vec![0, 1, 0, 1]); // row-major: (row0: col0=0,col1=1), (row1: col0=0,col1=1)
+    fn greedy_does_not_merge_across_material_boundary() {
+        // 2×2, columns differ in material; each column's 2 rows share (height, material) and merge vertically.
+        let world = flat_world(2, vec![3, 8, 3, 8]); // row-major: (row0: col0=Soil,col1=Water), (row1: same)
         let chunks = build_cube_terrain(2, &world);
         let mesh = &chunks[0].mesh;
 
-        // 2 quads (one per column), NOT 1 — biome_color equality gates the merge.
+        // 2 quads (one per column), NOT 1 — material_color equality gates the merge.
         assert_eq!(mesh.vertices.len(), 8);
         assert_eq!(mesh.indices.len(), 12);
     }
@@ -315,7 +320,7 @@ mod tests {
     #[test]
     fn greedy_does_not_merge_across_height_boundary() {
         let mut world = flat_world(2, vec![0; 4]);
-        world.heights = vec![0, 1, 0, 1]; // col1 is one unit taller than col0, same biome
+        world.heights = vec![0, 1, 0, 1]; // col1 is one unit taller than col0, same material
         let chunks = build_cube_terrain(2, &world);
         // Height differs between col0/col1 → their side quads are no longer culled (nh < h for col0's
         // east edge and col1 emits none west since col0 lower doesn't apply — col1's neighbour col0 is

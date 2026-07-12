@@ -282,6 +282,10 @@ impl WorldView for ProcgenWorld {
     fn temp_at(&self, pos: Vec2Fixed) -> i32 {
         self.temp_grid[self.idx(pos.0, pos.1)]
     }
+
+    fn surface_material(&self, pos: Vec2Fixed) -> u8 {
+        self.surface_material[self.idx(pos.0, pos.1)]
+    }
 }
 
 #[cfg(test)]

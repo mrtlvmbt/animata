@@ -120,9 +120,17 @@ async fn main() {
     // macroquad's default per-draw-call buffer (10 000 verts / 5 000 indices) silently CLAMPS (drops
     // trailing geometry, logging "exceeded max drawcall size" every frame) a terrain chunk's worst
     // case (`ROWS_PER_CHUNK` rows × `world_dim` cols × ≤30 verts/≤48 indices per hex column,
-    // `terrain.rs`). Raised well above that worst case — a one-time ~10 MB CPU/GPU buffer
-    // allocation, not a per-frame cost.
-    gl_set_drawcall_buffer_capacity(200_000, 400_000);
+    // `terrain.rs`). Raised above that worst case — a one-time buffer allocation, not a per-frame cost.
+    //
+    // BUT the capacity MUST stay ≤ u16::MAX: macroquad batches successive `draw_mesh` calls into one
+    // draw-call and stores each index as `local_index + draw_call.vertices_count as u16`
+    // (`quad_gl.rs:949`). It only breaks the batch when `vertices_count >= max_vertices`, so a large
+    // capacity lets `vertices_count` grow past 65535 → the `as u16` cast wraps and the `+` overflows
+    // (debug: panic "attempt to add with overflow"; release: silent geometry corruption). This bit us
+    // on big/high-relief maps (dim≥256 with landforms). Cap at ≤65535 so macroquad auto-flushes each
+    // batch before the u16 index space is exhausted. Each terrain chunk is kept < this bound by the
+    // adaptive `rows_per_chunk` in `terrain.rs`/`terrain_cube.rs`.
+    gl_set_drawcall_buffer_capacity(60_000, 120_000);
 
     let cli_args = parse_args();
     let config = cli::default_config(cli_args.seed);
@@ -140,7 +148,13 @@ async fn main() {
     // W-6 WIRE: use `cli::HMAX`, `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The
     // ProcgenWorld pipeline (integer relief + erosion + biome/edaphic + caps) runs once here and caches
     // all per-cell fields (height, biome, resource, etc.) — never re-run per frame or per query.
-    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, false, false, false, false, false);
+    //
+    // Landform stages (tectonics/aeolian/volcanic/glacial/coastal, all default-off in the sim path):
+    // turn ON in STANDALONE only, to preview the full diverse-relief terragen (map_dump does the same).
+    // In sim mode they MUST stay off — the sim worker builds its world with all-off, and flipping only
+    // the render side would desync the pinned-param contract above.
+    let lf = cli_args.standalone; // enable all 5 landforms for the standalone terragen preview
+    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, lf, lf, lf, lf, lf);
     let hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world);
     let cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world);
 
