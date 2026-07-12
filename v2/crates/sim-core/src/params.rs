@@ -49,6 +49,23 @@ pub struct EnvFrontierConfig {
     pub patch_grain: i64,
 }
 
+// ── R30-1.1 (#408): income-harvest mode selector ────────────────────────────────────────────────
+
+/// Selects how the footprint income harvest (`stage_interactions`) generates contestants for a
+/// body. Replaces the former boolean `body_footprint` (critic F7): the three lanes are MUTUALLY
+/// EXCLUSIVE by construction (both-on was unrepresentable with a bool). Pure selector, no RNG.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IncomeMode {
+    /// Single contestant at the entity's own anchor position (`Position`). The pre-EXT-0a path.
+    Anchor,
+    /// `side²` contestants over a FILLED square footprint (`side = g_dev.max(1)`), one per grid
+    /// cell regardless of live/dead — the EXT-0a path. Debug-asserts `body_size == side²`.
+    Footprint,
+    /// R30-1.1: one contestant per LIVE cell in `CellGraph.cell_positions` — the actual live
+    /// shape, not a filled square. A dead cell contributes no contestant and thus no income.
+    Extent,
+}
+
 // ── C-slice death-recycling constants ────────────────────────────────────────────────────────────
 
 /// Bit-mask for the `d0` background-death RNG draw. `D0_MASK = 2^20 − 1`.
@@ -426,14 +443,15 @@ pub struct EconParams {
     /// contested-cell grants scale equally) → byte-identical goldens (the isolation gate).
     pub env_frontier_config: Option<EnvFrontierConfig>,
 
-    // ── EXT-0a: body footprint harvest (spatial extent income) ──────────────────────────────
-    /// Body footprint mechanism (EXT-0a). `true` enables footprint-based harvest: a multicellular
-    /// body occupies `side²` field cells (where `side = g_dev.max(1)`) and harvests from all of them,
-    /// making income non-lethally grow in N. `false` (default, all existing production configs) →
-    /// footprint inert, `side² = 1` contestant per entity, grant pooled to single cell → income flat in N
-    /// regardless of body size → byte-identical goldens (the isolation gate).
-    /// Determinism: the footprint is a pure function of (Position, g_dev, world_dim) — no RNG/HashMap.
-    pub body_footprint: bool,
+    // ── EXT-0a/R30-1.1: income-harvest mode (spatial extent income) ─────────────────────────
+    /// Income-harvest mode (EXT-0a + R30-1.1, #408). Replaces the former boolean `body_footprint`
+    /// with a mutually-exclusive [`IncomeMode`] selector. `Anchor` (default, all existing
+    /// production configs) → single contestant at the entity's own position, income flat in N
+    /// regardless of body size → byte-identical goldens (the isolation gate). `Footprint` → the
+    /// EXT-0a filled-square `side²` path (unchanged). `Extent` → R30-1.1's live-shape path over
+    /// `CellGraph.cell_positions`.
+    /// Determinism: each lane is a pure function of (Position, phenotype, world_dim) — no RNG/HashMap.
+    pub income_mode: IncomeMode,
 
     // ── Rung 1 (topo-diff §3 SLOT 1, #401): heritable body-plan mutation gate ───────────────────
     /// Enable heritable mutation of `morphogen_spec.body_plan` (Square↔Ring↔Filament). `false`
@@ -724,8 +742,9 @@ impl Default for EconParams {
             burden_cost_k: 2,        // energy cost per load unit; anchored to ~2% of income (swept in diagnostic)
             // ENV-0a'-a1: spatial monopolization OFF by default — None for all existing configs (byte-identical).
             env_frontier_config: None,
-            // EXT-0a: body footprint harvest OFF by default — false for all 5 existing configs (byte-identical).
-            body_footprint: false,
+            // EXT-0a/R30-1.1: income-harvest mode — Anchor (the shipped path) for all existing
+            // configs (byte-identical). Preserves the pre-#408 discriminant: body_footprint=false.
+            income_mode: IncomeMode::Anchor,
             // Rung 1 (#401): body-plan mutation OFF by default — false for all existing production
             // configs (byte-identical goldens; body_plan stays Square forever).
             enable_body_plan: false,

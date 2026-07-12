@@ -489,19 +489,21 @@ pub fn stage_interactions(
 
     // 1. Gather: one or more contestants per entity (Monod demand). No `conserved_take` yet.
     //    Sort key = cell_index * 4 + layer (B-2: layer ∈ 0..4); secondary = entity_bits.
-    //    EXT-0a: when body_footprint=true, an entity emits side² contestants (one per footprint cell,
-    //    where side = g_dev.max(1)), reading each cell's conserved level independently and competing
-    //    under the existing per-cell cap. Each footprint contestant maps to a DISTINCT field cell
-    //    (no self-overlap) due to g_dev ≤ 4 ≪ world_dim, so sort-key uniqueness is preserved.
+    //    EXT-0a: under `IncomeMode::Footprint`, an entity emits side² contestants (one per footprint
+    //    cell, where side = g_dev.max(1)), reading each cell's conserved level independently and
+    //    competing under the existing per-cell cap. Each footprint contestant maps to a DISTINCT
+    //    field cell (no self-overlap) due to g_dev ≤ 4 ≪ world_dim, so sort-key uniqueness holds.
+    //    R30-1.1 (#408): under `IncomeMode::Extent`, an entity emits one contestant per LIVE cell in
+    //    `CellGraph.cell_positions` instead — the actual live shape, not a filled square.
     struct Contestant {
         cell_layer: usize, // cell_index * 4 + layer — the group key (B-2: layer ∈ 0..4)
         entity_bits: u64,
         entity: Entity,
-        cell_pos: Vec2Fixed,  // EXT-0a: the FOOTPRINT cell (not entity pos) for footprint mode
+        cell_pos: Vec2Fixed,  // EXT-0a/R30-1.1: the FOOTPRINT/EXTENT cell (not entity pos) for those modes
         layer: usize,
         demand: i64,
         bonded: bool,      // ENV-0a'-a1: true if Σ module_cell_count > 1 (multicellular body)
-        is_footprint: bool,  // EXT-0a: true if this is a footprint contestant (not the entity's anchor)
+        is_footprint: bool,  // EXT-0a/R30-1.1: true if this is not the entity's own anchor contestant
     }
     let mut contestants: Vec<Contestant> = q.iter().flat_map(|(e, pos, _g, ph, _)| {
         // E-1: read uptake_layer from the cached Phenotype (live consumer of the decode seam).
@@ -518,86 +520,138 @@ pub fn stage_interactions(
         // ENV-0a'-a1: cache bonded status (Σ module_cell_count > 1) for phase 3 priority fill.
         let bonded = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>() > 1;
 
-        // EXT-0a: determine footprint configuration
-        if econ.body_footprint {
-            let side = (ph.graph.g_dev).max(1) as u64;
-            // Debug assertion: body size must equal side² (F7 + F4)
-            let body_size = ph.graph.body_size();
-            debug_assert!(
-                body_size == (side * side) as i64,
-                "body_size {} must equal side²={} (side={})",
-                body_size,
-                side * side,
-                side
-            );
-            // Debug assertion: footprint must not wrap onto itself (F4)
-            debug_assert!(
-                econ.world_dim >= side as i64,
-                "world_dim {} >= side {} guard (wrap prevention)",
-                econ.world_dim,
-                side
-            );
+        // EXT-0a/R30-1.1: IncomeMode selects the contestant-generation lane (mutually exclusive, F7).
+        match econ.income_mode {
+            IncomeMode::Footprint => {
+                let side = (ph.graph.g_dev).max(1) as u64;
+                // Debug assertion: body size must equal side² (F7 + F4)
+                let body_size = ph.graph.body_size();
+                debug_assert!(
+                    body_size == (side * side) as i64,
+                    "body_size {} must equal side²={} (side={})",
+                    body_size,
+                    side * side,
+                    side
+                );
+                // Debug assertion: footprint must not wrap onto itself (F4)
+                debug_assert!(
+                    econ.world_dim >= side as i64,
+                    "world_dim {} >= side {} guard (wrap prevention)",
+                    econ.world_dim,
+                    side
+                );
 
-            // Generate footprint cells: block anchored at pos.0, toroidal-wrapped, row-major
-            let mut footprint_contestants = Vec::new();
-            let anchor_x = pos.0.0 as u64;
-            let anchor_z = pos.0.1 as u64;
-            let world_dim = econ.world_dim as u64;
+                // Generate footprint cells: block anchored at pos.0, toroidal-wrapped, row-major
+                let mut footprint_contestants = Vec::new();
+                let anchor_x = pos.0.0 as u64;
+                let anchor_z = pos.0.1 as u64;
+                let world_dim = econ.world_dim as u64;
 
-            for row in 0..side {
-                for col in 0..side {
-                    // Toroidal wrap using rem_euclid semantics
-                    let fx = ((anchor_x + col) % world_dim) as i64;
-                    let fz = ((anchor_z + row) % world_dim) as i64;
-                    let fp_pos = Vec2Fixed(fx, fz);
+                for row in 0..side {
+                    for col in 0..side {
+                        // Toroidal wrap using rem_euclid semantics
+                        let fx = ((anchor_x + col) % world_dim) as i64;
+                        let fz = ((anchor_z + row) % world_dim) as i64;
+                        let fp_pos = Vec2Fixed(fx, fz);
 
-                    // Read this footprint cell's resource level
-                    let r = field.0.conserved_at(fp_pos, layer);
+                        // Read this footprint cell's resource level
+                        let r = field.0.conserved_at(fp_pos, layer);
+                        let demand = monod_demand(econ.u_max, econ.km, r);
+                        let demand = if econ.dol_economy {
+                            // DR-0: soma cells scale demand
+                            let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                                .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
+                            demand * soma.max(1)
+                        } else { demand };
+
+                        let footprint_cell = field.0.cell_index(fp_pos);
+                        footprint_contestants.push(Contestant {
+                            cell_layer: footprint_cell * 4 + layer,
+                            entity_bits: e.to_bits(),
+                            entity: e,
+                            cell_pos: fp_pos,
+                            layer,
+                            demand,
+                            bonded,
+                            is_footprint: true,
+                        });
+                    }
+                }
+
+                footprint_contestants
+            }
+            IncomeMode::Extent => {
+                // R30-1.1 (#408): one contestant per LIVE cell in `cell_positions` (row-major,
+                // R30-1.0), NOT side² of a filled square — a dead cell contributes no contestant.
+                // Carries the footprint lane's no-wrap guard (world_dim >= grid size) so distinct-
+                // field-cell/no-wrap still holds on this lane.
+                let g_dev = ph.graph.g_dev.max(1) as i64;
+                debug_assert!(
+                    econ.world_dim >= g_dev,
+                    "world_dim {} >= g_dev {} guard (wrap prevention)",
+                    econ.world_dim,
+                    g_dev
+                );
+                let anchor_x = pos.0.0 as u64;
+                let anchor_z = pos.0.1 as u64;
+                let world_dim = econ.world_dim as u64;
+
+                // F2/F5 (decided): an empty `cell_positions` (fully-apoptosed body) makes this
+                // iterator yield NOTHING — zero contestants ⇒ zero income ⇒ the body starves. This
+                // is the faithful choice (R30 north-star): no anchor-fallback, which would harvest
+                // from a DEAD anchor cell — the exact "dead cells fake extent" cheat R30 kills.
+                ph.graph.cell_positions.iter().map(|&(cx, cz)| {
+                    let fx = ((anchor_x + cx as u64) % world_dim) as i64;
+                    let fz = ((anchor_z + cz as u64) % world_dim) as i64;
+                    let ep_pos = Vec2Fixed(fx, fz);
+
+                    let r = field.0.conserved_at(ep_pos, layer);
                     let demand = monod_demand(econ.u_max, econ.km, r);
                     let demand = if econ.dol_economy {
-                        // DR-0: soma cells scale demand
+                        // DR-0: soma cells scale demand (see F4 — kept off in Extent test configs
+                        // to avoid double-counting size: N_live contestants × soma multiplier).
                         let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
                             .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
                         demand * soma.max(1)
                     } else { demand };
 
-                    let footprint_cell = field.0.cell_index(fp_pos);
-                    footprint_contestants.push(Contestant {
-                        cell_layer: footprint_cell * 4 + layer,
+                    let extent_cell = field.0.cell_index(ep_pos);
+                    Contestant {
+                        cell_layer: extent_cell * 4 + layer,
                         entity_bits: e.to_bits(),
                         entity: e,
-                        cell_pos: fp_pos,
+                        cell_pos: ep_pos,
                         layer,
                         demand,
                         bonded,
                         is_footprint: true,
-                    });
-                }
+                    }
+                }).collect()
             }
-
-            footprint_contestants
-        } else {
-            // Non-footprint mode: single contestant at entity's anchor position
-            let r = field.0.conserved_at(pos.0, layer);
-            let demand = monod_demand(econ.u_max, econ.km, r);
-            let demand = if econ.dol_economy {
-                // DR-0: soma cells scale demand (income ∝ soma). Founder has soma=0 (germ-only body),
-                // so max(soma,1) ensures bootstrap survival at baseline rate; soma≥1 gains income bonus.
-                let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
-                    .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
-                demand * soma.max(1)
-            } else { demand };
-            let cell = field.0.cell_index(pos.0);
-            vec![Contestant {
-                cell_layer: cell * 4 + layer,
-                entity_bits: e.to_bits(),
-                entity: e,
-                cell_pos: pos.0,
-                layer,
-                demand,
-                bonded,
-                is_footprint: false,
-            }]
+            IncomeMode::Anchor => {
+                // Single contestant at entity's own anchor position (the pre-EXT-0a path).
+                let r = field.0.conserved_at(pos.0, layer);
+                let demand = monod_demand(econ.u_max, econ.km, r);
+                let demand = if econ.dol_economy {
+                    // DR-0: soma cells scale demand (income ∝ soma). Founder has soma=0 (germ-only
+                    // body), so max(soma,1) ensures bootstrap survival at baseline rate; soma≥1
+                    // gains income bonus.
+                    let soma: i64 = ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+                        .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None }).sum();
+                    demand * soma.max(1)
+                } else { demand };
+                let cell = field.0.cell_index(pos.0);
+                vec![Contestant {
+                    cell_layer: cell * 4 + layer,
+                    entity_bits: e.to_bits(),
+                    entity: e,
+                    cell_pos: pos.0,
+                    layer,
+                    demand,
+                    bonded,
+                    is_footprint: false,
+                }]
+            }
         }
     }).collect();
     // Stable order: primary = cell_layer (groups contestants), secondary = entity_bits (tie-break).
