@@ -1792,6 +1792,7 @@ mod tests {
             module_is_germ: vec![false; n],
             module_reachable: vec![true; n],
             module_consortium: (0..n).collect(),
+            cell_positions: Vec::new(),
         }
     }
 

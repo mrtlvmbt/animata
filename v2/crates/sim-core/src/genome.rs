@@ -190,6 +190,10 @@ pub struct CellGraph {
     /// consortium (min-index representative, mirrors Step 2's cell union-find). Cold — never
     /// consumed by a live stage.
     pub module_consortium: Vec<usize>,
+    /// R30-1.0 (#405): grid `(x, z)` of every LIVE cell (`!dead`), row-major order. Additive-layer
+    /// over the shared `g_dev²` morphogen grid. Cold — un-hashed, unconsumed this slice (foundation
+    /// for R30-1.1's extent-based income).
+    pub cell_positions: Vec<(u8, u8)>,
 }
 
 impl CellGraph {
@@ -294,6 +298,7 @@ impl CellGraph {
             module_is_germ: Vec::new(),
             module_reachable: Vec::new(),
             module_consortium: Vec::new(),
+            cell_positions: Vec::new(),
         }
     }
 
@@ -336,6 +341,9 @@ impl CellGraph {
         // GRN to resolve the attractor state, then classify that state to determine the cell type.
         let mut grid_cell_type: Vec<CellType> = Vec::with_capacity(n_cells);
         let mut dead: Vec<bool> = Vec::with_capacity(n_cells);
+        // R30-1.0 (#405): folded into this loop, sourced from `!dead` (not `live_mask` alone) so an
+        // apoptosed cell never contributes a position — same kept set union-find uses below.
+        let mut cell_positions: Vec<(u8, u8)> = Vec::new();
         for z in 0..g_dev {
             for x in 0..g_dev {
                 let idx = z * g_dev + x;
@@ -354,7 +362,11 @@ impl CellGraph {
                 grid_cell_type.push(ct);
                 // Rung 1 SLOT 1: non-live (per body_plan) OR M7-b apoptosed (F3, PINNED: gene-0
                 // expression below threshold) ⇒ dead. `Square` + `None` ⇒ never dead (pre-Rung-1).
-                dead.push(!live_mask[idx] || matches!(apoptosis_threshold, Some(t) if state[0] < t));
+                let is_dead = !live_mask[idx] || matches!(apoptosis_threshold, Some(t) if state[0] < t);
+                dead.push(is_dead);
+                if !is_dead {
+                    cell_positions.push((x as u8, z as u8));
+                }
             }
         }
 
@@ -562,6 +574,7 @@ impl CellGraph {
             module_is_germ,
             module_reachable,
             module_consortium,
+            cell_positions,
         }
     }
 
