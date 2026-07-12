@@ -298,7 +298,7 @@ pub fn grn(gradient: &Gradient, spec: &GrnSpec) -> CellType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::morphogen::{morphogen, Boundary, MorphogenSpec};
+    use crate::morphogen::{morphogen, BodyPlan, Boundary, MorphogenSpec};
     use crate::Genome;
     use sha2::{Digest, Sha256};
 
@@ -644,6 +644,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         // Gene 0 reads the sampled concentration directly; gene 1 is a FIXED threshold reference (no
         // input coupling) tuned (verified empirically) to sit strictly between the near-source and
@@ -697,6 +698,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         let gradient = morphogen(&Genome::founder(1), &spec);
         let _ = grn(&gradient, &bistable_spec(vec![EXPR_MAX, 0]));
