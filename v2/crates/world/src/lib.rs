@@ -102,10 +102,21 @@ impl ProcgenWorld {
     /// P3-3 (F1, golden-neutral): `thermal_verdict_temps` — optional biome-temperature override
     /// for the thermal-niche verdict harness. `None` (default) uses stock BIOME_TEMP; `Some(array)`
     /// injects custom temps (verdict-only, never shipped). Gated at world-gen time (immutable post-gen).
-    pub fn new(dim: i64, hmax: i64, resource_base: i64, seed: u64, thermal_verdict_temps: Option<[i32; 13]>) -> Self {
+    ///
+    /// **W-SIM-4a (#396):** `enable_tectonics` threads straight to `classify_and_caps`/`erode` —
+    /// `false` (every prod call site on `worldgen-relief`) reproduces the pre-#396 world byte-for-
+    /// byte, preserving the acceptance-corridor economy; the map/visual track opts in explicitly.
+    pub fn new(
+        dim: i64,
+        hmax: i64,
+        resource_base: i64,
+        seed: u64,
+        thermal_verdict_temps: Option<[i32; 13]>,
+        enable_tectonics: bool,
+    ) -> Self {
         // W-7 gate: patchiness defaults OFF for acceptance corridors (homogeneous baseline).
         // Specific scenarios (map-gen, visualization) can opt-in by calling with enable_patchiness=true.
-        let fields = classify_and_caps(seed, hmax, dim as usize, false);
+        let fields = classify_and_caps(seed, hmax, dim as usize, false, enable_tectonics);
         // W-6b Phase A: DECOUPLE resource from solid_level (RnD 01 §40,43: is_solid=movement,
         // resource=food are SEPARATE queries). solid_level → ONLY movement/collision (is_solid).
         // resource() → DIRECT rescale_cap(caps[idx]), independent of height.
@@ -254,7 +265,7 @@ mod tests {
 
     #[test]
     fn resource_nonneg_and_bounded() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false);
         for x in 0..DIM {
             for z in 0..DIM {
                 let r = w.resource(Vec2Fixed(x, z));
@@ -265,7 +276,7 @@ mod tests {
 
     #[test]
     fn height_wraps_toroidally_like_noise_world_did() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false);
         assert_eq!(w.height(0, 0), w.height(DIM, 0), "x must wrap at dim");
         assert_eq!(w.height(0, 0), w.height(0, DIM), "z must wrap at dim");
         assert_eq!(w.height(-1, 0), w.height(DIM - 1, 0), "negative x must wrap");
@@ -273,8 +284,8 @@ mod tests {
 
     #[test]
     fn procgen_world_is_deterministic_across_repeated_builds() {
-        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
-        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false);
+        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false);
         for x in 0..DIM {
             for z in 0..DIM {
                 let pos = Vec2Fixed(x, z);
@@ -291,7 +302,7 @@ mod tests {
     /// climate-only "≥2 biomes" check would silently pass even if erosion fully no-oped).
     #[test]
     fn procgen_world_is_rich_and_not_degenerate_at_prod_scale() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false);
 
         let mut min_h = i64::MAX;
         let mut max_h = i64::MIN;
@@ -340,7 +351,7 @@ mod tests {
     fn resource_decoupled_from_solid_level() {
         use gen::material::MaterialId;
 
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false);
         let mut resource_on_solid = Vec::new();
         let mut resource_on_non_solid = Vec::new();
 

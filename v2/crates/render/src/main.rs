@@ -107,7 +107,7 @@ fn parse_args() -> CliArgs {
 //
 // The render's `WorldView` MUST resolve to the SAME terrain the sim worker runs on. `ProcgenWorld` is
 // a pure function of `(world_dim, hmax, resource_base, seed)` — `cli::build_sim` constructs it as
-// `ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT)` (`cli/src/lib.rs`).
+// `ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT, .., false)` (`cli/src/lib.rs`).
 // W-6 wiring makes `HMAX`, `RESOURCE_BASE`, `WORLD_SALT` all `pub` in `cli`, so this file IMPORTS them
 // directly from `cli` rather than duplicating literals. This ensures the render's world matches the sim's
 // — no divergence via stale consts (the R-2 footgun this contract guards). The three-const triple
@@ -140,7 +140,7 @@ async fn main() {
     // W-6 WIRE: use `cli::HMAX`, `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The
     // ProcgenWorld pipeline (integer relief + erosion + biome/edaphic + caps) runs once here and caches
     // all per-cell fields (height, biome, resource, etc.) — never re-run per frame or per query.
-    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None);
+    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, false);
     let hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world);
     let cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world);
 
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
-        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None);
+        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false);
         let hex_chunks = terrain::build_hex_terrain(dim, &world);
         let cube_chunks = terrain_cube::build_cube_terrain(dim, &world);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");

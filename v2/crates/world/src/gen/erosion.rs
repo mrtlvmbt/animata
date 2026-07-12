@@ -7,12 +7,20 @@
 //! wired into `ProcgenWorld::new` (`world/src/lib.rs`), so the eroded relief actually shapes the
 //! sim's world.
 //!
+//! **W-SIM-4a status (#396):** [`erode`] gained a 4th `enable_tectonics` parameter — `false`
+//! (every prod call site on `worldgen-relief`) reproduces this file's pre-#396 body byte-for-byte;
+//! `true` folds `gen::tectonics`'s fault-scarp height step + fault-aligned resistance-lineament
+//! override into the initial `height`/`resistance` fields BEFORE the macro-loop below ever runs
+//! (see [`erode_with_tectonics`], the two-gate entry point used to isolate the two halves for the
+//! ablation-corridor test).
+//!
 //! ## W-4 is the phase's SECOND global-flow stage (like W-3), now ITERATIVE
 //!
 //! Erosion re-runs W-3's drainage functions (`priority_flood_fill`/`d8_directions`/
 //! `kahn_accumulate`, already generic over `&[i64]`) on the CURRENT eroding heightmap each
 //! macro-iteration — the surface changes every step, so drainage is recomputed, never cached from a
-//! stale instance. [`erode`] is the pure entry point: `(seed, hmax, dim) -> ErosionState`.
+//! stale instance. [`erode`] is the pure entry point: `(seed, hmax, dim, enable_tectonics) ->
+//! ErosionState`.
 //!
 //! ## Algorithm (locked by the golden-vector tests, re-derivable from this doc)
 //!
@@ -326,20 +334,15 @@ pub struct ErosionState {
     pub export_total: i64,
 }
 
-/// Sample `height_at` + `resistance_field` over a `dim × dim` grid and run the fixed
-/// `MACRO_ITERATIONS` erosion macro-loop: recompute drainage → stream-power incision → thermal
-/// talus, each iteration. Pure function of `(seed, hmax, dim)` — no RNG-of-clock, no
-/// thread-dependence, no global mutable state.
-pub fn erode(seed: u64, hmax: i64, dim: usize) -> ErosionState {
+/// Run the fixed `MACRO_ITERATIONS` erosion macro-loop (recompute drainage → stream-power incision
+/// → thermal talus, each iteration) over an ALREADY-BUILT initial `height`/`resistance` pair. Shared
+/// by [`erode_with_tectonics`]'s tectonics-on and tectonics-off paths so the macro-loop itself is
+/// never duplicated: the tectonic scarp/lineament overlay (if any) has already been folded into
+/// `height`/`resistance` by the caller, before this function ever runs — this function has no
+/// tectonics-awareness of its own.
+fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, resistance: Vec<i64>) -> ErosionState {
     let n = dim * dim;
-    let mut height = vec![0i64; n];
-    for z in 0..dim {
-        for x in 0..dim {
-            height[linear_index(x, z, dim)] = height_at(x as i64, z as i64, seed, hmax);
-        }
-    }
     let initial_height = height.clone();
-    let resistance = resistance_field(dim, seed, hmax);
 
     let mut export_total: i64 = 0;
 
@@ -380,6 +383,83 @@ pub fn erode(seed: u64, hmax: i64, dim: usize) -> ErosionState {
     }
 
     ErosionState { dim, height, surface_material, drainage, export_total }
+}
+
+/// W-SIM-4a (#396): build the initial `height`/`resistance` fields, OPTIONALLY overlaid with the
+/// tectonic fault network, then run the shared [`erode_from_fields`] macro-loop. Two INDEPENDENT
+/// gates (never coupled at this level — the three-condition ablation corridor test needs "scarp on,
+/// resistance-lineament off" as a distinct middle condition):
+/// - `enable_fault_scarp`: fold [`crate::gen::tectonics::fault_scarp_delta`] into the height field
+///   BEFORE the macro-loop runs, clamped into `[0, hmax]` (so erosion then dissects the raw scarp).
+/// - `enable_fault_resistance`: force [`crate::gen::tectonics::is_in_fault_band`] cells to the
+///   HARDEST resistance class (`N_RESIST_CLASSES - 1`). RnD 17 §3 (differential erosion): a
+///   relief-INCREASING fault must resist incision more than the surrounding rock, not less — a
+///   HARD fault stands proud as the soft surrounding rock strips away around it (models a
+///   cemented/mineralized fault, valid for active orogens), producing steep edges along the fault
+///   line. A SOFT fault band (the pre-#397 assignment) instead carves a smooth diffuse valley with
+///   FEWER steep edges than the fBm baseline — the inverse of the intended effect.
+///   Overrides the noise-based [`resistance_field`] there.
+///
+/// **OFF-path byte-identity (both flags `false`):** builds `height`/`resistance` EXACTLY as the
+/// pre-#396 `erode` did — no fault RNG/noise draw of any kind (the `if` gates skip
+/// `build_faults`/`fault_scarp_delta`/`is_in_fault_band` entirely, not merely discard their result)
+/// — so this is a byte-identical structural refactor when both flags are off.
+pub fn erode_with_tectonics(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    enable_fault_scarp: bool,
+    enable_fault_resistance: bool,
+) -> ErosionState {
+    let n = dim * dim;
+    let mut height = vec![0i64; n];
+    for z in 0..dim {
+        for x in 0..dim {
+            height[linear_index(x, z, dim)] = height_at(x as i64, z as i64, seed, hmax);
+        }
+    }
+
+    let mut resistance = resistance_field(dim, seed, hmax);
+
+    if enable_fault_scarp || enable_fault_resistance {
+        let faults = crate::gen::tectonics::build_faults(seed, dim);
+
+        if enable_fault_scarp {
+            for z in 0..dim {
+                for x in 0..dim {
+                    let idx = linear_index(x, z, dim);
+                    let delta = crate::gen::tectonics::fault_scarp_delta(x as i64, z as i64, &faults, hmax);
+                    height[idx] = (height[idx] + delta).clamp(0, hmax);
+                }
+            }
+        }
+
+        if enable_fault_resistance {
+            for z in 0..dim {
+                for x in 0..dim {
+                    let idx = linear_index(x, z, dim);
+                    if crate::gen::tectonics::is_in_fault_band(x as i64, z as i64, &faults) {
+                        resistance[idx] = N_RESIST_CLASSES - 1; // hardest class — resistant fault stands proud (module doc, RnD 17 §3)
+                    }
+                }
+            }
+        }
+    }
+
+    erode_from_fields(seed, hmax, dim, height, resistance)
+}
+
+/// Sample `height_at` + `resistance_field` over a `dim × dim` grid and run the fixed
+/// `MACRO_ITERATIONS` erosion macro-loop: recompute drainage → stream-power incision → thermal
+/// talus, each iteration. Pure function of `(seed, hmax, dim, enable_tectonics)` — no RNG-of-clock,
+/// no thread-dependence, no global mutable state.
+///
+/// **W-SIM-4a gate (tectonics default-off, #396):** `enable_tectonics` arms BOTH the fault-scarp
+/// step and the fault-aligned resistance-lineament override together (production's single on/off
+/// switch — see [`erode_with_tectonics`] for the two-gate ablation entry point the corridor test
+/// uses to isolate the resistance half). `false` reproduces the pre-#396 `erode` byte-for-byte.
+pub fn erode(seed: u64, hmax: i64, dim: usize, enable_tectonics: bool) -> ErosionState {
+    erode_with_tectonics(seed, hmax, dim, enable_tectonics, enable_tectonics)
 }
 
 #[cfg(test)]
@@ -580,7 +660,7 @@ mod tests {
     #[test]
     fn erode_conserves_rock_plus_export_exactly() {
         const DIM: usize = 16;
-        let state = erode(SEED, HMAX, DIM);
+        let state = erode(SEED, HMAX, DIM, false);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -600,8 +680,8 @@ mod tests {
 
     #[test]
     fn erode_is_deterministic_across_repeated_calls() {
-        let a = erode(SEED, HMAX, 16);
-        let b = erode(SEED, HMAX, 16);
+        let a = erode(SEED, HMAX, 16, false);
+        let b = erode(SEED, HMAX, 16, false);
         assert_eq!(a, b, "erode must be byte-identical across repeated calls");
     }
 
@@ -612,7 +692,7 @@ mod tests {
         // material diversity (Soil vs Bedrock) needs enough drainage-area range to cross
         // INCISION_EXPOSURE_THRESHOLD somewhere — a smaller probe grid (e.g. 32) may not reach it.
         const DIM: usize = 64;
-        let state = erode(SEED, HMAX, DIM);
+        let state = erode(SEED, HMAX, DIM, false);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -634,7 +714,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false);
 
         const CASES: &[(usize, i64, MaterialId)] = &[
             (0, 129, MaterialId::Soil),
@@ -647,5 +727,143 @@ mod tests {
             assert_eq!(state.surface_material[idx], exp_material, "golden drift: surface_material[{idx}]");
         }
         assert_eq!(state.export_total, 396, "golden drift: export_total");
+    }
+
+    // ── W-SIM-4a: tectonic relief (#396) ────────────────────────────────────────────────────────
+
+    #[test]
+    fn erode_with_tectonics_is_deterministic_across_repeated_calls() {
+        let a = erode_with_tectonics(SEED, HMAX, 16, true, true);
+        let b = erode_with_tectonics(SEED, HMAX, 16, true, true);
+        assert_eq!(a, b, "erode_with_tectonics must be byte-identical across repeated calls");
+    }
+
+    #[test]
+    fn erode_tectonics_gate_reproduces_pre_396_erode_byte_for_byte() {
+        // Both flags false must be IDENTICAL to erode()'s pre-#396 body (this is a pure structural
+        // refactor into erode_from_fields/erode_with_tectonics — no behavior change when off).
+        let via_erode = erode(SEED, HMAX, 16, false);
+        let via_flags = erode_with_tectonics(SEED, HMAX, 16, false, false);
+        assert_eq!(via_erode, via_flags, "erode(..,false) must equal erode_with_tectonics(..,false,false)");
+    }
+
+    /// D8-neighbor "steep edge" count on a height field: the number of (cell, right-or-down
+    /// neighbor) pairs whose absolute height difference reaches `threshold` — a simple, symmetric
+    /// relief-diversity proxy that catches BOTH raw scarp discontinuities and erosion-carved
+    /// incision, regardless of which axis the structure follows.
+    fn steep_edge_count(height: &[i64], dim: usize, threshold: i64) -> usize {
+        let mut count = 0usize;
+        for z in 0..dim {
+            for x in 0..dim {
+                let idx = linear_index(x, z, dim);
+                if x + 1 < dim {
+                    let r = linear_index(x + 1, z, dim);
+                    if (height[idx] - height[r]).abs() >= threshold {
+                        count += 1;
+                    }
+                }
+                if z + 1 < dim {
+                    let d = linear_index(x, z + 1, dim);
+                    if (height[idx] - height[d]).abs() >= threshold {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// Same as [`steep_edge_count`] but EXCLUDES any edge whose two endpoints received a DIFFERENT
+    /// raw (pre-erosion) `fault_scarp_delta` — i.e. an edge that straddles the scarp step itself.
+    /// What remains is steepness the erosion loop itself carved, isolated from the raw tectonic
+    /// step — the load-bearing isolation the acceptance criteria require (#396 AC 4-ii).
+    fn steep_edge_count_excluding_scarp(
+        height: &[i64],
+        dim: usize,
+        threshold: i64,
+        faults: &[crate::gen::tectonics::Fault],
+        hmax: i64,
+    ) -> usize {
+        let scarp_delta = |x: usize, z: usize| {
+            crate::gen::tectonics::fault_scarp_delta(x as i64, z as i64, faults, hmax)
+        };
+        let mut count = 0usize;
+        for z in 0..dim {
+            for x in 0..dim {
+                let idx = linear_index(x, z, dim);
+                let d_here = scarp_delta(x, z);
+                if x + 1 < dim {
+                    let r = linear_index(x + 1, z, dim);
+                    if d_here == scarp_delta(x + 1, z) && (height[idx] - height[r]).abs() >= threshold {
+                        count += 1;
+                    }
+                }
+                if z + 1 < dim {
+                    let d = linear_index(x, z + 1, dim);
+                    if d_here == scarp_delta(x, z + 1) && (height[idx] - height[d]).abs() >= threshold {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        count
+    }
+
+    /// The load-bearing verification (#396 AC): three-condition ablation on the golden grid —
+    /// A. tectonics fully OFF (isotropic baseline), B. fault-scarp ON / resistance-lineament OFF
+    /// (scarp step only), C. fully ON. Asserts BOTH (i) C is more relief-diverse than A, and (ii)
+    /// the resistance-lineament half contributes INDEPENDENTLY of the scarp step — C shows more
+    /// erosion-carved steep edges than B even with every scarp-straddling edge excluded from the
+    /// count, so the resistance half cannot be dead code riding on the scarp step alone.
+    #[test]
+    fn tectonic_ablation_three_condition_relief_diversity() {
+        const DIM: usize = 64;
+        // Calibrated against this fBm relief's measured adjacent-cell slope range (0–5 units, see
+        // `K_INCISE_DEN`'s doc) — mirrors `caps.rs`'s `ROCK_SLOPE_THRESHOLD`.
+        const STEEP_THRESHOLD: i64 = 4;
+
+        let a = erode_with_tectonics(SEED, HMAX, DIM, false, false);
+        let b = erode_with_tectonics(SEED, HMAX, DIM, true, false);
+        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true);
+
+        let a_count = steep_edge_count(&a.height, DIM, STEEP_THRESHOLD);
+        let c_count = steep_edge_count(&c.height, DIM, STEEP_THRESHOLD);
+        assert!(
+            c_count > a_count,
+            "(i) full tectonics ON must be MORE relief-diverse than the isotropic baseline: A={a_count} C={c_count}"
+        );
+
+        let faults = crate::gen::tectonics::build_faults(SEED, DIM);
+        let b_excl = steep_edge_count_excluding_scarp(&b.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
+        let c_excl = steep_edge_count_excluding_scarp(&c.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
+        // Measured on this golden grid (post-#397 hard-fault fix): B=1866 C=1892, a margin of 26.
+        // Locked below that with headroom (not the bare placeholder `1`) so the assertion actually
+        // guards the resistance-lineament effect size, not just its sign.
+        const MIN_MARGIN: usize = 20;
+        assert!(
+            c_excl >= b_excl + MIN_MARGIN,
+            "(ii) resistance-lineament structure must contribute INDEPENDENTLY of the scarp step: \
+             excluding scarp-straddling edges, C={c_excl} must exceed B={b_excl} by >= {MIN_MARGIN}"
+        );
+    }
+
+    /// Golden vector (ON path): the tectonic-ON `erode` output is pinned at fixed grid indices —
+    /// proves determinism of the FULL production path (not just the isolated `tectonics.rs` unit),
+    /// mirrors `golden_vector_matches_pinned_erosion_fixture` above.
+    ///
+    /// Re-pinned for #397 (fault-band resistance flipped soft→hard + scarp step widened
+    /// `FAULT_STEP_DEN` 12→8 — see this file's `erode_with_tectonics` doc): a local run, this golden
+    /// class is integer-deterministic and arch-independent (mirrors the original #396 pin method).
+    #[test]
+    fn golden_vector_matches_pinned_tectonic_on_erosion_fixture() {
+        const GOLDEN_SEED: u64 = 0xA11A_2A11;
+        const GOLDEN_HMAX: i64 = 200;
+        const DIM: usize = 16;
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true);
+
+        const INDICES: [usize; 4] = [0, 36, 100, 255];
+        const EXPECTED: [i64; 4] = [104, 105, 92, 82];
+        let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
+        assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
 }
