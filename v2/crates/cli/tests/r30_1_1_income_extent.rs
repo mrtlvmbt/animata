@@ -14,16 +14,35 @@
 
 use cli::{build_sim, config_with, DEFAULT_THREADS};
 use sim_core::{
-    monod_demand, BodyPlan, Boundary, EconParams, Genome, GrnSpec, IncomeMode, LayerSpec,
-    MergeStrategy, MorphogenSpec, SimConfig, GRN_EXPR_MAX,
+    grn_resolve, monod_demand, BodyPlan, Boundary, CellType, EconParams, Genome, Gradient,
+    GrnSpec, IncomeMode, LayerSpec, MergeStrategy, MorphogenSpec, SimConfig, GRN_EXPR_MAX,
 };
 use std::sync::Arc;
 
-/// Bistable-matrix GRN spec (reused verbatim from `cli::phase2_config` — already F7-validated).
-/// The per-cell TYPE it resolves is irrelevant to `cell_positions` (live/dead comes from
-/// `body_plan`/`apoptosis_threshold` only), so any valid spec works here.
+/// Bistable-matrix GRN spec (weight matrix reused verbatim from `cli::phase2_config` — already
+/// F7-validated; `input_weights=[0,0]` keeps the "drive" (per-cell sampled gradient) dead, so
+/// EVERY cell resolves the SAME attractor from the same fixed `initial` regardless of position).
+///
+/// **Liveness** (which cells appear in `cell_positions`) comes from `body_plan`/`apoptosis_threshold`
+/// only — the resolved TYPE plays no part there. But **which layer gets harvested is NOT
+/// type-independent**: E-4b-i (`genome.rs` `cell_type_uptake_layer`) has the resolved `CellType`
+/// DRIVE `Phenotype.uptake_layer` once a cell_type chain is present, overriding the raw
+/// `Genome.uptake_layer` we set below. `initial=[112,144]` (state[1] > state[0]) resolves every
+/// cell to `CellType::B` — verified below, not assumed — which `cell_type_uptake_layer` routes to
+/// layer 1, matching `ring_extent_config`'s `founder.uptake_layer = 1` override.
 fn ring_gspec() -> GrnSpec {
-    GrnSpec::new(2, vec![32, -32, -32, 32], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![144, 112])
+    GrnSpec::new(2, vec![32, -32, -32, 32], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![112, 144])
+}
+
+/// Self-verification (not an assumption): confirm `ring_gspec()` really resolves to `CellType::B`
+/// for every cell — since `input_weights=[0,0]`, the gradient VALUE is irrelevant, so a trivial
+/// singleton gradient stands in for any real per-cell sample.
+#[test]
+fn ring_gspec_resolves_to_cell_type_b() {
+    let gspec = ring_gspec();
+    let gradient = Gradient { g_dev: 1, cells: vec![0] };
+    let (_state, ct, _steps) = grn_resolve(&gradient, &gspec);
+    assert_eq!(ct, CellType::B, "ring_gspec's initial=[112,144] must resolve to CellType::B (drives uptake_layer=1, E-4b-i)");
 }
 
 fn base_mspec(g_dev: usize, apoptosis_threshold: Option<i32>, body_plan: BodyPlan) -> MorphogenSpec {
@@ -46,9 +65,11 @@ fn base_mspec(g_dev: usize, apoptosis_threshold: Option<i32>, body_plan: BodyPla
 
 /// A single founder shaped `BodyPlan::Ring` at `g_dev=3` (perimeter-only: `4*(g_dev-1)=8` live cells
 /// out of the 9-cell grid, center dead — `topology_mask`, already unit-pinned in `morphogen.rs`).
-/// `uptake_layer` is redirected to layer 1, a flat/uniform cap with `regen_rate=0` and no other
-/// consumer, so its per-cell resource level is a KNOWN CONSTANT (`flat_cap/2`, `fields::new_layered`)
-/// — the test can hand-compute expected income without reading any live field state.
+/// Harvest is redirected to layer 1 — a flat/uniform cap with `regen_rate=0` and no other consumer,
+/// so its per-cell resource level is a KNOWN CONSTANT (`flat_cap/2`, `fields::new_layered`) — via
+/// TWO agreeing settings: `founder.uptake_layer = 1` (the raw genome field) AND `ring_gspec`'s
+/// `CellType::B` resolution (E-4b-i's `cell_type_uptake_layer` OVERRIDES the raw field once a
+/// cell_type chain is present, so both must point at layer 1, not just one).
 fn ring_extent_config(seed: u64, flat_cap: i64) -> SimConfig {
     let mut founder = Genome::founder(2).with_specs(Some(Arc::new(ring_gspec())), Some(base_mspec(3, None, BodyPlan::Ring)));
     founder.uptake_layer = 1;
@@ -89,6 +110,8 @@ fn extent_income_sums_live_cells_only() {
     // Hand-computed expectation — NOT derived by running Footprint (which would panic on this
     // sparse body's body_size != side² debug_assert, F3):
     // - N_live = 4*(g_dev-1) = 8 (Ring perimeter at g_dev=3, morphogen.rs's own pinned formula).
+    // - Every live cell resolves CellType::B (see `ring_gspec_resolves_to_cell_type_b`), which
+    //   E-4b-i routes to layer 1 (`cell_type_uptake_layer`), matching `founder.uptake_layer = 1`.
     // - r_cell = flat_cap/2 (the layer's initial mass, `fields::CpuFieldStore::new_layered`),
     //   identical at every grid cell since layer 1 is flat/uniform and regen_rate=0.
     // - Each of the 8 live cells maps to a DISTINCT field cell (offsets 0..2 inside a 3x3 block,
