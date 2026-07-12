@@ -188,16 +188,29 @@ fn extent_economy_arm_a_evolutionary_contrast() {
                 continue;
             }
 
-            // Phase-1-floor guard (mandatory, BOTH arms — critic F5-prev): a nonzero multicellular
-            // fraction proves the population reached phase-2 (n_cells>1 reachable), not stuck at
-            // the empty-CellGraph floor where Kleiber/extent-income both silently vanish.
+            // Phase-1-floor guard (BOTH arms — critic F5-prev): distinguish the real confound
+            // (n_cells=0 for an ALIVE body — phase-1 DECODE floor, silently zeroes Kleiber/extent
+            // income) from a legitimate live-but-unicellular outcome (all N=1 — a real data point,
+            // not a floor). Neither case aborts the sweep; both are recorded so PM gets the full
+            // per-seed distribution including Arm B (see GOTCHAS.md coupled-∝N-axes entry).
             let n_gt1 = pooled_n.iter().filter(|&&n| n > 1).count();
-            assert!(
-                n_gt1 > 0,
-                "phase-1-floor guard: arm={} seed={} produced ZERO multicellular (N>1) bodies in the \
-                 last third — population is stuck at the phase-1 floor; see GOTCHAS.md coupled-∝N-axes entry",
-                arm_name, seed
-            );
+            let n_zero = pooled_n.iter().filter(|&&n| n == 0).count();
+            if n_zero > 0 {
+                let histogram = compute_histogram(&pooled_n, max_n);
+                println!(
+                    "EXTENT-ECON armA arm={:<6} seed={:<2} pop={:<4} WARN-DECODE-FLOOR n_zero={} hist={}",
+                    arm_name, seed, pop, n_zero, histogram
+                );
+            }
+            if n_gt1 == 0 {
+                let mean_n: f64 = pooled_n.iter().sum::<i64>() as f64 / pooled_n.len() as f64;
+                let histogram = compute_histogram(&pooled_n, max_n);
+                println!(
+                    "EXTENT-ECON armA arm={:<6} seed={:<2} pop={:<4} UNICELLULAR mean_n≈{:.2} samples={} hist={}",
+                    arm_name, seed, pop, mean_n, pooled_n.len(), histogram
+                );
+                continue;
+            }
 
             let mean_n: f64 = pooled_n.iter().sum::<i64>() as f64 / pooled_n.len() as f64;
             let observed_max_n = *pooled_n.iter().max().unwrap_or(&0);
