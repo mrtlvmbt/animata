@@ -49,9 +49,9 @@ pub use grn_lut::{
     PREACT_MAX as GRN_PREACT_MAX, PREACT_MIN as GRN_PREACT_MIN,
 };
 pub use morphogen::{morphogen, morphogen_steps, topology_mask, BodyPlan, Boundary, Gradient, MorphogenSpec};
-pub use params::{AmbientToleranceSpec, EconParams, EnvFrontierConfig, FieldId, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
+pub use params::{AmbientToleranceSpec, EconParams, EnvFrontierConfig, FieldId, IncomeMode, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
-pub use stages::{expressed_capacity, settling_drain};
+pub use stages::{expressed_capacity, monod_demand, settling_drain};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
@@ -220,9 +220,10 @@ pub struct Telemetry {
 
     // ── EXT-0a: per-entity contention rate ────────────────────────────────────────────────────────
     /// EXT-0a (F6): entity_bits → contention_rate (fraction of footprint cells with deficit).
-    /// Populated in stage_interactions when body_footprint=true: per-entity count of footprint cells
-    /// where `grant < demand` (contested with other bodies), divided by total footprint cells (side²).
-    /// Cleared at the start of each stage_interactions call; 0 for non-footprint configs.
+    /// Populated in stage_interactions when `income_mode` is `Footprint`/`Extent`: per-entity count
+    /// of footprint/extent cells where `grant < demand` (contested with other bodies), divided by
+    /// total cells for that entity (side² under Footprint, live-cell count under Extent).
+    /// Cleared at the start of each stage_interactions call; 0 under `IncomeMode::Anchor`.
     /// Purely observational — never fed to state_hash or any conserved value. Diagnostic: separates
     /// three conditions: (a) contention↑ & N*↓ → real gradient, (b) contention↑ & N*→cap → no gradient,
     /// (c) contention→0 → bodies dispersed or density too low to crowding.

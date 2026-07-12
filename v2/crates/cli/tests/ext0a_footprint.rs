@@ -8,7 +8,7 @@
 //! At sparse density (shipped ~0.02-0.03 agents/cell), contention is rare → gradient weak/absent.
 //! At higher density, contention strong → optimum interior and smaller N* than at lower density.
 //!
-//! GOLDEN-NEUTRAL: flag OFF byte-identical to main. Sweep uses driver_config + body_footprint=true overrides.
+//! GOLDEN-NEUTRAL: flag OFF byte-identical to main. Sweep uses driver_config + income_mode=Footprint overrides.
 //! NO size-reward constant, no base_hazard bump — income is Σ R_cell over footprint cells, nothing more.
 //! A NULL result (bodies pile at cap regardless of density) is valid → indicates no contention drove size selection.
 //!
@@ -18,7 +18,7 @@
 //! - Emits: R̄, mean_cells, max_cells, mc_frac, body-size histogram per (density, seed).
 //!
 //! **Arm B (control):** flag OFF at the same densities as Arm A.
-//! - Same sweep structure, body_footprint=false (should reproduce D5-DRIFT's N*≈3.3 at shipped density).
+//! - Same sweep structure, income_mode=Anchor (should reproduce D5-DRIFT's N*≈3.3 at shipped density).
 //!
 //! No PASS/FAIL verdict; PM interprets density response of N* to diagnose mechanism.
 //! Conservation assertion: footprint cells must sum to zero residual (R15).
@@ -132,7 +132,7 @@ fn ext0a_footprint_arm_a() {
         ("high", 0.10, 410u64),    // ≈ 0.10 × 4096
     ];
 
-    println!("\nEXT-0a ARM A: footprint ON, density sweep (body_footprint=true)");
+    println!("\nEXT-0a ARM A: footprint ON, density sweep (income_mode=Footprint)");
     println!("Sweep: density {{0.02, 0.05, 0.10}} agents/cell × seed {{1..8}}, world_dim=64, ticks={ticks}");
     println!("EXT-0b config: gdev_cap={}, morphogen_steps={}, c_coord={}", gdev_cap, morphogen_steps, c_coord);
 
@@ -147,14 +147,14 @@ fn ext0a_footprint_arm_a() {
 
     for (label, _dens_frac, n_founders) in &densities {
         for &seed in &DIAGNOSTIC_SEEDS {
-            // Apply body_footprint=true to driver_config (direct set, not via apply_overrides).
+            // Apply income_mode=Footprint to driver_config (direct set, not via apply_overrides).
             let mut cfg = driver_config(seed);
             cfg.n_founders = *n_founders;
-            cfg.econ.body_footprint = true;  // EXT-0a flag ON for this arm
+            cfg.econ.income_mode = sim_core::IncomeMode::Footprint;  // EXT-0a flag ON for this arm
             cfg.econ.gdev_cap = gdev_cap;
             cfg.econ.morphogen_steps = morphogen_steps;
             cfg.econ.c_coord = c_coord;  // EXT-0b: apply c_coord knob
-            let body_footprint_gate = cfg.econ.body_footprint;
+            let body_footprint_gate = cfg.econ.income_mode == sim_core::IncomeMode::Footprint;
 
             // Run simulation to horizon.
             let mut sim = build_sim(cfg);
@@ -166,8 +166,8 @@ fn ext0a_footprint_arm_a() {
             let body_sizes = sim.body_size_probe();
 
             // EXT-0b (F1): entity-keyed body-size readout for the income join, own explicit
-            // econ.body_footprint gate — unlike income_record (always-on), this probe is only
-            // built when the flag enables the footprint contestant path this test exercises.
+            // income_mode gate — unlike income_record (always-on), this probe is only
+            // built when the mode enables the footprint contestant path this test exercises.
             let body_sizes_by_entity =
                 if body_footprint_gate { Some(sim.body_size_entity_probe()) } else { None };
 
@@ -248,7 +248,7 @@ fn ext0a_footprint_arm_a() {
 
 /// EXT-0a Arm B (control): footprint OFF at the same densities as Arm A.
 /// Should reproduce D5-DRIFT's drift centre N*≈3.3 at shipped density (no footprint income gradient).
-/// Same structure as Arm A; body_footprint=false (default, byte-identical to main).
+/// Same structure as Arm A; income_mode=Anchor (default, byte-identical to main).
 #[test]
 #[ignore]
 fn ext0a_footprint_arm_b_control() {
@@ -264,17 +264,17 @@ fn ext0a_footprint_arm_b_control() {
         ("high", 0.10, 410u64),
     ];
 
-    println!("\nEXT-0a ARM B (CONTROL): footprint OFF, density sweep (body_footprint=false)");
+    println!("\nEXT-0a ARM B (CONTROL): footprint OFF, density sweep (income_mode=Anchor)");
     println!("Sweep: density {{0.02, 0.05, 0.10}} agents/cell × seed {{1..8}}, world_dim=64, ticks={ticks}");
     println!("Expected: N* ≈ 3.3 at all densities (no income gradient; D5-DRIFT baseline)");
 
     for (label, _dens_frac, n_founders) in &densities {
         for &seed in &DIAGNOSTIC_SEEDS {
-            // Driver config with body_footprint=false (explicit default, byte-identical).
+            // Driver config with income_mode=Anchor (explicit default, byte-identical).
             let mut cfg = driver_config(seed);
             cfg.n_founders = *n_founders;
 
-            // No override needed; default is body_footprint=false (isolation gate).
+            // No override needed; default is income_mode=Anchor (isolation gate).
             // Extract gdev_cap before cfg is moved.
             let gdev_cap_control = cfg.econ.gdev_cap;
 
@@ -348,7 +348,7 @@ fn ext0a_footprint_conservation() {
 
     // Build a sim with footprint ON on a simple driver config.
     let mut cfg = driver_config(1);
-    cfg.econ.body_footprint = true;
+    cfg.econ.income_mode = sim_core::IncomeMode::Footprint;
     cfg.n_founders = 10;
 
     let mut sim = build_sim(cfg);
