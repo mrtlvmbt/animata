@@ -131,7 +131,14 @@ fn success_multicellular_newborn_gets_n_scaled_endowment() {
     // after this tick's ordinary income/metabolism; mutation_rate=0 pins the child's body IDENTICAL
     // to the parent's (9 live cells, matching kleiber_config's validated Square@g_dev=3 fixture) —
     // no stillbirth risk, isolating the endowment formula itself (not decode luck).
-    let econ = EconParams { newborn_energy_per_cell: true, d0_scaled: 0, ..EconParams::default() };
+    //
+    // `excrete: 0` isolates the VALUE READ (same as `cannot_afford_yet_then_divides_with_full_endowment`):
+    // the newborn is spawned `Energy(endowment)` correctly inside `stage_birth_death`, but
+    // `stage_field_scatter` (excrete) runs later the SAME tick and already sees the new child,
+    // deducting one `econ.excrete` deposit before this test's post-`step()` probe reads it — a
+    // probe-timing artifact, not a clamp. excrete is a conserved field deposit (Δtotal=0,
+    // R15-neutral), so zeroing it here does not touch conservation or the endowment mechanism.
+    let econ = EconParams { newborn_energy_per_cell: true, d0_scaled: 0, excrete: 0, ..EconParams::default() };
     let e_cell = econ.e_cell;
     let mut sim = build_sim(newborn_config(1, 20_000, 0, econ));
 
