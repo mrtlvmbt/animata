@@ -229,6 +229,16 @@ pub struct Telemetry {
     /// (c) contention→0 → bodies dispersed or density too low to crowding.
     pub entity_contention_rate: DetMap<u64, f32>,
 
+    // ── #425: per-entity contestant count (encoding assert for N-cell monopolization) ───────────────
+    /// #425 (critic F5): entity_bits → total footprint/extent contestants generated for this body
+    /// THIS TICK — the same `total_cells` counter `entity_contention_rate` divides by, exposed raw so
+    /// a test can assert the COUNT (not just the ratio). Under `IncomeMode::Anchor` this is always 1
+    /// (one contestant at the entity's own anchor cell, regardless of body size — this is exactly why
+    /// FRONTIER-alone monopolizes only 1 cell per body); under `IncomeMode::Extent` it equals the live
+    /// cell count N (one contestant per live cell in `CellGraph.cell_positions` — EF monopolizes N
+    /// distinct cells). Cleared+refilled each tick; purely observational, never fed to state_hash.
+    pub entity_contestant_count: DetMap<u64, u64>,
+
     // ── STEP-A0 (#398): per-tick income probe (never drained) ──────────────────────────────────────
     /// STEP-A0 (#398): entity_bits → (photo_in, chem_in) booked THIS TICK — same values as
     /// `income_record`, populated in the SAME `stage_interactions` loop, but unlike `income_record`

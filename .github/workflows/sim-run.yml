@@ -37,7 +37,7 @@ on:
           - ext-0b               # EXT-0b (#385) sweep harness parameterizing footprint arm by gdev_cap/morphogen_steps
           - diff-probe           # DIFF-0 (#372) cell-type differentiation probe (T>=2 ever occur under stock driver_config?)
           - step-a0              # STEP A0 (#398) concavity pre-gate: income(soma) shape under dol_economy (bounded vs linear), routing verdict
-          - extent-economy       # R30-1 (#419) extent-economy size-selection probe: Arm A EXTENT-vs-FLAT evolutionary contrast + Arm B invasion-fitness diagnostic
+          - extent-economy       # R30-1 (#419/#425) extent-economy 2x2 factorial (FLAT/EXTENT/FRONTIER/EF) DiD + mandatory EF invasion diagnostic + legacy extent-alone Arm B
       seed:
         description: "World seed (evo-stats / perf)"
         default: "1"
@@ -325,16 +325,25 @@ jobs:
                 cargo test --release -p cli -- step_a0_concavity_pregate --nocapture --ignored 2>&1 | tee ../"$SUM"
               ;;
             extent-economy)
-              # R30-1 (#419) extent-economy size-selection probe: Arm A (EXTENT-vs-FLAT evolutionary
-              # contrast, gdev_cap=6/morphogen_steps=12, ≥8 seeds, last-third live-N distribution) +
-              # Arm B (invasion-fitness diagnostic — graded-N invader sweep g_dev∈{2,3,4,6}, breed-true,
-              # frontier economy stripped, invader SpeciesId census-count frequency trajectory).
-              # Emits greppable `EXTENT-ECON armA ...` / `EXTENT-ECON armB ...` MAP lines. Analysis
-              # (the pre-declared rank test vs FLAT's measured drift + the invasion-gradient read) is
-              # offline (PM, pass 2 of #419) — this run only produces the raw distributions/trajectories.
+              # R30-1 (#419) + #425: extent-economy ⊕ ENV-0a′ spatial-monopolization 2x2 factorial.
+              # 1. extent_economy_2x2_factorial_did: all FOUR arms (FLAT/EXTENT/FRONTIER/EXTENT+FRONTIER,
+              #    gdev_cap=6/morphogen_steps=12, ≥8 seeds, last-third live-N distribution) + the
+              #    pre-declared DiD INTERACTION (mean(EF)-mean(FRONTIER)) - (mean(EXTENT)-mean(FLAT)),
+              #    the FLAT-headroom validity gate, and median-ΔN/P(N_EF>N_F) corroboration.
+              # 2. extent_economy_ef_invasion_diagnostic: MANDATORY (critic F2) invasion-fitness
+              #    diagnostic under EXTENT+FRONTIER (graded-N invader sweep g_dev∈{2,3,4,6}, breed-true,
+              #    frontier economy WELDED IN) — the sole discriminator of genuine gradient vs drift
+              #    vs endowment-burn, required to attribute any 2x2 DiD positive.
+              # 3. extent_economy_arm_b_invasion_diagnostic: legacy #420 extent-ALONE invasion
+              #    diagnostic (frontier stripped, critic F9) — unchanged reference/corroboration.
+              # Emits greppable `EXTENT-ECON 2x2 ...` / `EXTENT-ECON armB-EF ...` / `EXTENT-ECON armB ...`
+              # MAP lines. Analysis (the 7-check gate + reading the DiD/gate/invasion together) is
+              # offline (PM, pass 2 of #425) — this run only produces the raw distributions/trajectories.
               cd v2
               EXTENT_ECONOMY_TICKS="${{ inputs.ticks }}" \
-                cargo test --release -p cli -- extent_economy_arm_a_evolutionary_contrast --nocapture --ignored 2>&1 | tee ../"$SUM"
+                cargo test --release -p cli -- extent_economy_2x2_factorial_did --nocapture --ignored 2>&1 | tee ../"$SUM"
+              EXTENT_ECONOMY_TICKS="${{ inputs.ticks }}" \
+                cargo test --release -p cli -- extent_economy_ef_invasion_diagnostic --nocapture --ignored 2>&1 | tee -a ../"$SUM"
               EXTENT_ECONOMY_TICKS="${{ inputs.ticks }}" \
                 cargo test --release -p cli -- extent_economy_arm_b_invasion_diagnostic --nocapture --ignored 2>&1 | tee -a ../"$SUM"
               ;;
