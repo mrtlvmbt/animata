@@ -1582,12 +1582,10 @@ impl Genome {
             // Rung 1 SLOT 1 (#401): body_plan folded ONLY when non-Square (mirrors dup_counter's
             // != 0 gate above) — `Square` on every shipped spec contributes nothing, so all 6 prod
             // goldens stay byte-identical. `Ring`/`Filament` genomes lock their plan into the hash.
-            if mspec.body_plan != BodyPlan::Square {
-                h = fnv_mix(h, match mspec.body_plan {
-                    BodyPlan::Square => 0u64,
-                    BodyPlan::Ring => 1u64,
-                    BodyPlan::Filament => 2u64,
-                });
+            match mspec.body_plan {
+                BodyPlan::Square => {}
+                BodyPlan::Ring => h = fnv_mix(h, 1u64),
+                BodyPlan::Filament => h = fnv_mix(h, 2u64),
             }
         }
         h
@@ -3963,10 +3961,19 @@ mod tests {
         g.size = 21; // above the E-6 fate boundary — matches m7a_live_drive_produces_multiple_modules
         let graph = g.decode(&econ).expect("live-drive genome must decode to Some").graph;
 
-        // Pre-Rung-1 pinned value, captured from CI failed.log on first run (identical on x86 and
-        // arm64 jobs ⇒ arch-independent), per the sanctioned "placeholder -> first run -> pin actual
-        // value" golden-test creation procedure; this test is new to this branch.
+        // Byte-identity check, not a hope (topo-diff R-D): body_plan=Square's live_mask is all-true,
+        // so EVERY field must equal its pre-Rung-1 value — not just num_modules. germ_threshold /
+        // supply_source / adhesion_threshold are all None in this fixture (mirroring m7a_live_drive),
+        // so module_is_germ/module_reachable/module_consortium are pinned at their M7-b defaults
+        // (all-false / all-true / identity) independent of the Rung-1 change; the cell-count sum
+        // conserves the full g_dev*g_dev grid (no cell dropped by the mask), and num_modules==2 is
+        // the CI-captured first-run value (identical on x86 and arm64 ⇒ arch-independent).
+        assert_eq!(graph.g_dev, 4);
         assert_eq!(graph.num_modules(), 2);
+        assert_eq!(graph.module_cell_count.iter().sum::<i32>(), 16, "Square mask must not drop any of the g_dev*g_dev=16 cells");
+        assert_eq!(graph.module_is_germ, vec![false, false], "germ_threshold=None ⇒ all-soma, unchanged by Rung 1");
+        assert_eq!(graph.module_reachable, vec![true, true], "supply_source=None ⇒ all-reachable, unchanged by Rung 1");
+        assert_eq!(graph.module_consortium, vec![0, 1], "adhesion_threshold=None ⇒ identity consortium, unchanged by Rung 1");
     }
 
     /// Structural mask-live-count teeth (SPARSE ≠ SMALL, topo-diff F6): decoding through the FULL
