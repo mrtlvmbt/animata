@@ -153,7 +153,14 @@ fn extent_income_reads_3_not_9_cells() {
 /// formula evaluated at n_cells=3 (not 9), using the same public pure helpers the stage itself calls.
 #[test]
 fn metabolism_and_coord_cost_read_3_not_9_cells() {
-    let econ = EconParams { c_coord: 5, metab_reads_n_cells: true, income_mode: IncomeMode::Anchor, ..EconParams::default() };
+    // excrete: 0 — isolate the metabolic-lump value from the post-metabolism `stage_field_scatter`
+    // excrete deposit (GOTCHAS.md's excrete-pollution rake, ~R30-1.1b): that stage runs every tick,
+    // unconditionally, and deducts `econ.excrete` (default 8) AFTER metabolism but BEFORE this
+    // test's post-step `energy_entity_probe()` read — an absolute-value assertion like this one
+    // (unlike the refuge twin-comparison below, where excrete cancels in the delta) would otherwise
+    // be off by exactly `excrete`. Excrete is a conserved field deposit (R15-neutral); it only
+    // offsets the MEASURED energy here, it does not touch the firewall logic under test.
+    let econ = EconParams { c_coord: 5, metab_reads_n_cells: true, income_mode: IncomeMode::Anchor, excrete: 0, ..EconParams::default() };
     // flat_cap=0 on the harvested layer ⇒ r_cell=0 ⇒ monod_demand=0 ⇒ income is exactly 0 (isolates
     // metabolism from income arithmetic entirely, for either arm).
     let mut sim3 = build_sim(firewall_config(10, 0, econ.clone()));
