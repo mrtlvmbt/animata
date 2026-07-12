@@ -8,9 +8,11 @@
 //! 1. **[`fault_scarp_delta`]** — a vertical height STEP applied across each fault line, BEFORE
 //!    erosion (so erosion then dissects the raw scarp).
 //! 2. **[`is_in_fault_band`]** — marks cells within a fixed perpendicular band of any fault line, so
-//!    `gen::erosion::erode_with_tectonics` can force the rock-resistance field softer there (fault
-//!    gouge — geologically the fault zone is the WEAKEST rock, not the hardest), giving the existing
-//!    differential-erosion machinery a LINEAR structure to carve into valleys, instead of the
+//!    `gen::erosion::erode_with_tectonics` can force the rock-resistance field HARDER there (RnD 17
+//!    §3, differential erosion: a relief-INCREASING fault must resist incision more than the
+//!    surrounding rock, standing proud as a resistant ridge/lineament as the softer surrounding rock
+//!    strips away around it — models a cemented/mineralized fault), giving the existing
+//!    differential-erosion machinery a LINEAR structure to carve relief around, instead of the
 //!    isotropic-noise blobs `resistance_field` alone produces.
 //!
 //! ## Fault representation — infinite lines via integer cross-product, no trig/float/sqrt
@@ -54,7 +56,7 @@ const FAULT_DIRECTIONS: [(i64, i64); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
 /// contributes `± step_half` to a cell's height depending on which side of the line it falls on;
 /// implementer's call, documented, locked by the golden-vector test.
 const FAULT_STEP_NUM: i64 = 1;
-const FAULT_STEP_DEN: i64 = 8;
+const FAULT_STEP_DEN: i64 = 12;
 
 /// Resistance-lineament half-band width, in grid cells, measured perpendicular to the fault line.
 /// Implementer's call, documented, locked — wide enough to give the erosion loop a real linear
@@ -197,14 +199,16 @@ mod tests {
     /// the golden `(seed, dim, hmax)` — re-derivable from this file's algorithm doc (critic F10
     /// idiom, mirrors `height.rs`/`erosion.rs`'s golden-vector tests).
     ///
-    /// Re-pinned for #397: `FAULT_STEP_DEN` widened 12→8 (the scarp-step fallback lever, see
-    /// `erosion.rs`'s `erode_with_tectonics` doc) — a local run, this golden class is
-    /// integer-deterministic and arch-independent (mirrors the original #396 pin method).
+    /// Restored for #397: the scarp-step widening (`FAULT_STEP_DEN` 12→8) was a magnitude crank,
+    /// reverted (PM decision) in favor of the hard-fault resistance flip alone. `FAULT_STEP_DEN` is
+    /// back at its pre-#397 value 12, so this is byte-identical to the original #396 pin — restored
+    /// from that value directly (no fresh CI reveal needed, it's a pure function of unchanged
+    /// inputs), originally pinned from `v2-golden-arm64` CI run #29170719244, commit cde3c68.
     #[test]
     fn golden_vector_matches_pinned_tectonics_fixture() {
         let faults = build_faults(SEED, DIM);
         const COORDS: &[(i64, i64)] = &[(0, 0), (7, 3), (32, 32), (63, 63)];
-        const EXPECTED: &[(i64, bool)] = &[(-25, false), (-25, false), (25, false), (-25, false)];
+        const EXPECTED: &[(i64, bool)] = &[(-16, false), (-16, false), (16, false), (-16, false)];
         let actual: Vec<(i64, bool)> = COORDS
             .iter()
             .map(|&(x, z)| (fault_scarp_delta(x, z, &faults, HMAX), is_in_fault_band(x, z, &faults)))
