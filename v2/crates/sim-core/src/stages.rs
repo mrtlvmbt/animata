@@ -890,6 +890,8 @@ pub fn stage_interactions(
             // Edge case: no footprint cells (shouldn't happen with footprint flag ON, but defensive).
             tel.entity_contention_rate.insert(*entity_bits, 0.0);
         }
+        // #425 (critic F5): raw contestant count, same counter as above, exposed unratioed.
+        tel.entity_contestant_count.insert(*entity_bits, *total_cells);
     }
 
     // D′-1: book photo energy as external source (non-conserved flux, like regen from field.solve()).

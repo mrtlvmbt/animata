@@ -399,8 +399,11 @@ const SETTLING_SHIFT: u32 = 16;       // Q-format shift (matches Q8.8 magnitude)
 
 /// ENV-0a'-a1: spatial monopolization CONSTANT (resource patch grain).
 /// Spatial correlation length for patch-grain heterogeneity (cells). Fixed default for a1;
-/// swept in a2. Controls the frequency-dependent bistability landscape.
-const ENV_FRONTIER_PATCH_GRAIN: i64 = 4;
+/// swept in a2. Controls the frequency-dependent bistability landscape. `pub` (#425) so the
+/// extent⊕monopolization 2×2-factorial test suite can assert the FRONTIER/EF arms reuse this EXACT
+/// established value instead of re-declaring the literal (anti-forcing — not tuned to make the
+/// composition fire).
+pub const ENV_FRONTIER_PATCH_GRAIN: i64 = 4;
 
 /// D-2 (#270): the multicellular-predation cost↔benefit economy — the experiment substrate D-3
 /// sweeps for body-size emergence. D-5 evolution: now uses hazard-refuge predation (implicit
@@ -820,6 +823,54 @@ pub fn extent_economy_invasion_config(seed: u64) -> SimConfig {
     cfg.econ.newborn_energy_per_cell = true;
     cfg.econ.gdev_cap = EXTENT_ECONOMY_GDEV_CAP;
     cfg.econ.morphogen_steps = EXTENT_ECONOMY_MORPHOGEN_STEPS;
+    cfg
+}
+
+// ── #425: extent-economy ⊕ spatial-monopolization 2×2 factorial (harness, pass 1 of 2) ───────────
+//
+// The 2×2 table (all four arms: SAME driver_config base, SAME raised gdev_cap/morphogen_steps,
+// differ ONLY in {3 extent flags} × {env_frontier_config}):
+//
+//   arm             | 3 extent flags | env_frontier_config           | role
+//   FLAT            | off            | None                          | neutral-drift baseline
+//   EXTENT          | on             | None                          | the concluded NULL (ref)
+//   FRONTIER        | off            | Some(ENV_FRONTIER_PATCH_GRAIN)| ENV-0a′ monopolization alone (ref)
+//   EXTENT+FRONTIER | on             | Some(ENV_FRONTIER_PATCH_GRAIN)| the composition (test arm)
+//
+// FLAT == `extent_economy_flat_config`, EXTENT == `extent_economy_extent_config` (both #420,
+// unchanged above). Only FRONTIER and EXTENT+FRONTIER are new — each is the existing sibling plus
+// `env_frontier_config = Some(ENV_FRONTIER_PATCH_GRAIN)` (the established ENV-0a′ value, NOT tuned).
+
+/// FRONTIER arm: ENV-0a′ spatial monopolization ALONE (the extent flags stay OFF — Anchor income,
+/// Kleiber-on-`size`-gene, flat endowment). `extent_economy_flat_config` + `env_frontier_config =
+/// Some(ENV_FRONTIER_PATCH_GRAIN)`. Reference arm: known MC driver (memory `reality-is-existence-proof`,
+/// GATE-4), NOT itself evidence for the extent economy — the DiD isolates the interaction (issue #425).
+pub fn extent_economy_frontier_config(seed: u64) -> SimConfig {
+    let mut cfg = extent_economy_flat_config(seed);
+    cfg.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain: ENV_FRONTIER_PATCH_GRAIN });
+    cfg
+}
+
+/// EXTENT+FRONTIER arm (the test arm): the coherent extent economy COMPOSED with ENV-0a′
+/// monopolization. `extent_economy_extent_config` + `env_frontier_config =
+/// Some(ENV_FRONTIER_PATCH_GRAIN)` — flips ONLY the frontier toggle relative to the EXTENT arm (and
+/// ONLY the 3 extent flags relative to the FRONTIER arm), so the 2×2 factorial isolates the
+/// frontier×extent interaction (critic F1/F6, issue #425).
+pub fn extent_economy_extent_frontier_config(seed: u64) -> SimConfig {
+    let mut cfg = extent_economy_extent_config(seed);
+    cfg.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain: ENV_FRONTIER_PATCH_GRAIN });
+    cfg
+}
+
+/// Invasion diagnostic under EXTENT+FRONTIER (#425, critic F2 MANDATORY attribution discriminator).
+/// Identical breed-true plumbing to `extent_economy_invasion_config` (`evolve_body_size=false`,
+/// `speciation_threshold=i64::MAX`, `founder_templates`-driven) but — UNLIKE that config, and
+/// unlike #420's critic-F9 requirement to strip it — `env_frontier_config` is `Some(patch_grain)`
+/// here, NOT `None`: this diagnostic tests the COMPOSITION (does a rare larger-N invader actually
+/// grow among small residents under EF?), so the frontier economy must be WELDED IN, not stripped.
+pub fn extent_economy_ef_invasion_config(seed: u64) -> SimConfig {
+    let mut cfg = extent_economy_invasion_config(seed);
+    cfg.econ.env_frontier_config = Some(sim_core::EnvFrontierConfig { patch_grain: ENV_FRONTIER_PATCH_GRAIN });
     cfg
 }
 
