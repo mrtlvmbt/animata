@@ -21,6 +21,11 @@
 //! deterministic Werner slab-CA (wind-driven dunes) run POST-erosion by `caps::classify_and_caps`,
 //! opt-in and default-off (`enable_aeolian` threads the same way `enable_tectonics` does, orthogonal
 //! to it — both are independent opt-in stages).
+//!
+//! **W-SIM-5 (#410, `worldgen-relief` branch):** `volcanic` is the third landform slice — CONSTRUCTIVE
+//! (additive) viscosity-selected edifices, folded into the initial height field by
+//! `erosion::erode_with_tectonics` PRE-erosion (the same seam tectonics already injects at), opt-in
+//! and default-off (`enable_volcanic`, orthogonal to `enable_tectonics`/`enable_aeolian`).
 
 pub mod aeolian;
 pub mod biome;
@@ -32,3 +37,4 @@ pub mod height;
 pub mod material;
 pub mod moisture;
 pub mod tectonics;
+pub mod volcanic;
