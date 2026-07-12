@@ -238,6 +238,7 @@ pub fn phase2_config(seed: u64) -> SimConfig {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: sim_core::BodyPlan::Square,
     };
     // V-1 reposition: weaker bistable matrix + off-center initial — mutation-sensitive-but-stable
     // (see the doc comment above). Validated via GrnSpec::new (F7).
@@ -327,6 +328,7 @@ pub fn differentiation_config(seed: u64) -> SimConfig {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: sim_core::BodyPlan::Square,
     };
     let gspec = sim_core::GrnSpec::new(
         2,
@@ -563,6 +565,7 @@ pub fn phase2_oxygen_config(seed: u64) -> SimConfig {
         germ_threshold: None,
         supply_source: None,
         adhesion_threshold: None,
+        body_plan: sim_core::BodyPlan::Square,
     };
     let gspec = sim_core::GrnSpec::new(
         2,
@@ -616,6 +619,7 @@ pub fn p2_config(seed: u64) -> SimConfig {
         germ_threshold: None,
         supply_source: None,
         adhesion_threshold: None,
+        body_plan: sim_core::BodyPlan::Square,
     };
     let gspec = sim_core::GrnSpec::new(
         2,

@@ -434,6 +434,14 @@ pub struct EconParams {
     /// regardless of body size → byte-identical goldens (the isolation gate).
     /// Determinism: the footprint is a pure function of (Position, g_dev, world_dim) — no RNG/HashMap.
     pub body_footprint: bool,
+
+    // ── Rung 1 (topo-diff §3 SLOT 1, #401): heritable body-plan mutation gate ───────────────────
+    /// Enable heritable mutation of `morphogen_spec.body_plan` (Square↔Ring↔Filament). `false`
+    /// (default, all existing production configs) → `mutate()` draws zero values from the
+    /// `SALT_BODY_PLAN` stream → `body_plan` never changes → stays `Square` forever → byte-identical
+    /// goldens (mirrors `evolve_body_size`/`SALT_GDEV`). Gated additionally on
+    /// `morphogen_spec.is_some()` in `Genome::mutate`.
+    pub enable_body_plan: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -718,6 +726,9 @@ impl Default for EconParams {
             env_frontier_config: None,
             // EXT-0a: body footprint harvest OFF by default — false for all 5 existing configs (byte-identical).
             body_footprint: false,
+            // Rung 1 (#401): body-plan mutation OFF by default — false for all existing production
+            // configs (byte-identical goldens; body_plan stays Square forever).
+            enable_body_plan: false,
         }
     }
 }

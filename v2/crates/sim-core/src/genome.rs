@@ -7,8 +7,8 @@
 #![deny(clippy::float_arithmetic)]
 
 use crate::{
-    brain_w_ho, brain_w_ih, fnv_mix, grn, morphogen, seed_fold, AmbientToleranceSpec, Boundary,
-    CellType, EconParams, GrnSpec, MorphogenSpec, BRAIN_WEIGHTS, GRN_EXPR_MAX,
+    brain_w_ho, brain_w_ih, fnv_mix, grn, morphogen, seed_fold, topology_mask, AmbientToleranceSpec,
+    BodyPlan, Boundary, CellType, EconParams, GrnSpec, MorphogenSpec, BRAIN_WEIGHTS, GRN_EXPR_MAX,
 };
 use bevy_ecs::prelude::Component;
 use std::sync::Arc;
@@ -298,8 +298,14 @@ impl CellGraph {
     }
 
     /// Decode a morphogen gradient into a multicellular graph: per-grid-cell classification,
-    /// M7-b apoptosis marking, connected-component labeling via union-find (skipping dead cells),
-    /// canonical row-major order + min-index representative.
+    /// Rung-1 body-plan masking + M7-b apoptosis marking, connected-component labeling via
+    /// union-find (skipping dead cells), canonical row-major order + min-index representative.
+    ///
+    /// `body_plan`: Rung 1 SLOT 1 (#401) — `topology_mask(body_plan, g_dev)` decides which cells
+    /// are structurally live BEFORE apoptosis is evaluated. `Square` (default, every shipped spec)
+    /// ⇒ all cells live ⇒ contributes nothing to `dead` ⇒ byte-identical to pre-Rung-1 decode.
+    /// `Ring`/`Filament`: non-live cells are marked dead the same way apoptosis is (in place, F1
+    /// PINNED — see below), so a cell can be dead via EITHER gate (`dead = !live_mask | apoptosis`).
     ///
     /// `apoptosis_threshold`: `None` (every shipped spec) runs the pass exactly as M7-a — byte-
     /// identical, no dead cells ever marked. `Some(t)` (test-only): a cell is marked dead iff its
@@ -315,18 +321,24 @@ impl CellGraph {
         germ_threshold: Option<i32>,
         supply_source: Option<i32>,
         adhesion_threshold: Option<i32>,
+        body_plan: BodyPlan,
     ) -> Self {
         let g_dev = gradient.g_dev;
         let n_cells = g_dev * g_dev;
+        // Rung 1 SLOT 1 (#401): pure (body_plan, g_dev) -> live_mask, computed once up front.
+        // `Square` (default) is all-true, so the `!live_mask[idx]` term below is always `false`
+        // and `dead` reduces exactly to the pre-Rung-1 apoptosis-only expression.
+        let live_mask = topology_mask(body_plan, g_dev);
 
         // 1. Per-grid-cell classification: each cell gets a CellType from its local gradient value,
-        // plus an M7-b dead mark from the same GRN-resolved state (canonical row-major order).
-        // For each grid cell, sample the gradient at that position and run the GRN to resolve
-        // the attractor state, then classify that state to determine the cell type.
+        // plus a live/dead mark from the body-plan mask and the same GRN-resolved state (canonical
+        // row-major order). For each grid cell, sample the gradient at that position and run the
+        // GRN to resolve the attractor state, then classify that state to determine the cell type.
         let mut grid_cell_type: Vec<CellType> = Vec::with_capacity(n_cells);
         let mut dead: Vec<bool> = Vec::with_capacity(n_cells);
         for z in 0..g_dev {
             for x in 0..g_dev {
+                let idx = z * g_dev + x;
                 // Create a singleton gradient with the value at this cell
                 let grad_val = gradient.at(x, z);
                 let cell_gradient = crate::morphogen::Gradient {
@@ -340,8 +352,9 @@ impl CellGraph {
                 // Run the GRN with this gradient value and resolve to attractor
                 let (state, ct, _steps) = crate::grn_resolve(&cell_gradient, &cell_gspec);
                 grid_cell_type.push(ct);
-                // M7-b (F3, PINNED): gene-0 expression below threshold ⇒ apoptosis. `None` ⇒ never dead.
-                dead.push(matches!(apoptosis_threshold, Some(t) if state[0] < t));
+                // Rung 1 SLOT 1: non-live (per body_plan) OR M7-b apoptosed (F3, PINNED: gene-0
+                // expression below threshold) ⇒ dead. `Square` + `None` ⇒ never dead (pre-Rung-1).
+                dead.push(!live_mask[idx] || matches!(apoptosis_threshold, Some(t) if state[0] < t));
             }
         }
 
@@ -817,7 +830,10 @@ impl Genome {
     /// stays 0, non-O₂ genomes never carry a non-zero respiratory_pathway, keeping existing goldens byte-identical.
     /// `has_ambient_tolerance` gates the `tol_optimum` and `tol_breadth` mutations (P3-1): when `false`,
     /// both stay 0, non-tolerance genomes never carry non-zero tolerance genes, keeping existing goldens byte-identical.
-    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool, enable_variable_length: bool, evolve_body_size: bool, enable_oxygen: bool, has_ambient_tolerance: bool, enable_mutation_load: bool, mut_load_del_num: i32, mut_load_del_den: i32, mut_load_ben_num: i32, mut_load_ben_den: i32, gdev_cap: usize) -> Genome {
+    /// `enable_body_plan` gates the `morphogen_spec.body_plan` mutation (Rung 1 SLOT 1, #401): when
+    /// `false`, `body_plan` stays `Square` forever — non-opted-in configs never carry a non-Square
+    /// plan, keeping existing goldens byte-identical.
+    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool, enable_variable_length: bool, evolve_body_size: bool, enable_oxygen: bool, has_ambient_tolerance: bool, enable_mutation_load: bool, mut_load_del_num: i32, mut_load_del_den: i32, mut_load_ben_num: i32, mut_load_ben_den: i32, gdev_cap: usize, enable_body_plan: bool) -> Genome {
         let mut g = self.clone();
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -992,6 +1008,24 @@ impl Genome {
                 if (r & 0xFF) < self.mutation_rate as u64 {
                     let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
                     mspec.g_dev = (mspec.g_dev as i32 + delta).clamp(1, gdev_cap as i32) as usize;
+                    g.morphogen_spec = Some(mspec);
+                }
+            }
+        }
+
+        // Rung 1 SLOT 1 (#401): body-plan axis — heritable small-step mutation of
+        // `morphogen_spec.body_plan` (Square↔Ring↔Filament). Disjoint salt `SALT_BODY_PLAN`, drawn
+        // AFTER SALT_GDEV, BEFORE V-3-b (§5.2 stream hygiene — every prior draw position preserved).
+        // Gated on BOTH `self.morphogen_spec.is_some()` AND `enable_body_plan` (opt-in per config —
+        // every shipped config passes `false` → zero draws → `body_plan` stays `Square` forever →
+        // byte-identical goldens). `MorphogenSpec` is `Copy` — mutate the carried copy directly.
+        const SALT_BODY_PLAN: u64 = 0x544F_504Fu64; // "TOPO"
+        if enable_body_plan {
+            if let Some(mut mspec) = self.morphogen_spec {
+                let r = seed_fold(stream, &[SALT_BODY_PLAN]);
+                if (r & 0xFF) < self.mutation_rate as u64 {
+                    let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1 (small circular step)
+                    mspec.body_plan = mspec.body_plan.step(delta);
                     g.morphogen_spec = Some(mspec);
                 }
             }
@@ -1350,6 +1384,8 @@ impl Genome {
                 // ⇒ byte-identical to M7-c for all 6 prod configs (golden-NEUTRAL).
                 // M7-f: adhesion_threshold=None on every shipped spec ⇒ module_consortium stays the
                 // identity mapping ⇒ byte-identical to M7-d for all 6 prod configs (golden-NEUTRAL).
+                // Rung 1 SLOT 1 (#401): body_plan=Square on every shipped spec ⇒ topology_mask is
+                // all-live ⇒ byte-identical to M7-f for all 6 prod configs (golden-NEUTRAL).
                 let g = CellGraph::from_gradient(
                     &gradient,
                     gspec,
@@ -1357,6 +1393,7 @@ impl Genome {
                     mspec.germ_threshold,
                     mspec.supply_source,
                     mspec.adhesion_threshold,
+                    mspec.body_plan,
                 );
                 (Some(ct), g)
             }
@@ -1542,6 +1579,14 @@ impl Genome {
             if let Some(t) = mspec.adhesion_threshold {
                 h = fnv_mix(h, t as u64);
             }
+            // Rung 1 SLOT 1 (#401): body_plan folded ONLY when non-Square (mirrors dup_counter's
+            // != 0 gate above) — `Square` on every shipped spec contributes nothing, so all 6 prod
+            // goldens stay byte-identical. `Ring`/`Filament` genomes lock their plan into the hash.
+            match mspec.body_plan {
+                BodyPlan::Square => {}
+                BodyPlan::Ring => h = fnv_mix(h, 1u64),
+                BodyPlan::Filament => h = fnv_mix(h, 2u64),
+            }
         }
         h
     }
@@ -1569,9 +1614,9 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4), g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4));
+        assert_eq!(g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false), g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.mutate(s, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
@@ -1582,19 +1627,19 @@ mod tests {
         }
         // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.mutate(s, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
             assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
             assert!((-4..=4).contains(&m.reg_gain), "reg_gain must be in [-reg_gain_max, +reg_gain_max]");
         }
         // reg_gain_max=0 locks regulation OFF even when has_light=true.
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.mutate(s, 2, true, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
             assert_eq!(m.reg_gain, 0, "reg_gain must stay 0 when reg_gain_max=0 (D′-2c lock)");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+        let m1 = g1.mutate(0, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }
@@ -1613,7 +1658,7 @@ mod tests {
         }
         // Also holds for a mutated genome.
         let g = Genome::founder(2);
-        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
         assert_eq!(mutated.decode(&EconParams::default()), mutated.decode(&EconParams::default()), "decode deterministic on mutated genome");
     }
 
@@ -1636,7 +1681,7 @@ mod tests {
             "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
         // Also for mutated genome — projection stays 1:1 regardless of trait value.
         for s in 0..50u64 {
-            let m = g.mutate(s, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.mutate(s, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
             let mph = m.decode(&EconParams::default()).expect("mutated Ф0 must decode to Some");
             assert_eq!(mph.uptake_layer, m.uptake_layer,
                 "1:1 projection must hold after mutation (seed={s})");
@@ -1673,14 +1718,14 @@ mod tests {
             "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
 
         // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
-        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
         assert!(mutated_child.force_decode_none,
             "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
         assert!(mutated_child.decode(&EconParams::default()).is_none(),
             "inherited flag: child decode() also returns None (lineage-level stillbirth)");
 
         // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
-        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
         assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
         assert!(normal_child.decode(&EconParams::default()).is_some(), "normal child decode() must return Some");
     }
@@ -1708,6 +1753,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         let gspec = GrnSpec {
             n_genes: 2,
@@ -1769,6 +1815,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         // Flipped-corner bistable fixture (mirrors grn.rs's, initial swapped) → resolves to B.
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![0, 256]);
@@ -1805,6 +1852,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         // grn_spec stays None — only morphogen_spec attached.
         let g = Genome::founder(2).with_specs(None, Some(mspec));
@@ -1854,6 +1902,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         }
     }
 
@@ -2100,6 +2149,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         let gspec = m7a_dead_drive_gspec();
 
@@ -2124,6 +2174,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -2151,6 +2202,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         let gspec = m7a_live_drive_gspec();
 
@@ -2207,6 +2259,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         }
     }
 
@@ -2430,6 +2483,7 @@ mod tests {
             apoptosis_threshold, germ_threshold,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         }
     }
 
@@ -2566,6 +2620,7 @@ mod tests {
             seed_scale: 64, stop_threshold: 0,
             apoptosis_threshold, germ_threshold, supply_source,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         }
     }
 
@@ -2673,7 +2728,7 @@ mod tests {
         let gspec = m7d_wall_gspec();
         let t = m7d_wall_apoptosis_threshold();
         // idx 0 = cell (0,0), inside the top (surviving) block.
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(0), None);
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(0), None, BodyPlan::Square);
         assert_eq!(
             graph.module_type,
             vec![CellType::A, CellType::A],
@@ -2693,7 +2748,7 @@ mod tests {
         let gspec = m7d_wall_gspec();
         let t = m7d_wall_apoptosis_threshold();
         // idx 4 = cell (x=0, z=1), inside the apoptosed wall row -- a genuinely dead source.
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(4), None);
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t), None, Some(4), None, BodyPlan::Square);
         assert_eq!(graph.num_modules(), 2, "sanity: apoptosis must still leave 2 live modules");
         assert!(graph.module_reachable.iter().all(|&r| !r), "a dead supply source must leave every module unreachable, valid Some, no panic");
     }
@@ -2704,13 +2759,13 @@ mod tests {
         let gspec = m7d_wall_gspec();
         let t_apop = m7d_wall_apoptosis_threshold();
         // germ_threshold=4: the top module (count=4) is GERM, the bottom module (count=8) is SOMA.
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), None);
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), None, BodyPlan::Square);
         assert_eq!(graph.module_cell_count, vec![4, 8]);
         assert_eq!(graph.module_is_germ, vec![true, false], "module 0 (count=4) is germ; module 1 (count=8) is soma");
         assert_eq!(graph.module_reachable, vec![true, false], "reachability must be unaffected by germ/soma labeling");
 
         // All three gates armed together must still be deterministic.
-        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), None);
+        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), None, BodyPlan::Square);
         assert_eq!(graph, graph2, "apoptosis + germ + supply must coexist deterministically");
     }
 
@@ -2720,7 +2775,7 @@ mod tests {
         let gspec = m7d_wall_gspec();
         // A threshold above every resolved state kills the whole grid (mirrors m7b/m7c's
         // `GRN_EXPR_MAX + 1` empty-body pattern).
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0), None);
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0), None, BodyPlan::Square);
         assert_eq!(graph.num_modules(), 0, "all-dead grid must yield zero modules");
         assert!(graph.module_reachable.is_empty(), "zero modules must yield an empty module_reachable, not a panic");
     }
@@ -2770,6 +2825,7 @@ mod tests {
             Some(m7f_adhesion_germ_threshold()),
             None,
             Some(1),
+            BodyPlan::Square,
         );
         assert_eq!(graph.module_type, vec![CellType::A, CellType::B, CellType::Mixed], "sanity: 3 distinct modules");
         assert_eq!(graph.module_cell_count, vec![4, 8, 4], "sanity: manually-traced module sizes");
@@ -2789,8 +2845,8 @@ mod tests {
     fn m7f_adhesion_determinism() {
         let gradient = m7f_adhesion_gradient();
         let gspec = m7d_wall_gspec();
-        let g1 = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1));
-        let g2 = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1));
+        let g1 = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1), BodyPlan::Square);
+        let g2 = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1), BodyPlan::Square);
         assert_eq!(g1, g2, "same gradient + Some(_) must produce identical module_consortium across repeated calls");
     }
 
@@ -2798,14 +2854,14 @@ mod tests {
     fn m7f_none_identity() {
         let gradient = m7f_adhesion_gradient();
         let gspec = m7d_wall_gspec();
-        let graph_off = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, None);
+        let graph_off = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, None, BodyPlan::Square);
         assert_eq!(
             graph_off.module_consortium,
             (0..graph_off.num_modules()).collect::<Vec<usize>>(),
             "adhesion_threshold=None must leave module_consortium as the identity mapping"
         );
 
-        let graph_on = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1));
+        let graph_on = CellGraph::from_gradient(&gradient, &gspec, None, Some(m7f_adhesion_germ_threshold()), None, Some(1), BodyPlan::Square);
         assert_eq!(graph_off.module_type, graph_on.module_type, "M7-f must not perturb module_type");
         assert_eq!(graph_off.module_cell_count, graph_on.module_cell_count, "M7-f must not perturb module_cell_count");
         assert_eq!(graph_off.module_is_germ, graph_on.module_is_germ, "M7-f must not perturb module_is_germ");
@@ -2829,7 +2885,7 @@ mod tests {
         // supply_source=0 makes only the top module reachable, adhesion_threshold=Some(_) arms
         // the consortium pass. The wall severs LIVE adjacency between the two surviving modules,
         // so Step 6 finds no edge to union regardless of germ-status — both stay their own.
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), Some(1));
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), Some(1), BodyPlan::Square);
         assert_eq!(graph.module_cell_count, vec![4, 8], "sanity: same wall-fixture module sizes as M7-d");
         assert_eq!(graph.module_is_germ, vec![true, false], "sanity: germ_threshold=4 still splits germ=[T,F]");
         assert_eq!(graph.module_reachable, vec![true, false], "sanity: wall still severs reachability");
@@ -2839,7 +2895,7 @@ mod tests {
             "wall severs live adjacency — no edge exists to union, both modules stay their own consortium"
         );
 
-        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), Some(1));
+        let graph2 = CellGraph::from_gradient(&gradient, &gspec, Some(t_apop), Some(4), Some(0), Some(1), BodyPlan::Square);
         assert_eq!(graph, graph2, "all four gates (apoptosis+germ+supply+adhesion) must coexist deterministically");
     }
 
@@ -2849,7 +2905,7 @@ mod tests {
         let gspec = m7d_wall_gspec();
         // A threshold above every resolved state kills the whole grid (mirrors m7b/m7c/m7d's
         // `GRN_EXPR_MAX + 1` empty-body pattern).
-        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0), Some(1));
+        let graph = CellGraph::from_gradient(&gradient, &gspec, Some(crate::GRN_EXPR_MAX + 1), None, Some(0), Some(1), BodyPlan::Square);
         assert_eq!(graph.num_modules(), 0, "all-dead grid must yield zero modules");
         assert!(graph.module_consortium.is_empty(), "zero modules must yield an empty module_consortium, not a panic");
     }
@@ -2860,7 +2916,7 @@ mod tests {
         // collapses the whole grid into exactly 1 module (mirrors M7-a's baseline reasoning).
         let gradient = crate::morphogen::Gradient { g_dev: 4, cells: vec![10; 16] };
         let gspec = m7d_wall_gspec();
-        let graph = CellGraph::from_gradient(&gradient, &gspec, None, None, None, Some(1));
+        let graph = CellGraph::from_gradient(&gradient, &gspec, None, None, None, Some(1), BodyPlan::Square);
         assert_eq!(graph.num_modules(), 1, "sanity: uniform grid must collapse to 1 module");
         assert_eq!(graph.module_consortium, vec![0], "a singleton module must be its own (trivial) consortium");
     }
@@ -2877,7 +2933,7 @@ mod tests {
         
         for i in 0..100 {
             let seed = 0x1234_5678 + (i as u64);
-            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
+            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false);
             
             // If grn_spec exists, n_genes should stay at 2
             if let Some(spec) = &g.grn_spec {
@@ -2898,8 +2954,8 @@ mod tests {
         let econ = EconParams::default();
         
         // Mutate both with flag=false
-        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
-        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
+        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false);
+        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false);
         
         // They should be byte-identical (determinism check)
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
@@ -2914,7 +2970,7 @@ mod tests {
         let g = Genome::founder(2); // No spec
         
         // Mutate with flag=true
-        let m = g.mutate(0x9999_9999, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+        let m = g.mutate(0x9999_9999, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
         
         // Should still have no spec
         assert!(m.grn_spec.is_none(), "V-3-b: genome without spec should stay without spec");
@@ -2945,7 +3001,7 @@ mod tests {
         let mut found_growth = false;
         for i in 0..1000 {
             let seed = 0xABCD_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -2985,7 +3041,7 @@ mod tests {
         // Find a seed that triggers duplication
         for i in 0..1000 {
             let seed = 0xFEED_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3025,7 +3081,7 @@ mod tests {
         
         for i in 0..1000 {
             let seed = 0xBEEF_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3062,6 +3118,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
@@ -3076,7 +3133,7 @@ mod tests {
         // Find a seed that triggers duplication
         for i in 0..1000 {
             let seed = 0xCAFE_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false);
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3101,7 +3158,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1111_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-c: flag=false must keep n_genes constant (iteration {i})");
             }
@@ -3118,8 +3175,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -3131,7 +3188,7 @@ mod tests {
     fn v3c_no_spec_no_indel() {
         // flag=true but grn_spec=None → no length change (Some-gated).
         let g = Genome::founder(2); // no spec
-        let m = g.mutate(0x2222_2222, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+        let m = g.mutate(0x2222_2222, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
         assert!(m.grn_spec.is_none(), "V-3-c: genome without spec must stay without spec");
     }
 
@@ -3148,7 +3205,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x3333_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &m.grn_spec {
                 // n_genes==3 alone doesn't prove indel-insert fired — V-3-b duplication also grows
                 // n_genes by 1 (with a NON-zero paralog copy). Distinguish by the novel gene's id:
@@ -3195,7 +3252,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x4444_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes == 2 {
                     let n = spec.n_genes;
@@ -3221,7 +3278,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x5555_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &m.grn_spec {
                 assert!(spec.n_genes >= 2, "V-3-c: n_genes must never breach the floor (iteration {i})");
             }
@@ -3238,7 +3295,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x6666_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &g.grn_spec {
                 let n = spec.n_genes;
                 assert_eq!(spec.weights.len(), n * n, "iteration {i}");
@@ -3260,7 +3317,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x7777_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &g.grn_spec {
                 let mut seen = std::collections::BTreeSet::new();
                 for &id in &spec.gene_ids {
@@ -3281,6 +3338,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
         g.mutation_rate = 256;
@@ -3293,7 +3351,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x8888_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false);
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes != 2 {
                     let _ph = m.decode(&econ); // must not panic; Some or None both fine
@@ -3312,7 +3370,7 @@ mod tests {
         g.mutation_rate = 256;
 
         let seed = 0x9999_9999;
-        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4)).collect();
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false)).collect();
 
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-c: replay must be seed-deterministic, not run-order-dependent");
@@ -3369,7 +3427,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1A00_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-d: flag=false must keep n_genes constant (iteration {i})");
                 assert_eq!(spec.gene_ids, vec![0, 1], "V-3-d: flag=false must never permute gene_ids (iteration {i})");
@@ -3387,8 +3445,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
+        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -3400,7 +3458,7 @@ mod tests {
     fn v3d_no_spec_no_op() {
         // flag=true but grn_spec=None → no-op (Some-gated).
         let g = Genome::founder(2); // no spec
-        let m = g.mutate(0x2A2A_2A2A, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+        let m = g.mutate(0x2A2A_2A2A, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
         assert!(m.grn_spec.is_none(), "V-3-d: genome without spec must stay without spec");
     }
 
@@ -3417,7 +3475,7 @@ mod tests {
 
         for i in 0..5000u64 {
             let seed = 0x3A00_0000 + i;
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) && **spec == v3d_manual_swap(&gspec0, 0, 1) {
                     assert_eq!(spec.gene_ids, vec![1, 0], "V-3-d: a real i!=j swap on n_genes=2 must reverse gene_ids");
@@ -3452,7 +3510,7 @@ mod tests {
             if (r_i >> 8) % 2 != (r_j >> 8) % 2 {
                 continue; // i != j — not the self-move branch
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &m.grn_spec {
                 if **spec == gspec0 {
                     return; // self-move fired; spec byte-identical to parent — no-op proven
@@ -3491,7 +3549,7 @@ mod tests {
             if ti == tj {
                 continue;
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             let Some(spec) = &m.grn_spec else { continue };
             if spec.n_genes != 3 {
                 continue; // V-3-b/c also fired this seed — skip (searching for a clean translocation)
@@ -3537,7 +3595,7 @@ mod tests {
             if ti == tj {
                 continue;
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             let Some(spec) = &m.grn_spec else { continue };
             if spec.n_genes != 3 {
                 continue;
@@ -3578,7 +3636,7 @@ mod tests {
 
         for i in 0..2000u64 {
             let seed = 0xA000_0000 + i;
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false);
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
                     let ph = m.decode(&econ).expect("post-translocation genome must decode to Some");
@@ -3600,7 +3658,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x1D1D_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &g.grn_spec {
                 let n = spec.n_genes;
                 assert_eq!(spec.weights.len(), n * n, "iteration {i}");
@@ -3623,7 +3681,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x1E1E_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &g.grn_spec {
                 let mut seen = std::collections::BTreeSet::new();
                 for &id in &spec.gene_ids {
@@ -3643,7 +3701,7 @@ mod tests {
 
         for i in 0..1000u64 {
             let seed = 0x1F1F_0000 + i;
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4);
+            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false);
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
                     assert_eq!(spec.dup_counter, gspec0.dup_counter, "V-3-d: translocation must not touch dup_counter");
@@ -3662,7 +3720,7 @@ mod tests {
         g.mutation_rate = 256;
 
         let seed = 0x1234_5A5A;
-        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4)).collect();
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false)).collect();
 
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-d: replay must be seed-deterministic, not run-order-dependent");
@@ -3713,7 +3771,7 @@ mod tests {
             ],
         };
         let gspec = classifygen_nway_gspec();
-        let graph = CellGraph::from_gradient(&gradient, &gspec, None, None, None, None);
+        let graph = CellGraph::from_gradient(&gradient, &gspec, None, None, None, None, BodyPlan::Square);
 
         assert_eq!(graph.num_modules(), 3, "3 distinct Diff(_) blocks must yield exactly 3 modules");
         let mut counts: Vec<(u8, i32)> = graph
@@ -3773,6 +3831,7 @@ mod tests {
             diffuse_shift: 3, decay_num: 1, decay_shift: 4,
             seed_scale: 4096, stop_threshold: 0, apoptosis_threshold: None,
             germ_threshold: None, supply_source: None, adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         }
     }
 
@@ -3786,7 +3845,7 @@ mod tests {
         let mut saw_change = false;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_0000u64 + gen; // "GDEV" salt already inside mutate(); vary seed
-            g = g.mutate(seed, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4, false);
             let gd = g.morphogen_spec.expect("spec must survive mutation").g_dev;
             assert!((1..=4).contains(&gd), "g_dev must stay clamped to [1,4], got {gd} at generation {gen}");
             if gd != 1 {
@@ -3805,15 +3864,15 @@ mod tests {
         g.mutation_rate = 256;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_1111u64 + gen;
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
             assert_eq!(g.morphogen_spec.unwrap().g_dev, 1, "flag off: g_dev must never change (generation {gen})");
         }
 
         // Disjoint-stream check: same seed/genome, flag on vs off, every OTHER field must agree.
         let base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(1)));
         let seed = 0xDEAD_BEEF_1234u64;
-        let on = base.clone().mutate(seed, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4);
-        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4);
+        let on = base.clone().mutate(seed, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4, false);
+        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
         assert_eq!(on.metabolism_eff, off.metabolism_eff);
         assert_eq!(on.move_speed, off.move_speed);
         assert_eq!(on.sense_range, off.sense_range);
@@ -3862,7 +3921,7 @@ mod tests {
             let mut lineage = start.clone();
             let mut trajectory = Vec::new();
             for gen in 0..32u64 {
-                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4);
+                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4, false);
                 trajectory.push(lineage.morphogen_spec.unwrap().g_dev);
             }
             trajectory
@@ -3877,6 +3936,181 @@ mod tests {
         let g1 = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(1)));
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(2)));
         assert_ne!(g1.hash_contribution(0), g2.hash_contribution(0), "g_dev=1 vs g_dev=2 must hash differently (already Some-gated fold)");
+    }
+
+    // ── Rung 1 SLOT 1 (#401): sparse topology primitive (body_plan → live_mask) ─────────────────
+
+    /// MANDATORY decode-identity CI assertion (topo-diff R-D): decoding a fixture with the default
+    /// `body_plan=Square` MUST reproduce the exact pre-Rung-1 `CellGraph` — reuses the M7-a
+    /// live-drive fixture (`size=21`, known ≥2 live-drive modules) and pins its ACTUAL decode output
+    /// (captured by running this test once against the implementation below), not a hoped-for value.
+    #[test]
+    fn rung1_decode_identity_square_body_plan() {
+        let econ = EconParams::default();
+        let mspec = MorphogenSpec {
+            g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
+            diffuse_shift: 3, decay_num: 1, decay_shift: 4,
+            seed_scale: 64, stop_threshold: 0, apoptosis_threshold: None,
+            germ_threshold: None,
+            supply_source: None,
+            adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
+        };
+        let gspec = m7a_live_drive_gspec();
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(gspec)), Some(mspec));
+        g.size = 21; // above the E-6 fate boundary — matches m7a_live_drive_produces_multiple_modules
+        let graph = g.decode(&econ).expect("live-drive genome must decode to Some").graph;
+
+        // Byte-identity check, not a hope (topo-diff R-D): body_plan=Square's live_mask is all-true,
+        // so EVERY field must equal its pre-Rung-1 value — not just num_modules. germ_threshold /
+        // supply_source / adhesion_threshold are all None in this fixture (mirroring m7a_live_drive),
+        // so module_is_germ/module_reachable/module_consortium are pinned at their M7-b defaults
+        // (all-false / all-true / identity) independent of the Rung-1 change; the cell-count sum
+        // conserves the full g_dev*g_dev grid (no cell dropped by the mask), and num_modules==2 is
+        // the CI-captured first-run value (identical on x86 and arm64 ⇒ arch-independent).
+        assert_eq!(graph.g_dev, 4);
+        assert_eq!(graph.num_modules(), 2);
+        assert_eq!(graph.module_cell_count.iter().sum::<i32>(), 16, "Square mask must not drop any of the g_dev*g_dev=16 cells");
+        assert_eq!(graph.module_is_germ, vec![false, false], "germ_threshold=None ⇒ all-soma, unchanged by Rung 1");
+        assert_eq!(graph.module_reachable, vec![true, true], "supply_source=None ⇒ all-reachable, unchanged by Rung 1");
+        assert_eq!(graph.module_consortium, vec![0, 1], "adhesion_threshold=None ⇒ identity consortium, unchanged by Rung 1");
+    }
+
+    /// Structural mask-live-count teeth (SPARSE ≠ SMALL, topo-diff F6): decoding through the FULL
+    /// `from_gradient` path (not just the standalone `topology_mask` unit) with a uniform-fate GRN
+    /// (every cell same type ⇒ union-find would otherwise collapse to 1 module) must produce exactly
+    /// the mask's live-cell count as the total body size, proving the mask is actually wired into
+    /// decode's dead/live gate, not merely computed and discarded.
+    #[test]
+    fn rung1_from_gradient_body_size_matches_mask_live_count() {
+        let econ = EconParams::default();
+        let gspec = v4_uniform_gspec(); // input_weights=[0,0]: every cell resolves to the SAME type
+        for (body_plan, expected) in [
+            (BodyPlan::Square, 16),   // g_dev=4: 4*4 = 16
+            (BodyPlan::Ring, 12),     // g_dev=4: 4*(4-1) = 12
+            (BodyPlan::Filament, 4),  // g_dev=4: one full row = 4
+        ] {
+            let mut mspec = v4_mspec(4);
+            mspec.body_plan = body_plan;
+            let g = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), Some(mspec));
+            let ph = g.decode(&econ).expect("uniform-fate genome must decode to Some");
+            assert_eq!(
+                ph.graph.body_size(), expected,
+                "{body_plan:?} at g_dev=4 must yield body_size={expected}, got {}", ph.graph.body_size()
+            );
+        }
+    }
+
+    /// Boundary guard (F3, PINNED) end-to-end: a `g_dev=1` genome with `body_plan=Ring`/`Filament`
+    /// must still decode to a valid, non-empty 1-cell body (falls back to Square), never an empty
+    /// graph feeding union-find.
+    #[test]
+    fn rung1_boundary_guard_gdev1_decodes_nonempty() {
+        let econ = EconParams::default();
+        let gspec = v4_uniform_gspec();
+        for body_plan in [BodyPlan::Square, BodyPlan::Ring, BodyPlan::Filament] {
+            let mut mspec = v4_mspec(1);
+            mspec.body_plan = body_plan;
+            let g = Genome::founder(2).with_specs(Some(Arc::new(gspec.clone())), Some(mspec));
+            let ph = g.decode(&econ).expect("g_dev=1 genome must decode to Some regardless of body_plan");
+            assert_eq!(ph.graph.body_size(), 1, "{body_plan:?} at g_dev=1 must fall back to Square (1 live cell)");
+            assert_eq!(ph.graph.num_modules(), 1, "{body_plan:?} at g_dev=1 must yield exactly 1 module");
+        }
+    }
+
+    /// `body_plan` folds into `hash_contribution` ONLY when non-Square (mirrors `classifygen_hash_gated`
+    /// / `dup_counter`'s gate) — `Square` must be a byte-identical no-op, `Ring`/`Filament` must lock
+    /// the plan into the hash.
+    #[test]
+    fn rung1_body_plan_hash_gated() {
+        let mspec_square = v4_mspec(4);
+        let g_square = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(mspec_square));
+        let h_square = g_square.hash_contribution(0);
+
+        let mut mspec_ring = v4_mspec(4);
+        mspec_ring.body_plan = BodyPlan::Ring;
+        let g_ring = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(mspec_ring));
+        assert_ne!(g_ring.hash_contribution(0), h_square, "body_plan=Ring must fold into hash_contribution (locks the plan)");
+
+        let mut mspec_filament = v4_mspec(4);
+        mspec_filament.body_plan = BodyPlan::Filament;
+        let g_filament = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(mspec_filament));
+        assert_ne!(g_filament.hash_contribution(0), h_square, "body_plan=Filament must fold into hash_contribution (locks the plan)");
+        assert_ne!(g_filament.hash_contribution(0), g_ring.hash_contribution(0), "Ring vs Filament must hash differently");
+
+        // Toggling back to Square must reproduce the ORIGINAL hash exactly — proves the gate
+        // contributes NOTHING when Square (not merely a fixed offset every genome shares).
+        let mspec_square_again = v4_mspec(4);
+        let g_square_again = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(mspec_square_again));
+        assert_eq!(g_square_again.hash_contribution(0), h_square, "body_plan=Square must be a byte-identical no-op fold");
+    }
+
+    /// Mutation teeth (1): with `enable_body_plan=true` and `morphogen_spec` present, a lineage
+    /// started at `Square` must move away from `Square` within a bounded number of high-mutation-rate
+    /// generations, drawing from the distinct `SALT_BODY_PLAN` stream.
+    #[test]
+    fn rung1_body_plan_mutates_when_enabled() {
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(4)));
+        g.mutation_rate = 256; // max rate — the (r & 0xFF) < mutation_rate gate always fires
+        let mut saw_change = false;
+        for gen in 0..64u64 {
+            let seed = 0x544F_504F_0000u64 + gen; // "TOPO" salt already inside mutate(); vary seed
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, true);
+            if g.morphogen_spec.expect("spec must survive mutation").body_plan != BodyPlan::Square {
+                saw_change = true;
+            }
+        }
+        assert!(saw_change, "body_plan must move away from Square within 64 high-mutation-rate generations");
+    }
+
+    /// Mutation teeth (2): with `enable_body_plan=false` (the shipped default), `body_plan` never
+    /// changes across many generations (zero draws from `SALT_BODY_PLAN`), AND the gate being off
+    /// does not perturb any OTHER mutated field on the same seed — proves the new draw is fully
+    /// disjoint/inert, not coincidentally equal.
+    #[test]
+    fn rung1_body_plan_inert_when_disabled() {
+        let mut g = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(4)));
+        g.mutation_rate = 256;
+        for gen in 0..64u64 {
+            let seed = 0x544F_504F_1111u64 + gen;
+            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
+            assert_eq!(g.morphogen_spec.unwrap().body_plan, BodyPlan::Square, "flag off: body_plan must never change (generation {gen})");
+        }
+
+        // Disjoint-stream check: same seed/genome, flag on vs off, every OTHER field must agree.
+        let base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(4)));
+        let seed = 0xDEAD_BEEF_5678u64;
+        let on = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, true);
+        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false);
+        assert_eq!(on.metabolism_eff, off.metabolism_eff);
+        assert_eq!(on.move_speed, off.move_speed);
+        assert_eq!(on.sense_range, off.sense_range);
+        assert_eq!(on.size, off.size);
+        assert_eq!(on.repro_threshold, off.repro_threshold);
+        assert_eq!(on.mutation_rate, off.mutation_rate);
+        assert_eq!(on.uptake_layer, off.uptake_layer);
+        assert_eq!(on.excrete_layer, off.excrete_layer);
+        assert_eq!(on.weights, off.weights);
+        assert_eq!(on.morphogen_spec.unwrap().g_dev, off.morphogen_spec.unwrap().g_dev, "enable_body_plan must not perturb the g_dev axis (disjoint salt)");
+    }
+
+    /// Determinism: the same seed stream reproduces the IDENTICAL body_plan trajectory across two
+    /// independent replays (mirrors `v4_determinism`).
+    #[test]
+    fn rung1_body_plan_determinism() {
+        let mut base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(4)));
+        base.mutation_rate = 256;
+
+        let run = |start: &Genome| -> Vec<BodyPlan> {
+            let mut lineage = start.clone();
+            let mut trajectory = Vec::new();
+            for gen in 0..32u64 {
+                lineage = lineage.mutate(0x544F_504F_9BDFu64 + gen, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, true);
+                trajectory.push(lineage.morphogen_spec.unwrap().body_plan);
+            }
+            trajectory
+        };
+        assert_eq!(run(&base), run(&base), "same seed stream must reproduce the identical body_plan trajectory");
     }
 
     // ── R31: respiratory-genes decode (P1-1) ──────────────────────────────────────────────────────
@@ -3895,14 +4129,14 @@ mod tests {
 
         // With enable_oxygen=false, respiratory_pathway must stay 0 (no mutation draw).
         for seed in 0..100u64 {
-            let m = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4); // enable_oxygen=false
+            let m = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false); // enable_oxygen=false
             assert_eq!(m.respiratory_pathway, 0, "with enable_oxygen=false, respiratory_pathway must not mutate (seed={seed})");
         }
 
         // With enable_oxygen=true, respiratory_pathway can mutate (at least some seeds must change it).
         let mut mutated_count = 0;
         for seed in 0..1000u64 {
-            let m = g.mutate(seed, 2, false, 4, false, false, false, true, false, false, 0, 0, 0, 0, 4); // enable_oxygen=true
+            let m = g.mutate(seed, 2, false, 4, false, false, false, true, false, false, 0, 0, 0, 0, 4, false); // enable_oxygen=true
             if m.respiratory_pathway != 0 {
                 mutated_count += 1;
             }

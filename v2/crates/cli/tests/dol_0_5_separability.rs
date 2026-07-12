@@ -20,7 +20,7 @@
 //! 7. Print DOL-SEP: table per value for CI log visibility.
 
 use cli::default_config;
-use sim_core::{GrnSpec, MorphogenSpec, Boundary, Genome};
+use sim_core::{BodyPlan, GrnSpec, MorphogenSpec, Boundary, Genome};
 use std::sync::Arc;
 
 const SEED: u64 = 0xA11A_2A11;
@@ -57,6 +57,7 @@ fn morphogen_spec() -> MorphogenSpec {
         germ_threshold: Some(5),            // GATE ON: module <= 5 cells is germ
         supply_source: None,                // Gate off (germ/soma separable from supply)
         adhesion_threshold: None,           // Gate off (germ/soma separable from adhesion)
+        body_plan: BodyPlan::Square,        // Gate off (Rung 1 default)
     }
 }
 

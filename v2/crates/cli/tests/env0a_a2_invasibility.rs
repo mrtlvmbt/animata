@@ -17,7 +17,7 @@
 //! - Covers: emergence OFF/ON + invasion both directions
 //! - Each path: step ~20 ticks, assert pop>0
 
-use sim_core::{Genome, GrnSpec, MorphogenSpec, Boundary, EconParams};
+use sim_core::{BodyPlan, Genome, GrnSpec, MorphogenSpec, Boundary, EconParams};
 use std::sync::Arc;
 use std::env;
 
@@ -38,6 +38,7 @@ fn make_unicell_template(n_layers: usize) -> Genome {
         germ_threshold: None,
         supply_source: None,
         adhesion_threshold: None,
+        body_plan: BodyPlan::Square,
     };
 
     // Phase2 GRN spec (standard bistable)
@@ -88,6 +89,7 @@ fn make_multicell_template(n_layers: usize) -> Genome {
         germ_threshold: None,
         supply_source: None,
         adhesion_threshold: None,
+        body_plan: BodyPlan::Square,
     };
 
     // Phase2 GRN spec (standard bistable)

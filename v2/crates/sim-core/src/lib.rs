@@ -48,7 +48,7 @@ pub use grn_lut::{
     SIGMA_LUT, SIGMA_LUT_SHA256, EXPR_MAX as GRN_EXPR_MAX, LUT_BIN as GRN_LUT_BIN,
     PREACT_MAX as GRN_PREACT_MAX, PREACT_MIN as GRN_PREACT_MIN,
 };
-pub use morphogen::{morphogen, morphogen_steps, Boundary, Gradient, MorphogenSpec};
+pub use morphogen::{morphogen, morphogen_steps, topology_mask, BodyPlan, Boundary, Gradient, MorphogenSpec};
 pub use params::{AmbientToleranceSpec, EconParams, EnvFrontierConfig, FieldId, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
 pub use stages::{expressed_capacity, settling_drain};
@@ -1597,7 +1597,7 @@ mod e1_gate_tests {
     // attributable to exactly one lineage — the same clean-isolation shape as `make_quick_repro_sim`.
 
     fn phase2_shaped_econ() -> EconParams {
-        use crate::{Boundary, GrnSpec, MorphogenSpec};
+        use crate::{BodyPlan, Boundary, GrnSpec, MorphogenSpec};
         let mspec = MorphogenSpec {
             g_dev: 4, n_dev: 8, boundary: Boundary::Reflecting,
             diffuse_shift: 3, decay_num: 1, decay_shift: 4, seed_scale: 4096, stop_threshold: 0,
@@ -1605,6 +1605,7 @@ mod e1_gate_tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         };
         let gspec = GrnSpec::new(2, vec![64, -64, -64, 64], vec![0, 0], vec![0, 0], 3, 12, 0, 0, vec![256, 0]);
         EconParams {

@@ -31,6 +31,75 @@ pub enum Boundary {
     Absorbing,
 }
 
+/// Rung 1 (topo-diff §3 SLOT 1, #401): the heritable body-plan gene. Decodes via [`topology_mask`]
+/// to a `live_mask` over the `g_dev²` developmental grid — `Square` (all cells live, the default)
+/// | `Ring` (perimeter cells live, interior dead) | `Filament` (one thin row live). `Square` is the
+/// founder value and the ONLY variant every shipped config ever carries, so `topology_mask` returns
+/// all-true for it and `CellGraph::from_gradient` stays byte-identical to pre-Rung-1 decode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodyPlan {
+    Square,
+    Ring,
+    Filament,
+}
+
+impl Default for BodyPlan {
+    fn default() -> Self {
+        BodyPlan::Square
+    }
+}
+
+impl BodyPlan {
+    /// Small-step circular mutation: Square(0)↔Ring(1)↔Filament(2), `delta ∈ {-1,0,+1}` wraps via
+    /// `rem_euclid` (never panics, never leaves the 3-state cycle).
+    pub fn step(self, delta: i32) -> Self {
+        let ord = match self {
+            BodyPlan::Square => 0,
+            BodyPlan::Ring => 1,
+            BodyPlan::Filament => 2,
+        };
+        match (ord + delta).rem_euclid(3) {
+            0 => BodyPlan::Square,
+            1 => BodyPlan::Ring,
+            _ => BodyPlan::Filament,
+        }
+    }
+}
+
+/// Rung 1 SLOT 1 (#401): pure `(body_plan, g_dev) → live_mask` over the `g_dev²` row-major grid
+/// (`idx = z*g_dev + x`, matching `CellGraph::from_gradient`'s own indexing). Integer-only, no RNG/
+/// float/HashMap-order dependence.
+///
+/// **Boundary guard (F3, PINNED):** falls back to `Square` whenever `g_dev < 2` — `Ring`'s
+/// perimeter formula `4(g_dev-1)` is `0` at `g_dev=1` (an empty body would panic union-find on an
+/// empty live set), and `g_dev=1` is reachable (the gene is clamped to `[1, gdev_cap]`, never 0).
+///
+/// **SPARSE ≠ SMALL (topo-diff F6):** `Ring`'s live count is the perimeter `4(g_dev-1)`, `Filament`'s
+/// is one full row (`g_dev`) — thin but EXTENDED across the grid, never a shrunken block.
+pub fn topology_mask(body_plan: BodyPlan, g_dev: usize) -> Vec<bool> {
+    let plan = if g_dev < 2 { BodyPlan::Square } else { body_plan };
+    let mut mask = Vec::with_capacity(g_dev * g_dev);
+    match plan {
+        BodyPlan::Square => mask.resize(g_dev * g_dev, true),
+        BodyPlan::Ring => {
+            for z in 0..g_dev {
+                for x in 0..g_dev {
+                    mask.push(z == 0 || z == g_dev - 1 || x == 0 || x == g_dev - 1);
+                }
+            }
+        }
+        BodyPlan::Filament => {
+            let mid = (g_dev - 1) / 2;
+            for z in 0..g_dev {
+                for _x in 0..g_dev {
+                    mask.push(z == mid);
+                }
+            }
+        }
+    }
+    mask
+}
+
 /// Production configuration for one morphogen solve — grid size, step policy, boundary, and the
 /// integer diffusion/decay/seed constants. NOT `#[cfg(test)]`: E-2 instantiates this with a test
 /// *value*; E-3 reuses the *type* unchanged when it wires the morphogen into `decode` (F9).
@@ -84,6 +153,11 @@ pub struct MorphogenSpec {
     /// module-level union-find into `module_consortium`. The numeric value is reserved for future
     /// boundary-count tuning (out of scope here — `Some(_)` just flips the gate on).
     pub adhesion_threshold: Option<i32>,
+    /// **Rung 1 SLOT 1 (#401) body-plan gate.** `Square` (default, every shipped spec) ⇒
+    /// `topology_mask` returns all-live ⇒ `CellGraph::from_gradient` marks no cell dead via this
+    /// gate ⇒ byte-identical to pre-Rung-1 decode. `Ring`/`Filament` (test-only / opt-in configs):
+    /// non-live cells are marked dead BEFORE union-find (mirrors the M7-b apoptosis gate's ordering).
+    pub body_plan: BodyPlan,
 }
 
 /// The morphogen output: a local, position-indexed integer concentration field (row-major,
@@ -216,6 +290,7 @@ mod tests {
             germ_threshold: None,
             supply_source: None,
             adhesion_threshold: None,
+            body_plan: BodyPlan::Square,
         }
     }
 
@@ -247,7 +322,7 @@ mod tests {
     fn different_genome_diverges() {
         let spec = fixture_spec();
         let founder = morphogen(&Genome::founder(1), &spec);
-        let mutated = morphogen(&Genome::founder(1).mutate(0xDEAD_BEEF, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4), &spec);
+        let mutated = morphogen(&Genome::founder(1).mutate(0xDEAD_BEEF, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false), &spec);
         // Not asserting inequality unconditionally (mutation could no-op on `size`); assert the
         // function actually depends on the genome by varying `size` directly.
         let mut bigger = Genome::founder(1);
@@ -357,5 +432,73 @@ mod tests {
         a.move_speed = 1;
         b.move_speed = 7;
         assert_eq!(morphogen(&a, &fixture_spec()), morphogen(&b, &fixture_spec()));
+    }
+
+    // ── Rung 1 SLOT 1 (#401): topology_mask structural teeth (SPARSE ≠ SMALL, topo-diff F6) ──────
+
+    #[test]
+    fn topology_mask_square_is_all_live() {
+        for g in 1..=6usize {
+            let mask = topology_mask(BodyPlan::Square, g);
+            assert_eq!(mask.len(), g * g, "Square mask must cover the full g_dev² grid at g_dev={g}");
+            assert!(mask.iter().all(|&live| live), "Square must be all-live at g_dev={g}");
+            assert_eq!(mask.iter().filter(|&&live| live).count(), g * g);
+        }
+    }
+
+    #[test]
+    fn topology_mask_ring_is_perimeter_only() {
+        for g in 2..=6usize {
+            let mask = topology_mask(BodyPlan::Ring, g);
+            let live_count = mask.iter().filter(|&&live| live).count();
+            assert_eq!(
+                live_count, 4 * (g - 1),
+                "Ring live count must be the perimeter 4(g_dev-1) at g_dev={g}, got {live_count}"
+            );
+            // SPARSE ≠ SMALL: Ring must be thin but EXTENDED — its bounding box is the full grid,
+            // not a shrunken block. Every interior cell (not on the border) must be dead.
+            for z in 0..g {
+                for x in 0..g {
+                    let idx = z * g + x;
+                    let on_border = z == 0 || z == g - 1 || x == 0 || x == g - 1;
+                    assert_eq!(mask[idx], on_border, "cell ({x},{z}) at g_dev={g} must be live iff on the border");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn topology_mask_filament_is_one_full_row() {
+        for g in 2..=6usize {
+            let mask = topology_mask(BodyPlan::Filament, g);
+            let live_count = mask.iter().filter(|&&live| live).count();
+            assert_eq!(live_count, g, "Filament live count must be exactly g_dev={g} (one full row), got {live_count}");
+            // SPARSE ≠ SMALL: the live row spans the full grid width (extended, not a shrunken block).
+            let mid = (g - 1) / 2;
+            for x in 0..g {
+                assert!(mask[mid * g + x], "row {mid} must be entirely live at g_dev={g}, col {x} is dead");
+            }
+        }
+    }
+
+    #[test]
+    fn topology_mask_boundary_guard_falls_back_to_square_at_gdev_below_2() {
+        // F3, PINNED: g_dev < 2 must fall back to Square — Ring's perimeter formula 4(g_dev-1) would
+        // be 0 at g_dev=1 (an empty body feeding union-find), and g_dev=1 IS reachable in production
+        // (the gene is clamped to [1, gdev_cap], never 0).
+        for body_plan in [BodyPlan::Square, BodyPlan::Ring, BodyPlan::Filament] {
+            let mask = topology_mask(body_plan, 1);
+            assert_eq!(mask, vec![true], "g_dev=1 must fall back to Square (1 live cell, non-empty) for {body_plan:?}");
+        }
+    }
+
+    #[test]
+    fn body_plan_step_cycles_through_all_three_states() {
+        // Square(0) -> Ring(1) -> Filament(2) -> Square(0), and the reverse.
+        assert_eq!(BodyPlan::Square.step(1), BodyPlan::Ring);
+        assert_eq!(BodyPlan::Ring.step(1), BodyPlan::Filament);
+        assert_eq!(BodyPlan::Filament.step(1), BodyPlan::Square);
+        assert_eq!(BodyPlan::Square.step(-1), BodyPlan::Filament);
+        assert_eq!(BodyPlan::Square.step(0), BodyPlan::Square);
     }
 }
