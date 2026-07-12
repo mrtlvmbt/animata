@@ -164,12 +164,19 @@ fn stillbirth_under_flag_conserves_energy_and_spawns_no_child() {
     // Income AND metabolism zeroed: the founder's own capital (huge, 10_000_000) is the ONLY energy
     // source for the whole run. Every successful division grants a child EXACTLY endowment=9000
     // (9 cells * e_cell=1000) — below its OWN 9100 afford-threshold, and with zero income a child can
-    // never grow past that, so children are permanently frozen at "cannot afford" (test 3 proves this
-    // outcome is otherwise harmless). Only the FOUNDER ever attempts a fresh division on any given
-    // tick, so on the tick its `size` gene mutation happens to draw -1 (child size=3=floor, a REAL
-    // size-viability stillbirth, genome.rs `(Some,Some)` arm — P≈1/24 per attempt, mutation_rate=32
-    // default), no OTHER entity is simultaneously dividing — the live entity id-set is provably
-    // unchanged by that specific tick, for ANY seed (no brute-force luck required).
+    // never grow past that, so no descendant ever SUCCEEDS at a second division. But every
+    // repro-eligible entity (energy >= repro_bar) — the founder AND every already-born child —
+    // independently attempts a fresh mutate+decode EACH tick regardless of whether it can afford the
+    // result (the flag-on gate order: repro_bar/mineral first, THEN decode, THEN affordability); a
+    // child that can't afford its own N-scaled endowment still runs decode() and can itself miscarry.
+    // So `stillbirth_count()` can increment from ANY live entity, and a DIFFERENT entity's successful
+    // division can coincide on the very same tick — a per-tick live-id-set equality check is thus NOT
+    // a valid invariant (population can grow AND a stillbirth can fire on the same tick, from two
+    // different entities). The timing/attribution-independent proof that a stillbirth mints no
+    // phantom child is CONSERVATION: an erroneously spawned child would carry an endowment that was
+    // never debited from any parent, so `conservation_residual()` would go nonzero. That is asserted
+    // below (checked at the exact stillbirth tick), which no phantom child could satisfy regardless
+    // of which entity's attempt failed or which entity's attempt succeeded that same tick.
     let econ = EconParams {
         newborn_energy_per_cell: true,
         d0_scaled: 0,
@@ -185,20 +192,15 @@ fn stillbirth_under_flag_conserves_energy_and_spawns_no_child() {
 
     let mut found = false;
     for _ in 0..600u64 {
-        let before_ids = live_ids(&mut sim);
         let still_before = sim.stillbirth_count();
         sim.step();
         let still_after = sim.stillbirth_count();
         if still_after > still_before {
-            let after_ids = live_ids(&mut sim);
-            assert_eq!(
-                after_ids, before_ids,
-                "a stillbirth must spawn NO child — the live entity id-set must be unchanged"
-            );
             assert_eq!(
                 sim.conservation_residual(), 0,
                 "stillbirth under the flag must close R15 exactly (c_div spent -> dissipated, \
-                 nothing lost, no endowment granted)"
+                 nothing lost, no endowment granted) — a phantom spawned child would mint an \
+                 undebited endowment and show up here as a nonzero residual"
             );
             found = true;
             break;
