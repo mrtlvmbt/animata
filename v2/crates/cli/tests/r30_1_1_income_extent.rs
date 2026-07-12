@@ -54,11 +54,17 @@ fn ring_extent_config(seed: u64, flat_cap: i64) -> SimConfig {
     founder.uptake_layer = 1;
 
     let layer1 = LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap, world_cap_mult: 0 };
+    // Layer 0 is unused (founder.uptake_layer=1 redirects harvest to layer1 above), but
+    // `build_sim` computes `flux_k_from_alpha` for every layer index < n_layers regardless —
+    // `LayerSpec::default()` has `flux_alpha_den=0`, which divides by zero there. `flux_alpha_num:
+    // 0` (α=0 ⇒ k=0 ⇒ no diffusion) with a non-zero `flux_alpha_den` is the inert, safe spec
+    // (mirrors `cli::L2_DETRITUS_SPEC`'s no-diffusion pattern).
+    let layer0_inert = LayerSpec { flux_alpha_num: 0, flux_alpha_den: 1, ..LayerSpec::default() };
     SimConfig {
         n_founders: 1,
         founder_templates: Some(vec![(founder, 1)]),
         n_layers: 2,
-        layer_specs: [LayerSpec::default(), layer1, LayerSpec::default(), LayerSpec::default()],
+        layer_specs: [layer0_inert, layer1, LayerSpec::default(), LayerSpec::default()],
         econ: EconParams {
             income_mode: IncomeMode::Extent,
             // F4: dol_economy multiplies demand by soma count; an Extent copy under it would
