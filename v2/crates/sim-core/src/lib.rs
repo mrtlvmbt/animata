@@ -228,6 +228,15 @@ pub struct Telemetry {
     /// (c) contention→0 → bodies dispersed or density too low to crowding.
     pub entity_contention_rate: DetMap<u64, f32>,
 
+    // ── STEP-A0 (#398): per-tick income probe (never drained) ──────────────────────────────────────
+    /// STEP-A0 (#398): entity_bits → (photo_in, chem_in) booked THIS TICK — same values as
+    /// `income_record`, populated in the SAME `stage_interactions` loop, but unlike `income_record`
+    /// (drained via `std::mem::take` inside `stage_observe`, stages.rs:1591, before external code can
+    /// read it — the channel is EMPTY by the time `step()` returns) this field is NEVER taken, so a
+    /// caller CAN safely read it right after `step()` (mirrors `entity_contention_rate`'s pattern).
+    /// Cleared+refilled each tick; purely observational, never fed to state_hash or any conserved value.
+    pub income_probe: DetMap<u64, (i64, i64)>,
+
     /// V-3-e: population diversity observable — mean [`genome_distance`] over CONSECUTIVE valid
     /// (`Some(grn_spec)`) genomes, entity-id order (computed by `stages::stage_observe`). `0` when
     /// fewer than 2 valid genomes exist (all non-phase2 configs; single-survivor populations).
@@ -839,6 +848,53 @@ impl Sim {
     pub fn body_size_entity_probe(&mut self) -> DetMap<u64, i64> {
         let mut q = self.world.query::<(Entity, &Phenotype)>();
         q.iter(&self.world).map(|(e, ph)| (e.to_bits(), ph.graph.body_size())).collect()
+    }
+
+    /// STEP-A0 (#398): entity-keyed SOMA cell count — `entity_bits → Σ module_cell_count` over
+    /// non-germ modules (`!module_is_germ`), mirroring `body_size_entity_probe`'s entity-identity
+    /// join contract (F1 lesson from #395: never zip an unordered Query against a `DetMap`). Test-only
+    /// probe: read-only, no state mutation, not on the tick path, not in state_hash.
+    pub fn soma_count_entity_probe(&mut self) -> DetMap<u64, i64> {
+        let mut q = self.world.query::<(Entity, &Phenotype)>();
+        q.iter(&self.world)
+            .map(|(e, ph)| {
+                let soma: i64 = ph.graph.module_cell_count.iter()
+                    .zip(ph.graph.module_is_germ.iter())
+                    .filter_map(|(&c, &g)| if !g { Some(c as i64) } else { None })
+                    .sum();
+                (e.to_bits(), soma)
+            })
+            .collect()
+    }
+
+    /// STEP-A0 (#398) probe-only mutator: overwrite `Phenotype.graph` for entities keyed by
+    /// `entity_bits`, bypassing `Genome::decode` entirely. Lets a test IMPOSE a hand-built
+    /// `CellGraph` (e.g. an arbitrary germ:soma split at a fixed body_size) on a live population.
+    /// `decode()` only runs once (at spawn/birth) — no tick stage re-derives `Phenotype.graph` from
+    /// the genome — so with reproduction disabled (`lock_repro_probe`) the imposed graph is never
+    /// overwritten and holds for the entity's whole life. Keys not present in `graphs` are left
+    /// untouched. Test-only: no state mutation on the tick path, not in state_hash.
+    pub fn impose_graph_probe(&mut self, graphs: &DetMap<u64, CellGraph>) {
+        let mut q = self.world.query::<(Entity, &mut Phenotype)>();
+        for (e, mut ph) in q.iter_mut(&mut self.world) {
+            if let Some(g) = graphs.get(&e.to_bits()) {
+                ph.graph = g.clone();
+            }
+        }
+    }
+
+    /// STEP-A0 (#398) probe-only mutator: set every live entity's `Genome.repro_threshold` to
+    /// `i32::MAX` and `mutation_rate` to `0`, so reproduction never fires and no offspring (with a
+    /// fresh, non-imposed `Phenotype.graph`) is ever born — the only way `Phenotype.graph` changes
+    /// post-spawn (`decode()` runs once, at birth). Holds an `impose_graph_probe`d structure fixed
+    /// for the whole run without re-imposing every tick. Test-only: no state mutation on the tick
+    /// path, not in state_hash.
+    pub fn lock_repro_probe(&mut self) {
+        let mut q = self.world.query::<&mut Genome>();
+        for mut g in q.iter_mut(&mut self.world) {
+            g.repro_threshold = i32::MAX;
+            g.mutation_rate = 0;
+        }
     }
 
     /// ENV-0a'-a2: population-mean cells-per-body (Σ entities module_cell_count / population).
