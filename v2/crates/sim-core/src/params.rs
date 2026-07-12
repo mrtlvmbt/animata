@@ -460,6 +460,14 @@ pub struct EconParams {
     /// goldens (mirrors `evolve_body_size`/`SALT_GDEV`). Gated additionally on
     /// `morphogen_spec.is_some()` in `Genome::mutate`.
     pub enable_body_plan: bool,
+
+    // ── R30-1.1a (#412): Kleiber metabolic cost welded to live cell count ────────────────────────
+    /// When `true`, the Kleiber metabolic term (`stage_metabolism`) reads the body's LIVE cell
+    /// count (`Σ ph.graph.module_cell_count`) instead of the `Genome::size` gene. `false` (default,
+    /// all existing production configs) → term stays `size_pow_three_quarters(g.size)`, byte-
+    /// identical goldens (the isolation gate). `Genome::size` stays wired to viability, mutation,
+    /// and `state_hash` regardless of this flag — only the metabolic consumer moves.
+    pub metab_reads_n_cells: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -748,6 +756,9 @@ impl Default for EconParams {
             // Rung 1 (#401): body-plan mutation OFF by default — false for all existing production
             // configs (byte-identical goldens; body_plan stays Square forever).
             enable_body_plan: false,
+            // R30-1.1a (#412): Kleiber-reads-n_cells OFF by default — false for all existing
+            // production configs (byte-identical; metab term stays gene-based).
+            metab_reads_n_cells: false,
         }
     }
 }
