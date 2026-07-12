@@ -797,10 +797,11 @@ pub struct SimConfig {
     /// Per-layer field parameters. Only the first `n_layers` entries are used by `build_sim`.
     /// Unused slots may be zeroed (`LayerSpec::default()`).
     pub layer_specs: [LayerSpec; 4],
-    /// P3-3 thermal-verdict world-temp override. `Some([i32; 13])` injects custom biome temperatures
-    /// (ONLY for verdict harness); `None` (default) uses stock BIOME_TEMP from world-gen.
+    /// P3-3 thermal-verdict world-temp override. `Some([i32; 14])` injects custom biome temperatures
+    /// (ONLY for verdict harness); `None` (default) uses stock BIOME_TEMP from world-gen. Widened
+    /// from 13 to 14 entries alongside W-SIM-7 (#423)'s `FinalBiome::Ocean` (index 13).
     /// Passed to ProcgenWorld at construction; byte-identical when `None` (F1, golden-neutral gate).
-    pub thermal_verdict_temps: Option<[i32; 13]>,
+    pub thermal_verdict_temps: Option<[i32; 14]>,
     /// ENV-0a'-a0: Multi-genotype founder seeding (optional, golden-neutral gate).
     /// When `Some(templates)`, founders are seeded from the caller-specified genome templates
     /// with a deterministic integer count split. Each template's founders carry a distinct

@@ -11,12 +11,42 @@
 //! **W-6 status**: `gen::caps::classify_and_caps` now backs the production `ProcgenWorld`
 //! (`world/src/lib.rs`) — the pipeline is WIRED. `NoiseWorld`, the last `f64 sin` in the world
 //! path, is deleted.
+//!
+//! **W-SIM-4a (#396, `worldgen-relief` branch):** `tectonics` is the first landform slice — a
+//! deterministic fault network consumed by `erosion::erode_with_tectonics` (fault-scarp height step
+//! + fault-aligned resistance-lineament override), opt-in and default-off (`enable_tectonics`
+//! threads `erode` → `classify_and_caps` → `ProcgenWorld::new`).
+//!
+//! **W-SIM-3a (#403, `worldgen-relief` branch):** `aeolian` is the second landform slice — a
+//! deterministic Werner slab-CA (wind-driven dunes) run POST-erosion by `caps::classify_and_caps`,
+//! opt-in and default-off (`enable_aeolian` threads the same way `enable_tectonics` does, orthogonal
+//! to it — both are independent opt-in stages).
+//!
+//! **W-SIM-5 (#410, `worldgen-relief` branch):** `volcanic` is the third landform slice — CONSTRUCTIVE
+//! (additive) viscosity-selected edifices, folded into the initial height field by
+//! `erosion::erode_with_tectonics` PRE-erosion (the same seam tectonics already injects at), opt-in
+//! and default-off (`enable_volcanic`, orthogonal to `enable_tectonics`/`enable_aeolian`).
+//!
+//! **W-SIM-6 (#416, `worldgen-relief` branch):** `glacial` is the fourth landform slice — an
+//! ELA-gated ice-incision (subtractive) + till-deposition (additive) pass run POST-erosion,
+//! PRE-aeolian by `caps::classify_and_caps`, opt-in and default-off (`enable_glacial`, orthogonal to
+//! `enable_tectonics`/`enable_aeolian`/`enable_volcanic`).
+//!
+//! **W-SIM-7 (#423, `worldgen-relief` branch):** `coastal` is the fifth and LAST landform slice — a
+//! sea-level datum (the world's first water) + cliff/wave-cut-platform pass run POST-aeolian,
+//! PRE-final-classify by `caps::classify_and_caps`, opt-in and default-off (`enable_coastal`,
+//! orthogonal to `enable_tectonics`/`enable_aeolian`/`enable_volcanic`/`enable_glacial`).
 
+pub mod aeolian;
 pub mod biome;
 pub mod caps;
 pub mod climate;
+pub mod coastal;
 pub mod drainage;
 pub mod erosion;
+pub mod glacial;
 pub mod height;
 pub mod material;
 pub mod moisture;
+pub mod tectonics;
+pub mod volcanic;

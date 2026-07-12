@@ -52,6 +52,7 @@
 //! it for `height_at`); `climate_from_height` takes no `hmax` (it consumes explicit eroded heights
 //! already in the `[0,hmax]` range).
 
+use crate::gen::aeolian;
 use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::drainage::is_river;
@@ -62,7 +63,10 @@ use crate::gen::moisture::moisture_at;
 
 /// The FINAL post-override biome id (zonal pass-through + azonal outcomes). `#[repr(u8)]`,
 /// append-only (matches `BiomeId`'s idiom) — the first 8 discriminants intentionally mirror
-/// `BiomeId` 1:1 (see [`From<BiomeId>`]).
+/// `BiomeId` 1:1 (see [`From<BiomeId>`]). `Ocean` (W-SIM-7, #423) is the submerged branch —
+/// classify's ONLY non-terrestrial outcome, checked BEFORE the zonal climate classification even
+/// runs (a submerged cell never reads `climate_from_height`/`biome_at` — RnD's "no ocean, all land"
+/// gap this slice closes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FinalBiome {
@@ -80,6 +84,8 @@ pub enum FinalBiome {
     Rock = 10,
     Fertile = 11,
     Dune = 12,
+    // W-SIM-7 (#423): the submerged branch — appended, never reorder.
+    Ocean = 13,
 }
 
 impl From<BiomeId> for FinalBiome {
@@ -189,7 +195,7 @@ fn biome_base_cap(b: FinalBiome) -> i64 {
         FinalBiome::TemperateGrassland | FinalBiome::Savanna => 180,
         FinalBiome::Tundra => 80,
         FinalBiome::Desert | FinalBiome::Dune => 40,
-        FinalBiome::Rock => 0,
+        FinalBiome::Rock | FinalBiome::Ocean => 0,
     }
 }
 
@@ -209,15 +215,23 @@ fn oxygen_base_cap(b: FinalBiome) -> i64 {
         // Transition biomes: lower O₂ availability
         FinalBiome::Tundra => 200,  // Cold, thin soils, but aerated
         FinalBiome::Desert | FinalBiome::Dune => 180,  // Arid, sparse life, but O₂-available surface
-        // Anaerobic/impenetrable: no O₂
-        FinalBiome::Rock => 0,
+        // Anaerobic/impenetrable: no O₂. Ocean (W-SIM-7, #423): out of scope for this slice's biology
+        // (RnD roadmap is relief-only) — treated as zero baseline, same as Rock.
+        FinalBiome::Rock | FinalBiome::Ocean => 0,
     }
 }
 
 /// Per-`MaterialId` cap multiplier (numerator/denominator — integer-domain, never a float scale).
+/// `Basalt`/`Tuff` (W-SIM-5, #410): fresh volcanic substrate is a barren rocky/ashy zone of
+/// near-zero production (RnD 15 §8) — the same zero multiplier as `Bedrock`. `Till` (W-SIM-6, #416):
+/// fresh glacial till/moraine is likewise a barren zone (RnD 16 §9) — same zero multiplier. `Water`
+/// (W-SIM-7, #423): out of scope for this slice's biology (relief-only roadmap) — zero multiplier,
+/// same as `Bedrock`/`Air` (the `caps_from` value never actually matters for a submerged cell in
+/// this slice, since `Ocean` biome's own base cap is already 0 — the multiplier is here purely for
+/// completeness of the `MaterialId` match, not a load-bearing production signal).
 fn material_mult(m: MaterialId) -> (i64, i64) {
     match m {
-        MaterialId::Bedrock | MaterialId::Air => (0, 1),
+        MaterialId::Bedrock | MaterialId::Air | MaterialId::Basalt | MaterialId::Tuff | MaterialId::Till | MaterialId::Water => (0, 1),
         MaterialId::Sand => (1, 2),
         MaterialId::Permafrost => (3, 4),
         MaterialId::Soil => (1, 1),
@@ -261,7 +275,7 @@ fn nitrate_base_cap(b: FinalBiome) -> i64 {
         FinalBiome::Fertile => 40,
         FinalBiome::Desert | FinalBiome::Dune => 30,  // Arid, minimal NO₃
         // Anaerobic/impenetrable: no NO₃ (uninhabitable)
-        FinalBiome::Rock => 0,
+        FinalBiome::Rock | FinalBiome::Ocean => 0,
     }
 }
 
@@ -286,39 +300,197 @@ pub struct WorldFields {
     pub surface_material: Vec<u8>,
 }
 
-/// Sample `erode(seed, hmax, dim)` (W-4) and classify the FINAL biome + caps per cell: zonal biome
-/// on the post-erosion surface (via `climate_from_height` + `biome_at`) → azonal override (via
-/// moisture/material/slope/is_river) → `caps_from`. Pure function of `(seed, hmax, dim, enable_patchiness)` — no
+/// W-SIM-3a (#403) aeolian sand-supply gate: a cell's PRE-aeolian working precipitation estimate
+/// below this (mm/year) counts as arid enough to seed a dune sand supply (see `classify_and_caps`'s
+/// aeolian-seeding comment for why this is precipitation, not the `Desert` zonal biome). Set at
+/// `climate.rs`'s baseline zero-slope precipitation (`P_BASE`, duplicated as a local literal here —
+/// intentionally, mirroring `erosion.rs`'s `surface_material_for_biome` duplication — so
+/// `climate.rs` stays untouched): any BELOW-baseline cell (negative orographic slope and/or noise)
+/// counts as arid. Implementer's call, documented, locked by the golden-vector test.
+const ARID_P_THRESHOLD: i64 = 900;
+
+/// W-SIM-3a (#403): reconcile the PRIMARY substrate at a cell. Sand is written as the primary
+/// layer — with aeolian on, real dune sand (`sand_depth>0`) reads as `Sand`; the erosion-baseline
+/// Desert→Sand mapping is SUBORDINATED in dune zones (falls back to `Soil`) so the azonal override
+/// reads ONLY the aeolian primary layer, breaking the biome↔material circularity RnD 13 §6
+/// describes (today, ANY Desert-classified cell gets material `Sand` → `override_biome` fires
+/// `Dune`, regardless of real dune geometry). With aeolian OFF, `material` is exactly
+/// `erosion_material`, unchanged — a pure pass-through, no perturbation.
+///
+/// Extracted as its own function (rather than inlined in `classify_and_caps`'s loop) so the OFF-path
+/// no-op guarantee is unit-testable directly against a synthetic `Sand` input — on THIS climate
+/// model, `erode`'s own Desert→Sand path never actually fires on any real generated grid (see
+/// `ARID_P_THRESHOLD`'s doc: `Desert`'s T_ref is unreachable), so a full-pipeline OFF-path test
+/// alone could never organically exercise the Sand/Dune case this reconciliation touches.
+fn reconcile_primary_material(enable_aeolian: bool, erosion_material: MaterialId, sand_depth: i64) -> MaterialId {
+    if !enable_aeolian {
+        return erosion_material;
+    }
+    if sand_depth > 0 {
+        MaterialId::Sand
+    } else if erosion_material == MaterialId::Sand {
+        MaterialId::Soil
+    } else {
+        erosion_material
+    }
+}
+
+/// Sample `erode(seed, hmax, dim, enable_tectonics, enable_volcanic)` (W-4) and classify the FINAL
+/// biome + caps per cell: zonal biome on the post-erosion surface (via `climate_from_height` +
+/// `biome_at`) → azonal override (via moisture/material/slope/is_river) → `caps_from`. Pure function
+/// of `(seed, hmax, dim, enable_patchiness, enable_tectonics, enable_aeolian, enable_volcanic)` — no
 /// RNG-of-clock, no thread-dependence, no global mutable state.
 ///
 /// **W-7 gate (patchiness default-off):** When `enable_patchiness` is false, the function produces
 /// caps identical to pre-W-7 (no spatial modulation). Patchiness must be explicitly opted-in by the
 /// caller (the map/visual track). This preserves acceptance corridors (settling, emergence) that assume
 /// homogeneous world-gen.
-pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize, enable_patchiness: bool) -> WorldFields {
-    let erosion = erode(seed, hmax, dim);
+///
+/// **W-SIM-4a gate (#396, tectonics default-off):** `enable_tectonics` threads straight to `erode`
+/// — `false` reproduces the pre-#396 `erosion` output byte-for-byte, so caps/biome derived from it
+/// are unaffected too.
+///
+/// **W-SIM-3a gate (#403, aeolian default-off):** `enable_aeolian` runs [`aeolian::run_aeolian`]
+/// POST-erosion (RnD 13 §1: `erode → AEOLIAN → final classify`), seeding its sand supply from a
+/// working precipitation-based aridity estimate on the post-erosion height ([`ARID_P_THRESHOLD`] —
+/// see its doc for why precipitation, not the `Desert` zonal biome). `false` reproduces the
+/// pre-#403 output byte-for-byte: `post_aeolian_height` is a plain clone of `erosion.height`,
+/// `sand_depth` is all-zero, and `material` below is exactly `erosion.surface_material[idx]`
+/// unchanged — no aeolian RNG draw, no reorder on the OFF path.
+///
+/// **W-SIM-5 gate (#410, volcanic default-off):** `enable_volcanic` threads straight to `erode`
+/// (the edifice height delta is folded in PRE-erosion — see `erosion.rs::erode_with_tectonics`).
+/// The volcanic material mask (Basalt/Tuff, re-derived here from the SAME `(seed, dim)` vents
+/// `erode` used internally — `volcanic::build_vents` is a cheap pure function, no need to thread it
+/// through `ErosionState`) takes PRIORITY over the glacial/aeolian reconciliation below when
+/// present: a volcanic-emplaced cell is never simultaneously read as a till or dune-sand cell.
+/// `false` reproduces the pre-#410 output byte-for-byte: the mask is all-`None`, so `material` falls
+/// straight through to the glacial/aeolian reconciliation, unperturbed.
+///
+/// **W-SIM-6 gate (#416, glacial default-off):** `enable_glacial` runs [`crate::gen::glacial::run_glacial`]
+/// POST-erosion, PRE-aeolian (RnD 16 §1: `erode → GLACIAL → aeolian → final classify` — glacial
+/// outwash could later feed the aeolian sand reserve, a follow-up coupling not built here, so
+/// glacial's reshaped height feeds FORWARD into aeolian's own aridity seeding below). The glacial
+/// `Till` material mask takes priority over aeolian's reconciliation (a till-covered cell is never
+/// simultaneously read as dune sand) but yields to volcanic (checked first). `false` reproduces the
+/// pre-#416 output byte-for-byte: `post_glacial_height` is a plain clone of `erosion.height`, the
+/// mask is all-`None` — no ELA/ice computation of any kind.
+///
+/// **W-SIM-7 gate (#423, coastal default-off):** `enable_coastal` runs
+/// [`crate::gen::coastal::run_coastal`] POST-aeolian, PRE-final-classify (RnD 17 §1's ordering — the
+/// LAST landform pass before classification). Introduces the world's FIRST water: `submerged` cells
+/// take the SUBMERGED BRANCH in the classify loop below (checked before any zonal climate call),
+/// reading `FinalBiome::Ocean` + `MaterialId::Water` directly, never `override_biome`/the
+/// volcanic/glacial/aeolian material reconciliation chain (a submerged cell can never simultaneously
+/// be a dune/till/edifice cell). `false` reproduces the pre-#423 output byte-for-byte:
+/// `post_coastal_height` is a plain clone of `post_aeolian_height`, `submerged` is all-`false` — no
+/// sea-level/BFS computation of any kind, and the classify loop never takes the submerged branch.
+pub fn classify_and_caps(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    enable_patchiness: bool,
+    enable_tectonics: bool,
+    enable_aeolian: bool,
+    enable_volcanic: bool,
+    enable_glacial: bool,
+    enable_coastal: bool,
+) -> WorldFields {
+    let erosion = erode(seed, hmax, dim, enable_tectonics, enable_volcanic);
     let n = dim * dim;
+
+    let volcanic_mask: Vec<Option<MaterialId>> = if enable_volcanic {
+        let vents = crate::gen::volcanic::build_vents(seed, dim);
+        crate::gen::volcanic::edifice_material_mask(dim, &vents)
+    } else {
+        vec![None; n]
+    };
+
+    let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if enable_glacial {
+        let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height);
+        (g.height, g.material)
+    } else {
+        (erosion.height.clone(), vec![None; n])
+    };
+
+    let (post_aeolian_height, sand_depth) = if enable_aeolian {
+        // W-SIM-3a (#403): sand supply seeded from a WORKING ARIDITY ESTIMATE (RnD 13 §1's own
+        // chicken-egg resolution — aridity depends on climate, climate depends on height, height is
+        // what this pass is about to change, so it reads a PRE-aeolian precipitation estimate on
+        // the CURRENT (post-glacial) height, not a biome classification). RnD 13 §1 specifies
+        // precipitation directly ("атмосферный P_base"), NOT the zonal Whittaker biome —
+        // deliberately: this climate model's temperature never exceeds ~16°C on any realistic grid
+        // (altitude lapse only ever cools below the latitude baseline), so `BiomeId::Desert`'s
+        // T_ref=25°C reference point is UNREACHABLE via real `climate_from_height` output — a
+        // Desert-biome gate would be permanently dead code, not merely rare. Below-baseline
+        // precipitation (`p < ARID_P_THRESHOLD`) is a real, reachable, broad arid-zone proxy instead.
+        let initial_sand: Vec<i64> = (0..n)
+            .map(|idx| {
+                let x = (idx % dim) as i64;
+                let z = (idx / dim) as i64;
+                let x_src = (x - WIND_DX).max(0) as usize;
+                let h_west = post_glacial_height[z as usize * dim + x_src];
+                let (_t, p) = climate_from_height(post_glacial_height[idx], h_west, x, z, seed);
+                if p < ARID_P_THRESHOLD { aeolian::INITIAL_SAND_DEPTH } else { 0 }
+            })
+            .collect();
+        let aeo = aeolian::run_aeolian(seed, dim, &post_glacial_height, initial_sand);
+        (aeo.height, aeo.sand_depth)
+    } else {
+        (post_glacial_height.clone(), vec![0i64; n])
+    };
+
+    // W-SIM-7 (#423): sea-level datum + cliff/wave-cut platform, POST-aeolian PRE-final-classify
+    // (RnD 17 §1's ordering — this is the LAST landform pass, closest to the classify loop). `false`
+    // reproduces the pre-#423 output byte-for-byte: `post_coastal_height` is a plain clone of
+    // `post_aeolian_height`, `submerged` is all-`false` — no sea-level/BFS/RNG computation of any
+    // kind, and the classify loop below never takes the submerged branch.
+    let (post_coastal_height, submerged) = if enable_coastal {
+        let c = crate::gen::coastal::run_coastal(seed, dim, hmax, &post_aeolian_height);
+        (c.height, c.submerged)
+    } else {
+        (post_aeolian_height.clone(), vec![false; n])
+    };
+
     let mut final_biome = Vec::with_capacity(n);
     let mut caps = vec![0i64; n];
+    let mut surface_material = Vec::with_capacity(n);
 
     for z in 0..dim {
         for x in 0..dim {
             let idx = z * dim + x;
-            let h_cell = erosion.height[idx];
+
+            // W-SIM-7 (#423): the submerged branch — checked BEFORE any zonal climate computation
+            // (a submerged cell never reads `climate_from_height`/`biome_at`/`override_biome`, RnD's
+            // "classify must gain a submerged branch" requirement). `Water` is the unambiguous
+            // primary substrate (never `Air` — see `coastal.rs`'s module doc); `Ocean` is the only
+            // non-terrestrial `FinalBiome`, with a fixed zero cap (out of scope for this
+            // relief-only slice's biology).
+            if submerged[idx] {
+                final_biome.push(FinalBiome::Ocean);
+                surface_material.push(MaterialId::Water as u8);
+                caps[idx] = 0;
+                continue;
+            }
+
+            let h_cell = post_coastal_height[idx];
             // Border rule (critic F2b): clamp the upwind sample to the grid edge.
             let x_src = (x as i64 - WIND_DX).max(0) as usize;
-            let h_west = erosion.height[z * dim + x_src];
+            let h_west = post_coastal_height[z * dim + x_src];
             let (t, p) = climate_from_height(h_cell, h_west, x as i64, z as i64, seed);
             let zonal = biome_at(t, p);
 
             let area = erosion.drainage.area[idx];
             let moisture = moisture_at(area);
-            let material = erosion.surface_material[idx];
             let riparian = is_river(area);
             let slope = match erosion.drainage.downstream[idx] {
-                Some(d) => (erosion.height[idx] - erosion.height[d]).max(0),
+                Some(d) => (post_coastal_height[idx] - post_coastal_height[d]).max(0),
                 None => 0,
             };
+
+            let material = volcanic_mask[idx].or(glacial_mask[idx]).unwrap_or_else(|| {
+                reconcile_primary_material(enable_aeolian, erosion.surface_material[idx], sand_depth[idx])
+            });
 
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
             final_biome.push(final_b);
@@ -335,11 +507,11 @@ pub fn classify_and_caps(seed: u64, hmax: i64, dim: usize, enable_patchiness: bo
                 cap_base
             };
             caps[idx] = cap_final;
+            surface_material.push(material as u8);
         }
     }
 
-    let surface_material = erosion.surface_material.iter().map(|&m| m as u8).collect();
-    WorldFields { dim, height: erosion.height, final_biome, caps, surface_material }
+    WorldFields { dim, height: post_coastal_height, final_biome, caps, surface_material }
 }
 
 #[cfg(test)]
@@ -461,8 +633,8 @@ mod tests {
 
     #[test]
     fn classify_and_caps_is_deterministic_across_repeated_calls() {
-        let a = classify_and_caps(SEED, HMAX, 16, false);
-        let b = classify_and_caps(SEED, HMAX, 16, false);
+        let a = classify_and_caps(SEED, HMAX, 16, false, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, 16, false, false, false, false, false, false);
         assert_eq!(a, b, "classify_and_caps must be byte-identical across repeated calls");
     }
 
@@ -471,7 +643,7 @@ mod tests {
     #[test]
     fn classify_and_caps_is_well_defined_grid_wide() {
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM, false);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
         assert_eq!(fields.final_biome.len(), DIM * DIM);
         assert_eq!(fields.caps.len(), DIM * DIM);
         for &c in &fields.caps {
@@ -484,7 +656,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false);
+        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, false, false, false, false, false);
 
         // W-7 gate (patchiness default-off): caps are byte-identical to pre-W-7 (no patchiness applied).
         // Height/biome/material fields unchanged. These are the canonical pre-W-7 values.
@@ -511,7 +683,7 @@ mod tests {
         const HMAX: i64 = 200;
         const DIM: usize = 64;
         // With patchiness ON to verify bounds and clamping behavior of the modulation
-        let fields = classify_and_caps(SEED, HMAX, DIM, true);
+        let fields = classify_and_caps(SEED, HMAX, DIM, true, false, false, false, false, false);
 
         // Count cells hitting bounds (ceiling at CAP_MAX, floor at 1 via rescale_cap).
         let mut clamp_low = 0usize;
@@ -571,7 +743,7 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM, true);
+        let fields = classify_and_caps(SEED, HMAX, DIM, true, false, false, false, false, false);
 
         // Adjacent-cell differences: sum of absolute differences for cells one step apart.
         let mut same_neighbor_sum = 0i64;
@@ -629,13 +801,13 @@ mod tests {
         const GRID_SIZE: i64 = (DIM * DIM) as i64;
 
         // Compute world WITH patchiness active (gated ON)
-        let with_patch = classify_and_caps(SEED, HMAX, DIM, true);
+        let with_patch = classify_and_caps(SEED, HMAX, DIM, true, false, false, false, false, false);
         let sum_with: i64 = with_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_with_times_1000 = (sum_with * 1000) / GRID_SIZE;
 
         // Compute world WITHOUT patchiness (gated OFF) — byte-identical to homogeneous baseline
-        let without_patch = classify_and_caps(SEED, HMAX, DIM, false);
+        let without_patch = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
         let sum_without: i64 = without_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_without_times_1000 = (sum_without * 1000) / GRID_SIZE;
@@ -671,4 +843,260 @@ mod tests {
         );
     }
 
+    // ── W-SIM-3a: primary material reconciliation (#403) ─────────────────────────────────────────
+
+    #[test]
+    fn reconcile_primary_material_off_is_always_pass_through() {
+        assert_eq!(reconcile_primary_material(false, MaterialId::Sand, 5), MaterialId::Sand);
+        assert_eq!(reconcile_primary_material(false, MaterialId::Soil, 0), MaterialId::Soil);
+        assert_eq!(reconcile_primary_material(false, MaterialId::Bedrock, 3), MaterialId::Bedrock);
+    }
+
+    #[test]
+    fn reconcile_primary_material_on_prefers_real_dune_sand() {
+        // Real aeolian sand present -> Sand, regardless of the erosion-baseline material underneath.
+        assert_eq!(reconcile_primary_material(true, MaterialId::Soil, 2), MaterialId::Sand);
+        assert_eq!(reconcile_primary_material(true, MaterialId::Sand, 2), MaterialId::Sand);
+    }
+
+    #[test]
+    fn reconcile_primary_material_on_subordinates_erosion_baseline_sand() {
+        // No real dune sand -> the erosion-baseline Desert->Sand mapping is subordinated to Soil
+        // (breaks the biome<->material circularity, RnD 13 §6), non-Sand materials pass through.
+        assert_eq!(reconcile_primary_material(true, MaterialId::Sand, 0), MaterialId::Soil);
+        assert_eq!(reconcile_primary_material(true, MaterialId::Bedrock, 0), MaterialId::Bedrock);
+    }
+
+    // ── W-SIM-4a: tectonic gate threading (#396) ─────────────────────────────────────────────────
+
+    /// The `enable_tectonics` gate genuinely threads through to `erode` (not a dead parameter): the
+    /// same `(seed, hmax, dim)` must produce a DIFFERENT height field with tectonics on vs off.
+    #[test]
+    fn classify_and_caps_tectonics_gate_actually_changes_height() {
+        const DIM: usize = 64;
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, true, false, false, false, false);
+        assert_ne!(off.height, on.height, "enable_tectonics=true must change the height field — else the gate is dead code");
+    }
+
+    /// `enable_tectonics=false` must be byte-identical to the pre-#396 `classify_and_caps` output —
+    /// the golden-neutral OFF-path guard at the caps layer (mirrors the erosion-layer guard).
+    #[test]
+    fn classify_and_caps_tectonics_off_is_deterministic_and_matches_baseline() {
+        const DIM: usize = 16;
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        assert_eq!(a, b, "classify_and_caps(..,false,false,false,false,false) must be byte-identical across repeated calls");
+    }
+
+    // ── W-SIM-3a: aeolian gate threading (#403) ──────────────────────────────────────────────────
+
+    /// The `enable_aeolian` gate genuinely threads through to `aeolian::run_aeolian` (not a dead
+    /// parameter): on a grid with a real Desert-derived sand supply, the same `(seed, hmax, dim)`
+    /// must produce a DIFFERENT height field with aeolian on vs off.
+    #[test]
+    fn classify_and_caps_aeolian_gate_actually_changes_height() {
+        const DIM: usize = 64;
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, true, false, false, false);
+        assert_ne!(off.height, on.height, "enable_aeolian=true must change the height field — else the gate is dead code");
+    }
+
+    /// `enable_aeolian=false` must be byte-identical to the pre-#403 `classify_and_caps` output —
+    /// **critically, this must cover the BIOME/MATERIAL classification too, not only height**
+    /// (#403 ТЗ): a test that only checked height/export could pass while Dune/Sand cells silently
+    /// drifted. Asserts full-struct byte-identity across repeated OFF calls AND that every
+    /// Sand-material cell in this fixture still classifies as `Dune` — the exact pre-#403
+    /// Desert→Sand→Dune mapping, unperturbed by the aeolian reconciliation logic being present
+    /// (but gated off) in the same function.
+    #[test]
+    fn classify_and_caps_aeolian_off_matches_baseline_including_dune_cells() {
+        const DIM: usize = 64;
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        assert_eq!(a, b, "classify_and_caps(..,enable_aeolian=false) must be byte-identical across repeated calls");
+
+        // Direct unit coverage of the BIOME/MATERIAL reconciliation on a Sand cell specifically
+        // (#403 ТЗ) — via `reconcile_primary_material` rather than hoping the full pipeline
+        // organically produces one: on this climate model `erode`'s own Desert→Sand path is
+        // unreachable on any real generated grid (see `ARID_P_THRESHOLD`'s doc), so a full-pipeline
+        // assertion alone could never exercise this case. `override_biome` itself is untouched by
+        // #403, so material==Sand -> Dune is proven directly against it.
+        let material_off = reconcile_primary_material(false, MaterialId::Sand, 0);
+        assert_eq!(material_off, MaterialId::Sand, "OFF path: reconcile_primary_material must pass Sand through unchanged");
+        assert_eq!(
+            override_biome(BiomeId::Desert, 0, material_off, 0, false),
+            FinalBiome::Dune,
+            "OFF path: a Sand-material cell must still classify as Dune — today's \
+             Desert→Sand→Dune mapping, unperturbed by enable_aeolian=false"
+        );
+    }
+
+    // ── W-SIM-5: volcanic gate threading (#410) ──────────────────────────────────────────────────
+
+    /// The `enable_volcanic` gate genuinely threads through to `erode`/the material mask (not a
+    /// dead parameter): the same `(seed, hmax, dim)` must produce a DIFFERENT height field with
+    /// volcanic on vs off.
+    #[test]
+    fn classify_and_caps_volcanic_gate_actually_changes_height() {
+        const DIM: usize = 64;
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, true, false, false);
+        assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
+    }
+
+    /// `enable_volcanic=false` is deterministic across repeated calls AND never emits Basalt/Tuff —
+    /// the two properties this test actually asserts. (The literal byte-identity-to-pre-#410
+    /// guarantee is structural — `classify_and_caps`'s `if enable_volcanic` gate skips
+    /// `volcanic::build_vents`/`edifice_material_mask` entirely when off — and is empirically
+    /// confirmed by every PRE-EXISTING pinned golden/chain-hash in this crate, computed with
+    /// `enable_volcanic=false`, remaining unchanged by this PR.)
+    #[test]
+    fn classify_and_caps_volcanic_off_matches_baseline_and_never_emits_volcanic_material() {
+        const DIM: usize = 64;
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        assert_eq!(a, b, "classify_and_caps(..,enable_volcanic=false) must be byte-identical across repeated calls");
+
+        let has_volcanic_material = a
+            .surface_material
+            .iter()
+            .any(|&m| m == MaterialId::Basalt as u8 || m == MaterialId::Tuff as u8);
+        assert!(!has_volcanic_material, "OFF path: Basalt/Tuff must never be emitted with enable_volcanic=false");
+    }
+
+    /// With volcanic on, at least one cell reads back as Basalt or Tuff (the material mask actually
+    /// threads through to the final `surface_material`, not just the height).
+    #[test]
+    fn classify_and_caps_volcanic_on_emits_basalt_or_tuff() {
+        const DIM: usize = 64;
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, true, false, false);
+        let has_volcanic_material = on
+            .surface_material
+            .iter()
+            .any(|&m| m == MaterialId::Basalt as u8 || m == MaterialId::Tuff as u8);
+        assert!(has_volcanic_material, "enable_volcanic=true must emit at least one Basalt/Tuff cell on this fixture");
+    }
+
+    // ── W-SIM-6: glacial gate threading (#416) ───────────────────────────────────────────────────
+
+    /// The `enable_glacial` gate genuinely threads through to `erode`/the material mask (not a dead
+    /// parameter): the same `(seed, hmax, dim)` must produce a DIFFERENT height field with glacial
+    /// on vs off.
+    #[test]
+    fn classify_and_caps_glacial_gate_actually_changes_height() {
+        const DIM: usize = 64;
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, true, false);
+        assert_ne!(off.height, on.height, "enable_glacial=true must change the height field — else the gate is dead code");
+    }
+
+    /// `enable_glacial=false` is deterministic across repeated calls AND never emits Till — the two
+    /// properties this test actually asserts (mirrors the volcanic OFF-path test's naming
+    /// discipline post-code-critic, #410: the literal byte-identity-to-pre-#416 guarantee is
+    /// structural — the `if enable_glacial` gate skips `glacial::run_glacial` entirely when off —
+    /// and is empirically confirmed by every PRE-EXISTING pinned golden/chain-hash in this crate,
+    /// computed with `enable_glacial=false`, remaining unchanged by this PR).
+    #[test]
+    fn classify_and_caps_glacial_off_matches_baseline_and_never_emits_till() {
+        const DIM: usize = 64;
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        assert_eq!(a, b, "classify_and_caps(..,enable_glacial=false) must be byte-identical across repeated calls");
+
+        let has_till = a.surface_material.iter().any(|&m| m == MaterialId::Till as u8);
+        assert!(!has_till, "OFF path: Till must never be emitted with enable_glacial=false");
+    }
+
+    /// With glacial on, at least one cell reads back as Till (the material mask actually threads
+    /// through to the final `surface_material`, not just the height).
+    #[test]
+    fn classify_and_caps_glacial_on_emits_till() {
+        const DIM: usize = 64;
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, true, false);
+        let has_till = on.surface_material.iter().any(|&m| m == MaterialId::Till as u8);
+        assert!(has_till, "enable_glacial=true must emit at least one Till cell on this fixture");
+    }
+
+    // ── W-SIM-7: coastal gate threading (#423) ───────────────────────────────────────────────────
+
+    /// The `enable_coastal` gate genuinely threads through (not a dead parameter): the same
+    /// `(seed, hmax, dim)` must produce a DIFFERENT height field with coastal on vs off.
+    #[test]
+    fn classify_and_caps_coastal_gate_actually_changes_height() {
+        const DIM: usize = 64;
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, true);
+        assert_ne!(off.height, on.height, "enable_coastal=true must change the height field — else the gate is dead code");
+    }
+
+    /// `enable_coastal=false` is deterministic across repeated calls AND never emits Water/Ocean —
+    /// the properties this test actually asserts (mirrors the volcanic/glacial OFF-path tests'
+    /// naming discipline post-code-critic, #410: the literal byte-identity-to-pre-#423 guarantee is
+    /// structural — the `if enable_coastal` gate skips `coastal::run_coastal` entirely when off,
+    /// and the classify loop's submerged branch is dead code on an all-`false` `submerged` array —
+    /// and is empirically confirmed by every PRE-EXISTING pinned golden/chain-hash in this crate,
+    /// computed with `enable_coastal=false`, remaining unchanged by this PR).
+    #[test]
+    fn classify_and_caps_coastal_off_matches_baseline_and_never_emits_water() {
+        const DIM: usize = 64;
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, false);
+        assert_eq!(a, b, "classify_and_caps(..,enable_coastal=false) must be byte-identical across repeated calls");
+
+        let has_water = a.surface_material.iter().any(|&m| m == MaterialId::Water as u8);
+        assert!(!has_water, "OFF path: Water must never be emitted with enable_coastal=false");
+        let has_ocean = a.final_biome.iter().any(|&b| b == FinalBiome::Ocean);
+        assert!(!has_ocean, "OFF path: Ocean must never be emitted with enable_coastal=false");
+    }
+
+    /// With coastal on, at least one cell reads back as Water/Ocean (the submerged signal actually
+    /// threads through to both `surface_material` and `final_biome`, not just the height), and
+    /// classify never gives a submerged cell a terrestrial biome (#423 AC 2).
+    #[test]
+    fn classify_and_caps_coastal_on_emits_water_and_ocean_never_terrestrial() {
+        const DIM: usize = 64;
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false, true);
+        let has_water = on.surface_material.iter().any(|&m| m == MaterialId::Water as u8);
+        assert!(has_water, "enable_coastal=true must emit at least one Water cell on this fixture");
+
+        for idx in 0..DIM * DIM {
+            if on.surface_material[idx] == MaterialId::Water as u8 {
+                assert_eq!(
+                    on.final_biome[idx], FinalBiome::Ocean,
+                    "a Water-material cell (idx={idx}) must classify as Ocean, never a terrestrial biome"
+                );
+            }
+        }
+    }
+
+    /// Orthogonality (#416/#423 ТЗ): every landform flag composes with any subset of the others
+    /// without cross-contamination — every combination compiles/runs and produces a well-formed
+    /// (correctly-sized, no-panic) result. This mirrors the existing pairwise gate-changes-height
+    /// tests but sweeps ALL 32 combinations of the five flags in one pass, checking only structural
+    /// well-formedness (a crash or a wrong-length field would indicate cross-contamination) — the
+    /// individual flags' OWN OFF-path/gate-changes-height guarantees are proven in isolation
+    /// elsewhere, this test's job is specifically the SUBSET-COMPOSITION claim.
+    #[test]
+    fn all_landform_flags_compose_with_any_subset_of_each_other() {
+        const DIM: usize = 64;
+        for tectonics in [false, true] {
+            for aeolian in [false, true] {
+                for volcanic in [false, true] {
+                    for glacial in [false, true] {
+                        for coastal in [false, true] {
+                            let fields = classify_and_caps(SEED, HMAX, DIM, false, tectonics, aeolian, volcanic, glacial, coastal);
+                            assert_eq!(fields.height.len(), DIM * DIM);
+                            assert_eq!(fields.final_biome.len(), DIM * DIM);
+                            assert_eq!(fields.caps.len(), DIM * DIM);
+                            assert_eq!(fields.surface_material.len(), DIM * DIM);
+                            for &h in &fields.height {
+                                assert!((0..=HMAX).contains(&h), "height out of [0,{HMAX}] with tectonics={tectonics} aeolian={aeolian} volcanic={volcanic} glacial={glacial} coastal={coastal}: {h}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

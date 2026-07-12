@@ -45,8 +45,8 @@ fn chain_hash(state: &ErosionState) -> u64 {
 /// Re-run identity: the full erosion chain is byte-identical across repeated calls, at prod scale.
 #[test]
 fn chain_is_deterministic_across_repeated_calls() {
-    let a = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM);
-    let b = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM);
+    let a = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM, false, false);
+    let b = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM, false, false);
     assert_eq!(a, b, "erode must be byte-identical across repeated calls at prod scale");
 }
 
@@ -57,11 +57,11 @@ fn chain_is_deterministic_across_repeated_calls() {
 /// parallel port — this test is the tooth that catches that regression.
 #[test]
 fn erosion_is_thread_count_independent_1_vs_n() {
-    let baseline = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM);
+    let baseline = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM, false, false);
 
     const N: usize = 4;
     let handles: Vec<_> = (0..N)
-        .map(|_| std::thread::spawn(|| erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM)))
+        .map(|_| std::thread::spawn(|| erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM, false, false)))
         .collect();
     for h in handles {
         let result = h.join().expect("worker thread must not panic");
@@ -74,7 +74,7 @@ fn erosion_is_thread_count_independent_1_vs_n() {
 /// `erosion.rs`'s own unit tests.
 #[test]
 fn erosion_conserves_sediment_at_prod_scale() {
-    let state = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM);
+    let state = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM, false, false);
     let mut initial_height = vec![0i64; W4_CHAIN_DIM * W4_CHAIN_DIM];
     for z in 0..W4_CHAIN_DIM {
         for x in 0..W4_CHAIN_DIM {
@@ -96,7 +96,7 @@ fn erosion_conserves_sediment_at_prod_scale() {
 /// W-1/W-3-consumed-wrong sample, or an incision/talus/material encoding mistake) reddens HERE.
 #[test]
 fn w4_chain_golden_erosion_post_state() {
-    let state = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM);
+    let state = erode(CHAIN_SEED, CHAIN_HMAX, W4_CHAIN_DIM, false, false);
 
     // Sanity: post-erosion height must never exceed the RAW pre-erosion height at that position
     // (erosion + talus can only remove/redistribute mass downhill, never inject height above the

@@ -53,9 +53,10 @@ fn rescale_cap(cap: i64, resource_base: i64) -> i64 {
     cap * resource_base / CAP_MAX + 1
 }
 
-/// P3-1 (B2): Biome reference temperatures (centidegrees). Indexed by FinalBiome ordinal (0-12).
+/// P3-1 (B2): Biome reference temperatures (centidegrees). Indexed by FinalBiome ordinal (0-13).
 /// Static per biome; used to initialize the temp_grid during world-gen.
-/// First 8 match zonal BiomeId; last 5 are azonal (edaphic) overrides (RnD 11 §3).
+/// First 8 match zonal BiomeId; next 5 are azonal (edaphic) overrides (RnD 11 §3); last 1 is the
+/// W-SIM-7 (#423) submerged branch.
 /// Matching § 1.1 theory (RnD/engineering/43-ambient-tolerance-*.md):
 /// Zonal (0-7):
 /// - Tundra: −15°C
@@ -72,7 +73,11 @@ fn rescale_cap(cap: i64, resource_base: i64) -> i64 {
 /// - Rock: −5°C (exposed mineral, cold/variable baseline)
 /// - Fertile: +12°C (nutrient-rich, temperate-forest baseline)
 /// - Dune: +25°C (arid sand, desert-heat baseline)
-const BIOME_TEMP: [i32; 13] = [
+/// Submerged (13):
+/// - Ocean: +10°C (temperate open-water surface; biologically inert placeholder — Ocean's own base
+///   cap/O₂/NO₃ are already fixed at 0 in `caps.rs`, RnD's relief-only roadmap explicitly excludes
+///   marine biology in this slice, so this value has no downstream production effect today).
+const BIOME_TEMP: [i32; 14] = [
     -1500,  // 0: Tundra (zonal)
     -500,   // 1: BorealForest (zonal)
     1000,   // 2: TemperateGrassland (zonal)
@@ -86,6 +91,7 @@ const BIOME_TEMP: [i32; 13] = [
     -500,   // 10: Rock (azonal, cold/exposed mineral)
     1200,   // 11: Fertile (azonal, nutrient-rich temperate)
     2500,   // 12: Dune (azonal, hot desert sand)
+    1000,   // 13: Ocean (submerged, W-SIM-7 #423 — biologically inert placeholder)
 ];
 
 impl ProcgenWorld {
@@ -102,10 +108,49 @@ impl ProcgenWorld {
     /// P3-3 (F1, golden-neutral): `thermal_verdict_temps` — optional biome-temperature override
     /// for the thermal-niche verdict harness. `None` (default) uses stock BIOME_TEMP; `Some(array)`
     /// injects custom temps (verdict-only, never shipped). Gated at world-gen time (immutable post-gen).
-    pub fn new(dim: i64, hmax: i64, resource_base: i64, seed: u64, thermal_verdict_temps: Option<[i32; 13]>) -> Self {
+    ///
+    /// **W-SIM-4a (#396):** `enable_tectonics` threads straight to `classify_and_caps`/`erode` —
+    /// `false` (every prod call site on `worldgen-relief`) reproduces the pre-#396 world byte-for-
+    /// byte, preserving the acceptance-corridor economy; the map/visual track opts in explicitly.
+    ///
+    /// **W-SIM-3a (#403):** `enable_aeolian` threads straight to `classify_and_caps`, orthogonal to
+    /// `enable_tectonics` (both are independent opt-in stages) — `false` (every prod call site)
+    /// reproduces the pre-#403 world byte-for-byte.
+    ///
+    /// **W-SIM-5 (#410):** `enable_volcanic` threads straight to `classify_and_caps`, orthogonal to
+    /// `enable_tectonics`/`enable_aeolian` (a 4th independent opt-in stage, matching house style —
+    /// see #410's explicit out-of-scope note on NOT folding these into a config struct here) —
+    /// `false` (every prod call site) reproduces the pre-#410 world byte-for-byte.
+    ///
+    /// **W-SIM-6 (#416):** `enable_glacial` threads straight to `classify_and_caps`, orthogonal to
+    /// `enable_tectonics`/`enable_aeolian`/`enable_volcanic` (a 5th independent opt-in stage,
+    /// matching house style — see #416's explicit out-of-scope note on NOT folding these into a
+    /// config struct here) — `false` (every prod call site) reproduces the pre-#416 world
+    /// byte-for-byte.
+    ///
+    /// **W-SIM-7 (#423):** `enable_coastal` threads straight to `classify_and_caps`, orthogonal to
+    /// `enable_tectonics`/`enable_aeolian`/`enable_volcanic`/`enable_glacial` (a 6th independent
+    /// opt-in stage, matching house style) — `false` (every prod call site) reproduces the pre-#423
+    /// world byte-for-byte. `thermal_verdict_temps` widened from `[i32; 13]` to `[i32; 14]` in the
+    /// SAME PR (a mechanical ripple, not a new opt-in): `BIOME_TEMP` is indexed by
+    /// `final_biome[i] as usize`, and `FinalBiome::Ocean=13` would otherwise index one past the old
+    /// 13-element array on ANY submerged cell, regardless of `thermal_verdict_temps` — a guaranteed
+    /// panic, not merely a latent gap, the moment `enable_coastal` produces water.
+    pub fn new(
+        dim: i64,
+        hmax: i64,
+        resource_base: i64,
+        seed: u64,
+        thermal_verdict_temps: Option<[i32; 14]>,
+        enable_tectonics: bool,
+        enable_aeolian: bool,
+        enable_volcanic: bool,
+        enable_glacial: bool,
+        enable_coastal: bool,
+    ) -> Self {
         // W-7 gate: patchiness defaults OFF for acceptance corridors (homogeneous baseline).
         // Specific scenarios (map-gen, visualization) can opt-in by calling with enable_patchiness=true.
-        let fields = classify_and_caps(seed, hmax, dim as usize, false);
+        let fields = classify_and_caps(seed, hmax, dim as usize, false, enable_tectonics, enable_aeolian, enable_volcanic, enable_glacial, enable_coastal);
         // W-6b Phase A: DECOUPLE resource from solid_level (RnD 01 §40,43: is_solid=movement,
         // resource=food are SEPARATE queries). solid_level → ONLY movement/collision (is_solid).
         // resource() → DIRECT rescale_cap(caps[idx]), independent of height.
@@ -254,7 +299,7 @@ mod tests {
 
     #[test]
     fn resource_nonneg_and_bounded() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
         for x in 0..DIM {
             for z in 0..DIM {
                 let r = w.resource(Vec2Fixed(x, z));
@@ -265,7 +310,7 @@ mod tests {
 
     #[test]
     fn height_wraps_toroidally_like_noise_world_did() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
         assert_eq!(w.height(0, 0), w.height(DIM, 0), "x must wrap at dim");
         assert_eq!(w.height(0, 0), w.height(0, DIM), "z must wrap at dim");
         assert_eq!(w.height(-1, 0), w.height(DIM - 1, 0), "negative x must wrap");
@@ -273,8 +318,8 @@ mod tests {
 
     #[test]
     fn procgen_world_is_deterministic_across_repeated_builds() {
-        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
-        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
+        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
         for x in 0..DIM {
             for z in 0..DIM {
                 let pos = Vec2Fixed(x, z);
@@ -291,7 +336,7 @@ mod tests {
     /// climate-only "≥2 biomes" check would silently pass even if erosion fully no-oped).
     #[test]
     fn procgen_world_is_rich_and_not_degenerate_at_prod_scale() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
 
         let mut min_h = i64::MAX;
         let mut max_h = i64::MIN;
@@ -340,7 +385,7 @@ mod tests {
     fn resource_decoupled_from_solid_level() {
         use gen::material::MaterialId;
 
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
         let mut resource_on_solid = Vec::new();
         let mut resource_on_non_solid = Vec::new();
 

@@ -24,6 +24,13 @@ use crate::gen::climate::climate_at;
 use crate::gen::height::height_at;
 
 /// Baseline material at a voxel. Small `#[repr(u8)]` id, append-only (matches `BiomeId`'s idiom).
+/// `Basalt`/`Tuff` (W-SIM-5, #410) are volcanic primary substrates, written by
+/// `gen::volcanic::edifice_material_mask`. `Till` (W-SIM-6, #416) is the glacial moraine primary
+/// substrate, written by `gen::glacial::run_glacial`. `Water` (W-SIM-7, #423) is the world's FIRST
+/// submerged signal — the UNAMBIGUOUS tag for cells below `coastal::sea_level` (deliberately NOT
+/// `Air`, which already means "above-surface empty" and is byte-indistinguishable from sky/barren
+/// land — see `coastal.rs`'s module doc) — appended, never reorder (existing discriminants
+/// `Air..Till` unchanged).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum MaterialId {
@@ -32,6 +39,10 @@ pub enum MaterialId {
     Permafrost = 2,
     Soil = 3,
     Bedrock = 4,
+    Basalt = 5,
+    Tuff = 6,
+    Till = 7,
+    Water = 8,
 }
 
 /// Depth (in `height_at` integer units) below the surface at which subsoil transitions to bedrock.
