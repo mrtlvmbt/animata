@@ -16,7 +16,13 @@
 //! deterministic fault network consumed by `erosion::erode_with_tectonics` (fault-scarp height step
 //! + fault-aligned resistance-lineament override), opt-in and default-off (`enable_tectonics`
 //! threads `erode` → `classify_and_caps` → `ProcgenWorld::new`).
+//!
+//! **W-SIM-3a (#403, `worldgen-relief` branch):** `aeolian` is the second landform slice — a
+//! deterministic Werner slab-CA (wind-driven dunes) run POST-erosion by `caps::classify_and_caps`,
+//! opt-in and default-off (`enable_aeolian` threads the same way `enable_tectonics` does, orthogonal
+//! to it — both are independent opt-in stages).
 
+pub mod aeolian;
 pub mod biome;
 pub mod caps;
 pub mod climate;
