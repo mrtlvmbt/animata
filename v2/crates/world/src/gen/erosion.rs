@@ -836,11 +836,11 @@ mod tests {
         let faults = crate::gen::tectonics::build_faults(SEED, DIM);
         let b_excl = steep_edge_count_excluding_scarp(&b.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
         let c_excl = steep_edge_count_excluding_scarp(&c.height, DIM, STEEP_THRESHOLD, &faults, HMAX);
-        // PASS 1 (#397): FAULT_STEP_DEN reverted 8→12 (scarp-step crank dropped, PM decision) —
-        // resistance flip alone changes b_excl/c_excl, so this margin is stale. Forced-impossible
-        // sentinel to reveal the real b_excl/c_excl from the CI failure message; pass 2 pins a real
-        // floor below the revealed margin.
-        const MIN_MARGIN: usize = 1_000_000;
+        // CI-sourced (#397, hard-fault-only config, FAULT_STEP_DEN=12): C=1373 B=1298, margin 75
+        // (run #29180478606, x86 debug + arm64 release agree). Locked at roughly half that with
+        // headroom (not the bare placeholder `1`) so the assertion guards the resistance-lineament
+        // effect size, not just its sign, without being brittle to minor perturbation.
+        const MIN_MARGIN: usize = 40;
         assert!(
             c_excl >= b_excl + MIN_MARGIN,
             "(ii) resistance-lineament structure must contribute INDEPENDENTLY of the scarp step: \
