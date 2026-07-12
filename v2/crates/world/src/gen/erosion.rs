@@ -95,7 +95,10 @@ const RESISTANCE_SALT: u64 = 0x5245_5349_5354_414E; // "RESISTAN" (ASCII, folded
 pub const N_RESIST_CLASSES: i64 = 4;
 /// Erodibility divisor per resistance class — harder rock (higher class) divides the incision rate
 /// down more, eroding SLOWER at identical `(area, slope)`. Implementer's call, documented, locked.
-const RESIST_DIVISOR: [i64; N_RESIST_CLASSES as usize] = [1, 2, 4, 8];
+/// `pub(crate)` (W-SIM-7, #423): `coastal.rs`'s cliff-retreat rate reuses the SAME divisor so
+/// "higher resistance ⇒ slower retreat" is driven by the identical resistance-class mapping erosion
+/// already uses, rather than a duplicated copy (mirrors `climate.rs`'s `WIND_DX` visibility precedent).
+pub(crate) const RESIST_DIVISOR: [i64; N_RESIST_CLASSES as usize] = [1, 2, 4, 8];
 
 /// Stream-power incision rate constants: `Δz = (K_INCISE_NUM · isqrt(A) · S) / (K_INCISE_DEN ·
 /// resist_divisor)`. Implementer's call (RnD `sim/world/10 §4`), CALIBRATED against the actual

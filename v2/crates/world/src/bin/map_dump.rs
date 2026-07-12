@@ -8,8 +8,8 @@
 //!   seed     u64, decimal or 0x-hex (default 1)
 //!   out.ppm  output path (default `map_<dim>_<seed>.ppm`)
 //!
-//! All four landform stages (tectonics / aeolian / volcanic / glacial) are turned ON so the
-//! preview shows the full diverse-relief material palette; patchiness is OFF.
+//! All five landform stages (tectonics / aeolian / volcanic / glacial / coastal) are turned ON so
+//! the preview shows the full diverse-relief material palette; patchiness is OFF.
 
 use std::io::Write;
 use world::gen::caps::classify_and_caps;
@@ -22,7 +22,7 @@ const HMAX: i64 = 200;
 /// Primary-material → RGB palette (top-down surface colour).
 fn colour(m: u8) -> [u8; 3] {
     match m {
-        x if x == MaterialId::Air as u8 => [40, 70, 130], // water / air — blue
+        x if x == MaterialId::Air as u8 => [180, 180, 190], // air (above-surface empty) — pale grey
         x if x == MaterialId::Sand as u8 => [222, 200, 120], // aeolian sand — tan
         x if x == MaterialId::Permafrost as u8 => [205, 232, 240], // permafrost — pale ice
         x if x == MaterialId::Soil as u8 => [96, 132, 66], // soil — green
@@ -30,6 +30,7 @@ fn colour(m: u8) -> [u8; 3] {
         x if x == MaterialId::Basalt as u8 => [58, 52, 62], // volcanic basalt — near-black
         x if x == MaterialId::Tuff as u8 => [172, 150, 138], // volcanic tuff — light brown
         x if x == MaterialId::Till as u8 => [184, 194, 206], // glacial till — grey-blue
+        x if x == MaterialId::Water as u8 => [40, 70, 130], // coastal water — blue (W-SIM-7, #423)
         _ => [255, 0, 255],                                  // unknown — magenta
     }
 }
@@ -50,8 +51,8 @@ fn main() {
     let seed: u64 = args.get(2).map_or(1, |s| parse_seed(s));
     let out = args.get(3).cloned().unwrap_or_else(|| format!("map_{dim}_{seed:#x}.ppm"));
 
-    // patchiness=false, then all four landforms ON.
-    let fields = classify_and_caps(seed, HMAX, dim, false, true, true, true, true);
+    // patchiness=false, then all five landforms ON.
+    let fields = classify_and_caps(seed, HMAX, dim, false, true, true, true, true, true);
     assert_eq!(fields.surface_material.len(), dim * dim, "surface_material must be dim*dim");
 
     // P6 binary PPM: header then RGB triples, row-major (idx = z*dim + x).
