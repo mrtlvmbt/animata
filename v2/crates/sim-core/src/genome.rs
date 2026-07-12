@@ -3963,10 +3963,10 @@ mod tests {
         g.size = 21; // above the E-6 fate boundary — matches m7a_live_drive_produces_multiple_modules
         let graph = g.decode(&econ).expect("live-drive genome must decode to Some").graph;
 
-        // Pre-Rung-1 pinned values (placeholder — CI's failed.log carries the real left:/right: on
-        // first run, per the sanctioned "placeholder -> first run -> pin actual value" golden-test
-        // creation procedure; this test is new to this branch).
-        assert_eq!(graph.num_modules(), 0, "PLACEHOLDER — pin from CI failed.log on first run");
+        // Pre-Rung-1 pinned value, captured from CI failed.log on first run (identical on x86 and
+        // arm64 jobs ⇒ arch-independent), per the sanctioned "placeholder -> first run -> pin actual
+        // value" golden-test creation procedure; this test is new to this branch.
+        assert_eq!(graph.num_modules(), 2);
     }
 
     /// Structural mask-live-count teeth (SPARSE ≠ SMALL, topo-diff F6): decoding through the FULL
