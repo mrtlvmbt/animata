@@ -33,7 +33,7 @@ mod stages;
 mod traits;
 
 pub use components::{
-    BrainOutput, BrainState, Energy, Intent, MineralQuota, PendingSpeciation, Sensors, SpeciesId,
+    BrainOutput, BrainState, Energy, Grown, Intent, MineralQuota, PendingSpeciation, Sensors, SpeciesId,
     Velocity, VelocityNext,
 };
 pub use det_map::DetMap;
@@ -421,6 +421,35 @@ impl Sim {
             );
         }
 
+        // P-1 (#429): propagule growth precondition — collapses every regime requirement into ONE
+        // hard assert so no invalid config is reachable under `enable_propagule` (critic F16).
+        // `income_mode != Footprint`: Footprint harvests `side²` from `g_dev` (the DECODED target),
+        // not materialised cells — a partial body would earn the full-N subsidy the firewall exists
+        // to prevent (F13); Anchor/Extent both read live cell state, so they're fine.
+        // `light.is_none()`: with no light field, `photo_gain` (a gene) can never mutate up
+        // (`has_light` gates the draw) ⇒ `photo_cost` stays 0 — the metab lump the grow reserve
+        // must cover reduces to `base_cost` alone (F14).
+        // `!enable_oxygen`: ⇒ `aerobe_cost` stays 0 (same reasoning).
+        // `morphogen.supply_source`/`.adhesion_threshold` both `None`: `rebuild_prefix`'s
+        // `module_reachable`/`module_consortium` inert defaults (all-true / identity) are exact
+        // ONLY then (F11) — `.as_ref().is_none_or(...)` so a `None` morphogen (no CellGraph, no
+        // body) trivially satisfies the guard instead of panicking (F19).
+        if econ.enable_propagule {
+            assert!(
+                econ.income_mode != IncomeMode::Footprint
+                    && econ.light.is_none()
+                    && !econ.enable_oxygen
+                    && econ.morphogen.as_ref().is_none_or(|m| m.supply_source.is_none() && m.adhesion_threshold.is_none()),
+                "enable_propagule requires: income_mode != Footprint, light.is_none(), \
+                 !enable_oxygen, and morphogen.supply_source/.adhesion_threshold both None. \
+                 Got: income_mode={:?}, light.is_some()={}, enable_oxygen={}, \
+                 morphogen.supply_source={:?}, morphogen.adhesion_threshold={:?}",
+                econ.income_mode, econ.light.is_some(), econ.enable_oxygen,
+                econ.morphogen.as_ref().and_then(|m| m.supply_source),
+                econ.morphogen.as_ref().and_then(|m| m.adhesion_threshold),
+            );
+        }
+
         let mut w = World::new();
         w.insert_resource(SimClock { seed: config.seed, tick: 0 });
         w.insert_resource(InputLog::default());
@@ -486,6 +515,9 @@ impl Sim {
 
         for (template, template_count, species_id) in &templates_with_ids {
             let template_phenotype = template.decode(&econ).expect("founder template decode must succeed");
+            // P-1 (#429): founders start FULLY GROWN regardless of `enable_propagule` — growth only
+            // applies to a propagule CHILD's truncated start (see the birth seams below).
+            let founder_grown = Grown(template_phenotype.graph.body_size().clamp(0, u8::MAX as i64) as u8);
             for _ in 0..*template_count {
                 // Deterministic scatter across the domain (co-prime strides → spread, no float).
                 // Use global_founder_index to maintain deterministic spread across all templates.
@@ -513,6 +545,7 @@ impl Sim {
                         BrainState::zeroed(),
                         BrainOutput::zeroed(),
                         MineralQuota(0),
+                        founder_grown,
                     ));
                 } else {
                     w.spawn((
@@ -529,6 +562,7 @@ impl Sim {
                         // Spawn contract (D-Brain-2a): brain buffers start zeroed — same path as a newborn.
                         BrainState::zeroed(),
                         BrainOutput::zeroed(),
+                        founder_grown,
                     ));
                 }
                 global_founder_index += 1;
@@ -612,12 +646,15 @@ impl Sim {
     /// label allocation order without adding physical information. The separate [`Sim::species_hash`]
     /// covers the SpeciesId layer in the two-run-identical CI check.
     pub fn state_hash(&mut self) -> u64 {
+        // P-1 (#429): read the gate BEFORE building the query (avoids a resource/query borrow
+        // clash) — `Grown` is folded ONLY under this flag, so off ⇒ byte-identical goldens.
+        let enable_propagule = self.world.resource::<EconParams>().enable_propagule;
         let mut q = self
             .world
-            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput, &Velocity, Option<&MineralQuota>)>();
+            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput, &Velocity, Option<&MineralQuota>, &Grown)>();
         let items: Vec<(Entity, u64)> = q
             .iter(&self.world)
-            .map(|(e, p, en, g, bs, bo, v, mq)| {
+            .map(|(e, p, en, g, bs, bo, v, mq, grown)| {
                 let mut h = fnv_mix(FNV_OFFSET, p.0 .0 as u64);
                 h = fnv_mix(h, p.0 .1 as u64);
                 h = fnv_mix(h, en.0 as u64);
@@ -638,6 +675,12 @@ impl Sim {
                     if m.0 != 0 {
                         h = fnv_mix(h, m.0 as u64);
                     }
+                }
+                // P-1 (#429): fold Grown ONLY under enable_propagule (the isolation gate — `Grown`
+                // is present on every entity regardless, but non-propagule configs would otherwise
+                // fold a constant-per-entity value into every golden, shifting them for free).
+                if enable_propagule {
+                    h = fnv_mix(h, grown.0 as u64);
                 }
                 (e, h)
             })
@@ -1272,6 +1315,7 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         stage!("3_act", stage_act),
         stage!("4_move", stage_move),
         stage!("5_metabolism", stage_metabolism),
+        stage!("5b_grow", stage_grow),
         stage!("6_interactions", stage_interactions),
         stage!("6b_mineral_feed", stage_mineral_feed),
         stage!("6c_predation", stage_predation),

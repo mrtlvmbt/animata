@@ -92,6 +92,7 @@ fn build_imposed_split_body(body_size: i64, germ_count: i64) -> CellGraph {
         module_reachable: vec![true; n_modules],
         module_consortium: (0..n_modules).collect(),
         cell_positions: Vec::new(),
+        growth_cells: Vec::new(),
     }
 }
 
