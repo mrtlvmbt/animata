@@ -217,10 +217,11 @@ fn oxygen_base_cap(b: FinalBiome) -> i64 {
 
 /// Per-`MaterialId` cap multiplier (numerator/denominator — integer-domain, never a float scale).
 /// `Basalt`/`Tuff` (W-SIM-5, #410): fresh volcanic substrate is a barren rocky/ashy zone of
-/// near-zero production (RnD 15 §8) — the same zero multiplier as `Bedrock`.
+/// near-zero production (RnD 15 §8) — the same zero multiplier as `Bedrock`. `Till` (W-SIM-6, #416):
+/// fresh glacial till/moraine is likewise a barren zone (RnD 16 §9) — same zero multiplier.
 fn material_mult(m: MaterialId) -> (i64, i64) {
     match m {
-        MaterialId::Bedrock | MaterialId::Air | MaterialId::Basalt | MaterialId::Tuff => (0, 1),
+        MaterialId::Bedrock | MaterialId::Air | MaterialId::Basalt | MaterialId::Tuff | MaterialId::Till => (0, 1),
         MaterialId::Sand => (1, 2),
         MaterialId::Permafrost => (3, 4),
         MaterialId::Soil => (1, 1),
@@ -351,10 +352,19 @@ fn reconcile_primary_material(enable_aeolian: bool, erosion_material: MaterialId
 /// (the edifice height delta is folded in PRE-erosion — see `erosion.rs::erode_with_tectonics`).
 /// The volcanic material mask (Basalt/Tuff, re-derived here from the SAME `(seed, dim)` vents
 /// `erode` used internally — `volcanic::build_vents` is a cheap pure function, no need to thread it
-/// through `ErosionState`) takes PRIORITY over the aeolian reconciliation below when present: a
-/// volcanic-emplaced cell is never simultaneously read as a dune-sand cell. `false` reproduces the
-/// pre-#410 output byte-for-byte: the mask is all-`None`, so `material` falls straight through to
-/// the existing aeolian reconciliation, unperturbed.
+/// through `ErosionState`) takes PRIORITY over the glacial/aeolian reconciliation below when
+/// present: a volcanic-emplaced cell is never simultaneously read as a till or dune-sand cell.
+/// `false` reproduces the pre-#410 output byte-for-byte: the mask is all-`None`, so `material` falls
+/// straight through to the glacial/aeolian reconciliation, unperturbed.
+///
+/// **W-SIM-6 gate (#416, glacial default-off):** `enable_glacial` runs [`crate::gen::glacial::run_glacial`]
+/// POST-erosion, PRE-aeolian (RnD 16 §1: `erode → GLACIAL → aeolian → final classify` — glacial
+/// outwash could later feed the aeolian sand reserve, a follow-up coupling not built here, so
+/// glacial's reshaped height feeds FORWARD into aeolian's own aridity seeding below). The glacial
+/// `Till` material mask takes priority over aeolian's reconciliation (a till-covered cell is never
+/// simultaneously read as dune sand) but yields to volcanic (checked first). `false` reproduces the
+/// pre-#416 output byte-for-byte: `post_glacial_height` is a plain clone of `erosion.height`, the
+/// mask is all-`None` — no ELA/ice computation of any kind.
 pub fn classify_and_caps(
     seed: u64,
     hmax: i64,
@@ -363,6 +373,7 @@ pub fn classify_and_caps(
     enable_tectonics: bool,
     enable_aeolian: bool,
     enable_volcanic: bool,
+    enable_glacial: bool,
 ) -> WorldFields {
     let erosion = erode(seed, hmax, dim, enable_tectonics, enable_volcanic);
     let n = dim * dim;
@@ -374,31 +385,38 @@ pub fn classify_and_caps(
         vec![None; n]
     };
 
+    let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if enable_glacial {
+        let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height);
+        (g.height, g.material)
+    } else {
+        (erosion.height.clone(), vec![None; n])
+    };
+
     let (post_aeolian_height, sand_depth) = if enable_aeolian {
         // W-SIM-3a (#403): sand supply seeded from a WORKING ARIDITY ESTIMATE (RnD 13 §1's own
         // chicken-egg resolution — aridity depends on climate, climate depends on height, height is
         // what this pass is about to change, so it reads a PRE-aeolian precipitation estimate on
-        // the post-erosion height, not a biome classification). RnD 13 §1 specifies precipitation
-        // directly ("атмосферный P_base"), NOT the zonal Whittaker biome — deliberately: this
-        // climate model's temperature never exceeds ~16°C on any realistic grid (altitude lapse
-        // only ever cools below the latitude baseline), so `BiomeId::Desert`'s T_ref=25°C reference
-        // point is UNREACHABLE via real `climate_from_height` output — a Desert-biome gate would be
-        // permanently dead code, not merely rare. Below-baseline precipitation (`p <
-        // ARID_P_THRESHOLD`) is a real, reachable, broad arid-zone proxy instead.
+        // the CURRENT (post-glacial) height, not a biome classification). RnD 13 §1 specifies
+        // precipitation directly ("атмосферный P_base"), NOT the zonal Whittaker biome —
+        // deliberately: this climate model's temperature never exceeds ~16°C on any realistic grid
+        // (altitude lapse only ever cools below the latitude baseline), so `BiomeId::Desert`'s
+        // T_ref=25°C reference point is UNREACHABLE via real `climate_from_height` output — a
+        // Desert-biome gate would be permanently dead code, not merely rare. Below-baseline
+        // precipitation (`p < ARID_P_THRESHOLD`) is a real, reachable, broad arid-zone proxy instead.
         let initial_sand: Vec<i64> = (0..n)
             .map(|idx| {
                 let x = (idx % dim) as i64;
                 let z = (idx / dim) as i64;
                 let x_src = (x - WIND_DX).max(0) as usize;
-                let h_west = erosion.height[z as usize * dim + x_src];
-                let (_t, p) = climate_from_height(erosion.height[idx], h_west, x, z, seed);
+                let h_west = post_glacial_height[z as usize * dim + x_src];
+                let (_t, p) = climate_from_height(post_glacial_height[idx], h_west, x, z, seed);
                 if p < ARID_P_THRESHOLD { aeolian::INITIAL_SAND_DEPTH } else { 0 }
             })
             .collect();
-        let aeo = aeolian::run_aeolian(seed, dim, &erosion.height, initial_sand);
+        let aeo = aeolian::run_aeolian(seed, dim, &post_glacial_height, initial_sand);
         (aeo.height, aeo.sand_depth)
     } else {
-        (erosion.height.clone(), vec![0i64; n])
+        (post_glacial_height.clone(), vec![0i64; n])
     };
 
     let mut final_biome = Vec::with_capacity(n);
@@ -423,8 +441,9 @@ pub fn classify_and_caps(
                 None => 0,
             };
 
-            let material = volcanic_mask[idx]
-                .unwrap_or_else(|| reconcile_primary_material(enable_aeolian, erosion.surface_material[idx], sand_depth[idx]));
+            let material = volcanic_mask[idx].or(glacial_mask[idx]).unwrap_or_else(|| {
+                reconcile_primary_material(enable_aeolian, erosion.surface_material[idx], sand_depth[idx])
+            });
 
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
             final_biome.push(final_b);
@@ -567,8 +586,8 @@ mod tests {
 
     #[test]
     fn classify_and_caps_is_deterministic_across_repeated_calls() {
-        let a = classify_and_caps(SEED, HMAX, 16, false, false, false, false);
-        let b = classify_and_caps(SEED, HMAX, 16, false, false, false, false);
+        let a = classify_and_caps(SEED, HMAX, 16, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, 16, false, false, false, false, false);
         assert_eq!(a, b, "classify_and_caps must be byte-identical across repeated calls");
     }
 
@@ -577,7 +596,7 @@ mod tests {
     #[test]
     fn classify_and_caps_is_well_defined_grid_wide() {
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
         assert_eq!(fields.final_biome.len(), DIM * DIM);
         assert_eq!(fields.caps.len(), DIM * DIM);
         for &c in &fields.caps {
@@ -590,7 +609,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, false, false, false);
+        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, false, false, false, false);
 
         // W-7 gate (patchiness default-off): caps are byte-identical to pre-W-7 (no patchiness applied).
         // Height/biome/material fields unchanged. These are the canonical pre-W-7 values.
@@ -617,7 +636,7 @@ mod tests {
         const HMAX: i64 = 200;
         const DIM: usize = 64;
         // With patchiness ON to verify bounds and clamping behavior of the modulation
-        let fields = classify_and_caps(SEED, HMAX, DIM, true, false, false, false);
+        let fields = classify_and_caps(SEED, HMAX, DIM, true, false, false, false, false);
 
         // Count cells hitting bounds (ceiling at CAP_MAX, floor at 1 via rescale_cap).
         let mut clamp_low = 0usize;
@@ -677,7 +696,7 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM, true, false, false, false);
+        let fields = classify_and_caps(SEED, HMAX, DIM, true, false, false, false, false);
 
         // Adjacent-cell differences: sum of absolute differences for cells one step apart.
         let mut same_neighbor_sum = 0i64;
@@ -735,13 +754,13 @@ mod tests {
         const GRID_SIZE: i64 = (DIM * DIM) as i64;
 
         // Compute world WITH patchiness active (gated ON)
-        let with_patch = classify_and_caps(SEED, HMAX, DIM, true, false, false, false);
+        let with_patch = classify_and_caps(SEED, HMAX, DIM, true, false, false, false, false);
         let sum_with: i64 = with_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_with_times_1000 = (sum_with * 1000) / GRID_SIZE;
 
         // Compute world WITHOUT patchiness (gated OFF) — byte-identical to homogeneous baseline
-        let without_patch = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
+        let without_patch = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
         let sum_without: i64 = without_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_without_times_1000 = (sum_without * 1000) / GRID_SIZE;
@@ -808,8 +827,8 @@ mod tests {
     #[test]
     fn classify_and_caps_tectonics_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
-        let on = classify_and_caps(SEED, HMAX, DIM, false, true, false, false);
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, true, false, false, false);
         assert_ne!(off.height, on.height, "enable_tectonics=true must change the height field — else the gate is dead code");
     }
 
@@ -818,9 +837,9 @@ mod tests {
     #[test]
     fn classify_and_caps_tectonics_off_is_deterministic_and_matches_baseline() {
         const DIM: usize = 16;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
-        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
-        assert_eq!(a, b, "classify_and_caps(..,false,false) must be byte-identical across repeated calls");
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        assert_eq!(a, b, "classify_and_caps(..,false,false,false,false,false) must be byte-identical across repeated calls");
     }
 
     // ── W-SIM-3a: aeolian gate threading (#403) ──────────────────────────────────────────────────
@@ -831,8 +850,8 @@ mod tests {
     #[test]
     fn classify_and_caps_aeolian_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
-        let on = classify_and_caps(SEED, HMAX, DIM, false, false, true, false);
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, true, false, false);
         assert_ne!(off.height, on.height, "enable_aeolian=true must change the height field — else the gate is dead code");
     }
 
@@ -846,8 +865,8 @@ mod tests {
     #[test]
     fn classify_and_caps_aeolian_off_matches_baseline_including_dune_cells() {
         const DIM: usize = 64;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
-        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
         assert_eq!(a, b, "classify_and_caps(..,enable_aeolian=false) must be byte-identical across repeated calls");
 
         // Direct unit coverage of the BIOME/MATERIAL reconciliation on a Sand cell specifically
@@ -874,8 +893,8 @@ mod tests {
     #[test]
     fn classify_and_caps_volcanic_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
-        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, true);
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, true, false);
         assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
     }
 
@@ -888,8 +907,8 @@ mod tests {
     #[test]
     fn classify_and_caps_volcanic_off_matches_baseline_and_never_emits_volcanic_material() {
         const DIM: usize = 64;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
-        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false);
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
         assert_eq!(a, b, "classify_and_caps(..,enable_volcanic=false) must be byte-identical across repeated calls");
 
         let has_volcanic_material = a
@@ -904,11 +923,79 @@ mod tests {
     #[test]
     fn classify_and_caps_volcanic_on_emits_basalt_or_tuff() {
         const DIM: usize = 64;
-        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, true);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, true, false);
         let has_volcanic_material = on
             .surface_material
             .iter()
             .any(|&m| m == MaterialId::Basalt as u8 || m == MaterialId::Tuff as u8);
         assert!(has_volcanic_material, "enable_volcanic=true must emit at least one Basalt/Tuff cell on this fixture");
+    }
+
+    // ── W-SIM-6: glacial gate threading (#416) ───────────────────────────────────────────────────
+
+    /// The `enable_glacial` gate genuinely threads through to `erode`/the material mask (not a dead
+    /// parameter): the same `(seed, hmax, dim)` must produce a DIFFERENT height field with glacial
+    /// on vs off.
+    #[test]
+    fn classify_and_caps_glacial_gate_actually_changes_height() {
+        const DIM: usize = 64;
+        let off = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, true);
+        assert_ne!(off.height, on.height, "enable_glacial=true must change the height field — else the gate is dead code");
+    }
+
+    /// `enable_glacial=false` is deterministic across repeated calls AND never emits Till — the two
+    /// properties this test actually asserts (mirrors the volcanic OFF-path test's naming
+    /// discipline post-code-critic, #410: the literal byte-identity-to-pre-#416 guarantee is
+    /// structural — the `if enable_glacial` gate skips `glacial::run_glacial` entirely when off —
+    /// and is empirically confirmed by every PRE-EXISTING pinned golden/chain-hash in this crate,
+    /// computed with `enable_glacial=false`, remaining unchanged by this PR).
+    #[test]
+    fn classify_and_caps_glacial_off_matches_baseline_and_never_emits_till() {
+        const DIM: usize = 64;
+        let a = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        let b = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, false);
+        assert_eq!(a, b, "classify_and_caps(..,enable_glacial=false) must be byte-identical across repeated calls");
+
+        let has_till = a.surface_material.iter().any(|&m| m == MaterialId::Till as u8);
+        assert!(!has_till, "OFF path: Till must never be emitted with enable_glacial=false");
+    }
+
+    /// With glacial on, at least one cell reads back as Till (the material mask actually threads
+    /// through to the final `surface_material`, not just the height).
+    #[test]
+    fn classify_and_caps_glacial_on_emits_till() {
+        const DIM: usize = 64;
+        let on = classify_and_caps(SEED, HMAX, DIM, false, false, false, false, true);
+        let has_till = on.surface_material.iter().any(|&m| m == MaterialId::Till as u8);
+        assert!(has_till, "enable_glacial=true must emit at least one Till cell on this fixture");
+    }
+
+    /// Orthogonality (#416 ТЗ): glacial composes with any subset of tectonics/aeolian/volcanic
+    /// without cross-contamination — every combination compiles/runs and produces a well-formed
+    /// (correctly-sized, no-panic) result. This mirrors the existing pairwise gate-changes-height
+    /// tests but sweeps ALL 16 combinations of the four flags in one pass, checking only structural
+    /// well-formedness (a crash or a wrong-length field would indicate cross-contamination) — the
+    /// individual flags' OWN OFF-path/gate-changes-height guarantees are proven in isolation
+    /// elsewhere, this test's job is specifically the SUBSET-COMPOSITION claim.
+    #[test]
+    fn glacial_composes_with_any_subset_of_other_landform_flags() {
+        const DIM: usize = 64;
+        for tectonics in [false, true] {
+            for aeolian in [false, true] {
+                for volcanic in [false, true] {
+                    for glacial in [false, true] {
+                        let fields = classify_and_caps(SEED, HMAX, DIM, false, tectonics, aeolian, volcanic, glacial);
+                        assert_eq!(fields.height.len(), DIM * DIM);
+                        assert_eq!(fields.final_biome.len(), DIM * DIM);
+                        assert_eq!(fields.caps.len(), DIM * DIM);
+                        assert_eq!(fields.surface_material.len(), DIM * DIM);
+                        for &h in &fields.height {
+                            assert!((0..=HMAX).contains(&h), "height out of [0,{HMAX}] with tectonics={tectonics} aeolian={aeolian} volcanic={volcanic} glacial={glacial}: {h}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

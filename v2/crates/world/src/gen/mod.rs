@@ -26,6 +26,11 @@
 //! (additive) viscosity-selected edifices, folded into the initial height field by
 //! `erosion::erode_with_tectonics` PRE-erosion (the same seam tectonics already injects at), opt-in
 //! and default-off (`enable_volcanic`, orthogonal to `enable_tectonics`/`enable_aeolian`).
+//!
+//! **W-SIM-6 (#416, `worldgen-relief` branch):** `glacial` is the fourth landform slice — an
+//! ELA-gated ice-incision (subtractive) + till-deposition (additive) pass run POST-erosion,
+//! PRE-aeolian by `caps::classify_and_caps`, opt-in and default-off (`enable_glacial`, orthogonal to
+//! `enable_tectonics`/`enable_aeolian`/`enable_volcanic`).
 
 pub mod aeolian;
 pub mod biome;
@@ -33,6 +38,7 @@ pub mod caps;
 pub mod climate;
 pub mod drainage;
 pub mod erosion;
+pub mod glacial;
 pub mod height;
 pub mod material;
 pub mod moisture;

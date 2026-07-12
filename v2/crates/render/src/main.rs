@@ -140,7 +140,7 @@ async fn main() {
     // W-6 WIRE: use `cli::HMAX`, `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The
     // ProcgenWorld pipeline (integer relief + erosion + biome/edaphic + caps) runs once here and caches
     // all per-cell fields (height, biome, resource, etc.) — never re-run per frame or per query.
-    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, false, false, false);
+    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, false, false, false, false);
     let hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world);
     let cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world);
 
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
-        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false);
+        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false);
         let hex_chunks = terrain::build_hex_terrain(dim, &world);
         let cube_chunks = terrain_cube::build_cube_terrain(dim, &world);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");
