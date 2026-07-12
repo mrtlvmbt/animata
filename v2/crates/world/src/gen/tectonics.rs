@@ -8,9 +8,11 @@
 //! 1. **[`fault_scarp_delta`]** — a vertical height STEP applied across each fault line, BEFORE
 //!    erosion (so erosion then dissects the raw scarp).
 //! 2. **[`is_in_fault_band`]** — marks cells within a fixed perpendicular band of any fault line, so
-//!    `gen::erosion::erode_with_tectonics` can force the rock-resistance field softer there (fault
-//!    gouge — geologically the fault zone is the WEAKEST rock, not the hardest), giving the existing
-//!    differential-erosion machinery a LINEAR structure to carve into valleys, instead of the
+//!    `gen::erosion::erode_with_tectonics` can force the rock-resistance field HARDER there (RnD 17
+//!    §3, differential erosion: a relief-INCREASING fault must resist incision more than the
+//!    surrounding rock, standing proud as a resistant ridge/lineament as the softer surrounding rock
+//!    strips away around it — models a cemented/mineralized fault), giving the existing
+//!    differential-erosion machinery a LINEAR structure to carve relief around, instead of the
 //!    isotropic-noise blobs `resistance_field` alone produces.
 //!
 //! ## Fault representation — infinite lines via integer cross-product, no trig/float/sqrt
