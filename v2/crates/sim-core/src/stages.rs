@@ -189,6 +189,46 @@ pub fn stage_move(
     }
 }
 
+/// P-1 (#429): the n_cells-dependent BASE metabolic lump — `stages.rs`'s pre-P-1 `base_cost`
+/// verbatim (breadth_cost/burden_cost/the Kleiber `metab_units` split/`* n`), extracted PURE in
+/// `(econ, g, n_cells)` (no `pos`/`world`/`clock`/`e` — photo_cost/aerobe_cost need those + the
+/// photo-share split, so they stay inline in `stage_metabolism`, and are 0 under the `Sim::new`
+/// `enable_propagule` assert). Shared by `stage_metabolism` (the actual per-tick charge, byte-
+/// identical extraction) AND the grow gate (`stage_grow`, at `Grown+1`) — ONE formula, no drift
+/// (critic F18).
+pub(crate) fn base_metab_lump(econ: &EconParams, g: &Genome, n_cells: i64) -> i64 {
+    let n = econ.metab_period.max(1) as i64;
+    // P3-2 (B5): breadth-cost additive in base_cost. Specialist/generalist tradeoff:
+    // wider tol_breadth incurs standing metabolic cost (gate on is_some() for byte-identity).
+    let breadth_cost = if econ.ambient_tolerance.is_some() {
+        econ.ambient_tolerance.as_ref().unwrap().breadth_cost_k * g.tol_breadth as i64 / crate::params::BREADTH_COST_SCALE
+    } else { 0 };
+    // GA-LOAD: genetic-load energy burden cost. Additive in base_cost.
+    // Load expresses as standing metabolic drain: burden_cost = genetic_load × burden_cost_k
+    // (gate on enable_mutation_load for byte-identity with non-load configs).
+    let burden_cost = if econ.enable_mutation_load {
+        g.genetic_load as i64 * econ.burden_cost_k
+    } else { 0 };
+    // R30-1.1a (#412): Kleiber consumer split — metabolism reads the LIVE body (n_cells) when
+    // gated on; viability/reproduction/state_hash stay wired to the `size` GENE regardless
+    // (only this consumer moves). n_cells ≤ g_dev² ≤ 16 ⇒ the i64→i32 cast is lossless; no
+    // clamp needed (size_pow_three_quarters floors size.max(1), so n_cells=0 is a valid
+    // fully-apoptosed body, not a panic).
+    let metab_units = if econ.metab_reads_n_cells {
+        crate::genome::size_pow_three_quarters(n_cells as i32)
+    } else {
+        g.metab_units()
+    };
+    (econ.base_metab
+        + econ.k_size_metab * metab_units
+        + econ.k_move_cost * g.move_speed as i64
+        + econ.k_sense_cost * g.sense_range as i64
+        + econ.c_coord * n_cells
+        + breadth_cost
+        + burden_cost)
+        * n
+}
+
 // ── Stage 5: Metabolism — base + size^¾ + move + sense cost, fixed-point ledger, N=1 (R20). ────────
 //
 // D′-2a: photo-machinery expression cost added here. Per-tick rate r = (NUM·expressed)/DEN;
@@ -224,35 +264,7 @@ pub fn stage_metabolism(
         let n_cells: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
         // Charge ×N — a lump standing in for the N base ticks since the last metabolism tick, so the
         // economy stays ≈invariant to N and conservation is exact (R15).
-        // P3-2 (B5): breadth-cost additive in base_cost. Specialist/generalist tradeoff:
-        // wider tol_breadth incurs standing metabolic cost (gate on is_some() for byte-identity).
-        let breadth_cost = if econ.ambient_tolerance.is_some() {
-            econ.ambient_tolerance.as_ref().unwrap().breadth_cost_k * g.tol_breadth as i64 / crate::params::BREADTH_COST_SCALE
-        } else { 0 };
-        // GA-LOAD: genetic-load energy burden cost. Additive in base_cost.
-        // Load expresses as standing metabolic drain: burden_cost = genetic_load × burden_cost_k
-        // (gate on enable_mutation_load for byte-identity with non-load configs).
-        let burden_cost = if econ.enable_mutation_load {
-            g.genetic_load as i64 * econ.burden_cost_k
-        } else { 0 };
-        // R30-1.1a (#412): Kleiber consumer split — metabolism reads the LIVE body (n_cells) when
-        // gated on; viability/reproduction/state_hash stay wired to the `size` GENE regardless
-        // (only this consumer moves). n_cells ≤ g_dev² ≤ 16 ⇒ the i64→i32 cast is lossless; no
-        // clamp needed (size_pow_three_quarters floors size.max(1), so n_cells=0 is a valid
-        // fully-apoptosed body, not a panic).
-        let metab_units = if econ.metab_reads_n_cells {
-            crate::genome::size_pow_three_quarters(n_cells as i32)
-        } else {
-            g.metab_units()
-        };
-        let base_cost = (econ.base_metab
-            + econ.k_size_metab * metab_units
-            + econ.k_move_cost * g.move_speed as i64
-            + econ.k_sense_cost * g.sense_range as i64
-            + econ.c_coord * n_cells
-            + breadth_cost
-            + burden_cost)
-            * n as i64;
+        let base_cost = base_metab_lump(&econ, g, n_cells);
         // D′-2a/2b: photo-machinery expression cost on the EXPRESSED capacity.
         // expressed_capacity returns 0 at night for regulated cells → cost skipped (the D′-2b lever).
         // Charge per event = (NUM · eff · n) / DEN (delayed division avoids truncation at low eff).
@@ -299,6 +311,46 @@ pub fn stage_metabolism(
     }
     // Accumulate cumulative photo-cost (non-inertness tooth: must be > 0 over a long dprime run).
     tel.photo_cost_total += photo_cost_this_event;
+}
+
+// ── Stage 5b: Grow — P-1 propagule growth primitive (#429). PINNED immediately after Metabolism,
+//    before Reproduction, running ONLY on metabolism ticks (critic F30/F4 — a grow step firing off
+//    that cadence could grow on a no-bill tick, so the very next lump would land at the HIGHER
+//    n_cells/Kleiber and starve the body). Grows AT MOST one cell per metabolism tick. Gated on
+//    `enable_propagule` (F2) — off ⇒ early return, zero cost, byte-identical. ─────────────────────
+pub fn stage_grow(
+    econ: Res<EconParams>,
+    clock: Res<SimClock>,
+    mut ledger: ResMut<EnergyLedger>,
+    mut q: Query<(&Genome, &mut Phenotype, &mut Grown, &mut Energy)>,
+) {
+    if !econ.enable_propagule {
+        return;
+    }
+    let n = econ.metab_period.max(1);
+    if !clock.tick.is_multiple_of(n) {
+        return; // same cadence as stage_metabolism — the reserve check below assumes it.
+    }
+    for (g, mut ph, mut grown, mut energy) in &mut q {
+        // `growth_cells.len()` is the decoded TARGET N — invariant across `rebuild_prefix` calls
+        // (it always carries the FULL decode), unlike `module_cell_count`'s sum (which shrinks to
+        // the materialised prefix).
+        let target = ph.graph.growth_cells.len() as i64;
+        if (grown.0 as i64) >= target {
+            continue;
+        }
+        // Gate: ONE more cell affordable AND the reserve covers the lump the tick AFTER growth
+        // will actually charge (recomputed at Grown+1 via the SHARED helper — no drift, F18/F20).
+        // Deliberately NOT keyed to repro_bar (i64::MAX for a germ-less body would overflow; a
+        // repro-first order would starve growth of any surplus, F34/F35).
+        let next_lump = base_metab_lump(&econ, g, grown.0 as i64 + 1);
+        if energy.0 >= econ.e_cell + next_lump {
+            grown.0 += 1;
+            energy.0 -= econ.e_cell;
+            ledger.dissipated += econ.e_cell;
+            ph.graph = ph.graph.rebuild_prefix(grown.0 as usize);
+        }
+    }
 }
 
 /// Monod saturating uptake demand: `U(R) = (u_max·R) / (R+km)`, integer, truncating toward zero.
@@ -1353,6 +1405,32 @@ pub fn stage_settling(
     }
 }
 
+/// P-1 (#429): resolve `n_eff` and, when `enable_propagule`, truncate `phenotype.graph` in place to
+/// the first `n_eff` entries of `growth_cells` (the birth-seam firewall: a propagule child is born
+/// at its MATERIALISED size, not its decoded target). Returns the `Grown` value to attach at spawn.
+///
+/// `target = phenotype.graph.body_size()` (the just-decoded FULL body, before any truncation).
+/// `n_eff = if genome.n_propagule == 0 { target } else { min(genome.n_propagule, target) }` (the
+/// `0` sentinel = full/instant, byte-identical to pre-P-1 decode).
+///
+/// When `enable_propagule=false`: returns `target` WITHOUT touching `phenotype.graph` at all (no
+/// truncation, no `rebuild_prefix` call) — byte-identical to pre-P-1 (F2). Callers that then read
+/// `phenotype.graph.body_size()` AFTER this call get `n_eff` for free (truncation already applied)
+/// when the flag is on, or the untouched `target` when it's off.
+fn propagule_truncate(econ: &EconParams, genome: &Genome, phenotype: &mut Phenotype) -> u8 {
+    let target = phenotype.graph.body_size();
+    if !econ.enable_propagule {
+        return target.clamp(0, u8::MAX as i64) as u8;
+    }
+    let n_eff = if genome.n_propagule == 0 {
+        target
+    } else {
+        (genome.n_propagule as i64).min(target)
+    };
+    phenotype.graph = phenotype.graph.rebuild_prefix(n_eff as usize);
+    n_eff.clamp(0, u8::MAX as i64) as u8
+}
+
 // ── Stage 7: BirthDeath — division (energy split) + death, via the command buffer (sync point). ────
 // D′-3a additions: Liebig AND-gate on division (quota ≥ q_mineral), overflow-heat when energy-ready
 // but mineral-poor (ONE site, same sorted loop), and mineral quota recycled on death.
@@ -1507,7 +1585,7 @@ pub fn stage_birth_death(
             if energy.0 >= repro_bar && mineral_gate_passes {
                 let pos_c = *pos;
                 let child_genome =
-                    genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, econ.enable_body_plan);
+                    genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, econ.enable_body_plan, econ.enable_propagule);
                 let species_c = *species;
 
                 match child_genome.decode(&econ) {
@@ -1531,7 +1609,11 @@ pub fn stage_birth_death(
                             repro.stillbirths += 1;
                         }
                     }
-                    Some(child_phenotype) => {
+                    Some(mut child_phenotype) => {
+                        // P-1 (#429): resolve n_eff + truncate the graph to it (no-op when the flag
+                        // is off). `body_size()` below now reads the TRUNCATED graph, so `n_child`
+                        // (and thus `endowment`) is n_eff for free — no separate variable needed.
+                        let grown = propagule_truncate(&econ, &child_genome, &mut child_phenotype);
                         let n_child = child_phenotype.graph.body_size();
                         let endowment = econ.e_cell * n_child;
                         if energy.0 >= endowment + econ.c_div {
@@ -1562,6 +1644,7 @@ pub fn stage_birth_death(
                                     BrainState::zeroed(),
                                     BrainOutput::zeroed(),
                                     MineralQuota(0),
+                                    Grown(grown),
                                     PendingSpeciation,
                                 ));
                             } else {
@@ -1578,6 +1661,7 @@ pub fn stage_birth_death(
                                     Intent::default(),
                                     BrainState::zeroed(),
                                     BrainOutput::zeroed(),
+                                    Grown(grown),
                                     PendingSpeciation,
                                 ));
                             }
@@ -1608,7 +1692,7 @@ pub fn stage_birth_death(
             }
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, econ.enable_body_plan);
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, econ.enable_body_plan, econ.enable_propagule);
             let species_c = *species;
 
             // E-1/E-5a/E-5b: decode-seam gate. Ф0 always returns Some; the five existing configs
@@ -1624,7 +1708,7 @@ pub fn stage_birth_death(
             // `born_total`. E-5b: attribute the None to the REAL criterion (not a test injection)
             // via `is_stillbirth_by_size_criterion` — the dedicated telemetry counter, distinct from
             // this generic gate, so a `force_decode_none` probe never pollutes the production count.
-            let Some(child_phenotype) = child_genome.decode(&econ) else {
+            let Some(mut child_phenotype) = child_genome.decode(&econ) else {
                 ledger.lost += econ.e_cell;
                 if child_genome.is_stillbirth_by_size_criterion() {
                     repro.stillbirths += 1;
@@ -1632,6 +1716,12 @@ pub fn stage_birth_death(
                 continue;
             };
             repro.parents.insert(bits);
+            // P-1 (#429): truncate the graph to n_eff (no-op when the flag is off) — birth is NOT a
+            // growth event, so without this a 1-cell propagule would spawn with the FULL-N graph
+            // (the exact F1 subsidy the firewall exists to prevent). Energy stays the FLAT `e_cell`
+            // on this branch regardless (see the #429 ТЗ's P-3 note — those N−1 cells are free
+            // today; P-1 does not change that attribution, only the materialised graph + Grown).
+            let grown = propagule_truncate(&econ, &child_genome, &mut child_phenotype);
 
             // Spawn contract (D-Brain-2a): the newborn gets ALL per-entity brain buffers ZEROED —
             // `BrainState` (both `h_old`/`h_new`) and `BrainOutput` — so no prior occupant's hidden
@@ -1658,6 +1748,7 @@ pub fn stage_birth_death(
                     BrainState::zeroed(),
                     BrainOutput::zeroed(),
                     MineralQuota(0), // D′-3a: child inherits zero quota (must re-accumulate)
+                    Grown(grown),
                     // M5: marks child for speciation check in Sim::process_pending_speciation()
                     PendingSpeciation,
                 ));
@@ -1675,6 +1766,7 @@ pub fn stage_birth_death(
                     Intent::default(),
                     BrainState::zeroed(),
                     BrainOutput::zeroed(),
+                    Grown(grown),
                     // M5: marks child for speciation check in Sim::process_pending_speciation()
                     // (post-stage, outside the ECS system so SpeciationState stays off the world).
                     PendingSpeciation,
@@ -1953,6 +2045,7 @@ mod tests {
             module_reachable: vec![true; n],
             module_consortium: (0..n).collect(),
             cell_positions: Vec::new(),
+            growth_cells: Vec::new(),
         }
     }
 

@@ -478,6 +478,15 @@ pub struct EconParams {
     /// not divide this tick and keeps accumulating. `false` (default, all existing production
     /// configs) → the flat `e_cell` endowment, byte-identical goldens (the isolation gate).
     pub newborn_energy_per_cell: bool,
+
+    // ── P-1: propagule growth primitive (#429) ────────────────────────────────────────────────
+    /// Enable the propagule-growth subsystem (P-1, #429). Gates the WHOLE subsystem: the
+    /// `n_propagule` mutation, the birth-seam truncation, the grow step (`stage_grow`), AND the
+    /// `Grown` hash-fold. `false` (default, all existing production configs) → nothing changes,
+    /// byte-identical goldens (the isolation gate). `true` requires the `Sim::new` hard config
+    /// assert to pass (`income_mode != Footprint`, no light, no O₂, no morphogen
+    /// supply_source/adhesion_threshold) — see `Sim::new`.
+    pub enable_propagule: bool,
 }
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
@@ -772,6 +781,9 @@ impl Default for EconParams {
             // R30-1.1b (#414): newborn-energy-per-cell OFF by default — false for all existing
             // production configs (byte-identical; endowment stays flat e_cell).
             newborn_energy_per_cell: false,
+            // P-1 (#429): propagule growth OFF by default — false for all existing production
+            // configs (byte-identical; no truncation, no grow, no Grown/growth_cells hash-fold).
+            enable_propagule: false,
         }
     }
 }

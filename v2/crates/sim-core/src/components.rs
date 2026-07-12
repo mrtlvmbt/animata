@@ -56,6 +56,16 @@ pub struct PendingSpeciation;
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct MineralQuota(pub i64);
 
+/// P-1 propagule growth primitive (#429): current MATERIALISED cell count (≤
+/// `Phenotype.graph.growth_cells.len()`, the decoded target). Initialised at EVERY spawn seam —
+/// founders and non-propagule newborns start full (`Grown = target`); a propagule child starts at
+/// `Grown = n_eff`. Warm — incremented by `stage_grow`, at most ONE cell per metabolism tick, only
+/// when `EconParams.enable_propagule`. Always present (unlike `MineralQuota`, which is Option-
+/// gated) but hash-folded ONLY under that flag (`Sim::state_hash`) — off ⇒ present but unfolded ⇒
+/// byte-identical goldens.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Grown(pub u8);
+
 /// Recurrent hidden state of the brain (M3 / D-Brain-2) — a per-entity **double buffer** of the
 /// `H = BRAIN_HIDDEN` hidden units (`FixedI16` Q8.8). All recurrent edges read `h_old` and write
 /// `h_new`; the buffers are swapped **only on Brain ticks** (1/K), so between Brain ticks the hidden
