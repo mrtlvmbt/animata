@@ -27,7 +27,7 @@ VALID_KEYS="scenario seed ticks bench_pop param values seeds force gdev_cap morp
 
 die() { echo "✗ $*" >&2; exit 2; }
 
-[ $# -ge 1 ] || die "usage: sim-run.sh <scenario> [k=v ...]  (scenario: evo-stats|perf|v2-perf|multiseed|sweep|gridsweep|dprime-2c|dprime-3b|driver-emergence|hypoxia-verdict|settling-verdict|dol-verdict|composition-verdict|dr0-diag|dr0-gradient|ga-load|dc-diag|d5-drift|env-frontier|ext-0a|ext-0b|diff-probe)"
+[ $# -ge 1 ] || die "usage: sim-run.sh <scenario> [k=v ...]  (scenario: evo-stats|perf|v2-perf|multiseed|sweep|gridsweep|dprime-2c|dprime-3b|driver-emergence|hypoxia-verdict|settling-verdict|dol-verdict|composition-verdict|dr0-diag|dr0-gradient|ga-load|dc-diag|d5-drift|env-frontier|ext-0a|ext-0b|diff-probe|step-a0)"
 SCENARIO="$1"; shift
 
 command -v gh >/dev/null 2>&1 || die "gh CLI не найден"
