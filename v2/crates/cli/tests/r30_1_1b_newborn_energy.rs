@@ -221,13 +221,22 @@ fn cannot_afford_yet_then_divides_with_full_endowment() {
     // not, making multicellular reproduction unaffordable BY CONSTRUCTION (independent of any cost
     // tuning). `Extent` books one independent contestant per LIVE cell (`stages.rs`'s
     // `IncomeMode::Extent` arm), so a 4-cell body earns ~4x a 1-cell body's income — the coherent
-    // extent economy this mechanism assumes. Costs stay at their EconParams defaults (income under
-    // Extent clears them easily); mutation_rate=0 isolates the affordability gate from decode/
-    // stillbirth risk (test 2 already covers that branch).
+    // extent economy this mechanism assumes. mutation_rate=0 isolates the affordability gate from
+    // decode/stillbirth risk (test 2 already covers that branch).
+    //
+    // `excrete: 0` here ISOLATES THE VALUE READ, not affordability (which is already proven under
+    // REAL default excrete by `r15_conservation_across_reproducing_multicellular_run`): the newborn
+    // is spawned `Energy(endowment)` correctly inside `stage_birth_death` (stage 7), but
+    // `stage_field_scatter` (stage 8, excrete) runs LATER THE SAME TICK and already sees the new
+    // child, deducting one `econ.excrete` deposit before this test's post-`step()` probe reads it —
+    // a probe-timing artifact, not a clamp (a clamp would read far below the endowment, not exactly
+    // `endowment - excrete`). excrete is a conserved field deposit (Δtotal=0, R15-neutral), so
+    // zeroing it here does not touch conservation or the endowment mechanism itself.
     let econ = EconParams {
         newborn_energy_per_cell: true,
         d0_scaled: 0,
         income_mode: sim_core::IncomeMode::Extent,
+        excrete: 0,
         ..EconParams::default()
     };
     let e_cell = econ.e_cell;
