@@ -37,7 +37,7 @@ fn main() {
         // Run the post-W-9 classification (all landforms enabled, talus disabled to match Phase-0 intent).
         // Actually, we want the POST-talus field since that's what classify uses.
         let (_, staged, _) = classify_and_caps_staged(
-            seed, HMAX, dim, false, true, true, true, true, true, false
+            seed, HMAX, dim, false, true, true, true, true, true, false, true  // enable_w10=true
         );
 
         let _n = dim * dim;
@@ -80,27 +80,33 @@ fn main() {
         println!("  Moisture (0=dry, 1000=wet): deciles = {:?}", moisture_deciles);
         println!("  Slope: deciles = {:?}", slope_deciles);
 
-        // Estimate class shares (using tentative thresholds for visualization)
-        let tentative_dry_threshold = 300i64;
-        let tentative_wet_threshold = 700i64;
-        let tentative_outcrop_threshold = 5i64;
+        // Test threshold candidates from deciles (target: 40–60% / 25–35% / 15–25%)
+        // Deciles show steep distribution: p50≈10–11, p90≈80–170
+        let candidates: &[(i64, i64, &str)] = &[
+            (15, 80, "CANDIDATE-A"),
+            (20, 100, "CANDIDATE-B"),
+            (25, 120, "CANDIDATE-C"),
+        ];
 
-        let dry_count = soil_moistures.iter().filter(|&&m| m < tentative_dry_threshold).count();
-        let wet_count = soil_moistures.iter().filter(|&&m| m >= tentative_wet_threshold).count();
-        let normal_count = soil_moistures.len() - dry_count - wet_count;
-        let outcrop_count = soil_slopes.iter().filter(|&&s| s >= tentative_outcrop_threshold).count();
+        for (dry_thresh, wet_thresh, label) in candidates {
+            let dry_count = soil_moistures.iter().filter(|&&m| m < *dry_thresh).count();
+            let wet_count = soil_moistures.iter().filter(|&&m| m >= *wet_thresh).count();
+            let normal_count = soil_moistures.len() - dry_count - wet_count;
+            let outcrop_count = soil_slopes.iter().filter(|&&s| s >= 5).count();
 
-        println!("  Tentative class distribution (dry<{}, normal, wet>={}):",
-            tentative_dry_threshold, tentative_wet_threshold);
-        println!("    SoilDry: {} ({:.1}%)", dry_count, 100.0 * dry_count as f64 / soil_moistures.len() as f64);
-        println!("    Soil:    {} ({:.1}%)", normal_count, 100.0 * normal_count as f64 / soil_moistures.len() as f64);
-        println!("    SoilWet: {} ({:.1}%)", wet_count, 100.0 * wet_count as f64 / soil_moistures.len() as f64);
-        println!("  Outcrop (slope>={}) in Soil cells: {} ({:.1}%)",
-            tentative_outcrop_threshold, outcrop_count, 100.0 * outcrop_count as f64 / soil_moistures.len() as f64);
+            println!("  {} (dry<{}, wet>={}): SoilDry {:.1}% | Soil {:.1}% | SoilWet {:.1}% | Outcrop {:.1}%",
+                label, dry_thresh, wet_thresh,
+                100.0 * dry_count as f64 / soil_moistures.len() as f64,
+                100.0 * normal_count as f64 / soil_moistures.len() as f64,
+                100.0 * wet_count as f64 / soil_moistures.len() as f64,
+                100.0 * outcrop_count as f64 / soil_moistures.len() as f64);
+        }
     }
 
-    println!("\n=== PINNED THRESHOLDS FOR PR (recommended from Phase-0) ===");
-    println!("const SOILDRY_THRESHOLD: i64 = 300;  // Below this -> SoilDry");
-    println!("const SOILWET_THRESHOLD: i64 = 700;  // At/above this -> SoilWet");
+    println!("\n=== CHOOSE CANDIDATE ABOVE (target: 40–60% / 25–35% / 15–25%) ===");
+    println!("Pick the candidate closest to those shares, then pin:");
+    println!("// Example: if CANDIDATE-B (20/100) gives best distribution:");
+    println!("const SOILDRY_THRESHOLD: i64 = 20;   // Below this -> SoilDry");
+    println!("const SOILWET_THRESHOLD: i64 = 100;  // At/above this -> SoilWet");
     println!("const OUTCROP_SLOPE_THRESHOLD: i64 = 5;  // Soil* with slope >= this -> Bedrock");
 }
