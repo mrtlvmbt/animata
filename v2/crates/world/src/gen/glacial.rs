@@ -392,24 +392,6 @@ fn ice_margin_cells(dim: usize, ice_mask: &[bool]) -> Vec<usize> {
     margin
 }
 
-/// Additive till deposition (module doc, pass 2): distributes `excavated_total` EXACTLY across
-/// `margin` — `excavated_total / margin.len()` per cell, with the integer remainder assigned to the
-/// first `remainder` cells in `margin`'s fixed canonical order. `margin` empty implies
-/// `excavated_total == 0` (no ice cells at all ⇒ nothing was ever excavated — see the call site),
-/// so the degenerate case never needs a fallback deposit target.
-fn deposit_till(dim: usize, excavated_total: i64, margin: &[usize]) -> Vec<i64> {
-    let mut deposit = vec![0i64; dim * dim];
-    if margin.is_empty() {
-        return deposit;
-    }
-    let n_margin = margin.len() as i64;
-    let base = excavated_total / n_margin;
-    let remainder = excavated_total % n_margin;
-    for (i, &idx) in margin.iter().enumerate() {
-        deposit[idx] = base + if (i as i64) < remainder { 1 } else { 0 };
-    }
-    deposit
-}
 
 /// The full W-SIM-6 glacial output: post-glacial `height` (ice-incised then till-deposited),
 /// the primary-substrate `material` mask (`Some(Till)` on any band cell that received a nonzero
@@ -971,6 +953,10 @@ mod tests {
         // To access it, we re-derive it (interior incision is deterministic); this is for testing only.
         let on_state = run_glacial(SEED, DIM, HMAX, &off.height);
 
+        // Compute the PRE-deposit incised field for wall-drop measurement (same hole-fill + incision as production).
+        let filled_mask = fill_holes_in_ice_mask(DIM, &mask, 16);
+        let (incised_height, _) = ice_incision_pass(DIM, off.height.clone(), &filled_mask, &interior);
+
         // Floor flatness: max height spread among D8 neighbors that are INTERIOR ice cells (the
         // actual trough FLOOR — deliberately excludes margin cells, which are the moraine RIDGE, a
         // different feature that legitimately rises; mixing them in would blame moraine relief on
@@ -996,10 +982,8 @@ mod tests {
             Some(vals.iter().copied().max().unwrap() - vals.iter().copied().min().unwrap())
         };
         // Wall steepness: the drop from idx to its lowest NON-ice D8 neighbor, measured on the
-        // PRE-deposit field (on_state.height is POST-deposit with moraine, so we use the incised
-        // baseline instead — the important question is whether incision steepens the wall, not
+        // PRE-deposit field (the important question is whether incision steepens the wall, not
         // whether moraine adds height on top of it).
-        // To get pre-deposit height, we subtract the deposited amount from the Till cells.
         let wall_drop = |h: &[i64], idx: usize| -> Option<i64> {
             let x = idx % DIM;
             let z = idx / DIM;
@@ -1012,10 +996,6 @@ mod tests {
                         return None;
                     }
                     let nidx = linear_index(nx as usize, nz as usize, DIM);
-                    // Wall is to a non-ice cell; measure on on_state.height (which includes till).
-                    // The key comparison is that the absolute drop from interior to exterior margin
-                    // is what we measure, so post-till height is actually correct here: the wall is
-                    // the edge of the incised trough relative to the surrounding non-ice terrain.
                     (!mask[nidx]).then(|| h[idx] - h[nidx])
                 })
                 .max()
@@ -1047,7 +1027,7 @@ mod tests {
                 off_spread_total += off_s;
                 on_spread_total += on_s;
             }
-            if let (Some(off_w), Some(on_w)) = (wall_drop(&off.height, idx), wall_drop(&on_state.height, idx)) {
+            if let (Some(off_w), Some(on_w)) = (wall_drop(&off.height, idx), wall_drop(&incised_height, idx)) {
                 off_wall_total += off_w;
                 on_wall_total += on_w;
             }
