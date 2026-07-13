@@ -56,7 +56,7 @@ use crate::gen::aeolian;
 use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::drainage::is_river;
-use crate::gen::erosion::{erode, de_needle_pass, talus_step_final, MAX_LOCAL_STEP_FINAL, REPOSE_THRESHOLD_FINAL, NEEDLE_MARGIN};
+use crate::gen::erosion::{erode, de_needle_pass, talus_step_final, MAX_LOCAL_STEP_FINAL, REPOSE_THRESHOLD_FINAL, N_ITERS_FINAL, NEEDLE_MARGIN};
 use crate::gen::height::height_at;
 use crate::gen::material::MaterialId;
 use crate::gen::moisture::moisture_at;
@@ -616,7 +616,7 @@ pub fn classify_and_caps_staged(
     // residual spikes from landforms that ran after the erode loop's early talus pass.
     // When disabled, this is byte-identical to the old path.
     let post_talus_height = if enable_talus_final && (enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal) {
-        talus_step_final(dim, &post_coastal_height, REPOSE_THRESHOLD_FINAL, 2)
+        talus_step_final(dim, &post_coastal_height, REPOSE_THRESHOLD_FINAL, N_ITERS_FINAL)
     } else {
         post_coastal_height.clone()
     };
@@ -719,11 +719,12 @@ pub fn classify_and_caps(
     enable_glacial: bool,
     enable_coastal: bool,
 ) -> WorldFields {
-    // W-9: Thin wrapper — talus_step_final is OFF by default for backward compatibility
-    // (the new pipeline feature is enabled only by explicit sweeps/testing).
+    // W-9: Thin wrapper — talus_step_final is gated the SAME as de_needle: any_landform_on
+    // Production output CHANGES when landforms are enabled (exactly why two-pass golden re-pin is prescribed).
+    let enable_talus_final = enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal;
     let (world_fields, _, _) = classify_and_caps_staged(
         seed, hmax, dim, enable_patchiness, enable_tectonics, enable_aeolian,
-        enable_volcanic, enable_glacial, enable_coastal, false,
+        enable_volcanic, enable_glacial, enable_coastal, enable_talus_final,
     );
     world_fields
 }

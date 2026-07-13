@@ -143,6 +143,11 @@ pub const MAX_LOCAL_STEP_FINAL: i64 = 12;
 /// config value (threshold=8, fewest iters passing the gate); overridden by sweep results.
 pub const REPOSE_THRESHOLD_FINAL: i64 = 8;
 
+/// W-9: Number of Jacobi iterations for talus_step_final. Picked by the sweep grid {2,4,8};
+/// must be sufficient to reduce all local-max steps to <= MAX_LOCAL_STEP_FINAL and needles to 0,
+/// while achieving >= 60% p10 relief retention per landform. Placeholder: 2 (minimum, pending sweep).
+pub const N_ITERS_FINAL: usize = 2;
+
 // Static assertion: MAX_LOCAL_STEP_FINAL must be strictly less than NEEDLE_MARGIN. If this breaks,
 // a future retune has made the post-talus bound larger than the de-needle guard, which would mean
 // de-needle might still clip some cells. The whole point of talus_step_final is to make de-needle
