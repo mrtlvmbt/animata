@@ -263,10 +263,13 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
 ///
 /// **`NEEDLE_MARGIN`:** an isolated-spike artifact filter (integer height units), not a physical
 /// talus angle. Cells exceeding their neighbors by at most this much are preserved (no smoothing).
-/// Calibrated to the measured relief's 1-cell overhangs: the default 40 matches the typical spike
-/// margin on smooth fBm terrain with `hmax=200`.
+/// Calibrated to the measured relief's 1-cell overhangs (`hmax=200`): the census on seed=1/512 shows
+/// the clear-outlier needles at excess +45..94, then a smooth continuum of legitimate fBm roughness
+/// below. `40` removed only the clear outliers but left +30..40 thin 1-cell columns that still read
+/// as needle towers on the 3D render; `30` also clips those (~17 cells) while staying above the
+/// continuum of real relief texture (excess <30). Below ~25 it starts smoothing genuine roughness.
 pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
-    const NEEDLE_MARGIN: i64 = 40;
+    const NEEDLE_MARGIN: i64 = 30;
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
 
@@ -764,9 +767,9 @@ mod tests {
             10, 10, 10,
         ];
         let new_height = de_needle_pass(dim, &height);
-        // NEEDLE_MARGIN = 40, so max_neighbor = 10, limit = 10 + 40 = 50.
-        // The spike at index 4 (height 110) should be clipped to <= 50.
-        assert!(new_height[4] <= 50, "spike at index 4 must be clipped to <= max_neighbor + NEEDLE_MARGIN");
+        // NEEDLE_MARGIN = 30, so max_neighbor = 10, limit = 10 + 30 = 40.
+        // The spike at index 4 (height 110) should be clipped to <= 40.
+        assert!(new_height[4] <= 40, "spike at index 4 must be clipped to <= max_neighbor + NEEDLE_MARGIN");
         // Total must be conserved.
         let sum_before: i64 = height.iter().sum();
         let sum_after: i64 = new_height.iter().sum();
@@ -780,11 +783,11 @@ mod tests {
         #[rustfmt::skip]
         let height = vec![
             10, 10, 10,
-            10, 50, 10,  // center cell is only 40 units above neighbors (< 40 + NEEDLE_MARGIN=40 threshold exactly)
+            10, 40, 10,  // center cell is exactly 30 units above neighbors (== NEEDLE_MARGIN)
             10, 10, 10,
         ];
         let new_height = de_needle_pass(dim, &height);
-        // Center cell (index 4) exceeds neighbors by exactly 40, which equals NEEDLE_MARGIN,
+        // Center cell (index 4) exceeds neighbors by exactly 30, which equals NEEDLE_MARGIN,
         // so it should NOT be clipped (the condition is height > nmax + NEEDLE_MARGIN, not >=).
         assert_eq!(new_height[4], height[4], "cells at or below the margin must not be clipped");
     }
@@ -806,9 +809,9 @@ mod tests {
         let result2 = de_needle_pass(dim, &height);
         // Results must be identical (determinism).
         assert_eq!(result1, result2, "de_needle_pass must be deterministic");
-        // Both spikes must be clipped.
-        assert!(result1[6] <= 50, "first spike must be clipped");
-        assert!(result1[8] <= 50, "second spike must be clipped");
+        // Both spikes must be clipped (NEEDLE_MARGIN=30, neighbors=10 → limit 40).
+        assert!(result1[6] <= 40, "first spike must be clipped");
+        assert!(result1[8] <= 40, "second spike must be clipped");
         // Total must be conserved.
         let sum_before: i64 = height.iter().sum();
         let sum_after: i64 = result1.iter().sum();
