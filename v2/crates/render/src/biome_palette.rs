@@ -70,6 +70,62 @@ pub fn material_color(m: u8) -> Color {
     }
 }
 
+/// Terrain top-face coloring mode, runtime-toggleable ('C' key). `Material` = physical substrate
+/// palette ([`material_color`]); `Height` = hypsometric elevation ramp ([`height_color`]) so relief
+/// reads by height (a ceiling plateau shows as a uniform snow-white cap, troughs as green lowland,
+/// moraine ridges as brown bumps — the direct visual for the glacial relief fix).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ColorMode {
+    Material,
+    Height,
+}
+
+/// Hypsometric elevation ramp: raw `height` → a classic low-green→brown→snow-white gradient. Makes
+/// pure RELIEF legible independent of material — the tool for eyeballing plateau/needle/trough shape.
+///
+/// Normalized by the map's *observed* relief band `[h_lo, h_hi]` (a per-map percentile stretch, not
+/// the fixed `[0, hmax]` datum). Real terrain is bottom-heavy (half the cells sit near sea level, the
+/// relief lives in the top decile), so stretching against `hmax=200` crams every landform into the
+/// ramp's low green third — one uniform hue. Stretching against `[p2, p98]` spreads the full
+/// green→brown→snow band over the relief that actually exists; the sparse >p98 peaks clamp to the
+/// snow-white top rather than wasting the upper 40% of the ramp on cells that never occur.
+pub fn height_color(height: i64, h_lo: i64, h_hi: i64) -> Color {
+    let span = (h_hi - h_lo).max(1) as f32;
+    let t = ((height - h_lo) as f32 / span).clamp(0.0, 1.0);
+    // (stop_t, r, g, b) — ascending; classic hypsometric tint band.
+    const STOPS: [(f32, f32, f32, f32); 7] = [
+        (0.00, 34.0, 74.0, 44.0),    // lowland — dark green
+        (0.25, 82.0, 138.0, 60.0),   // green
+        (0.45, 158.0, 168.0, 82.0),  // yellow-green
+        (0.60, 178.0, 146.0, 86.0),  // tan
+        (0.78, 138.0, 100.0, 64.0),  // brown (moraine/upland)
+        (0.90, 156.0, 156.0, 162.0), // bare rock — grey
+        (1.00, 246.0, 246.0, 250.0), // peaks — snow white
+    ];
+    let mut lo = &STOPS[0];
+    let mut hi = &STOPS[STOPS.len() - 1];
+    for w in STOPS.windows(2) {
+        if t >= w[0].0 && t <= w[1].0 {
+            lo = &w[0];
+            hi = &w[1];
+            break;
+        }
+    }
+    let span = (hi.0 - lo.0).max(1e-6);
+    let f = ((t - lo.0) / span).clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32| (a + (b - a) * f) / 255.0;
+    Color::new(lerp(lo.1, hi.1), lerp(lo.2, hi.2), lerp(lo.3, hi.3), 1.0)
+}
+
+/// Dispatch a cell's top-face color by the active [`ColorMode`]. `material`/`height` are read from the
+/// `WorldView`; `[h_lo, h_hi]` is the map's observed relief band that scales the [`height_color`] ramp.
+pub fn surface_color(mode: ColorMode, material: u8, height: i64, h_lo: i64, h_hi: i64) -> Color {
+    match mode {
+        ColorMode::Material => material_color(material),
+        ColorMode::Height => height_color(height, h_lo, h_hi),
+    }
+}
+
 /// Cliff (side-quad) shade: a fixed darkening of the top-face color — a cheap "AO-ish" cue (RnD
 /// `rendering/02` §3's baked-shading idea, without an actual light/AO bake) so columns read as
 /// stepped 3D prisms rather than flat-shaded slabs of one hue.

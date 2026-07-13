@@ -8,7 +8,7 @@
 //!
 //! R-3: Each chunk carries a world-space AABB for frustum culling.
 
-use crate::biome_palette::{material_color, cliff_shade, apply_directional_shading};
+use crate::biome_palette::{surface_color, cliff_shade, apply_directional_shading, ColorMode};
 use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE};
 use macroquad::models::{Mesh, Vertex};
 use macroquad::prelude::*;
@@ -30,21 +30,59 @@ pub struct TerrainChunk {
     pub bounds: (Vec3, Vec3), // (min, max)
 }
 
+/// The map's observed relief band `[p2, p98]` of cell heights — the per-map hypsometric normalization
+/// window for [`crate::biome_palette::height_color`]. Real terrain is bottom-heavy (half the cells
+/// near sea level), so a fixed `[0, hmax]` datum crams all relief into the ramp's low green third;
+/// stretching against the 2nd/98th percentiles spreads the full green→brown→snow band over the relief
+/// that actually exists and clamps the sparse outlier peaks (base-erosion needles) to the snow top.
+/// Scanned once at build. Returns `(lo, hi)` with `hi > lo` guaranteed (falls back to a unit span on
+/// a degenerate all-flat map).
+pub(crate) fn hypsometric_range(world_dim: i64, world: &dyn WorldView) -> (i64, i64) {
+    let mut hs: Vec<i64> = Vec::with_capacity((world_dim * world_dim) as usize);
+    for row in 0..world_dim {
+        for col in 0..world_dim {
+            hs.push(world.height(col, row));
+        }
+    }
+    if hs.is_empty() {
+        return (0, 1);
+    }
+    hs.sort_unstable();
+    let n = hs.len();
+    let at = |p: f64| hs[(((p * (n as f64 - 1.0)).round()) as usize).min(n - 1)];
+    let lo = at(0.02);
+    let hi = at(0.98);
+    if hi > lo {
+        (lo, hi)
+    } else {
+        (lo, lo + 1)
+    }
+}
+
 /// Build the whole `world_dim × world_dim` hex terrain as a handful of row-band chunks.
 /// Each chunk carries its own AABB (computed once at build).
-pub fn build_hex_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<TerrainChunk> {
+pub fn build_hex_terrain(world_dim: i64, world: &dyn WorldView, mode: ColorMode) -> Vec<TerrainChunk> {
     let mut chunks = Vec::new();
+    let (h_lo, h_hi) = hypsometric_range(world_dim, world);
     let rpc = rows_per_chunk(world_dim);
     let mut row0 = 0i64;
     while row0 < world_dim {
         let row1 = (row0 + rpc).min(world_dim);
-        chunks.push(build_chunk(world_dim, world, row0, row1));
+        chunks.push(build_chunk(world_dim, world, row0, row1, mode, h_lo, h_hi));
         row0 = row1;
     }
     chunks
 }
 
-fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> TerrainChunk {
+fn build_chunk(
+    world_dim: i64,
+    world: &dyn WorldView,
+    row0: i64,
+    row1: i64,
+    mode: ColorMode,
+    h_lo: i64,
+    h_hi: i64,
+) -> TerrainChunk {
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u16> = Vec::new();
 
@@ -52,7 +90,13 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
         for col in 0..world_dim {
             let h = world.height(col, row) as f32 * HEIGHT_SCALE;
             let (cx, cz) = hex_center(col, row);
-            let top_color = material_color(world.surface_material(Vec2Fixed(col, row)));
+            let top_color = surface_color(
+                mode,
+                world.surface_material(Vec2Fixed(col, row)),
+                world.height(col, row),
+                h_lo,
+                h_hi,
+            );
 
             // Top face: 6 corners, fan-triangulated from corner 0 (4 triangles, 6 unique verts).
             let base = vertices.len() as u16;

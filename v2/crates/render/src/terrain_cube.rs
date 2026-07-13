@@ -10,7 +10,7 @@
 //! Same `ROWS_PER_CHUNK` chunking + u16-index assert as hex terrain (`terrain.rs`).
 //! Built ONCE at startup — cold terrain immutable for the run.
 
-use crate::biome_palette::{material_color, cliff_shade, apply_directional_shading};
+use crate::biome_palette::{surface_color, cliff_shade, apply_directional_shading, ColorMode};
 use crate::hex::HEIGHT_SCALE;
 use crate::terrain::TerrainChunk;
 use macroquad::models::{Mesh, Vertex};
@@ -21,20 +21,29 @@ use sim_core::{Vec2Fixed, WorldView};
 /// Each chunk carries its own AABB (reuses `terrain::TerrainChunk`).
 /// Chunk height is adaptive to `world_dim` (shared with hex terrain) so no chunk mesh exceeds the
 /// u16 index space macroquad batches with — see `terrain::rows_per_chunk` + `main.rs`.
-pub fn build_cube_terrain(world_dim: i64, world: &dyn WorldView) -> Vec<TerrainChunk> {
+pub fn build_cube_terrain(world_dim: i64, world: &dyn WorldView, mode: ColorMode) -> Vec<TerrainChunk> {
     let mut chunks = Vec::new();
+    let (h_lo, h_hi) = crate::terrain::hypsometric_range(world_dim, world);
     let rpc = crate::terrain::rows_per_chunk(world_dim);
     let mut row0 = 0i64;
     while row0 < world_dim {
         let row1 = (row0 + rpc).min(world_dim);
-        chunks.push(build_chunk(world_dim, world, row0, row1));
+        chunks.push(build_chunk(world_dim, world, row0, row1, mode, h_lo, h_hi));
         row0 = row1;
     }
     chunks
 }
 
 /// Build one row-band chunk of cube terrain.
-fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> TerrainChunk {
+fn build_chunk(
+    world_dim: i64,
+    world: &dyn WorldView,
+    row0: i64,
+    row1: i64,
+    mode: ColorMode,
+    h_lo: i64,
+    h_hi: i64,
+) -> TerrainChunk {
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u16> = Vec::new();
 
@@ -49,7 +58,13 @@ fn build_chunk(world_dim: i64, world: &dyn WorldView, row0: i64, row1: i64) -> T
         let row = row0 + local_row as i64;
         for col in 0..world_dim {
             heights[local_row][col as usize] = world.height(col, row) as f32 * HEIGHT_SCALE;
-            colors[local_row][col as usize] = material_color(world.surface_material(Vec2Fixed(col, row)));
+            colors[local_row][col as usize] = surface_color(
+                mode,
+                world.surface_material(Vec2Fixed(col, row)),
+                world.height(col, row),
+                h_lo,
+                h_hi,
+            );
         }
     }
 
@@ -290,7 +305,7 @@ mod tests {
     fn greedy_merges_uniform_flat_region_into_one_quad() {
         let dim = 4;
         let world = flat_world(dim, vec![0; 16]);
-        let chunks = build_cube_terrain(dim, &world);
+        let chunks = build_cube_terrain(dim, &world, ColorMode::Material);
         assert_eq!(chunks.len(), 1);
         let mesh = &chunks[0].mesh;
 
@@ -309,7 +324,7 @@ mod tests {
     fn greedy_does_not_merge_across_material_boundary() {
         // 2×2, columns differ in material; each column's 2 rows share (height, material) and merge vertically.
         let world = flat_world(2, vec![3, 8, 3, 8]); // row-major: (row0: col0=Soil,col1=Water), (row1: same)
-        let chunks = build_cube_terrain(2, &world);
+        let chunks = build_cube_terrain(2, &world, ColorMode::Material);
         let mesh = &chunks[0].mesh;
 
         // 2 quads (one per column), NOT 1 — material_color equality gates the merge.
@@ -321,7 +336,7 @@ mod tests {
     fn greedy_does_not_merge_across_height_boundary() {
         let mut world = flat_world(2, vec![0; 4]);
         world.heights = vec![0, 1, 0, 1]; // col1 is one unit taller than col0, same material
-        let chunks = build_cube_terrain(2, &world);
+        let chunks = build_cube_terrain(2, &world, ColorMode::Material);
         // Height differs between col0/col1 → their side quads are no longer culled (nh < h for col0's
         // east edge and col1 emits none west since col0 lower doesn't apply — col1's neighbour col0 is
         // lower so col1 gets a cliff there); assert top faces alone still split into 2 merged quads.

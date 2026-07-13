@@ -155,8 +155,11 @@ async fn main() {
     // the render side would desync the pinned-param contract above.
     let lf = cli_args.standalone; // enable all 5 landforms for the standalone terragen preview
     let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, lf, lf, lf, lf, lf);
-    let hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world);
-    let cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world);
+    // Terrain top-face coloring: 'C' toggles Height↔Material at runtime (rebuilds the baked meshes).
+    // Default = Height (hypsometric relief ramp) so elevation shape reads at a glance.
+    let mut color_mode = crate::biome_palette::ColorMode::Height;
+    let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world, color_mode);
+    let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world, color_mode);
 
     // R-5: Runtime hex↔cube toggle state. Default = hex (R-2's established look).
     let mut use_cube_terrain = false;
@@ -186,6 +189,15 @@ async fn main() {
         // R-5: Toggle hex↔cube terrain with 'T' key.
         if is_key_pressed(KeyCode::T) {
             use_cube_terrain = !use_cube_terrain;
+        }
+        // Toggle Height↔Material terrain coloring with 'C' (rebuilds the baked-color meshes).
+        if is_key_pressed(KeyCode::C) {
+            color_mode = match color_mode {
+                crate::biome_palette::ColorMode::Height => crate::biome_palette::ColorMode::Material,
+                crate::biome_palette::ColorMode::Material => crate::biome_palette::ColorMode::Height,
+            };
+            hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world, color_mode);
+            cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world, color_mode);
         }
 
         clear_background(Color::from_rgba(18, 18, 22, 255));
@@ -414,8 +426,8 @@ mod tests {
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
         let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false, false);
-        let hex_chunks = terrain::build_hex_terrain(dim, &world);
-        let cube_chunks = terrain_cube::build_cube_terrain(dim, &world);
+        let hex_chunks = terrain::build_hex_terrain(dim, &world, crate::biome_palette::ColorMode::Height);
+        let cube_chunks = terrain_cube::build_cube_terrain(dim, &world, crate::biome_palette::ColorMode::Height);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");
         assert!(!cube_chunks.is_empty(), "cube terrain must produce at least one chunk");
         assert!(hex_chunks.iter().any(|c| !c.mesh.vertices.is_empty()));
