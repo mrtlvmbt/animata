@@ -1066,16 +1066,16 @@ mod tests {
     /// Golden vector: pinned exact glacial-ON height + material at fixed grid indices for the
     /// golden `(seed, dim, hmax)` fixture.
     ///
-    /// PASS 2 (#416): CI-pinned. This new-in-branch golden was born in CI (project contract);
-    /// pass 1 pushed a `[0,0,0,0]` placeholder, both v2 CI jobs (arm64 + x86) revealed the same
-    /// integer `left:` value, pinned below. Re-derive by reading `run_glacial` at these indices.
+    /// PASS 2 (STAGE 2): CI-pinned after Option-A moraine geometry (d_peak=40, k_band=5) lands.
+    /// Index 0 changed due to new margin-peaked moraine profile; other indices stable under the
+    /// budget-drain deposition model. Both v2 CI jobs (arm64 + x86) agree on the new values.
     #[test]
     fn golden_vector_matches_pinned_glacial_fixture() {
         let height = eroded_fixture();
         let state = run_glacial(SEED, DIM, HMAX, &height);
 
         const INDICES: [usize; 4] = [0, 500, 1500, 4000];
-        const EXPECTED: [i64; 4] = [106, 59, 95, 99]; // CI-pinned (#416 pass 2; arm64 + x86 agree)
+        const EXPECTED: [i64; 4] = [77, 59, 95, 99]; // STAGE 2 re-pin (Option-A geometry)
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
