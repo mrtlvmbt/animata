@@ -314,6 +314,92 @@ pub fn landform_amplitudes(
     }
 }
 
+// ── W-9: Measurement utilities for sweep evaluation ──────────────────────────────────────────────
+
+/// W-9: Count isolated spikes ("needles") on the field: cells whose height exceeds max of D8
+/// neighbors by > NEEDLE_MARGIN. Returns count and list of needle cell indices.
+pub fn measure_needles(dim: usize, heights: &[i64]) -> (usize, Vec<usize>) {
+    let n = dim * dim;
+    debug_assert_eq!(heights.len(), n);
+    let mut needles = Vec::new();
+
+    for z in 0..dim {
+        for x in 0..dim {
+            let idx = z * dim + x;
+            let mut nmax = i64::MIN;
+            for &(dx, dz) in &D8_OFFSETS_CAPS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                    let u = (nz as usize) * dim + (nx as usize);
+                    nmax = nmax.max(heights[u]);
+                }
+            }
+            if heights[idx] > nmax + NEEDLE_MARGIN {
+                needles.push(idx);
+            }
+        }
+    }
+    (needles.len(), needles)
+}
+
+/// W-9: Measure max local-max step: the maximum by which any cell exceeds its highest D8 neighbor.
+/// Returns the max step found. Gate: must be <= MAX_LOCAL_STEP_FINAL.
+pub fn measure_max_local_step(dim: usize, heights: &[i64]) -> i64 {
+    let n = dim * dim;
+    debug_assert_eq!(heights.len(), n);
+    let mut max_step: i64 = 0;
+
+    for z in 0..dim {
+        for x in 0..dim {
+            let idx = z * dim + x;
+            let mut nmax = i64::MIN;
+            for &(dx, dz) in &D8_OFFSETS_CAPS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                    let u = (nz as usize) * dim + (nx as usize);
+                    nmax = nmax.max(heights[u]);
+                }
+            }
+            let step = heights[idx] - nmax;
+            max_step = max_step.max(step);
+        }
+    }
+    max_step
+}
+
+/// W-9: Count cells clipped by de_needle_pass: cells with excess > NEEDLE_MARGIN that were reduced.
+/// Returns the count of cells that de_needle modified (sent out positive amount).
+pub fn measure_de_needle_clip_count(dim: usize, heights_before: &[i64], heights_after: &[i64]) -> usize {
+    let n = dim * dim;
+    debug_assert_eq!(heights_before.len(), n);
+    debug_assert_eq!(heights_after.len(), n);
+    let mut clip_count = 0;
+
+    for z in 0..dim {
+        for x in 0..dim {
+            let idx = z * dim + x;
+            let mut nmax = i64::MIN;
+            for &(dx, dz) in &D8_OFFSETS_CAPS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                    let u = (nz as usize) * dim + (nx as usize);
+                    nmax = nmax.max(heights_before[u]);
+                }
+            }
+            if heights_before[idx] > nmax + NEEDLE_MARGIN {
+                // This cell was a candidate for clipping; check if it was modified
+                if heights_before[idx] != heights_after[idx] {
+                    clip_count += 1;
+                }
+            }
+        }
+    }
+    clip_count
+}
+
 /// W-7: Patchiness (spatial autocorrelation) seed salt — decorrelated from height to create
 /// independent spatial structure for resource-cap heterogeneity (implementer's call, RnD W-7,
 /// documented, locked). Used as `seed ^ PATCH_SEED_SALT` in [`patchiness_at`], same pattern as
