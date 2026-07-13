@@ -383,7 +383,8 @@ pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
 /// - `n_iters`: number of Jacobi iterations (picked by sweep; typically 2-8).
 ///
 /// Returns: new height buffer (unscaled), same length as input.
-pub(crate) fn talus_step_final(dim: usize, height: &[i64], threshold: i64, n_iters: usize) -> Vec<i64> {
+/// Made public to support sweep/measurement utilities (w9_sweep bin).
+pub fn talus_step_final(dim: usize, height: &[i64], threshold: i64, n_iters: usize) -> Vec<i64> {
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
     debug_assert!(n_iters > 0);

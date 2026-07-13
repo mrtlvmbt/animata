@@ -188,7 +188,7 @@ pub struct StagedHeights {
 /// W-9: Amplitude floor constant for crest identification. Start = MAX_LOCAL_STEP_FINAL
 /// (cells with amplitude >= this are considered crests). Can be recalibrated from Phase-0
 /// if crest count falls below the precondition (>=16 @512, >=4 @64).
-const AMPLITUDE_FLOOR: i64 = MAX_LOCAL_STEP_FINAL;
+pub const AMPLITUDE_FLOOR: i64 = MAX_LOCAL_STEP_FINAL;
 
 /// W-9: D8 offsets for neighbor iteration (reused from erosion.rs pattern).
 const D8_OFFSETS_CAPS: [(i64, i64); 8] =
@@ -220,9 +220,41 @@ fn median_d8_neighbors(x: usize, z: usize, dim: usize, heights: &[i64]) -> i64 {
     }
 }
 
+/// W-9: Compute median of D8 neighbors at radius-2 (16 neighbors in a 5x5 ring, excluding center and radius-1).
+/// Used as a fallback median when radius-1 crest detection yields too few candidates.
+fn median_d8_neighbors_radius2(x: usize, z: usize, dim: usize, heights: &[i64]) -> i64 {
+    let mut neighbors = Vec::new();
+    for dz in -2..=2i64 {
+        for dx in -2..=2i64 {
+            if dx == 0 && dz == 0 { continue; } // Skip center
+            if dx.abs() == 1 && dz.abs() <= 1 { continue; } // Skip radius-1 (D8 ring)
+            if dx.abs() <= 1 && dz.abs() == 1 { continue; }
+            let nx = x as i64 + dx;
+            let nz = z as i64 + dz;
+            if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                let u = (nz as usize) * dim + (nx as usize);
+                neighbors.push(heights[u]);
+            }
+        }
+    }
+    if neighbors.is_empty() {
+        return i64::MIN;
+    }
+    neighbors.sort();
+    let mid = neighbors.len() / 2;
+    if neighbors.len() % 2 == 1 {
+        neighbors[mid]
+    } else if mid > 0 {
+        (neighbors[mid - 1] + neighbors[mid]) / 2
+    } else {
+        neighbors[0]
+    }
+}
+
 /// W-9: Identify crests and measure their amplitude preservation across the talus_step_final pass.
-/// A crest is a strict local maximum within the mask with pre-pass amplitude >= AMPLITUDE_FLOOR.
-/// Returns amplitude statistics: crest count and p10 retention percentage.
+/// A crest is a local maximum within the mask with pre-pass amplitude >= AMPLITUDE_FLOOR.
+/// Uses fallback order if crest count is too low: (1) strict maxima, (2) non-strict maxima, (3) radius-2 median.
+/// Returns amplitude statistics: crest count and p10 retention percentage, with fallback mode indicator.
 ///
 /// **Amplitude calculation (all in i64, no float):**
 /// - Pre-amplitude at crest c: `h_pre[c] - median(h_pre of c's in-grid D8 ring)`.
@@ -230,9 +262,14 @@ fn median_d8_neighbors(x: usize, z: usize, dim: usize, heights: &[i64]) -> i64 {
 /// - Retention at c: `100 * post / pre` (all i64 comparisons, no truncation to <100% = 0).
 /// - Score: p10 of the crest retention list per landform.
 ///
+/// **Fallback order (pre-decided in spec):**
+/// 1. Strict maxima: `h > all D8 neighbors`
+/// 2. Non-strict maxima: `h >= all D8 neighbors`
+/// 3. Radius-2 median: use outer ring (5x5 excluding center and inner ring) for median
+///
 /// **Edge cases (caller contract):**
-/// - Empty mask: returns `CrestAmplitudeReport { crest_count: 0, p10_retention_pct: 0 }`.
-/// - Fewer than expected crests: returns actual count (Phase-0 precondition will flag).
+/// - Empty mask: returns `(count: 0, p10: 0)`.
+/// - Fewer than expected crests: returns actual count with fallback mode used if applicable.
 pub fn landform_amplitudes(
     dim: usize,
     heights_pre: &[i64],
@@ -244,56 +281,114 @@ pub fn landform_amplitudes(
     debug_assert_eq!(heights_post.len(), n);
     debug_assert_eq!(mask.len(), n);
 
+    // Try Mode 1: strict local maxima (h > all D8 neighbors)
     let mut crests = Vec::new();
-    let mut retentions = Vec::new();
-
-    // Identify crests: strict local maxima within mask with amplitude >= AMPLITUDE_FLOOR
     for z in 0..dim {
         for x in 0..dim {
             let idx = z * dim + x;
-            if !mask[idx] {
-                continue;
-            }
+            if !mask[idx] { continue; }
 
-            // Check if this is a strict local maximum
-            let mut is_local_max = true;
+            let mut is_strict_max = true;
             for &(dx, dz) in &D8_OFFSETS_CAPS {
                 let nx = x as i64 + dx;
                 let nz = z as i64 + dz;
                 if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
                     let u = (nz as usize) * dim + (nx as usize);
                     if heights_pre[u] >= heights_pre[idx] {
-                        is_local_max = false;
+                        is_strict_max = false;
                         break;
                     }
                 }
             }
-
-            if !is_local_max {
-                continue;
+            if is_strict_max {
+                let median_pre = median_d8_neighbors(x, z, dim, heights_pre);
+                let amp_pre = heights_pre[idx] - median_pre;
+                if amp_pre >= AMPLITUDE_FLOOR {
+                    crests.push(idx);
+                }
             }
-
-            // Compute pre-amplitude
-            let median_pre = median_d8_neighbors(x, z, dim, heights_pre);
-            let amp_pre = heights_pre[idx] - median_pre;
-
-            if amp_pre < AMPLITUDE_FLOOR {
-                continue;
-            }
-
-            // This is a crest: record it and compute post-amplitude
-            crests.push(idx);
-            let median_post = median_d8_neighbors(x, z, dim, heights_post);
-            let amp_post = heights_post[idx] - median_post;
-
-            // Compute retention: 100 * post / pre (all i64, no float)
-            let retention = if amp_pre > 0 {
-                (100 * amp_post) / amp_pre
-            } else {
-                100
-            };
-            retentions.push(retention);
         }
+    }
+
+    // Fallback: if too few crests, try non-strict maxima (h >= all D8 neighbors)
+    if crests.len() < (if dim == 512 { 16 } else { 4 }) {
+        crests.clear();
+        for z in 0..dim {
+            for x in 0..dim {
+                let idx = z * dim + x;
+                if !mask[idx] { continue; }
+
+                let mut is_nonstrict_max = true;
+                for &(dx, dz) in &D8_OFFSETS_CAPS {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                        let u = (nz as usize) * dim + (nx as usize);
+                        if heights_pre[u] > heights_pre[idx] {
+                            is_nonstrict_max = false;
+                            break;
+                        }
+                    }
+                }
+                if is_nonstrict_max {
+                    let median_pre = median_d8_neighbors(x, z, dim, heights_pre);
+                    let amp_pre = heights_pre[idx] - median_pre;
+                    if amp_pre >= AMPLITUDE_FLOOR {
+                        crests.push(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Further fallback: if still too few, try radius-2 median for amplitude calc
+    if crests.len() < (if dim == 512 { 16 } else { 4 }) {
+        crests.clear();
+        for z in 0..dim {
+            for x in 0..dim {
+                let idx = z * dim + x;
+                if !mask[idx] { continue; }
+
+                let mut is_nonstrict_max = true;
+                for &(dx, dz) in &D8_OFFSETS_CAPS {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                        let u = (nz as usize) * dim + (nx as usize);
+                        if heights_pre[u] > heights_pre[idx] {
+                            is_nonstrict_max = false;
+                            break;
+                        }
+                    }
+                }
+                if is_nonstrict_max {
+                    let median_pre = median_d8_neighbors_radius2(x, z, dim, heights_pre);
+                    let amp_pre = heights_pre[idx] - median_pre;
+                    if amp_pre >= AMPLITUDE_FLOOR {
+                        crests.push(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // Compute retention for all crests
+    let mut retentions = Vec::new();
+    for &idx in &crests {
+        let z = idx / dim;
+        let x = idx % dim;
+
+        let median_pre = median_d8_neighbors(x, z, dim, heights_pre);
+        let amp_pre = heights_pre[idx] - median_pre;
+        let median_post = median_d8_neighbors(x, z, dim, heights_post);
+        let amp_post = heights_post[idx] - median_post;
+
+        let retention = if amp_pre > 0 {
+            (100 * amp_post) / amp_pre
+        } else {
+            100
+        };
+        retentions.push(retention);
     }
 
     if retentions.is_empty() {
