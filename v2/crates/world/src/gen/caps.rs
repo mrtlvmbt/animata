@@ -473,6 +473,42 @@ pub fn measure_max_local_step(dim: usize, heights: &[i64]) -> i64 {
     max_spike
 }
 
+/// W-9: Count cells exceeding spike thresholds: how many cells have `h - second_max(D8) > threshold`.
+/// Returns count of cells exceeding each threshold; useful for understanding residual distribution.
+pub fn count_spikes_exceeding(dim: usize, heights: &[i64], threshold: i64) -> usize {
+    let n = dim * dim;
+    debug_assert_eq!(heights.len(), n);
+    let mut count = 0;
+
+    for z in 0..dim {
+        for x in 0..dim {
+            let idx = z * dim + x;
+            let mut max_h = i64::MIN;
+            let mut second_max_h = i64::MIN;
+            for &(dx, dz) in &D8_OFFSETS_CAPS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                    let u = (nz as usize) * dim + (nx as usize);
+                    if heights[u] > max_h {
+                        second_max_h = max_h;
+                        max_h = heights[u];
+                    } else if heights[u] > second_max_h {
+                        second_max_h = heights[u];
+                    }
+                }
+            }
+            if second_max_h != i64::MIN {
+                let spike = heights[idx] - second_max_h;
+                if spike > threshold {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// W-9: Count cells clipped by de_needle_pass: cells with excess > NEEDLE_MARGIN that were reduced.
 /// Returns the count of cells that de_needle modified (sent out positive amount).
 pub fn measure_de_needle_clip_count(dim: usize, heights_before: &[i64], heights_after: &[i64]) -> usize {
