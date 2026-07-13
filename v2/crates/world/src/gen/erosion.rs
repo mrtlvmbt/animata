@@ -123,6 +123,32 @@ const REPOSE_THRESHOLD: i64 = 0;
 const TALUS_FRAC_NUM: i64 = 1;
 const TALUS_FRAC_DEN: i64 = 2;
 
+/// W-9: De-needle and final-surface thermal relaxation constants.
+/// `NEEDLE_MARGIN`: an isolated-spike artifact filter (integer height units), not a physical
+/// talus angle. Cells exceeding their neighbors by at most this much are preserved (no smoothing).
+/// Calibrated to the measured relief's 1-cell overhangs (`hmax=200`): the census on seed=1/512 shows
+/// the clear-outlier needles at excess +45..94. `30` clips those while staying above the
+/// continuum of real relief texture (excess <30). Pinned by existing tests in erosion.rs:772 [<=30] and :792 [>=30].
+pub const NEEDLE_MARGIN: i64 = 30;
+
+/// W-9: Maximum local-max step height after final-surface thermal relaxation. This is the strict
+/// bound enforced by `talus_step_final`: after the pass, no cell can exceed its highest in-grid
+/// D8 neighbor by more than this value. Once talus_step_final passes (needles==0 AND all local-max
+/// steps <= this bound), de_needle becomes a provable no-op.
+pub const MAX_LOCAL_STEP_FINAL: i64 = 12;
+
+/// W-9: Repose threshold for final-surface thermal relaxation. Diffusion is applied AFTER coastal
+/// phase, on the FINAL surface before classification. Picked by the sweep (grid: {8,12,16,24} x {2,4,8}),
+/// then used as `REPOSE_THRESHOLD_FINAL` in `talus_step_final`. This placeholder (8) is the picked
+/// config value (threshold=8, fewest iters passing the gate); overridden by sweep results.
+pub const REPOSE_THRESHOLD_FINAL: i64 = 8;
+
+// Static assertion: MAX_LOCAL_STEP_FINAL must be strictly less than NEEDLE_MARGIN. If this breaks,
+// a future retune has made the post-talus bound larger than the de-needle guard, which would mean
+// de-needle might still clip some cells. The whole point of talus_step_final is to make de-needle
+// provably a no-op at the picked config.
+const _: () = assert!(MAX_LOCAL_STEP_FINAL < NEEDLE_MARGIN);
+
 /// Material refinement: a cell whose NET height delta over the whole macro-loop is `<=` this
 /// (negative) threshold has been incised past the soil layer → exposed `Bedrock`. Implementer's
 /// call, documented, locked (erosion-scale threshold — larger magnitude than W-2's single-tick
@@ -269,7 +295,6 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
 /// as needle towers on the 3D render; `30` also clips those (~17 cells) while staying above the
 /// continuum of real relief texture (excess <30). Below ~25 it starts smoothing genuine roughness.
 pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
-    const NEEDLE_MARGIN: i64 = 30;
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
 
@@ -328,6 +353,106 @@ pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
         }
     }
     new_height
+}
+
+/// W-9: Final-surface thermal relaxation — Jacobi diffusion applied AFTER all landform phases
+/// (coastal), BEFORE classification. Removes the "picket fence" of residual spikes left by landforms
+/// that run after the early `erode` loop's thermal talus pass.
+///
+/// **Mechanism (Jacobi pair-wise diffusion, deterministic integer-only):**
+/// - Scale: heights & threshold by x64 (fixed-point working copy `hs`), removing integer deadzone.
+/// - `N` iterations of Jacobi double-buffer diffusion (reads old frame, writes new frame, no in-place mutation).
+/// - Per iteration: for each ordered pair (v,u) of D8 neighbors (v=donor, u=receiver) where
+///   `hs_old[v] - hs_old[u] > thr_s`, compute transfer amount:
+///   `t(v,u) = (hs_old[v] - hs_old[u] - thr_s) / 2 / 8`
+///   Integer division by constant D8 degree (8) bounds the receiver: a pit with 8 higher neighbors
+///   gains <= (max_drop - threshold) / 2, can never invert into a spike.
+/// - Both sides read from SAME `hs_old`: donor subtracts sum(t), receiver adds sum(t) => sum(hs)
+///   invariant per iteration BY CONSTRUCTION (no mass loss during iterations).
+/// - Unscale: after N iterations, divide by 64 (floor division); ≤1 unit/cell loss from quantization,
+///   documented not sum-conserved (as per spec).
+///
+/// **Parameters:**
+/// - `threshold`: repose threshold (must match `REPOSE_THRESHOLD_FINAL`); pairs with drop > threshold
+///   participate in diffusion.
+/// - `n_iters`: number of Jacobi iterations (picked by sweep; typically 2-8).
+///
+/// Returns: new height buffer (unscaled), same length as input.
+pub(crate) fn talus_step_final(dim: usize, height: &[i64], threshold: i64, n_iters: usize) -> Vec<i64> {
+    let n = dim * dim;
+    debug_assert_eq!(height.len(), n);
+    debug_assert!(n_iters > 0);
+
+    // Scale: convert to fixed-point (x64)
+    let mut hs = height.iter().map(|&h| h * 64).collect::<Vec<i64>>();
+    let thr_s = threshold * 64;
+
+    // Jacobi iterations
+    for _ in 0..n_iters {
+        let mut hs_new = hs.clone();
+
+        // For each cell v, compute outflow to neighbors and inflow from neighbors
+        // Using gather pattern: each cell v computes its own outflow (purely local read of v's scaled height)
+        // then pulls inflows from neighbors whose receiver IS v.
+
+        // Pass 1: compute outflows for each cell
+        let mut send_out = vec![vec![0i64; 8]; n];
+        for v in 0..n {
+            let z = v / dim;
+            let x = v % dim;
+
+            for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+                let drop = hs[v] - hs[u];
+                if drop > thr_s {
+                    // Transfer: (drop - threshold) / 2 / 8
+                    send_out[v][dir] = (drop - thr_s) / 2 / 8;
+                }
+            }
+        }
+
+        // Pass 2: apply changes (gather: each cell pulls from neighbors)
+        for v in 0..n {
+            let z = v / dim;
+            let x = v % dim;
+
+            let mut sum_in = 0i64;
+            let mut sum_out = 0i64;
+
+            for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+
+                // Outflow from v in direction (dx, dz) goes to u
+                sum_out += send_out[v][dir];
+
+                // Inflow into v from u's opposite direction
+                // Direction from u to v is (-dx, -dz), find its index in D8_OFFSETS
+                for (opposite_dir, &(ox, oz)) in D8_OFFSETS.iter().enumerate() {
+                    if ox == -dx && oz == -dz {
+                        sum_in += send_out[u][opposite_dir];
+                        break;
+                    }
+                }
+            }
+
+            hs_new[v] = hs[v] - sum_out + sum_in;
+        }
+
+        hs = hs_new;
+    }
+
+    // Unscale: divide by 64 (floor division)
+    hs.iter().map(|&hs_val| hs_val / 64).collect()
 }
 
 /// Route a per-cell `source` quantity (e.g. this iteration's incised sediment) through the CURRENT
