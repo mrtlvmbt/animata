@@ -56,7 +56,7 @@ use crate::gen::aeolian;
 use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::drainage::is_river;
-use crate::gen::erosion::erode;
+use crate::gen::erosion::{erode, de_needle_pass};
 use crate::gen::height::height_at;
 use crate::gen::material::MaterialId;
 use crate::gen::moisture::moisture_at;
@@ -452,6 +452,15 @@ pub fn classify_and_caps(
         (post_aeolian_height.clone(), vec![false; n])
     };
 
+    // W-8: De-needle pass — remove isolated 1-cell height spikes, FINAL landform post-processing
+    // BEFORE classify. Only runs when at least one landform is enabled (preserves byte-identical
+    // all-OFF golden path). See `gen::erosion::de_needle_pass` for mechanism (gather, mass-conserving).
+    let post_deneedle_height = if enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal {
+        de_needle_pass(dim, &post_coastal_height)
+    } else {
+        post_coastal_height.clone()
+    };
+
     let mut final_biome = Vec::with_capacity(n);
     let mut caps = vec![0i64; n];
     let mut surface_material = Vec::with_capacity(n);
@@ -473,10 +482,10 @@ pub fn classify_and_caps(
                 continue;
             }
 
-            let h_cell = post_coastal_height[idx];
+            let h_cell = post_deneedle_height[idx];
             // Border rule (critic F2b): clamp the upwind sample to the grid edge.
             let x_src = (x as i64 - WIND_DX).max(0) as usize;
-            let h_west = post_coastal_height[z * dim + x_src];
+            let h_west = post_deneedle_height[z * dim + x_src];
             let (t, p) = climate_from_height(h_cell, h_west, x as i64, z as i64, seed);
             let zonal = biome_at(t, p);
 
@@ -484,7 +493,7 @@ pub fn classify_and_caps(
             let moisture = moisture_at(area);
             let riparian = is_river(area);
             let slope = match erosion.drainage.downstream[idx] {
-                Some(d) => (post_coastal_height[idx] - post_coastal_height[d]).max(0),
+                Some(d) => (post_deneedle_height[idx] - post_deneedle_height[d]).max(0),
                 None => 0,
             };
 
@@ -511,7 +520,7 @@ pub fn classify_and_caps(
         }
     }
 
-    WorldFields { dim, height: post_coastal_height, final_biome, caps, surface_material }
+    WorldFields { dim, height: post_deneedle_height, final_biome, caps, surface_material }
 }
 
 #[cfg(test)]

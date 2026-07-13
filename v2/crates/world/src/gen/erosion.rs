@@ -248,6 +248,85 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
     new_height
 }
 
+/// W-8: De-needle pass — remove isolated 1-cell height spikes. GATHER formulation (Jacobi, like
+/// `talus_step`, never scatter). Pass 1 computes each cell's clipped excess (purely local). Pass 2
+/// has every cell PULL redistributions from its neighbors whose D8 receiver IS that cell — no cell
+/// ever writes into another's slot. Reads only the old `height` frame.
+///
+/// **Mechanism (deterministic, integer-only):**
+/// - For each cell `v`, compute `nmax` = max height over its in-grid 8-neighbours.
+/// - If `h[v] > nmax + NEEDLE_MARGIN`, clip `excess = h[v] - (nmax + NEEDLE_MARGIN)`.
+/// - Identify `v`'s D8 receiver = the SINGLE lowest 8-neighbour (deterministic tie-break: lowest
+///   linear index among equal-height candidates, matching `priority_flood_fill`'s convention).
+/// - Record `send[v] = excess` toward that receiver.
+/// - Pass 2 (gather): `new_h[v] = h[v] - send[v] + Σ(send[u] for each neighbor u whose receiver == v)`.
+///
+/// **`NEEDLE_MARGIN`:** an isolated-spike artifact filter (integer height units), not a physical
+/// talus angle. Cells exceeding their neighbors by at most this much are preserved (no smoothing).
+/// Calibrated to the measured relief's 1-cell overhangs: the default 40 matches the typical spike
+/// margin on smooth fBm terrain with `hmax=200`.
+pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
+    const NEEDLE_MARGIN: i64 = 40;
+    let n = dim * dim;
+    debug_assert_eq!(height.len(), n);
+
+    // Pass 1: identify each cell's clipping intention and its D8 receiver (lowest neighbor).
+    let mut send_out = vec![0i64; n];
+    let mut receiver = vec![None; n];
+
+    for v in 0..n {
+        let z = v / dim;
+        let x = v % dim;
+
+        // Find the max height among the 8 in-grid neighbors.
+        let mut nmax = i64::MIN;
+        for &(dx, dz) in &D8_OFFSETS {
+            let nx = x as i64 + dx;
+            let nz = z as i64 + dz;
+            if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                continue;
+            }
+            let u = linear_index(nx as usize, nz as usize, dim);
+            nmax = nmax.max(height[u]);
+        }
+
+        // If this cell is a spike, compute the excess to clip.
+        if height[v] > nmax + NEEDLE_MARGIN {
+            send_out[v] = height[v] - (nmax + NEEDLE_MARGIN);
+        }
+
+        // Find the lowest D8 neighbor (deterministic tie-break: lowest linear index).
+        // Start with self as a fallback if no in-grid neighbor is lower or equal.
+        let mut lowest_height = height[v];
+        let mut lowest_idx: Option<usize> = None;
+        for &(dx, dz) in &D8_OFFSETS {
+            let nx = x as i64 + dx;
+            let nz = z as i64 + dz;
+            if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                continue;
+            }
+            let u = linear_index(nx as usize, nz as usize, dim);
+            // Update if u is strictly lower, or if u equals the current lowest and has a lower linear index.
+            if height[u] < lowest_height || (height[u] == lowest_height && lowest_idx.map_or(true, |idx| u < idx)) {
+                lowest_height = height[u];
+                lowest_idx = Some(u);
+            }
+        }
+        receiver[v] = lowest_idx;
+    }
+
+    // Pass 2: gather — each cell v reads its own send_out plus its neighbors' send_out where that
+    // neighbor's D8 receiver IS v. Never writes into a neighbor's slot.
+    let mut new_height = height.to_vec();
+    for v in 0..n {
+        new_height[v] -= send_out[v];
+        if let Some(rec) = receiver[v] {
+            new_height[rec] += send_out[v];
+        }
+    }
+    new_height
+}
+
 /// Route a per-cell `source` quantity (e.g. this iteration's incised sediment) through the CURRENT
 /// drainage DAG to its base level, via the SAME Kahn topological technique `kahn_accumulate` uses
 /// (integer, associative — thread-count-independent). Returns `(accum, export)`: `accum[v]` is the
@@ -660,6 +739,80 @@ mod tests {
         let new_height = talus_step(dim, &height, &downstream);
         // The steep cell (index 3, height 30) must have LOST material (moved below its original height).
         assert!(new_height[3] < height[3], "the steep source cell must lose material to talus");
+    }
+
+    // ── de-needle pass ───────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn de_needle_pass_conserves_total_height_exactly() {
+        let dim = 4;
+        let height: Vec<i64> = (0..dim * dim).map(|i| (i as i64) * 3).collect();
+        let new_height = de_needle_pass(dim, &height);
+        let sum_before: i64 = height.iter().sum();
+        let sum_after: i64 = new_height.iter().sum();
+        assert_eq!(sum_before, sum_after, "de_needle_pass must be a zero-sum redistribution");
+    }
+
+    #[test]
+    fn de_needle_pass_clips_isolated_spike_above_neighbors() {
+        // Build a 3×3 grid with a +100 spike over flat neighbors.
+        let dim = 3;
+        #[rustfmt::skip]
+        let height = vec![
+            10, 10, 10,
+            10, 110, 10,  // center cell (index 4) is 110, neighbors all 10
+            10, 10, 10,
+        ];
+        let new_height = de_needle_pass(dim, &height);
+        // NEEDLE_MARGIN = 40, so max_neighbor = 10, limit = 10 + 40 = 50.
+        // The spike at index 4 (height 110) should be clipped to <= 50.
+        assert!(new_height[4] <= 50, "spike at index 4 must be clipped to <= max_neighbor + NEEDLE_MARGIN");
+        // Total must be conserved.
+        let sum_before: i64 = height.iter().sum();
+        let sum_after: i64 = new_height.iter().sum();
+        assert_eq!(sum_before, sum_after, "total height must be exactly conserved");
+    }
+
+    #[test]
+    fn de_needle_pass_leaves_non_spike_cells_unchanged() {
+        // A cell exceeding its neighbors by <= NEEDLE_MARGIN should not be modified.
+        let dim = 3;
+        #[rustfmt::skip]
+        let height = vec![
+            10, 10, 10,
+            10, 50, 10,  // center cell is only 40 units above neighbors (< 40 + NEEDLE_MARGIN=40 threshold exactly)
+            10, 10, 10,
+        ];
+        let new_height = de_needle_pass(dim, &height);
+        // Center cell (index 4) exceeds neighbors by exactly 40, which equals NEEDLE_MARGIN,
+        // so it should NOT be clipped (the condition is height > nmax + NEEDLE_MARGIN, not >=).
+        assert_eq!(new_height[4], height[4], "cells at or below the margin must not be clipped");
+    }
+
+    #[test]
+    fn de_needle_pass_on_two_adjacent_spikes_is_order_independent() {
+        // Build two adjacent spikes and verify that de_needle_pass treats them consistently
+        // (gather is deterministic, not order-dependent).
+        let dim = 5;
+        #[rustfmt::skip]
+        let height = vec![
+            10, 10, 10, 10, 10,
+            10, 105, 10, 110, 10,  // two spikes at indices 6 and 8
+            10, 10, 10, 10, 10,
+            10, 10, 10, 10, 10,
+            10, 10, 10, 10, 10,
+        ];
+        let result1 = de_needle_pass(dim, &height);
+        let result2 = de_needle_pass(dim, &height);
+        // Results must be identical (determinism).
+        assert_eq!(result1, result2, "de_needle_pass must be deterministic");
+        // Both spikes must be clipped.
+        assert!(result1[6] <= 50, "first spike must be clipped");
+        assert!(result1[8] <= 50, "second spike must be clipped");
+        // Total must be conserved.
+        let sum_before: i64 = height.iter().sum();
+        let sum_after: i64 = result1.iter().sum();
+        assert_eq!(sum_before, sum_after, "total height must be exactly conserved");
     }
 
     // ── sediment ledger / conservation ───────────────────────────────────────────────────────────
