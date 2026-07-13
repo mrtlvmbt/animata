@@ -283,9 +283,9 @@ async fn main() {
         cli_args.cam_preset.apply_to_camera(&mut camera, center, world_span);
     }
 
-    // R-13: Screenshot mode — render warmup frames, capture, exit.
+    // R-13: Screenshot mode — render warmup frames, then capture on the final frame.
     if let Some(screenshot_path) = &cli_args.screenshot {
-        for _ in 0..cli_args.screenshot_warmup {
+        for frame_num in 0..=cli_args.screenshot_warmup {
             if let Some(h) = &handle {
                 if is_key_pressed(KeyCode::Space) {
                     h.toggle_pause();
@@ -419,15 +419,17 @@ async fn main() {
             }
             set_default_camera();
 
+            // R-13 F-B5: Capture on final frame (frame_num == cli_args.screenshot_warmup)
+            // AFTER all rendering, BEFORE next_frame() to read the full backbuffer
+            if frame_num == cli_args.screenshot_warmup {
+                let img = get_screen_data();
+                img.export_png(screenshot_path);
+                println!("[screenshot] captured to {}", screenshot_path);
+                std::process::exit(0);
+            }
+
             next_frame().await;
         }
-
-        // Capture final frame to screenshot
-        set_default_camera();
-        let img = get_screen_data();
-        img.export_png(screenshot_path);
-        println!("[screenshot] captured to {}", screenshot_path);
-        std::process::exit(0);
     }
 
     // R-13: Benchmark mode — time steady-state frames, print machine-readable line, exit.
