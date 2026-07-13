@@ -46,6 +46,7 @@ mod terrain_cube;
 use camera::IsoCam;
 use macroquad::prelude::*;
 use sim_core::WorldView;
+use std::time::Instant;
 
 // ── R-4 LOD tier thresholds (px_per_m-driven) ──────────────────────────────────────────────────────
 /// FAR tier: creatures are sub-pixel or nearly invisible (point/billboard). Triggers when px_per_m < 5.
@@ -73,7 +74,41 @@ fn window_conf() -> Conf {
 /// generates).
 const SEED: u64 = 0xA11A_2A11;
 
-/// R-8 (#261): parsed CLI flags. `--standalone`/`--no-sim` are aliases for the same no-sim mode.
+/// R-13 camera presets for deterministic evidence capture.
+#[derive(Clone, Copy, Debug)]
+enum CamPreset {
+    /// Default isometric view: pitch ~41°, yaw 0°, centered, ortho_span 1.5x world span.
+    IsoDefault,
+    /// Zoomed-in isometric view: ortho_span 0.75x world span (close-up).
+    IsoZoomClose,
+    /// Zoomed-out isometric view: ortho_span 2.5x world span (wide view).
+    IsoZoomFar,
+}
+
+impl CamPreset {
+    /// Apply this preset to a camera, resetting it to a known state.
+    fn apply_to_camera(&self, camera: &mut IsoCam, center: Vec3, world_span: f32) {
+        match self {
+            CamPreset::IsoDefault => {
+                camera.focus = center;
+                camera.yaw = 0.0;
+                camera.ortho_span = world_span * 1.5;
+            }
+            CamPreset::IsoZoomClose => {
+                camera.focus = center;
+                camera.yaw = 0.0;
+                camera.ortho_span = world_span * 0.75;
+            }
+            CamPreset::IsoZoomFar => {
+                camera.focus = center;
+                camera.yaw = 0.0;
+                camera.ortho_span = world_span * 2.5;
+            }
+        }
+    }
+}
+
+/// R-13 (#433): parsed CLI flags. `--standalone`/`--no-sim` are aliases for the same no-sim mode.
 struct CliArgs {
     standalone: bool,
     seed: u64,
@@ -82,6 +117,14 @@ struct CliArgs {
     /// `--v1-dump <path>`: draw a v1-generated world dump (ATDMP1) instead of `ProcgenWorld`, to
     /// compare v1 vs v2 worldgen in the SAME renderer. Implies standalone (no sim on a dump world).
     v1_dump: Option<String>,
+    /// R-13: `--screenshot <path.png>`: render warmup frames and capture the framebuffer to PNG.
+    screenshot: Option<String>,
+    /// R-13: number of warmup frames before screenshot (default 30).
+    screenshot_warmup: u32,
+    /// R-13: `--bench`: run deterministic benchmark (300+ frames), print machine-readable line.
+    bench: bool,
+    /// R-13: camera preset (default: iso-default).
+    cam_preset: CamPreset,
 }
 
 fn parse_args() -> CliArgs {
@@ -89,6 +132,10 @@ fn parse_args() -> CliArgs {
     let mut seed = SEED;
     let mut dim_override = None;
     let mut v1_dump = None;
+    let mut screenshot = None;
+    let mut screenshot_warmup = 30;
+    let mut bench = false;
+    let mut cam_preset = CamPreset::IsoDefault;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -106,10 +153,31 @@ fn parse_args() -> CliArgs {
                 let v = args.next().expect("--dim requires a value");
                 dim_override = Some(v.parse().unwrap_or_else(|_| panic!("--dim expects an integer, got {v:?}")));
             }
+            "--screenshot" => {
+                screenshot = Some(args.next().expect("--screenshot requires a path"));
+                standalone = true; // screenshot mode is standalone
+            }
+            "--screenshot-warmup" => {
+                let v = args.next().expect("--screenshot-warmup requires a value");
+                screenshot_warmup = v.parse().unwrap_or_else(|_| panic!("--screenshot-warmup expects a u32, got {v:?}"));
+            }
+            "--bench" => {
+                bench = true;
+                standalone = true; // benchmark mode is standalone
+            }
+            "--cam" => {
+                let preset_name = args.next().expect("--cam requires a preset name");
+                cam_preset = match preset_name.as_str() {
+                    "iso-default" => CamPreset::IsoDefault,
+                    "iso-zoom-close" => CamPreset::IsoZoomClose,
+                    "iso-zoom-far" => CamPreset::IsoZoomFar,
+                    other => panic!("unknown camera preset: {other:?}"),
+                };
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset }
 }
 
 // ── Pinned-param contract (W-6 WIRE: ProcgenWorld; critic F3, issue #223 acceptance; R-6) ──────────
@@ -201,6 +269,460 @@ async fn main() {
     // stays `None` too (the render loop already tolerated a pre-first-tick `None`; standalone just
     // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
     let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
+
+    // R-13: Apply camera preset to ensure deterministic view.
+    let world_span = span_x.max(span_z).max(1.0);
+    if cli_args.screenshot.is_some() || cli_args.bench {
+        cli_args.cam_preset.apply_to_camera(&mut camera, center, world_span);
+    }
+
+    // R-13: Screenshot mode — render warmup frames, capture, exit.
+    if let Some(screenshot_path) = &cli_args.screenshot {
+        for _ in 0..cli_args.screenshot_warmup {
+            if let Some(h) = &handle {
+                if is_key_pressed(KeyCode::Space) {
+                    h.toggle_pause();
+                }
+                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
+                    h.step_once();
+                }
+            }
+
+            clear_background(Color::from_rgba(18, 18, 22, 255));
+            let snap = handle.as_ref().and_then(|h| h.latest());
+
+            camera.update();
+            let cam3d = camera.to_camera3d();
+            let frustum_planes = camera.frustum_planes();
+            set_camera(&cam3d);
+
+            let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+            for chunk in terrain_chunks {
+                let (min, max) = chunk.bounds;
+                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
+                    draw_mesh(&chunk.mesh);
+                }
+            }
+
+            if let Some(s) = snap.as_ref() {
+                let px_per_m = camera.px_per_m();
+                for c in &s.creatures {
+                    let (cx, cz) = if use_cube_terrain {
+                        (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
+                    } else {
+                        hex::hex_center(c.pos.0, c.pos.1)
+                    };
+                    let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
+                    let creature_pos = vec3(cx, h + 0.15, cz);
+
+                    if !camera.point_in_frustum(creature_pos) {
+                        continue;
+                    }
+
+                    let color = match c.uptake_layer {
+                        0 => Color::new(1.0, 0.6, 0.2, 1.0),
+                        1 => Color::new(0.2, 0.8, 1.0, 1.0),
+                        2 => Color::new(0.8, 0.2, 1.0, 1.0),
+                        _ => Color::new(0.5, 0.5, 0.5, 1.0),
+                    };
+
+                    if px_per_m < PX_PER_M_FAR_THRESHOLD {
+                        draw_sphere(creature_pos, 0.04, None, color);
+                    } else if px_per_m < PX_PER_M_MID_THRESHOLD {
+                        let body_count = c.body_size.max(1) as usize;
+                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                        let cell_radius = 0.03;
+                        let spacing = cell_radius * 2.2;
+                        let grid_size = (grid_side - 1) as f32 * spacing;
+                        let offset_x = -grid_size / 2.0;
+                        let offset_z = -grid_size / 2.0;
+
+                        let mut drawn = 0;
+                        for row in 0..grid_side {
+                            for col in 0..grid_side {
+                                if drawn >= body_count {
+                                    break;
+                                }
+                                let cell_x = offset_x + col as f32 * spacing;
+                                let cell_z = offset_z + row as f32 * spacing;
+                                let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
+                                draw_sphere(cell_pos, cell_radius, None, color);
+                                drawn += 1;
+                            }
+                            if drawn >= body_count {
+                                break;
+                            }
+                        }
+                    } else {
+                        let size_scale = c.size as f32 / 16.0;
+                        let base_size = 0.15 * size_scale;
+                        let body_count = c.body_size.max(1) as usize;
+
+                        if body_count > 1 {
+                            let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                            let cell_radius = 0.04;
+                            let spacing = cell_radius * 2.0;
+                            let grid_size = (grid_side - 1) as f32 * spacing;
+                            let offset_x = -grid_size / 2.0;
+                            let offset_z = -grid_size / 2.0;
+
+                            let mut drawn = 0;
+                            for row in 0..grid_side {
+                                for col in 0..grid_side {
+                                    if drawn >= body_count {
+                                        break;
+                                    }
+                                    let cell_x = offset_x + col as f32 * spacing;
+                                    let cell_z = offset_z + row as f32 * spacing;
+                                    let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
+                                    draw_sphere(cell_pos, cell_radius, None, color);
+                                    drawn += 1;
+                                }
+                                if drawn >= body_count {
+                                    break;
+                                }
+                            }
+                        } else {
+                            match c.cell_type {
+                                Some(sim_core::CellType::A) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
+                                    draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::B) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
+                                    draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::Mixed) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
+                                    draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::Diff(_)) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                }
+                                None => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            set_default_camera();
+
+            next_frame().await;
+        }
+
+        // Capture final frame to screenshot
+        set_default_camera();
+        let img = get_screen_data();
+        img.export_png(screenshot_path);
+        println!("[screenshot] captured to {}", screenshot_path);
+        std::process::exit(0);
+    }
+
+    // R-13: Benchmark mode — time steady-state frames, print machine-readable line, exit.
+    if cli_args.bench {
+        // Warmup: 30 frames to reach steady state
+        for _ in 0..30 {
+            if let Some(h) = &handle {
+                if is_key_pressed(KeyCode::Space) {
+                    h.toggle_pause();
+                }
+                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
+                    h.step_once();
+                }
+            }
+
+            clear_background(Color::from_rgba(18, 18, 22, 255));
+            let snap = handle.as_ref().and_then(|h| h.latest());
+
+            camera.update();
+            let cam3d = camera.to_camera3d();
+            let frustum_planes = camera.frustum_planes();
+            set_camera(&cam3d);
+
+            let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+            for chunk in terrain_chunks {
+                let (min, max) = chunk.bounds;
+                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
+                    draw_mesh(&chunk.mesh);
+                }
+            }
+
+            if let Some(s) = snap.as_ref() {
+                let px_per_m = camera.px_per_m();
+                for c in &s.creatures {
+                    let (cx, cz) = if use_cube_terrain {
+                        (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
+                    } else {
+                        hex::hex_center(c.pos.0, c.pos.1)
+                    };
+                    let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
+                    let creature_pos = vec3(cx, h + 0.15, cz);
+
+                    if !camera.point_in_frustum(creature_pos) {
+                        continue;
+                    }
+
+                    let color = match c.uptake_layer {
+                        0 => Color::new(1.0, 0.6, 0.2, 1.0),
+                        1 => Color::new(0.2, 0.8, 1.0, 1.0),
+                        2 => Color::new(0.8, 0.2, 1.0, 1.0),
+                        _ => Color::new(0.5, 0.5, 0.5, 1.0),
+                    };
+
+                    if px_per_m < PX_PER_M_FAR_THRESHOLD {
+                        draw_sphere(creature_pos, 0.04, None, color);
+                    } else if px_per_m < PX_PER_M_MID_THRESHOLD {
+                        let body_count = c.body_size.max(1) as usize;
+                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                        let cell_radius = 0.03;
+                        let spacing = cell_radius * 2.2;
+                        let grid_size = (grid_side - 1) as f32 * spacing;
+                        let offset_x = -grid_size / 2.0;
+                        let offset_z = -grid_size / 2.0;
+
+                        let mut drawn = 0;
+                        for row in 0..grid_side {
+                            for col in 0..grid_side {
+                                if drawn >= body_count {
+                                    break;
+                                }
+                                let cell_x = offset_x + col as f32 * spacing;
+                                let cell_z = offset_z + row as f32 * spacing;
+                                let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
+                                draw_sphere(cell_pos, cell_radius, None, color);
+                                drawn += 1;
+                            }
+                            if drawn >= body_count {
+                                break;
+                            }
+                        }
+                    } else {
+                        let size_scale = c.size as f32 / 16.0;
+                        let base_size = 0.15 * size_scale;
+                        let body_count = c.body_size.max(1) as usize;
+
+                        if body_count > 1 {
+                            let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                            let cell_radius = 0.04;
+                            let spacing = cell_radius * 2.0;
+                            let grid_size = (grid_side - 1) as f32 * spacing;
+                            let offset_x = -grid_size / 2.0;
+                            let offset_z = -grid_size / 2.0;
+
+                            let mut drawn = 0;
+                            for row in 0..grid_side {
+                                for col in 0..grid_side {
+                                    if drawn >= body_count {
+                                        break;
+                                    }
+                                    let cell_x = offset_x + col as f32 * spacing;
+                                    let cell_z = offset_z + row as f32 * spacing;
+                                    let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
+                                    draw_sphere(cell_pos, cell_radius, None, color);
+                                    drawn += 1;
+                                }
+                                if drawn >= body_count {
+                                    break;
+                                }
+                            }
+                        } else {
+                            match c.cell_type {
+                                Some(sim_core::CellType::A) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
+                                    draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::B) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
+                                    draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::Mixed) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
+                                    draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::Diff(_)) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                }
+                                None => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            set_default_camera();
+
+            next_frame().await;
+        }
+
+        // Timed frames: collect per-frame times for p95 calculation
+        let mut frame_times_ms = Vec::with_capacity(300);
+        let mut chunk_count = 0;
+        let mut vert_count = 0;
+
+        for _ in 0..300 {
+            let frame_start = Instant::now();
+
+            if let Some(h) = &handle {
+                if is_key_pressed(KeyCode::Space) {
+                    h.toggle_pause();
+                }
+                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
+                    h.step_once();
+                }
+            }
+
+            clear_background(Color::from_rgba(18, 18, 22, 255));
+            let snap = handle.as_ref().and_then(|h| h.latest());
+
+            camera.update();
+            let cam3d = camera.to_camera3d();
+            let frustum_planes = camera.frustum_planes();
+            set_camera(&cam3d);
+
+            let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+            let mut chunks_drawn = 0;
+            for chunk in terrain_chunks {
+                let (min, max) = chunk.bounds;
+                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
+                    draw_mesh(&chunk.mesh);
+                    chunks_drawn += 1;
+                    vert_count = chunk.mesh.vertices.len();
+                }
+            }
+            chunk_count = chunks_drawn;
+
+            if let Some(s) = snap.as_ref() {
+                let px_per_m = camera.px_per_m();
+                for c in &s.creatures {
+                    let (cx, cz) = if use_cube_terrain {
+                        (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
+                    } else {
+                        hex::hex_center(c.pos.0, c.pos.1)
+                    };
+                    let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
+                    let creature_pos = vec3(cx, h + 0.15, cz);
+
+                    if !camera.point_in_frustum(creature_pos) {
+                        continue;
+                    }
+
+                    let color = match c.uptake_layer {
+                        0 => Color::new(1.0, 0.6, 0.2, 1.0),
+                        1 => Color::new(0.2, 0.8, 1.0, 1.0),
+                        2 => Color::new(0.8, 0.2, 1.0, 1.0),
+                        _ => Color::new(0.5, 0.5, 0.5, 1.0),
+                    };
+
+                    if px_per_m < PX_PER_M_FAR_THRESHOLD {
+                        draw_sphere(creature_pos, 0.04, None, color);
+                    } else if px_per_m < PX_PER_M_MID_THRESHOLD {
+                        let body_count = c.body_size.max(1) as usize;
+                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                        let cell_radius = 0.03;
+                        let spacing = cell_radius * 2.2;
+                        let grid_size = (grid_side - 1) as f32 * spacing;
+                        let offset_x = -grid_size / 2.0;
+                        let offset_z = -grid_size / 2.0;
+
+                        let mut drawn = 0;
+                        for row in 0..grid_side {
+                            for col in 0..grid_side {
+                                if drawn >= body_count {
+                                    break;
+                                }
+                                let cell_x = offset_x + col as f32 * spacing;
+                                let cell_z = offset_z + row as f32 * spacing;
+                                let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
+                                draw_sphere(cell_pos, cell_radius, None, color);
+                                drawn += 1;
+                            }
+                            if drawn >= body_count {
+                                break;
+                            }
+                        }
+                    } else {
+                        let size_scale = c.size as f32 / 16.0;
+                        let base_size = 0.15 * size_scale;
+                        let body_count = c.body_size.max(1) as usize;
+
+                        if body_count > 1 {
+                            let grid_side = (body_count as f32).sqrt().ceil() as i32;
+                            let cell_radius = 0.04;
+                            let spacing = cell_radius * 2.0;
+                            let grid_size = (grid_side - 1) as f32 * spacing;
+                            let offset_x = -grid_size / 2.0;
+                            let offset_z = -grid_size / 2.0;
+
+                            let mut drawn = 0;
+                            for row in 0..grid_side {
+                                for col in 0..grid_side {
+                                    if drawn >= body_count {
+                                        break;
+                                    }
+                                    let cell_x = offset_x + col as f32 * spacing;
+                                    let cell_z = offset_z + row as f32 * spacing;
+                                    let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
+                                    draw_sphere(cell_pos, cell_radius, None, color);
+                                    drawn += 1;
+                                }
+                                if drawn >= body_count {
+                                    break;
+                                }
+                            }
+                        } else {
+                            match c.cell_type {
+                                Some(sim_core::CellType::A) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
+                                    draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::B) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
+                                    draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::Mixed) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                    let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
+                                    draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
+                                }
+                                Some(sim_core::CellType::Diff(_)) => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                }
+                                None => {
+                                    draw_sphere(creature_pos, base_size, None, color);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            set_default_camera();
+
+            next_frame().await;
+
+            let frame_elapsed = frame_start.elapsed().as_secs_f32() * 1000.0;
+            frame_times_ms.push(frame_elapsed);
+        }
+
+        // Calculate statistics
+        let avg_ms = frame_times_ms.iter().sum::<f32>() / frame_times_ms.len() as f32;
+        frame_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let p95_idx = (frame_times_ms.len() * 95 / 100).max(1);
+        let p95_ms = frame_times_ms[p95_idx - 1];
+
+        println!("BENCH dim={} avg_ms={:.2} p95_ms={:.2} verts={} chunks={}", world_dim, avg_ms, p95_ms, vert_count, chunk_count);
+        std::process::exit(0);
+    }
 
     loop {
         if let Some(h) = &handle {
