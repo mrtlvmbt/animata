@@ -73,11 +73,8 @@ pub fn chunk_pipeline(ctx: &mut dyn RenderingBackend, vertex: &str, fragment: &s
             // whose coincident, differently-shaded quads z-fought into dashed seams.
             cull_face: CullFace::Back,
             front_face_order: FrontFaceOrder::Clockwise,
-            color_blend: Some(BlendState::new(
-                Equation::Add,
-                BlendFactor::Value(BlendValue::SourceAlpha),
-                BlendFactor::OneMinusValue(BlendValue::SourceAlpha),
-            )),
+            // Terrain draws opaque (no alpha blending). Macroquad's default path doesn't blend terrain either.
+            color_blend: None,
             ..Default::default()
         },
     )
