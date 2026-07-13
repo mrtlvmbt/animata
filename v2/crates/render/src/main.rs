@@ -193,13 +193,23 @@ fn parse_args() -> CliArgs {
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
-/// Load a shader source from file, with inline fallback for development.
+/// Load a shader source from file. Tries multiple paths to find assets/shaders/ relative to the repo root.
 fn load_shader(filename: &str) -> String {
-    std::fs::read_to_string(format!("assets/shaders/{filename}"))
-        .unwrap_or_else(|_| {
-            eprintln!("[gpu_terrain] warning: shader {} not found; GPU path will fail", filename);
-            String::new()
-        })
+    // Try paths relative to common execution contexts
+    let candidate_paths = [
+        format!("assets/shaders/{}", filename),                  // From repo root
+        format!("../../../../assets/shaders/{}", filename),      // From target/release
+        format!("../../../assets/shaders/{}", filename),         // From v2/crates/render
+    ];
+
+    for path in &candidate_paths {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            return content;
+        }
+    }
+
+    eprintln!("[gpu_terrain] warning: shader {} not found (tried: {:?}); GPU path will fail", filename, candidate_paths);
+    String::new()
 }
 
 /// Helper to draw terrain using retained GPU buffers.
