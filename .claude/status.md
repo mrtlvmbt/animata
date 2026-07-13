@@ -1,5 +1,5 @@
-task: #436 R-15a retained GPU buffers - screenshot parity fix
-phase: investigation complete, fix attempted
-blocked_on: parity verification pending (gl_pass_as_float=false approach requires runtime testing)
-next: run final parity test with gl_pass_as_float=false; if still failing, escalate to PM for deeper GPU backend debugging
-updated: 2026-07-13 17:00
+task: PR #437 — R-15a retained GPU buffers parity fix
+phase: code complete, PR ready for review
+blocked_on: none
+next: PM intake (code-critic already run, commit daedbc8)
+updated: 2026-07-13 23:30
