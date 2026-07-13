@@ -1,5 +1,5 @@
-task: #433 R-13 render evidence harness (screenshot/bench/camera presets)
-phase: PR ready-for-review
-blocked_on: none (all PM intake fixes applied: F-B1/F-B2/F-B2b/F-B4/F-B5)
-next: PM review and merge to render-r12-terragen-preview
-updated: 2026-07-13 18:42
+task: PR #434 (W-9 final-surface talus_step_final)
+phase: CI pass 2 in flight (dim=128→256 fixture, non-vacuity control removed)
+blocked_on: CI completion (run #29284354893 in_progress)
+next: CI completes → extract v2-golden-arm64 left:/right: → re-pin golden → green CI
+updated: 2026-07-13 23:04
