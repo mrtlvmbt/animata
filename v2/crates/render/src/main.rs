@@ -39,6 +39,7 @@ mod biome_palette;
 mod camera;
 mod driver;
 mod dump_world;
+mod gpu_terrain;
 mod hex;
 mod terrain;
 mod terrain_cube;
@@ -132,6 +133,8 @@ struct CliArgs {
     bench: bool,
     /// R-13: camera preset (default: iso-default).
     cam_preset: CamPreset,
+    /// R-15a: `--retained`: use retained-buffer GPU rendering for terrain (default OFF).
+    retained: bool,
 }
 
 fn parse_args() -> CliArgs {
@@ -143,6 +146,7 @@ fn parse_args() -> CliArgs {
     let mut screenshot_warmup = 30;
     let mut bench = false;
     let mut cam_preset = CamPreset::IsoDefault;
+    let mut retained = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -181,10 +185,55 @@ fn parse_args() -> CliArgs {
                     other => panic!("unknown camera preset: {other:?}"),
                 };
             }
+            "--retained" => retained = true,
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained }
+}
+
+// ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
+/// Load a shader source from file, with inline fallback for development.
+fn load_shader(filename: &str) -> String {
+    std::fs::read_to_string(format!("assets/shaders/{filename}"))
+        .unwrap_or_else(|_| {
+            eprintln!("[gpu_terrain] warning: shader {} not found; GPU path will fail", filename);
+            String::new()
+        })
+}
+
+/// Helper to draw terrain using retained GPU buffers.
+fn draw_gpu_terrain(
+    gpu_chunks: &[gpu_terrain::GpuChunk],
+    pipeline: macroquad::miniquad::Pipeline,
+    camera: &IsoCam,
+    frustum_planes: &[camera::FrustumPlane],
+) {
+    use macroquad::prelude::get_internal_gl;
+    use macroquad::miniquad::UniformsSource;
+
+    let mut gl = unsafe { get_internal_gl() };
+    gl.flush(); // Flush any pending macroquad 2D before our draw calls
+    let ctx = gl.quad_context;
+
+    let mvp = camera.to_camera3d().matrix();
+    let uniforms = gpu_terrain::ChunkUniforms {
+        mvp,
+        dbg: macroquad::prelude::vec4(0.0, 0.0, 0.0, 0.0),
+    };
+
+    ctx.apply_pipeline(&pipeline);
+    ctx.apply_uniforms(UniformsSource::table(&uniforms));
+
+    for chunk in gpu_chunks {
+        // Frustum culling
+        if !frustum_planes.iter().all(|plane| plane.aabb_intersects(chunk.lo, chunk.hi)) {
+            continue;
+        }
+
+        ctx.apply_bindings(&chunk.bindings);
+        ctx.draw(0, chunk.n_idx, 1);
+    }
 }
 
 // ── Pinned-param contract (W-6 WIRE: ProcgenWorld; critic F3, issue #223 acceptance; R-6) ──────────
@@ -261,6 +310,24 @@ async fn main() {
     let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode);
     let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode);
 
+    // R-15a: Retained-buffer GPU terrain initialization (if --retained).
+    let (mut gpu_hex_chunks, mut gpu_cube_chunks, gpu_pipeline) = if cli_args.retained {
+        use macroquad::prelude::get_internal_gl;
+
+        let chunk_vert = load_shader("chunk.vert");
+        let chunk_frag = load_shader("chunk.frag");
+
+        let mut gl = unsafe { get_internal_gl() };
+        let ctx = gl.quad_context;
+
+        let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
+        let gpu_hex = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+        let gpu_cube = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+        (gpu_hex, gpu_cube, Some(pipeline))
+    } else {
+        (Vec::new(), Vec::new(), None)
+    };
+
     // R-5: Runtime hex↔cube toggle state. Default = hex (R-2's established look).
     let mut use_cube_terrain = false;
 
@@ -303,11 +370,16 @@ async fn main() {
             let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-            for chunk in terrain_chunks {
-                let (min, max) = chunk.bounds;
-                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                    draw_mesh(&chunk.mesh);
+            if cli_args.retained && gpu_pipeline.is_some() {
+                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
+                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
+            } else {
+                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+                for chunk in terrain_chunks {
+                    let (min, max) = chunk.bounds;
+                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
+                        draw_mesh(&chunk.mesh);
+                    }
                 }
             }
 
@@ -453,11 +525,16 @@ async fn main() {
             let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-            for chunk in terrain_chunks {
-                let (min, max) = chunk.bounds;
-                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                    draw_mesh(&chunk.mesh);
+            if cli_args.retained && gpu_pipeline.is_some() {
+                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
+                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
+            } else {
+                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+                for chunk in terrain_chunks {
+                    let (min, max) = chunk.bounds;
+                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
+                        draw_mesh(&chunk.mesh);
+                    }
                 }
             }
 
@@ -603,15 +680,26 @@ async fn main() {
             let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
             let mut chunks_drawn = 0;
             let mut frame_verts = 0;
-            for chunk in terrain_chunks {
-                let (min, max) = chunk.bounds;
-                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                    draw_mesh(&chunk.mesh);
-                    chunks_drawn += 1;
-                    frame_verts += chunk.mesh.vertices.len();
+            if cli_args.retained && gpu_pipeline.is_some() {
+                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
+                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
+                for gpu_chunk in gpu_chunks {
+                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(gpu_chunk.lo, gpu_chunk.hi)) {
+                        chunks_drawn += 1;
+                        frame_verts += gpu_chunk.n_idx as usize;
+                    }
+                }
+            } else {
+                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+                for chunk in terrain_chunks {
+                    let (min, max) = chunk.bounds;
+                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
+                        draw_mesh(&chunk.mesh);
+                        chunks_drawn += 1;
+                        frame_verts += chunk.mesh.vertices.len();
+                    }
                 }
             }
             chunk_count = chunks_drawn;
@@ -771,6 +859,18 @@ async fn main() {
             };
             hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode);
             cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode);
+
+            // R-15a: Rebuild GPU chunks if retained mode is active
+            if cli_args.retained && gpu_pipeline.is_some() {
+                use macroquad::prelude::get_internal_gl;
+                gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_hex_chunks);
+                gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_cube_chunks);
+
+                let mut gl = unsafe { get_internal_gl() };
+                let ctx = gl.quad_context;
+                gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+            }
         }
 
         clear_background(Color::from_rgba(18, 18, 22, 255));
@@ -788,11 +888,21 @@ async fn main() {
         // R-5: Works over both hex and cube layouts (same chunk AABB structure).
         let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
         let mut chunks_drawn = 0;
-        for chunk in terrain_chunks {
-            let (min, max) = chunk.bounds;
-            if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                draw_mesh(&chunk.mesh);
-                chunks_drawn += 1;
+        if cli_args.retained && gpu_pipeline.is_some() {
+            let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
+            draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
+            for gpu_chunk in gpu_chunks {
+                if frustum_planes.iter().all(|plane| plane.aabb_intersects(gpu_chunk.lo, gpu_chunk.hi)) {
+                    chunks_drawn += 1;
+                }
+            }
+        } else {
+            for chunk in terrain_chunks {
+                let (min, max) = chunk.bounds;
+                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
+                    draw_mesh(&chunk.mesh);
+                    chunks_drawn += 1;
+                }
             }
         }
 
