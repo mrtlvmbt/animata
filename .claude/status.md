@@ -1,5 +1,5 @@
-task: #394 ext-0b STEP 0: c_coord knob + measured income(N) observable
-phase: CI
-blocked_on: CI-green on HEAD (v2-golden-arm64 + v2-sim-x86 + golden-arm64 + test-x86 jobs)
-next: Check CI status (gh run view 29165987975); merge PR #395 when CI passes
-updated: 2026-07-11 19:58
+task: #433 R-13 render evidence harness (screenshot/bench/camera presets)
+phase: PR
+blocked_on: code-critic verdict; PR #435 created
+next: Post code-critic verdict as comment; await PM review and merge to render-r12-terragen-preview
+updated: 2026-07-13 18:08

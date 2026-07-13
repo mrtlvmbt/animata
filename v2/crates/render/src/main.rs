@@ -60,11 +60,18 @@ const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 /// NEAR tier: creatures are minimal cell-type morphology (differentiated small shapes).
 /// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
 fn window_conf() -> Conf {
+    // R-13: Pre-parse args to detect --bench mode for vsync configuration
+    let is_bench = std::env::args().any(|arg| arg == "--bench");
+
     Conf {
         window_title: "animata v2 — render scaffold (R-8 standalone hex-map viewer)".to_owned(),
         window_width: 1024,
         window_height: 768,
         high_dpi: true,
+        platform: macroquad::miniquad::conf::Platform {
+            swap_interval: if is_bench { Some(0) } else { None },
+            ..Default::default()
+        },
         ..Default::default()
     }
 }
@@ -564,13 +571,14 @@ async fn main() {
         }
 
         // Timed frames: collect per-frame times for p95 calculation
+        // R-13 F-B2: Measure render time EXCLUDING next_frame() sync (macroquad vsync is locked,
+        // so measuring wall-clock frame time would show 16.67ms for all sizes; measuring only
+        // the render portion shows actual GPU load difference between dim sizes).
         let mut frame_times_ms = Vec::with_capacity(300);
         let mut chunk_count = 0;
         let mut vert_count = 0;
 
         for _ in 0..300 {
-            let frame_start = Instant::now();
-
             if let Some(h) = &handle {
                 if is_key_pressed(KeyCode::Space) {
                     h.toggle_pause();
@@ -583,6 +591,8 @@ async fn main() {
             clear_background(Color::from_rgba(18, 18, 22, 255));
             let snap = handle.as_ref().and_then(|h| h.latest());
 
+            let frame_start = Instant::now();
+
             camera.update();
             let cam3d = camera.to_camera3d();
             let frustum_planes = camera.frustum_planes();
@@ -590,15 +600,17 @@ async fn main() {
 
             let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
             let mut chunks_drawn = 0;
+            let mut frame_verts = 0;
             for chunk in terrain_chunks {
                 let (min, max) = chunk.bounds;
                 if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
                     draw_mesh(&chunk.mesh);
                     chunks_drawn += 1;
-                    vert_count = chunk.mesh.vertices.len();
+                    frame_verts += chunk.mesh.vertices.len();
                 }
             }
             chunk_count = chunks_drawn;
+            vert_count = frame_verts;
 
             if let Some(s) = snap.as_ref() {
                 let px_per_m = camera.px_per_m();
@@ -708,9 +720,10 @@ async fn main() {
             }
             set_default_camera();
 
+            let frame_elapsed = frame_start.elapsed().as_secs_f32() * 1000.0;
+
             next_frame().await;
 
-            let frame_elapsed = frame_start.elapsed().as_secs_f32() * 1000.0;
             frame_times_ms.push(frame_elapsed);
         }
 
