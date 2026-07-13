@@ -38,6 +38,7 @@
 mod biome_palette;
 mod camera;
 mod driver;
+mod dump_world;
 mod hex;
 mod terrain;
 mod terrain_cube;
@@ -78,17 +79,25 @@ struct CliArgs {
     seed: u64,
     /// Only honoured in standalone mode — see the module doc comment for why.
     dim_override: Option<i64>,
+    /// `--v1-dump <path>`: draw a v1-generated world dump (ATDMP1) instead of `ProcgenWorld`, to
+    /// compare v1 vs v2 worldgen in the SAME renderer. Implies standalone (no sim on a dump world).
+    v1_dump: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
     let mut standalone = false;
     let mut seed = SEED;
     let mut dim_override = None;
+    let mut v1_dump = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--standalone" | "--no-sim" => standalone = true,
+            "--v1-dump" => {
+                v1_dump = Some(args.next().expect("--v1-dump requires a path"));
+                standalone = true; // a dump world has no sim backend
+            }
             "--seed" => {
                 let v = args.next().expect("--seed requires a value");
                 seed = v.parse().unwrap_or_else(|_| panic!("--seed expects a u64, got {v:?}"));
@@ -100,7 +109,7 @@ fn parse_args() -> CliArgs {
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override }
+    CliArgs { standalone, seed, dim_override, v1_dump }
 }
 
 // ── Pinned-param contract (W-6 WIRE: ProcgenWorld; critic F3, issue #223 acceptance; R-6) ──────────
@@ -137,29 +146,45 @@ async fn main() {
     // R-8: `--dim` only applies in standalone — in sim mode the worker thread builds its OWN world
     // from `config.econ.world_dim` (via `cli::build_sim`), so overriding it here alone would desync
     // the render's terrain from the sim's, breaking the pinned-param contract below.
-    let world_dim = if cli_args.standalone {
-        cli_args.dim_override.unwrap_or(config.econ.world_dim)
-    } else {
-        config.econ.world_dim
-    };
-
-    // The render's OWN WorldView, built ONCE from the SAME (dim, hmax, resource_base, seed) tuple the
-    // sim worker uses — the single source of provenance the pinned-param contract above requires.
-    // W-6 WIRE: use `cli::HMAX`, `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The
-    // ProcgenWorld pipeline (integer relief + erosion + biome/edaphic + caps) runs once here and caches
-    // all per-cell fields (height, biome, resource, etc.) — never re-run per frame or per query.
+    // The render's OWN WorldView (boxed so it can be either the native `ProcgenWorld` or a v1 dump).
+    // Built ONCE from the SAME (dim, hmax, resource_base, seed) tuple the sim worker uses — the single
+    // source of provenance the pinned-param contract above requires. W-6 WIRE: use `cli::HMAX`,
+    // `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The ProcgenWorld pipeline (integer
+    // relief + erosion + biome/edaphic + caps) runs once here and caches all per-cell fields — never
+    // re-run per frame or per query.
     //
     // Landform stages (tectonics/aeolian/volcanic/glacial/coastal, all default-off in the sim path):
     // turn ON in STANDALONE only, to preview the full diverse-relief terragen (map_dump does the same).
     // In sim mode they MUST stay off — the sim worker builds its world with all-off, and flipping only
     // the render side would desync the pinned-param contract above.
-    let lf = cli_args.standalone; // enable all 5 landforms for the standalone terragen preview
-    let world = world::ProcgenWorld::new(world_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, lf, lf, lf, lf, lf);
+    //
+    // `--v1-dump <path>` REPLACES the ProcgenWorld with a v1-generated dump (carrying its OWN `dim`),
+    // holding THIS renderer constant to compare v1 vs v2 worldgen. On load error it falls back to
+    // ProcgenWorld. `--dim` only applies in standalone — see the module doc comment for why.
+    let make_procgen = |dim: i64| -> Box<dyn WorldView> {
+        let lf = cli_args.standalone; // enable all 5 landforms for the standalone terragen preview
+        Box::new(world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, lf, lf, lf, lf, lf))
+    };
+    let default_dim = if cli_args.standalone { cli_args.dim_override.unwrap_or(config.econ.world_dim) } else { config.econ.world_dim };
+    let (world_dim, world): (i64, Box<dyn WorldView>) = match &cli_args.v1_dump {
+        Some(path) => match dump_world::DumpWorld::load(path) {
+            Ok(w) => {
+                let dim = w.dim;
+                println!("[v1-dump] loaded {path}: dim {dim} — drawing v1 worldgen in the v2 renderer");
+                (dim, Box::new(w))
+            }
+            Err(e) => {
+                eprintln!("[v1-dump] {e}; falling back to ProcgenWorld");
+                (default_dim, make_procgen(default_dim))
+            }
+        },
+        None => (default_dim, make_procgen(default_dim)),
+    };
     // Terrain top-face coloring: 'C' toggles Height↔Material at runtime (rebuilds the baked meshes).
     // Default = Height (hypsometric relief ramp) so elevation shape reads at a glance.
     let mut color_mode = crate::biome_palette::ColorMode::Height;
-    let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world, color_mode);
-    let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world, color_mode);
+    let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode);
+    let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode);
 
     // R-5: Runtime hex↔cube toggle state. Default = hex (R-2's established look).
     let mut use_cube_terrain = false;
@@ -196,8 +221,8 @@ async fn main() {
                 crate::biome_palette::ColorMode::Height => crate::biome_palette::ColorMode::Material,
                 crate::biome_palette::ColorMode::Material => crate::biome_palette::ColorMode::Height,
             };
-            hex_terrain_chunks = terrain::build_hex_terrain(world_dim, &world, color_mode);
-            cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, &world, color_mode);
+            hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode);
+            cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode);
         }
 
         clear_background(Color::from_rgba(18, 18, 22, 255));

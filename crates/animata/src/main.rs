@@ -19,6 +19,7 @@ mod mac_icon;
 
 mod render;
 mod render_snapshot;
+mod terrain_dump;
 mod sim_driver;
 mod ui;
 
