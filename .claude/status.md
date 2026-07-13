@@ -1,5 +1,5 @@
-task: #432 (W-9 final-surface thermal relaxation)
-phase: pass 2 CI (dim=128 fixture test vacuity fixed)
-blocked_on: CI pass 2 completion (test now non-vacuous, golden vector re-pin expected)
-next: extract golden vectors from .ci-report/failed.log, report final STATUS
-updated: 2026-07-13 20:35
+task: PR #434 (W-9 final-surface talus_step_final)
+phase: CI pass 2 in flight (dim=128→256 fixture, non-vacuity control removed)
+blocked_on: CI completion (run #29284354893 in_progress)
+next: CI completes → extract v2-golden-arm64 left:/right: → re-pin golden → green CI
+updated: 2026-07-13 23:04
