@@ -55,7 +55,12 @@ pub fn chunk_pipeline(ctx: &mut dyn RenderingBackend, vertex: &str, fragment: &s
         &[
             VertexAttribute::new("position", VertexFormat::Float3),
             VertexAttribute::new("texcoord", VertexFormat::Float2),
-            VertexAttribute::new("color0", VertexFormat::Byte4),
+            VertexAttribute {
+                name: "color0",
+                format: VertexFormat::Byte4,
+                buffer_index: 0,
+                gl_pass_as_float: false,  // Try passing as uvec4 instead
+            },
             VertexAttribute::new("normal", VertexFormat::Float4),
         ],
         shader,
