@@ -1,5 +1,5 @@
 task: #432 (W-9 final-surface thermal relaxation)
-phase: spike-selective sweep complete, retention failure
-blocked_on: PM decision on amended mechanism (gate + retention both fail)
-next: await PM guidance on next amendment or rollback
-updated: 2026-07-13 19:45
+phase: visual pick stage (sweep + 4 candidate dumps complete)
+blocked_on: PM/user screenshot review to select config
+next: await visual comparison, then pin constants + run CI
+updated: 2026-07-13 20:15

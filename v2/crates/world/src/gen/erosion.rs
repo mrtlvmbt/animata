@@ -141,12 +141,13 @@ pub const MAX_SPIKE_FINAL: i64 = 12;
 /// W-9: Spike margin for donor classification in talus_step_final. Selective donor rule:
 /// a cell donates ONLY if `h_old[v] - second_max(D8 neighbors) > SPIKE_MARGIN`.
 /// Needles donate (second_max = ground); ridge/moraine/dune crests never donate (second_max = ridge).
-/// Picked by the sweep (grid: {8,12,16} x {2,4,8}); placeholder value (8) from sweep results.
-pub const SPIKE_MARGIN_FINAL: i64 = 8;
+/// Pinned by visual selection (user 2026-07-13): SPIKE_MARGIN=12, iters=4. Post-sweep: ~117 cells
+/// with h - second_max > 12 @512x2 seeds (count reported, not gate-asserted). Till p10 retention 37%.
+pub const SPIKE_MARGIN_FINAL: i64 = 12;
 
-/// W-9: Number of Jacobi iterations for talus_step_final. Picked by the sweep grid {2,4,8};
-/// must be sufficient to smooth isolated spikes while preserving ridge relief (>= 60% p10 retention).
-/// Placeholder: 4 (pending re-sweep with selective donor rule).
+/// W-9: Number of Jacobi iterations for talus_step_final. Pinned by visual selection:
+/// SPIKE_MARGIN_FINAL=12, N_ITERS_FINAL=4 smooths isolated spikes while preserving
+/// landform relief (till p10 retention 37%, user-accepted; see w9_sweep table in PR #434).
 pub const N_ITERS_FINAL: usize = 4;
 
 // Static assertion: MAX_SPIKE_FINAL must be strictly less than NEEDLE_MARGIN.
