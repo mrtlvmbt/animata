@@ -380,10 +380,13 @@ async fn main() {
             let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
+            // R-15a: EXCLUSIVE terrain draw in --retained mode (no double-draw z-fighting)
             if cli_args.retained && gpu_pipeline.is_some() {
                 let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
                 draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
-            } else {
+                // HARD SKIP: GPU path is exclusive; macroquad draw completely bypassed
+            } else if !cli_args.retained {
+                // CPU macroquad path: used ONLY when --retained is NOT active
                 let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
                 for chunk in terrain_chunks {
                     let (min, max) = chunk.bounds;
@@ -392,6 +395,8 @@ async fn main() {
                     }
                 }
             }
+            // When --retained is true AND gpu_pipeline exists: GPU path only (above)
+            // No fallthrough to CPU path in --retained mode
 
             if let Some(s) = snap.as_ref() {
                 let px_per_m = camera.px_per_m();

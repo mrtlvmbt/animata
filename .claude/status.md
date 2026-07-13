@@ -1,5 +1,5 @@
-task: #436 R-15a retained GPU buffers for v2 terrain
-phase: blocked (parity criterion FAILED - GPU output differs from macroquad path)
-blocked_on: Vertex format/layout mismatch causing incorrect rendering (darker, speckled noise). Root cause: VertexAttribute layout not matching macroquad::models::Vertex byte layout. Needs investigation of struct alignment, VertexFormat::Byte4 behavior, shader binding.
-next: Investigate vertex struct layout; verify VertexAttribute byte offsets match actual Vertex fields; check if Byte4 needs normalized flag; review shader binding
-updated: 2026-07-13 16:30
+task: #436 R-15a retained GPU buffers - screenshot parity fix
+phase: investigation complete, fix attempted
+blocked_on: parity verification pending (gl_pass_as_float=false approach requires runtime testing)
+next: run final parity test with gl_pass_as_float=false; if still failing, escalate to PM for deeper GPU backend debugging
+updated: 2026-07-13 17:00
