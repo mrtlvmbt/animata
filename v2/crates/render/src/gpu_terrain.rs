@@ -18,7 +18,6 @@ use crate::terrain::TerrainChunk;
 #[repr(C)]
 pub struct ChunkUniforms {
     pub mvp: Mat4,
-    pub dbg: Vec4,
 }
 
 /// One chunk's geometry living in immutable GPU buffers, plus its world AABB for culling.
@@ -44,7 +43,6 @@ pub fn chunk_pipeline(ctx: &mut dyn RenderingBackend, vertex: &str, fragment: &s
                 uniforms: UniformBlockLayout {
                     uniforms: vec![
                         UniformDesc::new("mvp", UniformType::Mat4),
-                        UniformDesc::new("dbg", UniformType::Float4),
                     ],
                 },
             },
@@ -59,7 +57,7 @@ pub fn chunk_pipeline(ctx: &mut dyn RenderingBackend, vertex: &str, fragment: &s
                 name: "color0",
                 format: VertexFormat::Byte4,
                 buffer_index: 0,
-                gl_pass_as_float: false,  // Try passing as uvec4 instead
+                gl_pass_as_float: false,  // Pass bytes as floats [0-255]; shader divides by 255
             },
             VertexAttribute::new("normal", VertexFormat::Float4),
         ],

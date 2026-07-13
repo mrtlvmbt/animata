@@ -195,11 +195,13 @@ fn parse_args() -> CliArgs {
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
 /// Load a shader source from file. Tries multiple paths to find assets/shaders/ relative to the repo root.
 fn load_shader(filename: &str) -> String {
-    // Try paths relative to common execution contexts
+    // Try v2 local paths first, then fallback to v1 paths (for compatibility)
     let candidate_paths = [
-        format!("assets/shaders/{}", filename),                  // From repo root
-        format!("../../../../assets/shaders/{}", filename),      // From target/release
-        format!("../../../assets/shaders/{}", filename),         // From v2/crates/render
+        format!("v2/crates/render/assets/shaders/{}", filename),  // From repo root
+        format!("crates/render/assets/shaders/{}", filename),     // From v2/
+        format!("assets/shaders/{}", filename),                   // From repo root (v1 fallback)
+        format!("../../../../assets/shaders/{}", filename),       // From target/release
+        format!("../../../assets/shaders/{}", filename),          // From v2/crates/render
     ];
 
     for path in &candidate_paths {
@@ -208,8 +210,7 @@ fn load_shader(filename: &str) -> String {
         }
     }
 
-    eprintln!("[gpu_terrain] warning: shader {} not found (tried: {:?}); GPU path will fail", filename, candidate_paths);
-    String::new()
+    panic!("[gpu_terrain] FATAL: shader {} not found in any candidate path (tried: {:?})", filename, candidate_paths);
 }
 
 /// Helper to draw terrain using retained GPU buffers.
@@ -229,7 +230,6 @@ fn draw_gpu_terrain(
     let mvp = camera.to_camera3d().matrix();
     let uniforms = gpu_terrain::ChunkUniforms {
         mvp,
-        dbg: macroquad::prelude::vec4(0.0, 0.0, 0.0, 0.0),
     };
 
     ctx.apply_pipeline(&pipeline);
@@ -324,8 +324,8 @@ async fn main() {
     let (mut gpu_hex_chunks, mut gpu_cube_chunks, gpu_pipeline) = if cli_args.retained {
         use macroquad::prelude::get_internal_gl;
 
-        let chunk_vert = load_shader("chunk.vert");
-        let chunk_frag = load_shader("chunk.frag");
+        let chunk_vert = load_shader("chunk_v2.vert");
+        let chunk_frag = load_shader("chunk_v2.frag");
 
         let mut gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
