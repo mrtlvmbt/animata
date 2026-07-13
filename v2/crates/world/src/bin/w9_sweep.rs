@@ -39,11 +39,11 @@ fn phase0_measurement(dim: usize) {
 }
 
 fn sweep_measurement(dim: usize) {
-    println!("\n=== SWEEP GRID (threshold x iters @dim={}) ===", dim);
-    println!("Thr Iter | Needles | MaxStep | Edifice% | Till% | Dune% | DeNeedleClips");
-    println!("--------|---------|---------|----------|-------|-------|---------------");
+    println!("\n=== SWEEP GRID (SPIKE_MARGIN x iters @dim={}) ===", dim);
+    println!("Margin Iter | Needles | MaxSpike | Edifice% | Till% | Dune% | DeNeedleClips");
+    println!("------|------|---------|----------|----------|-------|-------|---------------");
 
-    let thresholds = [8i64, 12, 16, 24];
+    let spike_margins = [8i64, 12, 16];  // W-9 selective donor rule (NOT 24)
     let iters = [2usize, 4, 8];
     let seed = 1u64;
 
@@ -52,17 +52,17 @@ fn sweep_measurement(dim: usize) {
         seed, HMAX, dim, false, true, true, true, true, true, false
     );
 
-    for threshold in &thresholds {
+    for spike_margin in &spike_margins {
         for iter in &iters {
-            // Apply talus_step_final with this (threshold, iter) config
-            let post_talus = talus_step_final(dim, &staged.post_coastal, *threshold, *iter);
+            // Apply talus_step_final with selective donor rule (spike_margin, iter) config
+            let post_talus = talus_step_final(dim, &staged.post_coastal, *spike_margin, *iter);
 
             // Apply de_needle to post_talus (to measure clip count)
             let post_deneedle = de_needle_pass(dim, &post_talus);
 
             // Measure metrics on post-talus field
             let (needle_count, _) = measure_needles(dim, &post_talus);
-            let max_step = measure_max_local_step(dim, &post_talus);
+            let max_spike = measure_max_local_step(dim, &post_talus);
 
             // Measure amplitude retention per landform (pre=post_coastal, post=post_talus)
             let edifice_report = landform_amplitudes(dim, &staged.post_coastal, &post_talus, &masks.edifice);
@@ -72,12 +72,12 @@ fn sweep_measurement(dim: usize) {
             // De-needle clip count on post-talus
             let clip_count = measure_de_needle_clip_count(dim, &post_talus, &post_deneedle);
 
-            // Gate check: needles==0 AND step<=12
-            let gate_pass = needle_count == 0 && max_step <= 12;
+            // Gate check: needles==0 AND max_second_spike<=12 (MAX_SPIKE_FINAL)
+            let gate_pass = needle_count == 0 && max_spike <= 12;
 
             println!(
-                "{:3} {:3} | {:7} | {:7} | {:8} | {:5} | {:5} | {:13} {}",
-                threshold, iter, needle_count, max_step,
+                "{:3}  {:3}  | {:7} | {:8} | {:8} | {:5} | {:5} | {:13} {}",
+                spike_margin, iter, needle_count, max_spike,
                 edifice_report.p10_retention_pct, till_report.p10_retention_pct, dune_report.p10_retention_pct,
                 clip_count,
                 if gate_pass { "✓ PASS" } else { "✗ FAIL" }

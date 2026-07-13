@@ -131,28 +131,26 @@ const TALUS_FRAC_DEN: i64 = 2;
 /// continuum of real relief texture (excess <30). Pinned by existing tests in erosion.rs:772 [<=30] and :792 [>=30].
 pub const NEEDLE_MARGIN: i64 = 30;
 
-/// W-9: Maximum local-max step height after final-surface thermal relaxation. This is the strict
-/// bound enforced by `talus_step_final`: after the pass, no cell can exceed its highest in-grid
-/// D8 neighbor by more than this value. Once talus_step_final passes (needles==0 AND all local-max
-/// steps <= this bound), de_needle becomes a provable no-op.
-pub const MAX_LOCAL_STEP_FINAL: i64 = 12;
+/// W-9: Maximum isolated-spike height after final-surface thermal relaxation. Selective donor rule
+/// preserves ridge crests (whose second-highest neighbor is the ridge itself) while smoothing only
+/// true spikes (whose second-highest neighbor is lower). Gate: post-pass, no cell exceeds its
+/// second-highest D8 neighbor by more than this value. Once talus_step_final passes
+/// (needles==0 AND no second-max spikes > this), de_needle becomes a provable no-op.
+pub const MAX_SPIKE_FINAL: i64 = 12;
 
-/// W-9: Repose threshold for final-surface thermal relaxation. Diffusion is applied AFTER coastal
-/// phase, on the FINAL surface before classification. Picked by the sweep (grid: {8,12,16,24} x {2,4,8}),
-/// then used as `REPOSE_THRESHOLD_FINAL` in `talus_step_final`. This placeholder (8) is the picked
-/// config value (threshold=8, fewest iters passing the gate); overridden by sweep results.
-pub const REPOSE_THRESHOLD_FINAL: i64 = 8;
+/// W-9: Spike margin for donor classification in talus_step_final. Selective donor rule:
+/// a cell donates ONLY if `h_old[v] - second_max(D8 neighbors) > SPIKE_MARGIN`.
+/// Needles donate (second_max = ground); ridge/moraine/dune crests never donate (second_max = ridge).
+/// Picked by the sweep (grid: {8,12,16} x {2,4,8}); placeholder value (8) from sweep results.
+pub const SPIKE_MARGIN_FINAL: i64 = 8;
 
 /// W-9: Number of Jacobi iterations for talus_step_final. Picked by the sweep grid {2,4,8};
-/// must be sufficient to reduce all local-max steps to <= MAX_LOCAL_STEP_FINAL and needles to 0,
-/// while achieving >= 60% p10 relief retention per landform. Placeholder: 2 (minimum, pending sweep).
-pub const N_ITERS_FINAL: usize = 2;
+/// must be sufficient to smooth isolated spikes while preserving ridge relief (>= 60% p10 retention).
+/// Placeholder: 4 (pending re-sweep with selective donor rule).
+pub const N_ITERS_FINAL: usize = 4;
 
-// Static assertion: MAX_LOCAL_STEP_FINAL must be strictly less than NEEDLE_MARGIN. If this breaks,
-// a future retune has made the post-talus bound larger than the de-needle guard, which would mean
-// de-needle might still clip some cells. The whole point of talus_step_final is to make de-needle
-// provably a no-op at the picked config.
-const _: () = assert!(MAX_LOCAL_STEP_FINAL < NEEDLE_MARGIN);
+// Static assertion: MAX_SPIKE_FINAL must be strictly less than NEEDLE_MARGIN.
+const _: () = assert!(MAX_SPIKE_FINAL < NEEDLE_MARGIN);
 
 /// Material refinement: a cell whose NET height delta over the whole macro-loop is `<=` this
 /// (negative) threshold has been incised past the soil layer → exposed `Bedrock`. Implementer's
@@ -360,53 +358,72 @@ pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
     new_height
 }
 
-/// W-9: Final-surface thermal relaxation — Jacobi diffusion applied AFTER all landform phases
-/// (coastal), BEFORE classification. Removes the "picket fence" of residual spikes left by landforms
-/// that run after the early `erode` loop's thermal talus pass.
+/// W-9: Final-surface thermal relaxation — Jacobi diffusion with SELECTIVE DONOR RULE applied
+/// AFTER all landform phases (coastal), BEFORE classification. Removes isolated spikes while
+/// preserving ridge crests (whose second-highest neighbor is the ridge itself).
 ///
-/// **Mechanism (Jacobi pair-wise diffusion, deterministic integer-only):**
-/// - Scale: heights & threshold by x64 (fixed-point working copy `hs`), removing integer deadzone.
+/// **Mechanism (Jacobi pair-wise diffusion, selective donor, deterministic integer-only):**
+/// - Scale: heights & spike_margin by x64 (fixed-point working copy `hs`), removing integer deadzone.
 /// - `N` iterations of Jacobi double-buffer diffusion (reads old frame, writes new frame, no in-place mutation).
-/// - Per iteration: for each ordered pair (v,u) of D8 neighbors (v=donor, u=receiver) where
-///   `hs_old[v] - hs_old[u] > thr_s`, compute transfer amount:
-///   `t(v,u) = (hs_old[v] - hs_old[u] - thr_s) / 2 / 8`
-///   Integer division by constant D8 degree (8) bounds the receiver: a pit with 8 higher neighbors
-///   gains <= (max_drop - threshold) / 2, can never invert into a spike.
-/// - Both sides read from SAME `hs_old`: donor subtracts sum(t), receiver adds sum(t) => sum(hs)
-///   invariant per iteration BY CONSTRUCTION (no mass loss during iterations).
-/// - Unscale: after N iterations, divide by 64 (floor division); ≤1 unit/cell loss from quantization,
-///   documented not sum-conserved (as per spec).
+/// - **SELECTIVE DONOR RULE**: a cell v donates ONLY if `h[v] - second_max(D8) > spike_margin`.
+///   Needles donate (second_max = ground level); ridge/moraine/dune crests never donate (second_max = ridge cell).
+/// - Per iteration, for each donor's direction: compute transfer amount:
+///   `t(v,u) = (drop - spike_margin) / 2 / 8`  (integer division; divisor 8 = D8 degree)
+/// - Both sides read from SAME old frame: donor subtracts sum(t), receiver adds sum(t) => sum(hs)
+///   invariant per iteration BY CONSTRUCTION.
+/// - Unscale: after N iterations, divide by 64 (floor division); ≤1 unit/cell loss from quantization.
 ///
 /// **Parameters:**
-/// - `threshold`: repose threshold (must match `REPOSE_THRESHOLD_FINAL`); pairs with drop > threshold
-///   participate in diffusion.
+/// - `spike_margin`: threshold for donor classification (e.g., SPIKE_MARGIN_FINAL). A cell donates
+///   if its height exceeds its second-highest D8 neighbor by more than this.
 /// - `n_iters`: number of Jacobi iterations (picked by sweep; typically 2-8).
 ///
 /// Returns: new height buffer (unscaled), same length as input.
 /// Made public to support sweep/measurement utilities (w9_sweep bin).
-pub fn talus_step_final(dim: usize, height: &[i64], threshold: i64, n_iters: usize) -> Vec<i64> {
+pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: usize) -> Vec<i64> {
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
     debug_assert!(n_iters > 0);
 
     // Scale: convert to fixed-point (x64)
     let mut hs = height.iter().map(|&h| h * 64).collect::<Vec<i64>>();
-    let thr_s = threshold * 64;
+    let margin_s = spike_margin * 64;
 
     // Jacobi iterations
     for _ in 0..n_iters {
         let mut hs_new = hs.clone();
 
-        // For each cell v, compute outflow to neighbors and inflow from neighbors
-        // Using gather pattern: each cell v computes its own outflow (purely local read of v's scaled height)
-        // then pulls inflows from neighbors whose receiver IS v.
-
-        // Pass 1: compute outflows for each cell
+        // Pass 1: compute outflows based on SELECTIVE DONOR RULE (second-max based)
         let mut send_out = vec![vec![0i64; 8]; n];
         for v in 0..n {
             let z = v / dim;
             let x = v % dim;
 
+            // Classify as spike: h - second_max(neighbors) > spike_margin
+            // Needles donate (second_max=ground); ridges don't (second_max=ridge)
+            let mut max_h = i64::MIN;
+            let mut second_max_h = i64::MIN;
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                    let u = linear_index(nx as usize, nz as usize, dim);
+                    let nh = height[u]; // Use unscaled for classification
+                    if nh > max_h {
+                        second_max_h = max_h;
+                        max_h = nh;
+                    } else if nh > second_max_h {
+                        second_max_h = nh;
+                    }
+                }
+            }
+
+            // Only donate if this is a spike: h - second_max > margin
+            if second_max_h == i64::MIN || height[v] - second_max_h <= spike_margin {
+                continue; // Not a spike, don't donate
+            }
+
+            // This is a spike; compute transfers to D8 neighbors
             for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
                 let nx = x as i64 + dx;
                 let nz = z as i64 + dz;
@@ -415,9 +432,9 @@ pub fn talus_step_final(dim: usize, height: &[i64], threshold: i64, n_iters: usi
                 }
                 let u = linear_index(nx as usize, nz as usize, dim);
                 let drop = hs[v] - hs[u];
-                if drop > thr_s {
-                    // Transfer: (drop - threshold) / 2 / 8
-                    send_out[v][dir] = (drop - thr_s) / 2 / 8;
+                if drop > 0 {
+                    // Transfer: (drop - spike_margin) / 2 / 8
+                    send_out[v][dir] = (drop.saturating_sub(margin_s)) / 2 / 8;
                 }
             }
         }
@@ -442,7 +459,6 @@ pub fn talus_step_final(dim: usize, height: &[i64], threshold: i64, n_iters: usi
                 sum_out += send_out[v][dir];
 
                 // Inflow into v from u's opposite direction
-                // Direction from u to v is (-dx, -dz), find its index in D8_OFFSETS
                 for (opposite_dir, &(ox, oz)) in D8_OFFSETS.iter().enumerate() {
                     if ox == -dx && oz == -dz {
                         sum_in += send_out[u][opposite_dir];

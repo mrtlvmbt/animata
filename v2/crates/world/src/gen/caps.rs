@@ -56,7 +56,7 @@ use crate::gen::aeolian;
 use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::drainage::is_river;
-use crate::gen::erosion::{erode, de_needle_pass, talus_step_final, MAX_LOCAL_STEP_FINAL, REPOSE_THRESHOLD_FINAL, N_ITERS_FINAL, NEEDLE_MARGIN};
+use crate::gen::erosion::{erode, de_needle_pass, talus_step_final, MAX_SPIKE_FINAL, SPIKE_MARGIN_FINAL, N_ITERS_FINAL, NEEDLE_MARGIN};
 use crate::gen::height::height_at;
 use crate::gen::material::MaterialId;
 use crate::gen::moisture::moisture_at;
@@ -185,10 +185,10 @@ pub struct StagedHeights {
     pub post_deneedle: Vec<i64>,
 }
 
-/// W-9: Amplitude floor constant for crest identification. Start = MAX_LOCAL_STEP_FINAL
+/// W-9: Amplitude floor constant for crest identification. Start = MAX_SPIKE_FINAL
 /// (cells with amplitude >= this are considered crests). Can be recalibrated from Phase-0
 /// if crest count falls below the precondition (>=16 @512, >=4 @64).
-pub const AMPLITUDE_FLOOR: i64 = MAX_LOCAL_STEP_FINAL;
+pub const AMPLITUDE_FLOOR: i64 = MAX_SPIKE_FINAL;
 
 /// W-9: D8 offsets for neighbor iteration (reused from erosion.rs pattern).
 const D8_OFFSETS_CAPS: [(i64, i64); 8] =
@@ -438,30 +438,39 @@ pub fn measure_needles(dim: usize, heights: &[i64]) -> (usize, Vec<usize>) {
     (needles.len(), needles)
 }
 
-/// W-9: Measure max local-max step: the maximum by which any cell exceeds its highest D8 neighbor.
-/// Returns the max step found. Gate: must be <= MAX_LOCAL_STEP_FINAL.
+/// W-9: Measure max second-max spike: the maximum by which any cell exceeds its second-highest D8 neighbor.
+/// Selective donor rule: cells only donate if h - second_max > spike_margin, so this is the gate metric.
+/// Returns the max second-spike found. Gate: must be <= MAX_SPIKE_FINAL.
 pub fn measure_max_local_step(dim: usize, heights: &[i64]) -> i64 {
     let n = dim * dim;
     debug_assert_eq!(heights.len(), n);
-    let mut max_step: i64 = 0;
+    let mut max_spike: i64 = 0;
 
     for z in 0..dim {
         for x in 0..dim {
             let idx = z * dim + x;
-            let mut nmax = i64::MIN;
+            let mut max_h = i64::MIN;
+            let mut second_max_h = i64::MIN;
             for &(dx, dz) in &D8_OFFSETS_CAPS {
                 let nx = x as i64 + dx;
                 let nz = z as i64 + dz;
                 if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
                     let u = (nz as usize) * dim + (nx as usize);
-                    nmax = nmax.max(heights[u]);
+                    if heights[u] > max_h {
+                        second_max_h = max_h;
+                        max_h = heights[u];
+                    } else if heights[u] > second_max_h {
+                        second_max_h = heights[u];
+                    }
                 }
             }
-            let step = heights[idx] - nmax;
-            max_step = max_step.max(step);
+            if second_max_h != i64::MIN {
+                let spike = heights[idx] - second_max_h;
+                max_spike = max_spike.max(spike);
+            }
         }
     }
-    max_step
+    max_spike
 }
 
 /// W-9: Count cells clipped by de_needle_pass: cells with excess > NEEDLE_MARGIN that were reduced.
@@ -797,7 +806,7 @@ pub fn classify_and_caps_staged(
     // residual spikes from landforms that ran after the erode loop's early talus pass.
     // When disabled, this is byte-identical to the old path.
     let post_talus_height = if enable_talus_final && (enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal) {
-        talus_step_final(dim, &post_coastal_height, REPOSE_THRESHOLD_FINAL, N_ITERS_FINAL)
+        talus_step_final(dim, &post_coastal_height, SPIKE_MARGIN_FINAL, N_ITERS_FINAL)
     } else {
         post_coastal_height.clone()
     };
