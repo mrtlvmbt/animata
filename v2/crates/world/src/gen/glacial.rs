@@ -935,8 +935,10 @@ mod tests {
         let state = run_glacial(SEED, DIM, HMAX, &off.height);
 
         let mask = ice_mask(SEED, DIM, &off.height);
-        let margin = ice_margin_cells(DIM, &mask);
-        let mut interior = mask.clone();
+        // Compute filled_mask and derive margin/interior from it (match production exactly).
+        let filled_mask = fill_holes_in_ice_mask(DIM, &mask, 16);
+        let margin = ice_margin_cells(DIM, &filled_mask);
+        let mut interior = filled_mask.clone();
         for &idx in &margin {
             interior[idx] = false;
         }
@@ -954,7 +956,6 @@ mod tests {
         let on_state = run_glacial(SEED, DIM, HMAX, &off.height);
 
         // Compute the PRE-deposit incised field for wall-drop measurement (same hole-fill + incision as production).
-        let filled_mask = fill_holes_in_ice_mask(DIM, &mask, 16);
         let (incised_height, _) = ice_incision_pass(DIM, off.height.clone(), &filled_mask, &interior);
 
         // Floor flatness: max height spread among D8 neighbors that are INTERIOR ice cells (the
@@ -996,7 +997,7 @@ mod tests {
                         return None;
                     }
                     let nidx = linear_index(nx as usize, nz as usize, DIM);
-                    (!mask[nidx]).then(|| h[idx] - h[nidx])
+                    (!filled_mask[nidx]).then(|| h[idx] - h[nidx])
                 })
                 .max()
         };
