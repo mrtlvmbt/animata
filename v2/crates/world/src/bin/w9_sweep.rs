@@ -43,8 +43,8 @@ fn sweep_measurement(dim: usize) {
     println!("Margin Iter | Needles | MaxSpike | Edifice% | Till% | Dune% | DeNeedleClips");
     println!("------|------|---------|----------|----------|-------|-------|---------------");
 
-    let spike_margins = [8i64, 12, 16];  // W-9 selective donor rule (NOT 24)
-    let iters = [2usize, 4, 8];
+    let spike_margins = [8i64, 12, 16];  // W-9 selective donor rule (amendment-specified)
+    let iters = [2usize, 4, 8];  // Amendment-specified iterations
     let seed = 1u64;
 
     // Generate base map once (with all landforms ON, talus OFF to get post-coastal)

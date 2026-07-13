@@ -399,27 +399,28 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
             let z = v / dim;
             let x = v % dim;
 
-            // Classify as spike: h - second_max(neighbors) > spike_margin
+            // Classify as spike: hs - second_max(neighbors) > margin_s
             // Needles donate (second_max=ground); ridges don't (second_max=ridge)
-            let mut max_h = i64::MIN;
-            let mut second_max_h = i64::MIN;
+            // Use the OLD frame (hs) from this iteration for consistency.
+            let mut max_hs = i64::MIN;
+            let mut second_max_hs = i64::MIN;
             for &(dx, dz) in &D8_OFFSETS {
                 let nx = x as i64 + dx;
                 let nz = z as i64 + dz;
                 if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
                     let u = linear_index(nx as usize, nz as usize, dim);
-                    let nh = height[u]; // Use unscaled for classification
-                    if nh > max_h {
-                        second_max_h = max_h;
-                        max_h = nh;
-                    } else if nh > second_max_h {
-                        second_max_h = nh;
+                    let neighbor_hs = hs[u]; // Classify on scaled frame (old frame of current iteration)
+                    if neighbor_hs > max_hs {
+                        second_max_hs = max_hs;
+                        max_hs = neighbor_hs;
+                    } else if neighbor_hs > second_max_hs {
+                        second_max_hs = neighbor_hs;
                     }
                 }
             }
 
-            // Only donate if this is a spike: h - second_max > margin
-            if second_max_h == i64::MIN || height[v] - second_max_h <= spike_margin {
+            // Only donate if this is a spike: hs - second_max > margin_s
+            if second_max_hs == i64::MIN || hs[v] - second_max_hs <= margin_s {
                 continue; // Not a spike, don't donate
             }
 
