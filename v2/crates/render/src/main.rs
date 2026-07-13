@@ -571,14 +571,17 @@ async fn main() {
         }
 
         // Timed frames: collect per-frame times for p95 calculation
-        // R-13 F-B2: Measure render time EXCLUDING next_frame() sync (macroquad vsync is locked,
-        // so measuring wall-clock frame time would show 16.67ms for all sizes; measuring only
-        // the render portion shows actual GPU load difference between dim sizes).
-        let mut frame_times_ms = Vec::with_capacity(300);
+        // R-13 F-B2b: Measure BOTH CPU (pre-flush) and wall (including GPU flush/present) times.
+        // cpu_ms tracks R-15 headroom improvement; wall_ms is the user-facing 60fps gate.
+        // Timing structure: [input] clear_background [cpu_start] render [cpu_end/wall_start] next_frame [wall_end]
+        let mut cpu_times_ms = Vec::with_capacity(300);
+        let mut wall_times_ms = Vec::with_capacity(300);
         let mut chunk_count = 0;
         let mut vert_count = 0;
 
         for _ in 0..300 {
+            let wall_start = Instant::now();
+
             if let Some(h) = &handle {
                 if is_key_pressed(KeyCode::Space) {
                     h.toggle_pause();
@@ -591,7 +594,7 @@ async fn main() {
             clear_background(Color::from_rgba(18, 18, 22, 255));
             let snap = handle.as_ref().and_then(|h| h.latest());
 
-            let frame_start = Instant::now();
+            let cpu_start = Instant::now();
 
             camera.update();
             let cam3d = camera.to_camera3d();
@@ -720,20 +723,28 @@ async fn main() {
             }
             set_default_camera();
 
-            let frame_elapsed = frame_start.elapsed().as_secs_f32() * 1000.0;
+            let cpu_elapsed = cpu_start.elapsed().as_secs_f32() * 1000.0;
 
             next_frame().await;
 
-            frame_times_ms.push(frame_elapsed);
+            let wall_elapsed = wall_start.elapsed().as_secs_f32() * 1000.0;
+
+            cpu_times_ms.push(cpu_elapsed);
+            wall_times_ms.push(wall_elapsed);
         }
 
-        // Calculate statistics
-        let avg_ms = frame_times_ms.iter().sum::<f32>() / frame_times_ms.len() as f32;
-        frame_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p95_idx = (frame_times_ms.len() * 95 / 100).max(1);
-        let p95_ms = frame_times_ms[p95_idx - 1];
+        // Calculate statistics for both metrics
+        let cpu_avg = cpu_times_ms.iter().sum::<f32>() / cpu_times_ms.len() as f32;
+        cpu_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let cpu_p95_idx = (cpu_times_ms.len() * 95 / 100).max(1);
+        let cpu_p95 = cpu_times_ms[cpu_p95_idx - 1];
 
-        println!("BENCH dim={} avg_ms={:.2} p95_ms={:.2} verts={} chunks={}", world_dim, avg_ms, p95_ms, vert_count, chunk_count);
+        let wall_avg = wall_times_ms.iter().sum::<f32>() / wall_times_ms.len() as f32;
+        wall_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let wall_p95_idx = (wall_times_ms.len() * 95 / 100).max(1);
+        let wall_p95 = wall_times_ms[wall_p95_idx - 1];
+
+        println!("BENCH dim={} cpu_ms={:.2}/{:.2} wall_ms={:.2}/{:.2} verts={} chunks={}", world_dim, cpu_avg, cpu_p95, wall_avg, wall_p95, vert_count, chunk_count);
         std::process::exit(0);
     }
 
