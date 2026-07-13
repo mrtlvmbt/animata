@@ -20,6 +20,7 @@ use world::gen::material::MaterialId;
 const HMAX: i64 = 200;
 
 /// Primary-material → RGB palette (top-down surface colour).
+/// Includes W-10 presentation-only discriminants: SoilDry (9), SoilWet (10).
 fn colour(m: u8) -> [u8; 3] {
     match m {
         x if x == MaterialId::Air as u8 => [180, 180, 190], // air (above-surface empty) — pale grey
@@ -31,6 +32,8 @@ fn colour(m: u8) -> [u8; 3] {
         x if x == MaterialId::Tuff as u8 => [172, 150, 138], // volcanic tuff — light brown
         x if x == MaterialId::Till as u8 => [184, 194, 206], // glacial till — grey-blue
         x if x == MaterialId::Water as u8 => [40, 70, 130], // coastal water — blue (W-SIM-7, #423)
+        9 => [64, 96, 42],  // W-10: SoilDry (discriminant 9) — darker/drier soil green
+        10 => [128, 164, 90], // W-10: SoilWet (discriminant 10) — lighter/wetter soil green
         _ => [255, 0, 255],                                  // unknown — magenta
     }
 }
@@ -64,14 +67,15 @@ fn main() {
     std::fs::File::create(&out).and_then(|mut f| f.write_all(&buf)).expect("write ppm");
 
     // Material histogram to stderr — a quick sanity read without opening the image.
-    let mut hist = [0u32; 8];
+    // Covers all discriminants: 0-8 (MaterialId), 9-10 (W-10 presentation-only).
+    let mut hist = [0u32; 11];
     for &m in &fields.surface_material {
-        if (m as usize) < 8 {
+        if (m as usize) < 11 {
             hist[m as usize] += 1;
         }
     }
-    let names = ["Air", "Sand", "Permafrost", "Soil", "Bedrock", "Basalt", "Tuff", "Till"];
-    eprintln!("wrote {out}  ({dim}x{dim}, seed={seed:#x}, all landforms ON)");
+    let names = ["Air", "Sand", "Permafrost", "Soil", "Bedrock", "Basalt", "Tuff", "Till", "Water", "SoilDry", "SoilWet"];
+    eprintln!("wrote {out}  ({dim}x{dim}, seed={seed:#x}, all landforms ON, W-10 enabled)");
     for (i, n) in names.iter().enumerate() {
         if hist[i] > 0 {
             eprintln!("  {n:<10} {:>8}  ({:.1}%)", hist[i], 100.0 * hist[i] as f64 / (dim * dim) as f64);
