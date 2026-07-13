@@ -1747,14 +1747,15 @@ mod tests {
     }
 
     /// W-9: Shipping assert — de_needle is a no-op post-talus_step_final.
-    /// On a 64^2 landform-ON fixture with picked config (SPIKE_MARGIN=12, iters=4),
+    /// On a landform-ON fixture with picked config (SPIKE_MARGIN=12, iters=4),
     /// the post-talus field must not have any cell exceeding nmax+NEEDLE_MARGIN.
     /// Non-vacuity control: baseline (talus OFF) must have de_needle clipping > 0
     /// to prove the fixture contains legitimate spikes that need smoothing.
+    /// Note: at dim=64 landform apices are too small to trigger clipping; using dim=128.
     #[test]
     fn talus_step_final_leaves_no_de_needle_clipping() {
-        const DIM: usize = 64;
-        const SEED: u64 = 1;  // Start with seed=1; if baseline has 0 clips, test will find alternative
+        const DIM: usize = 128;  // Raised from 64 — at 64, no landform seed triggers baseline clipping
+        const SEED: u64 = 1;
         const HMAX: i64 = 200;
 
         // Baseline (talus OFF, all landforms ON): measure de_needle clip count
@@ -1764,35 +1765,24 @@ mod tests {
         let baseline_clipped = de_needle_pass(DIM, &baseline.height);
         let baseline_clip_count = measure_de_needle_clip_count(DIM, &baseline.height, &baseline_clipped);
 
-        // If baseline has no clipping, use an alternative seed where it does (for test non-vacuity)
-        let (actual_baseline, _actual_staged, _actual_masks) = if baseline_clip_count == 0 {
-            // Try seed=42 (known to have needles from sweep)
-            let (alt_baseline, alt_staged, alt_masks) = classify_and_caps_staged(
-                42, HMAX, DIM, false, true, true, true, true, true, false
-            );
-            let alt_clipped = de_needle_pass(DIM, &alt_baseline.height);
-            let alt_clip_count = measure_de_needle_clip_count(DIM, &alt_baseline.height, &alt_clipped);
-            assert!(
-                alt_clip_count > 0,
-                "non-vacuity control failed: even seed=42 has zero de_needle clipping (fixture contains no spikes)"
-            );
-            (alt_baseline, alt_staged, alt_masks)
-        } else {
-            let (base, staged, masks) = classify_and_caps_staged(
-                SEED, HMAX, DIM, false, true, true, true, true, true, false
-            );
-            (base, staged, masks)
-        };
+        // Non-vacuity control: baseline must have de_needle clipping to test meaningfully
+        assert!(
+            baseline_clip_count > 0,
+            "non-vacuity control failed: baseline (talus OFF, dim={}) has zero de_needle clipping — \
+             fixture contains no spikes (fixture params: seed={}, all landforms ON)",
+            DIM, SEED
+        );
 
         // Post-talus: apply picked config (SPIKE_MARGIN=12, iters=4) and verify de_needle is no-op
-        let post_talus = talus_step_final(DIM, &actual_baseline.height, 12, 4);
+        let post_talus = talus_step_final(DIM, &baseline.height, 12, 4);
         let post_talus_clipped = de_needle_pass(DIM, &post_talus);
         let post_clip_count = measure_de_needle_clip_count(DIM, &post_talus, &post_talus_clipped);
 
         assert_eq!(
             post_clip_count, 0,
-            "de_needle must be a no-op post-talus_step_final(12, 4): {} cells still need clipping",
-            post_clip_count
+            "de_needle must be a no-op post-talus_step_final(12, 4): {} cells still need clipping. \
+             Baseline had {} clips; talus should have eliminated all.",
+            post_clip_count, baseline_clip_count
         );
     }
 }
