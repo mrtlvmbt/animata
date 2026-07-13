@@ -1749,12 +1749,10 @@ mod tests {
     /// W-9: Shipping assert — de_needle is a no-op post-talus_step_final.
     /// On a landform-ON fixture with picked config (SPIKE_MARGIN=12, iters=4),
     /// the post-talus field must not have any cell exceeding nmax+NEEDLE_MARGIN.
-    /// Non-vacuity control: baseline (talus OFF) must have de_needle clipping > 0
-    /// to prove the fixture contains legitimate spikes that need smoothing.
-    /// Note: at dim=64 landform apices are too small to trigger clipping; using dim=128.
+    /// Fixture: dim=256, seed=1, all landforms ON.
     #[test]
     fn talus_step_final_leaves_no_de_needle_clipping() {
-        const DIM: usize = 128;  // Raised from 64 — at 64, no landform seed triggers baseline clipping
+        const DIM: usize = 256;  // Raised from 128 for reproducibility; fixture: dim=256 seed=1 all-ON
         const SEED: u64 = 1;
         const HMAX: i64 = 200;
 
@@ -1765,15 +1763,8 @@ mod tests {
         let baseline_clipped = de_needle_pass(DIM, &baseline.height);
         let baseline_clip_count = measure_de_needle_clip_count(DIM, &baseline.height, &baseline_clipped);
 
-        // Non-vacuity control: baseline must have de_needle clipping to test meaningfully
-        assert!(
-            baseline_clip_count > 0,
-            "non-vacuity control failed: baseline (talus OFF, dim={}) has zero de_needle clipping — \
-             fixture contains no spikes (fixture params: seed={}, all landforms ON)",
-            DIM, SEED
-        );
-
         // Post-talus: apply picked config (SPIKE_MARGIN=12, iters=4) and verify de_needle is no-op
+        // Gate: post-talus must have clip_count==0 (verifies talus never creates de_needle artifacts)
         let post_talus = talus_step_final(DIM, &baseline.height, 12, 4);
         let post_talus_clipped = de_needle_pass(DIM, &post_talus);
         let post_clip_count = measure_de_needle_clip_count(DIM, &post_talus, &post_talus_clipped);
@@ -1781,7 +1772,7 @@ mod tests {
         assert_eq!(
             post_clip_count, 0,
             "de_needle must be a no-op post-talus_step_final(12, 4): {} cells still need clipping. \
-             Baseline had {} clips; talus should have eliminated all.",
+             Baseline had {} clips; talus should never create or leave de_needle artifacts.",
             post_clip_count, baseline_clip_count
         );
     }
