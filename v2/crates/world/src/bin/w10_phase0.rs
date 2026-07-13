@@ -40,7 +40,7 @@ fn main() {
             seed, HMAX, dim, false, true, true, true, true, true, false
         );
 
-        let n = dim * dim;
+        let _n = dim * dim;
         let post_deneedle_height = &staged.post_deneedle;
         let erosion = world::gen::erosion::erode(seed, HMAX, dim, true, true);
 
