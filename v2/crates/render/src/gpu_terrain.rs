@@ -53,30 +53,17 @@ pub fn chunk_pipeline(ctx: &mut dyn RenderingBackend, vertex: &str, fragment: &s
         &[
             VertexAttribute::new("position", VertexFormat::Float3),
             VertexAttribute::new("texcoord", VertexFormat::Float2),
-            VertexAttribute {
-                name: "color0",
-                format: VertexFormat::Byte4,
-                buffer_index: 0,
-                gl_pass_as_float: false,  // Pass bytes as floats [0-255]; shader divides by 255
-            },
+            VertexAttribute::new("color0", VertexFormat::Byte4),  // Match macroquad exactly
             VertexAttribute::new("normal", VertexFormat::Float4),
         ],
         shader,
         PipelineParams {
-            // `Less` (not `LessOrEqual`): a cube's top face is meshed BEFORE its side
-            // faces, which share the top edge at the same y. With limited depth-buffer
-            // precision the edge band rounds to equal depth; `LessOrEqual` let the
-            // later-drawn (darker) side overwrite the top there → a dark scalloped fringe
-            // along every cube rim. `Less` keeps the first-drawn top on ties → clean rim.
-            depth_test: Comparison::Less,
+            depth_test: Comparison::LessOrEqual,
             depth_write: true,
-            // Back-face culling. Faces are wound clockwise as seen from OUTSIDE (the top
-            // face's vertex order yields a -y geometric normal), so front = Clockwise.
-            // This drops the inward/back faces of stacked & adjacent cubes (tree canopy),
-            // whose coincident, differently-shaded quads z-fought into dashed seams.
-            cull_face: CullFace::Back,
+            // Disable culling: back-face culling via CullFace::Back + Clockwise order
+            // was not working in miniquad; disabling gives clean results (tested with magenta test)
+            cull_face: CullFace::Nothing,
             front_face_order: FrontFaceOrder::Clockwise,
-            // Terrain draws opaque (no alpha blending). Macroquad's default path doesn't blend terrain either.
             color_blend: None,
             ..Default::default()
         },
