@@ -49,25 +49,106 @@ pub fn biome_color(id: u8) -> Color {
     }
 }
 
-/// `MaterialId` byte (`world::gen::material::MaterialId`, `0..=8`) → top-face color. This is the
-/// PRIMARY terrain palette: the renderer colours by physical surface material, not biome, because
-/// biome misses the landform substrates the diverse-relief terragen produces — Ocean water, aeolian
-/// sand, glacial till, volcanic basalt/tuff (biome=13 Ocean alone already fell off `biome_color`'s
-/// `0..=12` table → magenta sea). Mirrors `world/src/bin/map_dump.rs`'s palette so the interactive
-/// 3D view and the headless PPM preview read identically. `_ => UNKNOWN` keeps the no-panic contract.
+/// `MaterialId` byte (`world::gen::material::MaterialId`, `0..=10`) → hue for palette v2 (two-factor
+/// color = material HUE × height VALUE + per-column jitter). This is the PRIMARY terrain palette:
+/// the renderer colours by physical surface material, not biome, because biome misses the landform
+/// substrates the diverse-relief terragen produces — Ocean water, aeolian sand, glacial till,
+/// volcanic basalt/tuff (biome=13 Ocean alone already fell off `biome_color`'s `0..=12` table → magenta sea).
+/// Mirrors `world/src/bin/map_dump.rs`'s palette so the interactive 3D view and the headless PPM
+/// preview read identically. `_ => UNKNOWN` keeps the no-panic contract.
+/// Hues are in HSL: (h, s, l) where we keep saturation/lightness consistent and vary hue per material.
 pub fn material_color(m: u8) -> Color {
     match m {
         0 => Color::from_rgba(180, 180, 190, 255), // Air (above-surface empty) — pale grey
-        1 => Color::from_rgba(222, 200, 120, 255), // Sand (aeolian dune) — tan
-        2 => Color::from_rgba(205, 232, 240, 255), // Permafrost — pale ice
+        1 => Color::from_rgba(222, 200, 120, 255), // Sand (aeolian dune) — warm tan
+        2 => Color::from_rgba(205, 232, 240, 255), // Permafrost — ice grey
         3 => Color::from_rgba(96, 132, 66, 255),   // Soil — green
-        4 => Color::from_rgba(128, 128, 132, 255), // Bedrock — grey
+        4 => Color::from_rgba(128, 128, 132, 255), // Bedrock — cool grey
         5 => Color::from_rgba(58, 52, 62, 255),    // Basalt (volcanic) — near-black
         6 => Color::from_rgba(172, 150, 138, 255), // Tuff (volcanic) — light brown
         7 => Color::from_rgba(184, 194, 206, 255), // Till (glacial) — grey-blue
         8 => Color::from_rgba(40, 70, 130, 255),   // Water (coastal/ocean) — blue
+        9 => Color::from_rgba(184, 168, 104, 255), // SoilDry — pale ochre
+        10 => Color::from_rgba(96, 80, 48, 255),   // SoilWet — dark umber
         _ => UNKNOWN,
     }
+}
+
+/// Simple integer hash for deterministic per-column jitter: `hash(col, row, seed) -> [0, 1]`.
+/// Used for palette v2's per-column value variation without float RNG.
+fn color_jitter_hash(col: i64, row: i64, seed: u64) -> f32 {
+    let mut h: u64 = seed;
+    h = h.wrapping_mul(0x9e3779b97f4a7c15);
+    h ^= (col as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = h.wrapping_mul(0x9e3779b97f4a7c15);
+    h ^= (row as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = h.wrapping_mul(0x9e3779b97f4a7c15);
+    // Normalize to [0.0, 1.0]
+    ((h >> 33) as f32) / 18446744073709551615.0
+}
+
+/// Palette v2 — two-factor color: material HUE × height VALUE + per-column jitter.
+/// Takes the material hue from [`material_color`], interpolates it through the height value ramp
+/// (green→brown→snow), and applies ±4% jitter per column via integer hash.
+/// Parameters:
+/// - `material`: surface material byte (0..=10)
+/// - `height`: cell height value (raw, pre-hypsometric normalization)
+/// - `h_lo`, `h_hi`: the map's observed [p2, p98] relief band for hypsometric scaling
+/// - `col`, `row`: world grid coordinates (for deterministic per-column jitter)
+/// - `seed`: random seed component (for deterministic per-map variation)
+pub fn surface_color_v2(
+    material: u8,
+    height: i64,
+    h_lo: i64,
+    h_hi: i64,
+    col: i64,
+    row: i64,
+    seed: u64,
+) -> Color {
+    // Get material hue base color
+    let hue_color = material_color(material);
+
+    // Compute height-based value tier (same stretch as hypsometric_range)
+    let span = (h_hi - h_lo).max(1) as f32;
+    let t = ((height - h_lo) as f32 / span).clamp(0.0, 1.0);
+
+    // Height value ramp: interpolate through the same stops as height_color
+    // but we multiply the base hue_color by the VALUE to darken/lighten
+    const VALUE_STOPS: [(f32, f32); 7] = [
+        (0.00, 0.4),   // lowland — darkened
+        (0.25, 0.5),   //
+        (0.45, 0.7),   //
+        (0.60, 0.8),   //
+        (0.78, 0.6),   // brown (moraine/upland)
+        (0.90, 0.8),   // bare rock
+        (1.00, 0.95),  // peaks — bright
+    ];
+
+    let mut lo = &VALUE_STOPS[0];
+    let mut hi = &VALUE_STOPS[VALUE_STOPS.len() - 1];
+    for w in VALUE_STOPS.windows(2) {
+        if t >= w[0].0 && t <= w[1].0 {
+            lo = &w[0];
+            hi = &w[1];
+            break;
+        }
+    }
+
+    let value_span = (hi.0 - lo.0).max(1e-6);
+    let f = ((t - lo.0) / value_span).clamp(0.0, 1.0);
+    let value = (lo.1 + (hi.1 - lo.1) * f).clamp(0.0, 1.0);
+
+    // Apply per-column jitter: ±4%
+    let jitter_factor = (color_jitter_hash(col, row, seed) - 0.5) * 0.08 + 1.0; // [0.96, 1.04]
+    let jittered_value = (value * jitter_factor).clamp(0.0, 1.0);
+
+    // Multiply hue by the value to darken/lighten
+    Color::new(
+        hue_color.r * jittered_value,
+        hue_color.g * jittered_value,
+        hue_color.b * jittered_value,
+        hue_color.a,
+    )
 }
 
 /// Terrain top-face coloring mode, runtime-toggleable ('C' key). `Material` = physical substrate
@@ -119,7 +200,15 @@ pub fn height_color(height: i64, h_lo: i64, h_hi: i64) -> Color {
 
 /// Dispatch a cell's top-face color by the active [`ColorMode`]. `material`/`height` are read from the
 /// `WorldView`; `[h_lo, h_hi]` is the map's observed relief band that scales the [`height_color`] ramp.
-pub fn surface_color(mode: ColorMode, material: u8, height: i64, h_lo: i64, h_hi: i64) -> Color {
+/// **Note**: This function is now deprecated in favor of directly calling `surface_color_v2`,
+/// which provides palette v2 (two-factor coloring) that the renderer expects.
+pub fn surface_color(
+    mode: ColorMode,
+    material: u8,
+    height: i64,
+    h_lo: i64,
+    h_hi: i64,
+) -> Color {
     match mode {
         ColorMode::Material => material_color(material),
         ColorMode::Height => height_color(height, h_lo, h_hi),
