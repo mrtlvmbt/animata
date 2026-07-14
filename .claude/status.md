@@ -1,5 +1,12 @@
-task: #438 W-10 material diversity (presentation-only soil split + slope outcrops)
-phase: CI
-blocked_on: CI run #29288184040 in progress; code-critic review in progress
-next: (1) CI completes → verify all 4 jobs green; (2) critic completes → resolve verdict; (3) create PR with --base render-r12-terragen-preview; (4) append verdict comment; (5) mark ready-for-review
-updated: 2026-07-13 23:59
+task: PR #437 — R-15a retained GPU buffers parity fix
+phase: COMPLETE
+blocked_on: none
+next: PM merge review
+updated: 2026-07-14 10:05
+
+COMPLETION SUMMARY:
+- Parity check: PASS (cmp -s exit 0, byte-identical PNGs)
+- Compile check: PASS (scripts/compile-check.sh)
+- Commits: ed3a467 (final culling fix) + 66c0036 (status update) + daedbc8 (shader isolation)
+- Root cause fixed: back-face culling ineffective in miniquad; disabled via CullFace::Nothing
+- Evidence: regenerated parity-off/on-iso-zoom-close.png (both 881K, identical)
