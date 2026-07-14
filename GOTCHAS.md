@@ -107,3 +107,9 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   precedent (2026-07-13, PR #435): force-reset main via `gh api -X PATCH .../git/refs/heads/main -f sha=…
   -F force=true` (bypasses the local kit hook AND works with admin token), then fast-forward the
   integration branch to the feature head.
+
+- **macroquad screenshot comes out 100% black** → Cause: `get_screen_data()` called outside the frame
+  (after `next_frame().await` the backbuffer is cleared) or before the scene draw. → What to do:
+  capture in the SAME frame AFTER drawing the scene and BEFORE `next_frame().await` (draw → capture →
+  export → exit). And ALWAYS open the produced PNG with the Read tool before claiming it shows anything
+  — a "verified" black file has now happened twice (R-13 F-B5, R-15a parity).
