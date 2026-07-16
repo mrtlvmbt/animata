@@ -2789,12 +2789,21 @@ mod tests {
         schedule.add_systems(stage_predation);
         schedule.run(&mut world);
 
+        let zero_alive = world.get::<Energy>(zero_id).map(|e| e.0);
+        let killed_alive = world.get::<Energy>(killed_id).map(|e| e.0);
+        let survivor_alive = world.get::<Energy>(survivor_id).map(|e| e.0);
+        let diag = format!(
+            "bits(zero={} killed={} survivor={} pred1={} pred2={}) alive(zero={:?} killed={:?} survivor={:?})",
+            zero_id.to_bits(), killed_id.to_bits(), survivor_id.to_bits(), pred1_id.to_bits(), pred2_id.to_bits(),
+            zero_alive, killed_alive, survivor_alive,
+        );
+
         // (i) drained-but-surviving: prey_survivor is orders of magnitude bigger than the pool's
         // other two members, so both predator passes' bites (however exactly split) only ever
         // partially drain it — alive, nothing booked.
-        let survivor_energy = world.get::<Energy>(survivor_id).map(|e| e.0).unwrap_or(-1);
-        assert!(survivor_energy > 0, "prey_survivor must survive both predator passes: got {survivor_energy}");
-        assert!(survivor_energy < S, "prey_survivor must still be drained SOME across both predator passes: got {survivor_energy}");
+        let survivor_energy = survivor_alive.unwrap_or(-1);
+        assert!(survivor_energy > 0, "prey_survivor must survive both predator passes: got {survivor_energy} | {diag}");
+        assert!(survivor_energy < S, "prey_survivor must still be drained SOME across both predator passes: got {survivor_energy} | {diag}");
 
         // (ii)+(iii): prey_killed and prey_zero must each book EXACTLY ONCE despite being
         // re-touched by BOTH predators (the `booked` guard is what makes this non-vacuous — an
@@ -2802,7 +2811,7 @@ mod tests {
         let ledger = *world.resource::<EnergyLedger>();
         assert_eq!(
             ledger.deaths_by_channel[DeathChannel::Predation as usize], 2,
-            "exactly two deaths (prey_zero + prey_killed) — NOT four (double-booked by 2 predators)"
+            "exactly two deaths (prey_zero + prey_killed) — NOT four (double-booked by 2 predators) | {diag}"
         );
         assert_eq!(
             ledger.deaths_growing_by_channel[DeathChannel::Predation as usize], 2,
