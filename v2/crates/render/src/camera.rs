@@ -75,8 +75,30 @@ impl IsoCam {
         self.update_rotate();
     }
 
+    /// Update the camera state with UI gating.
+    /// When UI wants pointer input, mouse-driven camera controls are skipped.
+    /// When UI wants keyboard input, keyboard-driven camera controls are skipped.
+    pub fn update_gated(&mut self, wants_pointer: bool, wants_keyboard: bool) {
+        if !wants_keyboard {
+            self.update_pan_keyboard();
+        }
+        if !wants_pointer {
+            self.update_pan_mouse();
+            self.update_zoom();
+        }
+        if !wants_keyboard {
+            self.update_rotate();
+        }
+    }
+
     /// Update pan (WASD / arrows + mouse drag).
     fn update_pan(&mut self) {
+        self.update_pan_keyboard();
+        self.update_pan_mouse();
+    }
+
+    /// Update keyboard pan (WASD / arrows).
+    fn update_pan_keyboard(&mut self) {
         let dt = get_frame_time();
 
         // Keyboard pan: WASD and arrow keys.
@@ -100,8 +122,15 @@ impl IsoCam {
         let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
         let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
         self.focus += local_x * pan_delta.x + local_z * pan_delta.z;
+    }
 
-        // Mouse drag pan (middle or right button).
+    /// Update mouse drag pan (middle or right button).
+    fn update_pan_mouse(&mut self) {
+        let cos_yaw = self.yaw.cos();
+        let sin_yaw = self.yaw.sin();
+        let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
+        let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
+
         let mouse_pos = mouse_position();
         if is_mouse_button_down(MouseButton::Middle) || is_mouse_button_down(MouseButton::Right) {
             let delta = (mouse_pos.0 - self.last_mouse_pos.0, mouse_pos.1 - self.last_mouse_pos.1);

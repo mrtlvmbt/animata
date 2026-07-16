@@ -10,7 +10,7 @@
 //! Same `ROWS_PER_CHUNK` chunking + u16-index assert as hex terrain (`terrain.rs`).
 //! Built ONCE at startup — cold terrain immutable for the run.
 
-use crate::biome_palette::{cell_color, cliff_shade, apply_directional_shading, ColorMode};
+use crate::biome_palette::{cell_color, cliff_shade, apply_directional_shading};
 use crate::hex::HEIGHT_SCALE;
 use crate::terrain::TerrainChunk;
 use macroquad::models::{Mesh, Vertex};
@@ -26,7 +26,6 @@ use sim_core::{Vec2Fixed, WorldView};
 pub fn build_cube_terrain(
     world_dim: i64,
     world: &dyn WorldView,
-    mode: ColorMode,
     seed: u64,
     bare_mode: bool,
 ) -> Vec<TerrainChunk> {
@@ -36,7 +35,7 @@ pub fn build_cube_terrain(
     let mut row0 = 0i64;
     while row0 < world_dim {
         let row1 = (row0 + rpc).min(world_dim);
-        chunks.push(build_chunk(world_dim, world, row0, row1, mode, h_lo, h_hi, seed, bare_mode));
+        chunks.push(build_chunk(world_dim, world, row0, row1, h_lo, h_hi, seed, bare_mode));
         row0 = row1;
     }
     chunks
@@ -48,7 +47,6 @@ fn build_chunk(
     world: &dyn WorldView,
     row0: i64,
     row1: i64,
-    _mode: ColorMode,
     h_lo: i64,
     h_hi: i64,
     seed: u64,
@@ -311,7 +309,7 @@ mod tests {
     fn greedy_merges_uniform_flat_region_into_one_quad() {
         let dim = 4;
         let world = flat_world(dim, vec![0; 16]);
-        let chunks = build_cube_terrain(dim, &world, ColorMode::Material, 0x1234, false);
+        let chunks = build_cube_terrain(dim, &world, 0x1234, false);
         assert_eq!(chunks.len(), 1);
         let mesh = &chunks[0].mesh;
 
@@ -330,7 +328,7 @@ mod tests {
     fn greedy_does_not_merge_across_material_boundary() {
         // 2×2, columns differ in material; each column's 2 rows share (height, material) and merge vertically.
         let world = flat_world(2, vec![3, 8, 3, 8]); // row-major: (row0: col0=Soil,col1=Water), (row1: same)
-        let chunks = build_cube_terrain(2, &world, ColorMode::Material, 0x1234, false);
+        let chunks = build_cube_terrain(2, &world, 0x1234, false);
         let mesh = &chunks[0].mesh;
 
         // 2 quads (one per column), NOT 1 — material_color equality gates the merge.
@@ -342,7 +340,7 @@ mod tests {
     fn greedy_does_not_merge_across_height_boundary() {
         let mut world = flat_world(2, vec![0; 4]);
         world.heights = vec![0, 1, 0, 1]; // col1 is one unit taller than col0, same material
-        let chunks = build_cube_terrain(2, &world, ColorMode::Material, 0x1234, false);
+        let chunks = build_cube_terrain(2, &world, 0x1234, false);
         // Height differs between col0/col1 → their side quads are no longer culled (nh < h for col0's
         // east edge and col1 emits none west since col0 lower doesn't apply — col1's neighbour col0 is
         // lower so col1 gets a cliff there); assert top faces alone still split into 2 merged quads.
