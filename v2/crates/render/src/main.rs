@@ -135,6 +135,10 @@ struct CliArgs {
     cam_preset: CamPreset,
     /// R-15a: `--retained`: use retained-buffer GPU rendering for terrain (default OFF).
     retained: bool,
+    /// R-14: `--bare`: water renders as dry-bed (default OFF).
+    bare_mode: bool,
+    /// R-14: `--height-scale <f32>`: override the height scale (default 0.2).
+    height_scale_override: Option<f32>,
 }
 
 fn parse_args() -> CliArgs {
@@ -147,6 +151,8 @@ fn parse_args() -> CliArgs {
     let mut bench = false;
     let mut cam_preset = CamPreset::IsoDefault;
     let mut retained = false;
+    let mut bare_mode = false;
+    let mut height_scale_override = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -186,10 +192,15 @@ fn parse_args() -> CliArgs {
                 };
             }
             "--retained" => retained = true,
+            "--bare" => bare_mode = true,
+            "--height-scale" => {
+                let v = args.next().expect("--height-scale requires a value");
+                height_scale_override = Some(v.parse().unwrap_or_else(|_| panic!("--height-scale expects f32, got {v:?}")));
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -317,8 +328,8 @@ async fn main() {
     // Terrain top-face coloring: 'C' toggles Height↔Material at runtime (rebuilds the baked meshes).
     // Default = Height (hypsometric relief ramp) so elevation shape reads at a glance.
     let mut color_mode = crate::biome_palette::ColorMode::Height;
-    let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode);
-    let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode);
+    let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
+    let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
 
     // R-15a: Retained-buffer GPU terrain initialization (if --retained).
     let (mut gpu_hex_chunks, mut gpu_cube_chunks, gpu_pipeline) = if cli_args.retained {
@@ -872,8 +883,8 @@ async fn main() {
                 crate::biome_palette::ColorMode::Height => crate::biome_palette::ColorMode::Material,
                 crate::biome_palette::ColorMode::Material => crate::biome_palette::ColorMode::Height,
             };
-            hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode);
-            cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode);
+            hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
+            cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
 
             // R-15a: Rebuild GPU chunks if retained mode is active
             if cli_args.retained && gpu_pipeline.is_some() {
@@ -1124,8 +1135,8 @@ mod tests {
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
         let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false, false);
-        let hex_chunks = terrain::build_hex_terrain(dim, &world, crate::biome_palette::ColorMode::Height);
-        let cube_chunks = terrain_cube::build_cube_terrain(dim, &world, crate::biome_palette::ColorMode::Height);
+        let hex_chunks = terrain::build_hex_terrain(dim, &world, crate::biome_palette::ColorMode::Height, SEED, false);
+        let cube_chunks = terrain_cube::build_cube_terrain(dim, &world, crate::biome_palette::ColorMode::Height, SEED, false);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");
         assert!(!cube_chunks.is_empty(), "cube terrain must produce at least one chunk");
         assert!(hex_chunks.iter().any(|c| !c.mesh.vertices.is_empty()));
