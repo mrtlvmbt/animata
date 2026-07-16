@@ -806,6 +806,16 @@ fn provision_rate_ladder_lowest_rung_grants_nonzero_dose() {
     let mut cfg = driver_config(41);
     cfg.econ.enable_propagule = true;
     cfg.econ.enable_provision = true;
+    // `driver_config` overrides `phase2_config`'s g_dev=4 down to g_dev=1 (deliberately, to test
+    // body-size EVOLUTION from unicellular — see its own doc-comment). That default is the WRONG
+    // substrate for THIS test: a founder decoding to `target=1` is already "fully grown" at birth
+    // regardless of `n_propagule_init`, so `5a_provision` would have zero eligible children for a
+    // long time (a reachability confound, not a rate one). Restore g_dev=4 so REAL decode targets
+    // are reliably > 1 — the bootstrap propagule (`n_propagule_init=1`) then has genuine growth
+    // material for the ladder's lowest rung to act on.
+    if let Some(mspec) = cfg.econ.morphogen.as_mut() {
+        mspec.g_dev = 4;
+    }
     cfg.econ.n_propagule_init = 1;
     cfg.econ.n_propagule_locked = true;
     cfg.econ.provision_rate_init = PROVISION_RATE_LADDER[0] as i32;
