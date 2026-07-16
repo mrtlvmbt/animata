@@ -6,8 +6,17 @@ use crate::terrain::TerrainChunk;
 use crate::camera::IsoCam;
 use macroquad::prelude::*;
 
+/// Statistics from a terrain draw pass.
+#[derive(Debug, Clone, Copy)]
+pub struct DrawStats {
+    /// Number of chunks that passed frustum culling and were drawn.
+    pub chunks_drawn: usize,
+    /// Total number of vertices drawn across all chunks.
+    pub verts_drawn: usize,
+}
+
 /// Draw terrain using either GPU-retained or CPU macroquad path, depending on `retained` flag.
-/// Performs frustum culling on chunks and returns the count of chunks drawn.
+/// Performs frustum culling on chunks and returns draw statistics.
 ///
 /// Arguments:
 /// - `chunks_hex`: hex terrain chunks (used if `use_cube` is false)
@@ -19,7 +28,7 @@ use macroquad::prelude::*;
 /// - `use_cube`: if true, use cube terrain; if false, use hex terrain
 /// - `retained`: if true, use GPU-retained rendering; if false, use CPU macroquad
 ///
-/// Returns the number of chunks drawn.
+/// Returns draw statistics (chunks and vertex counts).
 pub fn draw_terrain(
     chunks_hex: &[TerrainChunk],
     chunks_cube: &[TerrainChunk],
@@ -29,9 +38,10 @@ pub fn draw_terrain(
     camera: &IsoCam,
     use_cube: bool,
     retained: bool,
-) -> usize {
+) -> DrawStats {
     let frustum_planes = camera.frustum_planes();
     let mut chunks_drawn = 0;
+    let mut verts_drawn = 0;
 
     if retained && gpu_pipeline.is_some() {
         // GPU-retained path: use GPU chunks
@@ -40,6 +50,7 @@ pub fn draw_terrain(
         for gpu_chunk in gpu_chunks {
             if frustum_planes.iter().all(|plane| plane.aabb_intersects(gpu_chunk.lo, gpu_chunk.hi)) {
                 chunks_drawn += 1;
+                verts_drawn += gpu_chunk.n_idx as usize;
             }
         }
     } else {
@@ -50,9 +61,10 @@ pub fn draw_terrain(
             if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
                 draw_mesh(&chunk.mesh);
                 chunks_drawn += 1;
+                verts_drawn += chunk.mesh.vertices.len();
             }
         }
     }
 
-    chunks_drawn
+    DrawStats { chunks_drawn, verts_drawn }
 }

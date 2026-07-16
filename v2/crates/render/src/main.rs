@@ -411,12 +411,20 @@ async fn main() {
     // R-13: Screenshot mode — render warmup frames, then capture on the final frame.
     if let Some(screenshot_path) = &cli_args.screenshot {
         for frame_num in 0..=cli_args.screenshot_warmup {
-            if let Some(h) = &handle {
-                if is_key_pressed(KeyCode::Space) {
-                    h.toggle_pause();
-                }
-                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                    h.step_once();
+            // Process input events (screenshot mode: only sim controls)
+            for ev in input::collect() {
+                match ev {
+                    input::InputEvent::TogglePause => {
+                        if let Some(h) = &handle {
+                            h.toggle_pause();
+                        }
+                    }
+                    input::InputEvent::StepOnce => {
+                        if let Some(h) = &handle {
+                            h.step_once();
+                        }
+                    }
+                    _ => {} // screenshot mode ignores terrain and color toggles
                 }
             }
 
@@ -429,7 +437,7 @@ async fn main() {
             set_camera(&cam3d);
 
             // R-15a: Draw terrain (CPU or GPU path)
-            draw::draw_terrain(
+            let _ = draw::draw_terrain(
                 &hex_terrain_chunks,
                 &cube_terrain_chunks,
                 &gpu_hex_chunks,
@@ -461,12 +469,20 @@ async fn main() {
     if cli_args.bench {
         // Warmup: 30 frames to reach steady state
         for _ in 0..30 {
-            if let Some(h) = &handle {
-                if is_key_pressed(KeyCode::Space) {
-                    h.toggle_pause();
-                }
-                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                    h.step_once();
+            // Process input events (benchmark warmup: only sim controls)
+            for ev in input::collect() {
+                match ev {
+                    input::InputEvent::TogglePause => {
+                        if let Some(h) = &handle {
+                            h.toggle_pause();
+                        }
+                    }
+                    input::InputEvent::StepOnce => {
+                        if let Some(h) = &handle {
+                            h.step_once();
+                        }
+                    }
+                    _ => {} // benchmark warmup ignores terrain and color toggles
                 }
             }
 
@@ -477,7 +493,7 @@ async fn main() {
             let cam3d = camera.to_camera3d();
             set_camera(&cam3d);
 
-            draw::draw_terrain(
+            let _ = draw::draw_terrain(
                 &hex_terrain_chunks,
                 &cube_terrain_chunks,
                 &gpu_hex_chunks,
@@ -506,12 +522,20 @@ async fn main() {
         for _ in 0..300 {
             let wall_start = Instant::now();
 
-            if let Some(h) = &handle {
-                if is_key_pressed(KeyCode::Space) {
-                    h.toggle_pause();
-                }
-                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                    h.step_once();
+            // Process input events (benchmark timed: only sim controls)
+            for ev in input::collect() {
+                match ev {
+                    input::InputEvent::TogglePause => {
+                        if let Some(h) = &handle {
+                            h.toggle_pause();
+                        }
+                    }
+                    input::InputEvent::StepOnce => {
+                        if let Some(h) = &handle {
+                            h.step_once();
+                        }
+                    }
+                    _ => {} // benchmark timed ignores terrain and color toggles
                 }
             }
 
@@ -522,33 +546,20 @@ async fn main() {
 
             camera.update();
             let cam3d = camera.to_camera3d();
-            let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            let mut chunks_drawn = 0;
-            let mut frame_verts = 0;
-            if cli_args.retained && gpu_pipeline.is_some() {
-                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
-                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
-                for gpu_chunk in gpu_chunks {
-                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(gpu_chunk.lo, gpu_chunk.hi)) {
-                        chunks_drawn += 1;
-                        frame_verts += gpu_chunk.n_idx as usize;
-                    }
-                }
-            } else {
-                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-                for chunk in terrain_chunks {
-                    let (min, max) = chunk.bounds;
-                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                        draw_mesh(&chunk.mesh);
-                        chunks_drawn += 1;
-                        frame_verts += chunk.mesh.vertices.len();
-                    }
-                }
-            }
-            chunk_count = chunks_drawn;
-            vert_count = frame_verts;
+            let draw_stats = draw::draw_terrain(
+                &hex_terrain_chunks,
+                &cube_terrain_chunks,
+                &gpu_hex_chunks,
+                &gpu_cube_chunks,
+                gpu_pipeline,
+                &camera,
+                use_cube_terrain,
+                cli_args.retained,
+            );
+            chunk_count = draw_stats.chunks_drawn;
+            vert_count = draw_stats.verts_drawn;
 
             creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
             set_default_camera();
@@ -579,37 +590,42 @@ async fn main() {
     }
 
     loop {
-        if let Some(h) = &handle {
-            if is_key_pressed(KeyCode::Space) {
-                h.toggle_pause();
-            }
-            if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                h.step_once();
-            }
-        }
-        // R-5: Toggle hex↔cube terrain with 'T' key.
-        if is_key_pressed(KeyCode::T) {
-            use_cube_terrain = !use_cube_terrain;
-        }
-        // Toggle Height↔Material terrain coloring with 'C' (rebuilds the baked-color meshes).
-        if is_key_pressed(KeyCode::C) {
-            color_mode = match color_mode {
-                crate::biome_palette::ColorMode::Height => crate::biome_palette::ColorMode::Material,
-                crate::biome_palette::ColorMode::Material => crate::biome_palette::ColorMode::Height,
-            };
-            hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
-            cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
+        // Process input events from all sources
+        for ev in input::collect() {
+            match ev {
+                input::InputEvent::TogglePause => {
+                    if let Some(h) = &handle {
+                        h.toggle_pause();
+                    }
+                }
+                input::InputEvent::StepOnce => {
+                    if let Some(h) = &handle {
+                        h.step_once();
+                    }
+                }
+                input::InputEvent::ToggleTerrainKind => {
+                    use_cube_terrain = !use_cube_terrain;
+                }
+                input::InputEvent::ToggleColorMode => {
+                    color_mode = match color_mode {
+                        crate::biome_palette::ColorMode::Height => crate::biome_palette::ColorMode::Material,
+                        crate::biome_palette::ColorMode::Material => crate::biome_palette::ColorMode::Height,
+                    };
+                    hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
+                    cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
 
-            // R-15a: Rebuild GPU chunks if retained mode is active
-            if cli_args.retained && gpu_pipeline.is_some() {
-                use macroquad::prelude::get_internal_gl;
-                gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_hex_chunks);
-                gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_cube_chunks);
+                    // R-15a: Rebuild GPU chunks if retained mode is active
+                    if cli_args.retained && gpu_pipeline.is_some() {
+                        use macroquad::prelude::get_internal_gl;
+                        gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_hex_chunks);
+                        gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_cube_chunks);
 
-                let mut gl = unsafe { get_internal_gl() };
-                let ctx = gl.quad_context;
-                gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
-                gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                        let mut gl = unsafe { get_internal_gl() };
+                        let ctx = gl.quad_context;
+                        gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                        gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                    }
+                }
             }
         }
 
@@ -620,12 +636,11 @@ async fn main() {
         // R-3: Update camera input and build frustum.
         camera.update();
         let cam3d = camera.to_camera3d();
-        let frustum_planes = camera.frustum_planes();
 
         set_camera(&cam3d);
 
         let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-        let chunks_drawn = draw::draw_terrain(
+        let draw_stats = draw::draw_terrain(
             &hex_terrain_chunks,
             &cube_terrain_chunks,
             &gpu_hex_chunks,
@@ -643,7 +658,7 @@ async fn main() {
             &snap.as_deref().cloned(),
             cli_args.standalone,
             world_dim,
-            chunks_drawn,
+            draw_stats.chunks_drawn,
             terrain_chunks.len(),
         );
         ui::draw();
