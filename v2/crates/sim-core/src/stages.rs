@@ -391,6 +391,12 @@ fn settling_reserve(econ: &EconParams, ph: &Phenotype) -> i64 {
 /// the body's POST-growth cell count — it drives `base_metab_lump`, the Kleiber lump the body pays
 /// AFTER this grow. Every caller passes `n = grown.0 + 1` alongside the matching (pre-growth) `ph`,
 /// so the two never silently desync.
+///
+/// **Sanctioned second caller pattern (P-2b #448, critic F4):** `5a_provision`'s `survival_floor`
+/// for a MATURE parent (`g_extra=0`) calls this with `n = grown.0` (NOT `grown.0 + 1`) — a
+/// deliberate exception to the invariant above. It is numerically sound: a mature parent has
+/// `grown.0 == module_cell_count` (fully materialised), so `ph` and `n` already agree at the
+/// current body — there is no post-growth state to desync from, because it isn't growing.
 pub fn grow_reserve(econ: &EconParams, ph: &Phenotype, g: &Genome, n: i64) -> i64 {
     2 * window_drain(econ, ph, g, n) + settling_reserve(econ, ph)
 }
@@ -398,8 +404,7 @@ pub fn grow_reserve(econ: &EconParams, ph: &Phenotype, g: &Genome, n: i64) -> i6
 /// P-2a (#442): `grow_reserve` + `e_cell`, the still-growing body's total energy threshold to pay
 /// for one more cell AND exit the grow with a full window of buffer (critic F160 — derived from
 /// `grow_reserve` so the reserve is structural, not a coincidental duplicate). P-2b's
-/// `survival_floor` calls this for the still-growing-donor case.
-#[allow(dead_code)] // unused THIS slice — P-2b's survival_floor is the first caller (F160).
+/// `survival_floor` calls this for the still-growing-donor case (P-2b, #448).
 pub(crate) fn grow_threshold(econ: &EconParams, ph: &Phenotype, g: &Genome, grown: i64) -> i64 {
     econ.e_cell + grow_reserve(econ, ph, g, grown + 1)
 }
@@ -429,6 +434,123 @@ pub fn grow_gate(econ: &EconParams, energy: i64, prov: i64, reserve: i64) -> Gro
     }
 }
 
+// ── Stage 5a: Provision — P-2b (#448): a parent transfers energy per-tick from its own liquid
+//    reserve into its still-growing offspring's non-liquid Provisioned bank, spent ONLY by
+//    stage_grow (5b) on building cells (the F3/F5 firewall: never the child's liquid Energy).
+//    PINNED after Metabolism, BEFORE Grow — so a fresh grant is available to `stage_grow` the SAME
+//    tick (all-or-nothing grants make `prov` exactly the shortfall, so 5b drains the bank to 0 in
+//    the same tick, by construction — no death/maturity strand possible, F131/F133). Gated on
+//    `enable_provision`, runs on the metabolism cadence (like `stage_grow`) — the child can only
+//    CONVERT provision on metab ticks, so a per-tick stage would be `metab_period×` the work for
+//    zero economic difference. ──────────────────────────────────────────────────────────────────
+pub fn stage_provision(
+    econ: Res<EconParams>,
+    clock: Res<SimClock>,
+    mut ledger: ResMut<EnergyLedger>,
+    mut q: Query<(Entity, &Genome, &Phenotype, &Grown, &mut Energy, Option<&Parent>, Option<&mut Provisioned>)>,
+) {
+    if !econ.enable_provision {
+        return;
+    }
+    let n = econ.metab_period.max(1);
+    if !clock.tick.is_multiple_of(n) {
+        return; // same cadence as stage_grow — a still-growing child converts on metab ticks only.
+    }
+
+    // ONE sorted pass, grouped by parent (critic F1/F8 — NOT a nested O(N_parents·N_children)
+    // scan). Collect every still-growing, Parent-carrying child whose grow_gate reads BlockedCell
+    // (cannot self-fund THIS tick's cell — F129/F130): `BlockedLump` is skipped (the gate keeps
+    // `energy >= reserve`, so it cannot convert a bank anyway) and `Grow` is skipped (its need is 0
+    // — a forced grant would leave a bank the same-tick 5b does NOT consume, breaking the
+    // same-tick-drain invariant, F118/F141).
+    let mut candidates: Vec<(u64, i64, u64, Entity, Entity)> = Vec::new(); // (parent_bits, need, child_bits, parent_e, child_e)
+    for (child_e, g, ph, grown, energy, parent, provisioned) in &q {
+        let Some(parent) = parent else { continue }; // founders carry no Parent — not a candidate
+        let target = ph.graph.growth_cells.len() as i64;
+        if (grown.0 as i64) >= target {
+            continue; // mature — nothing to fund
+        }
+        let reserve = grow_reserve(&econ, ph, g, grown.0 as i64 + 1);
+        let prov = provisioned.as_ref().map_or(0, |p| p.0);
+        let gate = grow_gate(&econ, energy.0, prov, reserve);
+        if gate != GrowGate::BlockedCell {
+            continue;
+        }
+        // A `BlockedCell` child has `energy >= reserve` ⇒ shortfall ≤ e_cell (critic-derived bound).
+        let need = (econ.e_cell + reserve - energy.0 - prov).max(0);
+        candidates.push((parent.0.to_bits(), need, child_e.to_bits(), parent.0, child_e));
+    }
+    // SINGLE sort key `(parent_bits, need, child_bits)` (critic F152) — groups by parent, then
+    // smallest-need-first within a group (tiebreak child_bits), a TOTAL order ⇒ the grant set is
+    // deterministic and parent-order-invariant.
+    candidates.sort_unstable_by_key(|&(parent_bits, need, child_bits, _, _)| (parent_bits, need, child_bits));
+
+    let mut i = 0;
+    while i < candidates.len() {
+        let parent_bits = candidates[i].0;
+        let parent_e = candidates[i].3;
+        let mut j = i;
+        while j < candidates.len() && candidates[j].0 == parent_bits {
+            j += 1;
+        }
+
+        // Read the parent's info ONCE per group (critic F1 — the budget is computed once, not
+        // re-derived per child). A stale/despawned parent (`q.get` → `Err`) grants nothing to its
+        // whole group — detected at READ, never dereferenced blindly.
+        if let Ok((_, parent_g, parent_ph, parent_grown, parent_energy, _, _)) = q.get(parent_e) {
+            // `grant_pool` reserves the SURVIVAL floor only (critic F113 — load-bearing: reserving
+            // the division cost would make the mechanic INERT by algebra, since division is
+            // unbounded-rate). Reserve the growth headroom ONLY if the parent is ITSELF still
+            // growing (critic F121 — a MATURE parent never spends `e_cell` on its own growth).
+            let parent_target = parent_ph.graph.growth_cells.len() as i64;
+            let g_extra: i64 = if (parent_grown.0 as i64) < parent_target { 1 } else { 0 };
+            let survival_floor = if g_extra == 1 {
+                // Still-growing parent: LITERALLY its own grow gate (critic F160 structural
+                // identity) — never drops below the threshold it needs to keep growing itself.
+                grow_threshold(&econ, parent_ph, parent_g, parent_grown.0 as i64)
+            } else {
+                // Mature parent (critic F4): n = grown.0, the sanctioned exception documented on
+                // `grow_reserve` above — two metab-windows of upkeep, no growth headroom.
+                grow_reserve(&econ, parent_ph, parent_g, parent_grown.0 as i64)
+            };
+            let grant_pool = (parent_energy.0 - survival_floor).max(0);
+            // `provision_rate` is a `0..=256` FRACTION of `grant_pool` (critic F110), NOT raw
+            // energy/tick.
+            let rate = parent_g.provision_rate as i64;
+            let mut running_budget = rate * grant_pool / 256;
+
+            // Fund SMALLEST-need-FIRST (critic F146 — already the candidates' sort order within
+            // this group) ALL-OR-NOTHING (critic F131/F133): grant `t = need` iff
+            // `running_budget >= need`, else skip entirely — the parent can never overspend to
+            // negative (critic F1).
+            let mut grants: Vec<(Entity, i64)> = Vec::new();
+            let mut total_granted: i64 = 0;
+            for &(_, need, _, _, child_e) in &candidates[i..j] {
+                if need > 0 && running_budget >= need {
+                    running_budget -= need;
+                    total_granted += need;
+                    grants.push((child_e, need));
+                }
+            }
+
+            if total_granted > 0 {
+                if let Ok((_, _, _, _, mut parent_energy_mut, _, _)) = q.get_mut(parent_e) {
+                    parent_energy_mut.0 -= total_granted;
+                }
+                // The ON-arm DOSE (critic F107) — P-3 reads this to distinguish "mechanism didn't
+                // fire" (dose≈0) from "fired, didn't help" (dose large, no effect).
+                ledger.provision_granted_total += total_granted as u64;
+                for (child_e, t) in grants {
+                    if let Ok((_, _, _, _, _, _, Some(prov))) = q.get_mut(child_e) {
+                        prov.0 += t;
+                    }
+                }
+            }
+        }
+        i = j;
+    }
+}
+
 // ── Stage 5b: Grow — P-1 propagule growth primitive (#429), P-2a (#442) reserve/gate refactor.
 //    PINNED immediately after Metabolism, before Reproduction, running ONLY on metabolism ticks
 //    (critic F30/F4 — a grow step firing off that cadence could grow on a no-bill tick, so the very
@@ -441,7 +563,7 @@ pub fn stage_grow(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
     mut ledger: ResMut<EnergyLedger>,
-    mut q: Query<(&Genome, &mut Phenotype, &mut Grown, &mut Energy)>,
+    mut q: Query<(&Genome, &mut Phenotype, &mut Grown, &mut Energy, Option<&mut Provisioned>)>,
 ) {
     if !econ.enable_propagule {
         return;
@@ -450,12 +572,21 @@ pub fn stage_grow(
     if !clock.tick.is_multiple_of(n) {
         return; // same cadence as stage_metabolism — the reserve check below assumes it.
     }
-    for (g, mut ph, mut grown, mut energy) in &mut q {
+    for (g, mut ph, mut grown, mut energy, mut provisioned) in &mut q {
         // `growth_cells.len()` is the decoded TARGET N — invariant across `rebuild_prefix` calls
         // (it always carries the FULL decode), unlike `module_cell_count`'s sum (which shrinks to
         // the materialised prefix).
         let target = ph.graph.growth_cells.len() as i64;
         if (grown.0 as i64) >= target {
+            // P-2b (#448, critic F131/F133): all-or-nothing grants (5a) make the bank provably 0
+            // at every maturity boundary (5a's grant is EXACTLY the shortfall, drained same-tick by
+            // 5b) — this debug_assert documents the invariant; it cannot silently mask a strand
+            // because all-or-nothing makes a nonzero bank at maturity structurally impossible.
+            debug_assert!(
+                provisioned.as_deref().is_none_or(|p| p.0 == 0),
+                "stage_grow: mature body (grown={} >= target={}) still carries a Provisioned bank \
+                 (F131/F133 same-tick-drain invariant violated)", grown.0, target,
+            );
             continue;
         }
         // Reserve covers ALL FOUR deterministic per-tick drains over a 2-metab-window horizon,
@@ -463,20 +594,26 @@ pub fn stage_grow(
         // keyed to repro_bar (i64::MAX for a germ-less body would overflow; a repro-first order
         // would starve growth of any surplus, F34/F35).
         let reserve = grow_reserve(&econ, &ph, g, grown.0 as i64 + 1);
-        // `prov=0` this slice (no `Provisioned` component yet, F2b out of scope) — degenerates to
-        // the P-1 liquid gate at the wider reserve.
-        let gate = grow_gate(&econ, energy.0, 0, reserve);
+        // P-2b (#448): pass the REAL bank into the gate — `0` for founders (no `Provisioned`) and
+        // for every entity when `enable_provision=false` (byte-identical to P-2a).
+        let prov = provisioned.as_deref().map_or(0, |p| p.0);
+        let gate = grow_gate(&econ, energy.0, prov, reserve);
         ledger.grow_step_counts[gate as usize] += 1;
         if gate == GrowGate::Grow {
-            // Liquid-first payment down to the reserve (critic F129); bank second — `bank_part` is
-            // an explicit term (0 this slice, since `prov=0` above), NOT folded away, so P-2b's only
-            // change here is to actually withdraw `bank_part` from `Provisioned` — the ledger
-            // bookkeeping (`liquid_part + bank_part`) already has the right shape and needs no
-            // rewrite (PM F1: booking `dissipated` off a bare `econ.e_cell` constant instead of the
-            // two parts is the exact drift a future prov>0 wire would silently re-open).
+            // Liquid-first payment down to the reserve (critic F129); bank second. Liquid-first is
+            // preserved by `liquid_part = min(e_cell, energy − reserve).max(0)` — post-growth
+            // liquid `= max(reserve, energy − e_cell)`, IDENTICAL to a self-funding twin's, so
+            // provisioning frees no liquid (the F3/F5 firewall holds against fungibility, critic
+            // F149 — carried by `grant == shortfall` at the 5a seam, not by this payment order).
             let liquid_part = (energy.0 - reserve).min(econ.e_cell).max(0);
             let bank_part = econ.e_cell - liquid_part;
             energy.0 -= liquid_part;
+            // P-2b: withdraw the bank_part actually spent — the ONLY change to this payment shape
+            // (P-2a's shape already had the `liquid_part`/`bank_part` split + the `dissipated`
+            // bookkeeping; this just makes the withdraw real for a nonzero bank).
+            if let Some(p) = provisioned.as_deref_mut() {
+                p.0 -= bank_part;
+            }
             grown.0 += 1;
             if (grown.0 as i64) == target {
                 ledger.maturations_total += 1;
@@ -1178,7 +1315,9 @@ pub fn stage_predation(
     econ: Res<EconParams>,
     mut ledger: ResMut<EnergyLedger>,
     field: ResMut<FieldRes>,  // C′: dead prey → detritus or substrate (currently unused in P-2a)
-    mut q: Query<(Entity, &Position, &mut Energy, &Genome, &Phenotype)>,
+    // P-2b (#448): `&Grown` + `Option<&mut Provisioned>` ADDED (critic requirement) — `&Phenotype`
+    // is ALREADY here (F67/F67b), so `growth_cells.len()` for the `growing` predicate is free.
+    mut q: Query<(Entity, &Position, &mut Energy, &Genome, &Phenotype, &Grown, Option<&mut Provisioned>)>,
     mut commands: Commands,
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
@@ -1198,7 +1337,7 @@ pub fn stage_predation(
         if spec.base_hazard > 0 && spec.size_refuge.is_some() {
             let refuge = spec.size_refuge.unwrap();
             // Collect all entities in entity-id order (R14).
-            let mut entity_list: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _)| (e.to_bits(), e)).collect();
+            let mut entity_list: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _, _, _)| (e.to_bits(), e)).collect();
             entity_list.sort_unstable_by_key(|x| x.0);
 
             for (_bits, entity) in entity_list {
@@ -1207,7 +1346,7 @@ pub fn stage_predation(
 
                 // Read entity's energy and body size.
                 let (energy_val, body_size, refuge_mass) = match q.get(entity) {
-                    Ok((_, _, energy, _, ph)) => {
+                    Ok((_, _, energy, _, ph, _, _)) => {
                         let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
                         let refuge_mass = if econ.division_of_labor {
                             ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
@@ -1228,9 +1367,12 @@ pub fn stage_predation(
                 let actual_drain = drain;
 
                 // Apply drain and route to dissipation.
-                if let Ok((_, _, mut energy, _, _)) = q.get_mut(entity) {
+                if let Ok((_, _, mut energy, _, ph, grown, mut provisioned)) = q.get_mut(entity) {
                     energy.0 -= actual_drain;
                     if energy.0 <= 0 {
+                        let growing = (grown.0 as i64) < ph.graph.growth_cells.len() as i64;
+                        count_death(&mut ledger, DeathChannel::Hazard, growing);
+                        release_provisioned(&mut ledger, provisioned.as_deref_mut(), DeathChannel::Hazard);
                         commands.entity(entity).despawn();
                         ledger.lost += energy.0.max(0); // 0 at death
                     }
@@ -1253,7 +1395,7 @@ pub fn stage_predation(
         // 1. Gather all entities with body size, grouped by cell.
         let mut cells_universal: std::collections::BTreeMap<usize, Vec<(u64, Entity, i64)>> =
             std::collections::BTreeMap::new();
-        for (e, pos, _, _g, ph) in &q {
+        for (e, pos, _, _g, ph, _, _) in &q {
             let cell_idx = field.0.cell_index(pos.0);
             let body_size: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
             cells_universal.entry(cell_idx).or_insert_with(Vec::new).push((e.to_bits(), e, body_size));
@@ -1283,7 +1425,7 @@ pub fn stage_predation(
                 // The trait term is driven by combat_trait which stays 0 under universal mode (founder never mutates it),
                 // so we can also use combat_trait_scale=0 in driver_config to make the bite independent of size.
                 let pred_genome = match q.get(*pred_e) {
-                    Ok((_, _, _, genome, _)) => {
+                    Ok((_, _, _, genome, _, _, _)) => {
                         let mut g = genome.clone();
                         g.size = 0; // neutral predator strength: bite governed by refuge only
                         g
@@ -1294,7 +1436,7 @@ pub fn stage_predation(
                 // Resolve each prey in id order (F5: live energy read per prey, post-drain visible to next).
                 for (_, prey_e, _) in &prey_pool {
                     let (prey_energy_val, prey_body_size) = match q.get(*prey_e) {
-                        Ok((_, _, energy, _, ph)) => {
+                        Ok((_, _, energy, _, ph, _, _)) => {
                             let body: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
                             (energy.0.max(0), body.max(1))
                         }
@@ -1308,14 +1450,17 @@ pub fn stage_predation(
                     let outcome = resolve_encounter(&pred_genome, prey_energy_val, prey_body_size, spec);
 
                     // Drain prey and credit predator (conservation invariant re-proven per prey).
-                    if let Ok((_, _, mut prey_energy, _, _)) = q.get_mut(*prey_e) {
+                    if let Ok((_, _, mut prey_energy, _, ph, grown, mut provisioned)) = q.get_mut(*prey_e) {
                         prey_energy.0 -= outcome.prey_loss;
                         if prey_energy.0 <= 0 {
+                            let growing = (grown.0 as i64) < ph.graph.growth_cells.len() as i64;
+                            count_death(&mut ledger, DeathChannel::Predation, growing);
+                            release_provisioned(&mut ledger, provisioned.as_deref_mut(), DeathChannel::Predation);
                             commands.entity(*prey_e).despawn();
                             ledger.lost += prey_energy.0.max(0); // 0
                         }
                     }
-                    if let Ok((_, _, mut pred_energy, _, _)) = q.get_mut(*pred_e) {
+                    if let Ok((_, _, mut pred_energy, _, _, _, _)) = q.get_mut(*pred_e) {
                         pred_energy.0 = (pred_energy.0 + outcome.predator_gain).max(0);
                     }
                     ledger.dissipated += outcome.dissipated;
@@ -1329,7 +1474,7 @@ pub fn stage_predation(
 
     // Gather all entities with their combat_trait, sorted by id (combat-trait split path, byte-identical to P-2a/D-1).
     let mut entity_list: Vec<(u64, Entity, Vec2Fixed, i32)> = q.iter()
-        .map(|(e, pos, _, g, _)| (e.to_bits(), e, pos.0, g.combat_trait))
+        .map(|(e, pos, _, g, _, _, _)| (e.to_bits(), e, pos.0, g.combat_trait))
         .collect();
     entity_list.sort_unstable_by_key(|x| x.0);
 
@@ -1346,6 +1491,11 @@ pub fn stage_predation(
         }
     }
 
+    // P-2b (#448, critic F7): STAGE-SCOPE booked set — OUTSIDE the cell/predator loops, so it
+    // survives across predators (the aggregate branch rebuilds `prey_pool` per predator, but a
+    // despawn-pending corpse stays `q.get`-resolvable to the NEXT predator in a multi-predator
+    // cell; a per-pool-scoped flag would double-book it once per predator).
+    let mut booked: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     // Process each cell.
     for (_cell, (mut predators, prey_candidates)) in cells {
         if predators.is_empty() {
@@ -1373,7 +1523,7 @@ pub fn stage_predation(
             // Get predator genome for encounter resolution.
             let pred_genome = {
                 match q.get(pred_e) {
-                    Ok((_, _, _, genome, _)) => genome.clone(),
+                    Ok((_, _, _, genome, _, _, _)) => genome.clone(),
                     Err(_) => continue,
                 }
             };
@@ -1387,7 +1537,7 @@ pub fn stage_predation(
                 // body size, in entity-id order (deterministic, R14) — NOT a pool aggregate.
                 for (_, prey_e, _) in &prey_pool {
                     let (prey_energy_val, prey_body_size) = match q.get(*prey_e) {
-                        Ok((_, _, energy, _, ph)) => {
+                        Ok((_, _, energy, _, ph, _, _)) => {
                             let body: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum();
                             (energy.0.max(0), body.max(1))
                         }
@@ -1404,15 +1554,18 @@ pub fn stage_predation(
                         spec,
                     );
 
-                    if let Ok((_, _, mut prey_energy, _, _)) = q.get_mut(*prey_e) {
+                    if let Ok((_, _, mut prey_energy, _, ph, grown, mut provisioned)) = q.get_mut(*prey_e) {
                         prey_energy.0 -= outcome.prey_loss;
                         if prey_energy.0 <= 0 {
                             // At death, energy=0, recycled=0 (no detritus from dead prey here).
+                            let growing = (grown.0 as i64) < ph.graph.growth_cells.len() as i64;
+                            count_death(&mut ledger, DeathChannel::Predation, growing);
+                            release_provisioned(&mut ledger, provisioned.as_deref_mut(), DeathChannel::Predation);
                             commands.entity(*prey_e).despawn();
                             ledger.lost += prey_energy.0.max(0); // 0
                         }
                     }
-                    if let Ok((_, _, mut pred_energy, _, _)) = q.get_mut(pred_e) {
+                    if let Ok((_, _, mut pred_energy, _, _, _, _)) = q.get_mut(pred_e) {
                         pred_energy.0 = (pred_energy.0 + outcome.predator_gain).max(0);
                     }
                     ledger.dissipated += outcome.dissipated;
@@ -1425,29 +1578,46 @@ pub fn stage_predation(
             // order. `prey_body_size` is unused by `resolve_encounter` when `size_refuge=None`, so
             // the placeholder `1` below has no effect on the outcome.
             let prey_energy_agg: i64 = prey_pool.iter().map(|(_, prey_e, _)| {
-                q.get(*prey_e).map(|(_, _, energy, _, _)| energy.0.max(0)).unwrap_or(0)
+                q.get(*prey_e).map(|(_, _, energy, _, _, _, _)| energy.0.max(0)).unwrap_or(0)
             }).sum();
 
             let outcome = resolve_encounter(&pred_genome_for_encounter, prey_energy_agg, 1, spec);
 
             // Drain prey_loss from prey in entity-id order, handling deaths.
+            // P-2b (#448, critic F13/F15/F17): rebind the pool tuple's discarded `u64` field
+            // (`prey_bits`) — needed by the `booked` guard below.
             let mut remaining_loss = outcome.prey_loss;
-            for (_, prey_e, _) in &prey_pool {
+            for (prey_bits, prey_e, _) in &prey_pool {
                 if remaining_loss <= 0 {
                     break;
                 }
 
-                // Get prey's current energy.
-                let prey_current = q.get(*prey_e).map(|(_, _, energy, _, _)| energy.0).unwrap_or(0);
+                // Get prey's current energy. Sign contract (critic F10/F11): no pre-6c stage may
+                // leave `energy.0 < 0` — this read has only `unwrap_or(0)`, no clamp, so the
+                // debug_assert IS the backstop (release-mode: silently trusts the invariant).
+                let prey_current = q.get(*prey_e).map(|(_, _, energy, _, _, _, _)| energy.0).unwrap_or(0);
+                debug_assert!(prey_current >= 0, "6c: negative entry energy");
                 let drained = prey_current.min(remaining_loss);
                 remaining_loss -= drained;
 
                 // Apply drainage.
-                if let Ok((_, _, mut prey_energy, _, _)) = q.get_mut(*prey_e) {
+                if let Ok((_, _, mut prey_energy, _, ph, grown, mut provisioned)) = q.get_mut(*prey_e) {
                     prey_energy.0 -= drained;
 
-                    // If prey dies, handle death routing (C′ pattern).
+                    // If prey dies, handle death routing (C′ pattern). P-2b (#448, critic F1/F5/F7):
+                    // `booked` (STAGE-SCOPE, spans every predator/cell this tick) guards the LIVE
+                    // count_death/release_provisioned against double-booking the SAME corpse when a
+                    // second predator's rebuilt `prey_pool` still contains it (the deferred despawn
+                    // leaves it `q.get`-resolvable until the sync point) — despawn itself stays
+                    // UNCONDITIONAL on `prey_energy.0 <= 0` (byte-identical to pre-P-2b: a redundant
+                    // despawn command on an already-queued entity is pre-existing behaviour, not
+                    // something this slice changes).
                     if prey_energy.0 <= 0 {
+                        if booked.insert(*prey_bits) {
+                            let growing = (grown.0 as i64) < ph.graph.growth_cells.len() as i64;
+                            count_death(&mut ledger, DeathChannel::Predation, growing);
+                            release_provisioned(&mut ledger, provisioned.as_deref_mut(), DeathChannel::Predation);
+                        }
                         // At death, energy=0, recycled=0 (no detritus from dead prey here).
                         // Mark for despawn.
                         commands.entity(*prey_e).despawn();
@@ -1457,7 +1627,7 @@ pub fn stage_predation(
             }
 
             // Apply predator gain.
-            if let Ok((_, _, mut pred_energy, _, _)) = q.get_mut(pred_e) {
+            if let Ok((_, _, mut pred_energy, _, _, _, _)) = q.get_mut(pred_e) {
                 pred_energy.0 = (pred_energy.0 + outcome.predator_gain).max(0);
             }
             ledger.dissipated += outcome.dissipated;
@@ -1575,19 +1745,22 @@ pub fn stage_birth_death(
     mut field: ResMut<FieldRes>,  // C-2: receive recycled body energy → substrate (layer 0)
     mut repro: ResMut<ReproEvents>,
     mut commands: Commands,
-    mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId, &Phenotype)>,
+    // P-2b (#448): `Option<&mut Provisioned>` ADDED — the d0/starvation death sites need it
+    // (`&Phenotype` is ALREADY here, so `growth_cells.len()` for the `growing` predicate is free).
+    mut q: Query<(Entity, &Position, &mut Energy, &Genome, &SpeciesId, &Phenotype, &Grown, Option<&mut Provisioned>)>,
     mut qmin: Query<&mut MineralQuota>,  // D′-3a: separate query (avoids borrow conflict)
     #[cfg(feature = "perf")] mut wc: ResMut<WorkCounters>,
 ) {
     use crate::params::{D0_MASK, RECYCLE_DEN};
     let has_mineral = econ.mineral_layer.is_some();
     repro.parents.clear();
-    let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _, _)| (e.to_bits(), e)).collect();
+    let mut ents: Vec<(u64, Entity)> = q.iter().map(|(e, _, _, _, _, _, _, _)| (e.to_bits(), e)).collect();
     ents.sort_unstable_by_key(|x| x.0);
     for (bits, e) in ents {
         #[cfg(feature = "perf")]
         { wc.birth_death_iters += 1; }
-        let (_, pos, mut energy, genome, species, ph) = q.get_mut(e).expect("entity present");
+        let (_, pos, mut energy, genome, species, ph, grown, mut provisioned) = q.get_mut(e).expect("entity present");
+        let growing = (grown.0 as i64) < ph.graph.growth_cells.len() as i64;
 
         // ── C-1: background death (d0) — FIRST check, before starvation and division. ──────────
         // A d0-killed agent does not also divide this tick; the counter-RNG draw is pure per-
@@ -1602,7 +1775,17 @@ pub fn stage_birth_death(
                 // lost_here → ledger.lost (first real source for this bucket).
                 // Conservation: agents_total −E; field_staging +recycled (live in next solve());
                 //   ledger.lost +(E−recycled); residual unchanged (verified at tick boundary).
-                let e_body = energy.0;
+                // P-2b (#448, critic F151): d0 RECYCLES the bank into the body energy (not lost) —
+                // `e_body` folds in `Provisioned` before the recycle split, R15-neutral. The
+                // `provisioned_released_total` tripwire still bumps (F148) even though this path
+                // does its release INLINE (not via `release_provisioned`, which books to `lost`).
+                let prov_bank = provisioned.as_deref().map_or(0, |p| p.0);
+                let e_body = energy.0 + prov_bank;
+                if let Some(p) = provisioned.as_deref_mut() {
+                    p.0 = 0;
+                }
+                ledger.provisioned_released_total += prov_bank as u64;
+                count_death(&mut ledger, DeathChannel::Background, growing);
                 let recycled = econ.recycle_num * e_body / RECYCLE_DEN; // truncating — remainder → lost
                 let lost_here = e_body - recycled; // = E − ⌊recycle·E⌋; every eu in exactly one bucket
                 if recycled > 0 {
@@ -1647,6 +1830,10 @@ pub fn stage_birth_death(
             // Death (starvation): metabolism clamps energy ≥ 0 (stages.rs stage_metabolism), so
             // energy.0 = 0 exactly here. Recycle split: floor(recycle_num × 0 / RECYCLE_DEN) = 0.
             // ledger.lost += 0 is a no-op; no field deposit; conservation intact (as before C).
+            // P-2b (#448): the DEFENSIVE release — all-or-nothing grants (5a) make the bank
+            // provably 0 here (same-tick-drain, F131/F133); kept as the R15 falsifiability tripwire.
+            count_death(&mut ledger, DeathChannel::Starvation, growing);
+            release_provisioned(&mut ledger, provisioned.as_deref_mut(), DeathChannel::Starvation);
             let recycled = econ.recycle_num * energy.0 / RECYCLE_DEN; // = 0
             ledger.lost += energy.0 - recycled;                        // = 0
             // D′-3a: starvation death — recycle mineral quota (same path as d0 death).
@@ -1719,7 +1906,7 @@ pub fn stage_birth_death(
             if energy.0 >= repro_bar && mineral_gate_passes {
                 let pos_c = *pos;
                 let child_genome =
-                    genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, econ.enable_body_plan, econ.enable_propagule);
+                    genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.reg_gain_max, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, &MutationGates::from_econ(&econ));
                 let species_c = *species;
 
                 match child_genome.decode(&econ) {
@@ -1763,7 +1950,12 @@ pub fn stage_birth_death(
                                 }
                             }
                             repro.parents.insert(bits);
-                            if has_mineral {
+                            // P-2b (#448, critic impl-note): the spawn bundle is already 14
+                            // components (15 with mineral) and Bevy's `Bundle` tuple impl caps at
+                            // 15 — Parent/Provisioned are added via a SEPARATE `.insert()` on the
+                            // returned `EntityCommands`, not inlined into the tuple, so a 15-slot
+                            // bundle never overflows to 16/17.
+                            let mut child_ec = if has_mineral {
                                 commands.spawn((
                                     Position(pos_c.0),
                                     PositionNext(pos_c.0),
@@ -1780,7 +1972,7 @@ pub fn stage_birth_death(
                                     MineralQuota(0),
                                     Grown(grown),
                                     PendingSpeciation,
-                                ));
+                                ))
                             } else {
                                 commands.spawn((
                                     Position(pos_c.0),
@@ -1797,7 +1989,10 @@ pub fn stage_birth_death(
                                     BrainOutput::zeroed(),
                                     Grown(grown),
                                     PendingSpeciation,
-                                ));
+                                ))
+                            };
+                            if econ.enable_provision {
+                                child_ec.insert((Parent(e), Provisioned(0)));
                             }
                         }
                         // else: cannot yet afford the N-scaled endowment (critic F2) — NO clamp, NO
@@ -1826,7 +2021,7 @@ pub fn stage_birth_death(
             }
             let pos_c = *pos;
             let child_genome =
-                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), econ.enable_variable_length, econ.evolve_body_size, econ.enable_oxygen, econ.ambient_tolerance.is_some(), econ.enable_mutation_load, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, econ.enable_body_plan, econ.enable_propagule);
+                genome.mutate(seed_fold(clock.seed, &[SALT_MUT, bits, clock.tick]), econ.n_energy_layers, econ.reg_gain_max, econ.mut_load_del_num, econ.mut_load_del_den, econ.mut_load_ben_num, econ.mut_load_ben_den, econ.gdev_cap, &MutationGates::from_econ(&econ));
             let species_c = *species;
 
             // E-1/E-5a/E-5b: decode-seam gate. Ф0 always returns Some; the five existing configs
@@ -1867,7 +2062,9 @@ pub fn stage_birth_death(
             // is no partial migration where BrainState moves but BrainOutput does not. All per-slot
             // buffers are therefore always in sync; the "forgot to move h_new" class of bug cannot
             // occur. The zeroing here covers the initial allocation, not partial row-updates.
-            if has_mineral {
+            // P-2b (#448, critic impl-note): Parent/Provisioned via a separate `.insert()` (not
+            // inlined in the tuple) — the bundle is already at the 15-component Bundle cap.
+            let mut child_ec = if has_mineral {
                 commands.spawn((
                     Position(pos_c.0),
                     PositionNext(pos_c.0),
@@ -1885,7 +2082,7 @@ pub fn stage_birth_death(
                     Grown(grown),
                     // M5: marks child for speciation check in Sim::process_pending_speciation()
                     PendingSpeciation,
-                ));
+                ))
             } else {
                 commands.spawn((
                     Position(pos_c.0),
@@ -1904,7 +2101,10 @@ pub fn stage_birth_death(
                     // M5: marks child for speciation check in Sim::process_pending_speciation()
                     // (post-stage, outside the ECS system so SpeciationState stays off the world).
                     PendingSpeciation,
-                ));
+                ))
+            };
+            if econ.enable_provision {
+                child_ec.insert((Parent(e), Provisioned(0)));
             }
         }
     }

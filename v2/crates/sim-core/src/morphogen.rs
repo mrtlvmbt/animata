@@ -272,7 +272,7 @@ pub fn morphogen(genome: &Genome, spec: &MorphogenSpec) -> Gradient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Genome;
+    use crate::{Genome, MutationGates};
 
     /// E-2 fixture — respects the provisional perf ceiling `G_dev ≤ 4`, `N_dev ≤ 16` (PR states the
     /// chosen values). Shift ≥ 3 keeps the 4-neighbor stencil CFL-stable (mirrors M2's fields crate).
@@ -322,7 +322,7 @@ mod tests {
     fn different_genome_diverges() {
         let spec = fixture_spec();
         let founder = morphogen(&Genome::founder(1), &spec);
-        let mutated = morphogen(&Genome::founder(1).mutate(0xDEAD_BEEF, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false), &spec);
+        let mutated = morphogen(&Genome::founder(1).mutate(0xDEAD_BEEF, 1, 0, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false }), &spec);
         // Not asserting inequality unconditionally (mutation could no-op on `size`); assert the
         // function actually depends on the genome by varying `size` directly.
         let mut bigger = Genome::founder(1);

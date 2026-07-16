@@ -168,6 +168,58 @@ pub struct Genome {
     /// `EconParams.enable_propagule=true` — non-propagule configs stay 0 forever (mutation gate
     /// prevents draw, hash gate prevents state inclusion), existing goldens byte-identical.
     pub n_propagule: i32,
+
+    // ── P-2b: provisioning (#448) ──────────────────────────────────────────────────────────────
+    /// Cold, evolvable `0..=256` FRACTION of a parent's `grant_pool` transferred per-parent-budget
+    /// tick to still-growing offspring's [`crate::components::Provisioned`] bank (critic F110 — a
+    /// fraction, not raw energy, so the whole meaningful range is ±1-traversable). `0` = OFF
+    /// sentinel (byte-identical to pre-P-2b: `5a_provision` grants nothing). Founder = 0. Mutated
+    /// only when `EconParams.enable_provision=true` AND NOT `provision_rate_locked` — non-provision
+    /// configs stay 0 forever (mutation gate prevents draw, hash gate prevents state inclusion),
+    /// existing goldens byte-identical.
+    pub provision_rate: i32,
+}
+
+/// P-2b (#448, critic F176): the boolean gates `Genome::mutate` reads, bundled into one named
+/// struct instead of trailing positional bools (a transposed pair of bools would type-check
+/// silently — the exact risk this struct exists to remove; field access cannot be transposed).
+/// Construct via [`MutationGates::from_econ`] at every production call site.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MutationGates {
+    pub has_light: bool,
+    pub has_predation: bool,
+    pub enable_variable_length: bool,
+    pub evolve_body_size: bool,
+    pub enable_oxygen: bool,
+    pub has_ambient_tolerance: bool,
+    pub enable_mutation_load: bool,
+    pub enable_body_plan: bool,
+    pub enable_propagule: bool,
+    pub enable_provision: bool,
+    pub provision_rate_locked: bool,
+    pub n_propagule_locked: bool,
+}
+
+impl MutationGates {
+    /// The ONE production constructor (`stage_birth_death` already holds `Res<EconParams>`) — reads
+    /// every gate off the SAME `econ` the rest of the stage uses, so a gate can never silently
+    /// diverge from the config actually driving the tick.
+    pub fn from_econ(econ: &crate::params::EconParams) -> Self {
+        MutationGates {
+            has_light: econ.light.is_some(),
+            has_predation: econ.predation.is_some(),
+            enable_variable_length: econ.enable_variable_length,
+            evolve_body_size: econ.evolve_body_size,
+            enable_oxygen: econ.enable_oxygen,
+            has_ambient_tolerance: econ.ambient_tolerance.is_some(),
+            enable_mutation_load: econ.enable_mutation_load,
+            enable_body_plan: econ.enable_body_plan,
+            enable_propagule: econ.enable_propagule,
+            enable_provision: econ.enable_provision,
+            provision_rate_locked: econ.provision_rate_locked,
+            n_propagule_locked: econ.n_propagule_locked,
+        }
+    }
 }
 
 /// M7-a: graph-body COLD representation — the multicellular module lattice derived from
@@ -936,6 +988,8 @@ impl Genome {
             morphogen_spec: None,
             // P-1 (#429): founder is instant/full (sentinel 0) — byte-identical to pre-P-1 decode.
             n_propagule: 0,
+            // P-2b (#448): founder provisions nothing (OFF sentinel) — byte-identical to pre-P-2b.
+            provision_rate: 0,
         }
     }
 
@@ -961,6 +1015,15 @@ impl Genome {
             self.tol_breadth = 500;     // ±5°C moderate generalist
         }
         // If gate is None, both stay 0 (inert)
+        self
+    }
+
+    /// P-2b (#448): seed the founder's `n_propagule`/`provision_rate` from `EconParams`'s
+    /// `--set`-able `_init` fields — used ONCE at founder-spawn (`Sim::new`), mirroring
+    /// `with_ambient_tolerance`'s seam. Both default `0` ⇒ no-op ⇒ byte-identical to pre-P-2b.
+    pub fn with_provisioning_seed(mut self, n_propagule_init: i32, provision_rate_init: i32) -> Self {
+        self.n_propagule = n_propagule_init;
+        self.provision_rate = provision_rate_init;
         self
     }
 
@@ -991,7 +1054,19 @@ impl Genome {
     /// stays 0 forever — non-propagule configs never carry a non-zero value, keeping existing
     /// goldens byte-identical. Drawn LAST (after GA-LOAD) so every prior stream position is
     /// preserved (§5.2 stream hygiene).
-    pub fn mutate(&self, stream: u64, n_layers: usize, has_light: bool, reg_gain_max: i32, has_predation: bool, enable_variable_length: bool, evolve_body_size: bool, enable_oxygen: bool, has_ambient_tolerance: bool, enable_mutation_load: bool, mut_load_del_num: i32, mut_load_del_den: i32, mut_load_ben_num: i32, mut_load_ben_den: i32, gdev_cap: usize, enable_body_plan: bool, enable_propagule: bool) -> Genome {
+    ///
+    /// P-2b (#448, critic F176): the boolean gates are bundled into [`MutationGates`] (a NAMED
+    /// struct), not more trailing positional bools — `mutate` was already 17 positional args / 11
+    /// bare bools, and a transposed pair type-checks silently (byte-identical at the all-false
+    /// default, so no golden catches it; only the flag-on cloud arms would misbehave). Field access
+    /// is transposition-proof. Destructured immediately so the rest of this fn is unchanged (every
+    /// local name below matches the struct field name).
+    pub fn mutate(&self, stream: u64, n_layers: usize, reg_gain_max: i32, mut_load_del_num: i32, mut_load_del_den: i32, mut_load_ben_num: i32, mut_load_ben_den: i32, gdev_cap: usize, gates: &MutationGates) -> Genome {
+        let MutationGates {
+            has_light, has_predation, enable_variable_length, evolve_body_size, enable_oxygen,
+            has_ambient_tolerance, enable_mutation_load, enable_body_plan, enable_propagule,
+            enable_provision, provision_rate_locked, n_propagule_locked,
+        } = *gates;
         let mut g = self.clone();
         let max_layer = n_layers.saturating_sub(1) as i32;
         let traits: [(&mut i32, i32, i32); 8] = [
@@ -1483,12 +1558,32 @@ impl Genome {
         // Drawn LAST (after GA-LOAD) — preserves every prior draw stream position (§5.2). Clamped
         // to [0, gdev_cap²] (the largest possible decoded target under this config); the exact
         // per-genome affordable n_eff = min(n_propagule, target) is resolved at the birth seam.
+        // P-2b (#448, critic F172): `n_propagule_locked` SKIPS this locus (seed-and-lock) — else a
+        // seeded `n_propagule_init` substrate relaxes toward the `0` sentinel mid-run and the
+        // provisioning dose ladder's growth substrate evaporates.
         const SALT_PROPAGULE: u64 = 0x5052_4F50u64;
-        if enable_propagule {
+        if enable_propagule && !n_propagule_locked {
             let r = seed_fold(stream, &[SALT_PROPAGULE]);
             if (r & 0xFF) < self.mutation_rate as u64 {
                 let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
                 g.n_propagule = (g.n_propagule + delta).clamp(0, (gdev_cap * gdev_cap) as i32);
+            }
+        }
+
+        // P-2b (#448): provision_rate mutates only when enable_provision. Salt 0x5052_4F56 ("PROV").
+        // Drawn LAST (after n_propagule) — preserves every prior draw stream position (§5.2). A
+        // `0..=256` FRACTION of `grant_pool` (critic F110 — NOT raw energy/tick: a `[0,32]`-range
+        // raw-energy locus would make 0→useful an O(e_cell)-long ±1 walk untraversable by this
+        // ±1-clamped kernel; `0..=256` makes the whole meaningful range ±1-traversable, mirroring
+        // `photo_gain`). `provision_rate_locked` SKIPS this locus (seed-and-lock, same F165 argument
+        // as `n_propagule_locked` above) — else a seeded dose erodes toward the `0` plateau under
+        // direct fecundity selection and the dose-ladder rungs cannot be told apart from erosion.
+        const SALT_PROVISION: u64 = 0x5052_4F56u64;
+        if enable_provision && !provision_rate_locked {
+            let r = seed_fold(stream, &[SALT_PROVISION]);
+            if (r & 0xFF) < self.mutation_rate as u64 {
+                let delta = ((r >> 8) % 3) as i32 - 1; // -1, 0, +1
+                g.provision_rate = (g.provision_rate + delta).clamp(0, 256);
             }
         }
         g
@@ -1676,6 +1771,12 @@ impl Genome {
         if self.n_propagule != 0 {
             h = fnv_mix(h, self.n_propagule as u64);
         }
+        // P-2b (#448): fold provision_rate ONLY when non-zero (same pattern as n_propagule, above).
+        // Non-provision configs: provision_rate always 0 -> not folded -> checksums undisturbed,
+        // existing goldens byte-identical.
+        if self.provision_rate != 0 {
+            h = fnv_mix(h, self.provision_rate as u64);
+        }
         // V-1: fold the heritable GRN/morphogen spec by INTEGER CONTENTS, in a FIXED field order —
         // exactly like the existing i32 traits above, never the `Arc` pointer (CoW sharing is
         // transparent to the hash; two lineages with byte-identical spec CONTENTS hash the same
@@ -1791,9 +1892,9 @@ mod tests {
     #[test]
     fn mutation_is_deterministic_and_clamped() {
         let g = Genome::founder(2);
-        assert_eq!(g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false), g.mutate(123, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false));
+        assert_eq!(g.mutate(123, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false }), g.mutate(123, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false }));
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.mutate(s, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             assert!((0..=256).contains(&m.metabolism_eff));
             assert!((1..=32).contains(&m.size));
             assert!((0..=1).contains(&m.uptake_layer));
@@ -1804,19 +1905,19 @@ mod tests {
         }
         // With light, photo_gain can mutate (starts at 0, may go to 1 or stay 0).
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.mutate(s, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: true, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             assert!((0..=256).contains(&m.photo_gain), "photo_gain must be in [0,256]");
             assert!((-4..=4).contains(&m.reg_gain), "reg_gain must be in [-reg_gain_max, +reg_gain_max]");
         }
         // reg_gain_max=0 locks regulation OFF even when has_light=true.
         for s in 0..200u64 {
-            let m = g.mutate(s, 2, true, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.mutate(s, 2, 0, 0, 0, 0, 0, 4, &MutationGates { has_light: true, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             assert_eq!(m.reg_gain, 0, "reg_gain must stay 0 when reg_gain_max=0 (D′-2c lock)");
         }
         // L=1 bench path: layers clamped to 0.
         let g1 = Genome::founder(1);
         assert_eq!(g1.excrete_layer, 0);
-        let m1 = g1.mutate(0, 1, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let m1 = g1.mutate(0, 1, 0, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert_eq!(m1.uptake_layer, 0);
         assert_eq!(m1.excrete_layer, 0);
     }
@@ -1835,7 +1936,7 @@ mod tests {
         }
         // Also holds for a mutated genome.
         let g = Genome::founder(2);
-        let mutated = g.mutate(0xDEAD_BEEF, 2, true, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let mutated = g.mutate(0xDEAD_BEEF, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: true, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert_eq!(mutated.decode(&EconParams::default()), mutated.decode(&EconParams::default()), "decode deterministic on mutated genome");
     }
 
@@ -1858,7 +1959,7 @@ mod tests {
             "Phenotype::uptake_layer must equal Genome::uptake_layer for Ф0");
         // Also for mutated genome — projection stays 1:1 regardless of trait value.
         for s in 0..50u64 {
-            let m = g.mutate(s, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.mutate(s, 2, 0, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             let mph = m.decode(&EconParams::default()).expect("mutated Ф0 must decode to Some");
             assert_eq!(mph.uptake_layer, m.uptake_layer,
                 "1:1 projection must hold after mutation (seed={s})");
@@ -1895,14 +1996,14 @@ mod tests {
             "force_decode_none=true must make decode() return None (gate fires → spawn skipped)");
 
         // Mutated children inherit the flag (mutate copies *self) → entire lineage stays stillborn.
-        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let mutated_child = stillborn.mutate(0xDEAD_CAFE, 2, 0, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert!(mutated_child.force_decode_none,
             "force_decode_none must be inherited by mutate() so the entire lineage stays stillborn");
         assert!(mutated_child.decode(&EconParams::default()).is_none(),
             "inherited flag: child decode() also returns None (lineage-level stillbirth)");
 
         // Normal mutated child (force_decode_none=false) returns Some — mutation alone never triggers None.
-        let normal_child = g.mutate(0xDEAD_CAFE, 2, false, 0, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let normal_child = g.mutate(0xDEAD_CAFE, 2, 0, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert!(!normal_child.force_decode_none, "normal child must NOT inherit false as true");
         assert!(normal_child.decode(&EconParams::default()).is_some(), "normal child decode() must return Some");
     }
@@ -3145,7 +3246,7 @@ mod tests {
         
         for i in 0..100 {
             let seed = 0x1234_5678 + (i as u64);
-            g = g.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false, false);
+            g = g.mutate(seed, econ.n_energy_layers, econ.reg_gain_max, 0, 0, 0, 0, econ.gdev_cap, &MutationGates { has_light: econ.light.is_some(), has_predation: econ.predation.is_some(), enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: econ.ambient_tolerance.is_some(), enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             
             // If grn_spec exists, n_genes should stay at 2
             if let Some(spec) = &g.grn_spec {
@@ -3166,8 +3267,8 @@ mod tests {
         let econ = EconParams::default();
         
         // Mutate both with flag=false
-        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false, false);
-        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), false, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false, false);
+        let m1 = g1.mutate(seed, econ.n_energy_layers, econ.reg_gain_max, 0, 0, 0, 0, econ.gdev_cap, &MutationGates { has_light: econ.light.is_some(), has_predation: econ.predation.is_some(), enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: econ.ambient_tolerance.is_some(), enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
+        let m2 = g2.mutate(seed, econ.n_energy_layers, econ.reg_gain_max, 0, 0, 0, 0, econ.gdev_cap, &MutationGates { has_light: econ.light.is_some(), has_predation: econ.predation.is_some(), enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: econ.ambient_tolerance.is_some(), enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         
         // They should be byte-identical (determinism check)
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
@@ -3182,7 +3283,7 @@ mod tests {
         let g = Genome::founder(2); // No spec
         
         // Mutate with flag=true
-        let m = g.mutate(0x9999_9999, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let m = g.mutate(0x9999_9999, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         
         // Should still have no spec
         assert!(m.grn_spec.is_none(), "V-3-b: genome without spec should stay without spec");
@@ -3213,7 +3314,7 @@ mod tests {
         let mut found_growth = false;
         for i in 0..1000 {
             let seed = 0xABCD_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3253,7 +3354,7 @@ mod tests {
         // Find a seed that triggers duplication
         for i in 0..1000 {
             let seed = 0xFEED_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3293,7 +3394,7 @@ mod tests {
         
         for i in 0..1000 {
             let seed = 0xBEEF_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3345,7 +3446,7 @@ mod tests {
         // Find a seed that triggers duplication
         for i in 0..1000 {
             let seed = 0xCAFE_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false, false);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.reg_gain_max, 0, 0, 0, 0, econ.gdev_cap, &MutationGates { has_light: econ.light.is_some(), has_predation: econ.predation.is_some(), enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: econ.ambient_tolerance.is_some(), enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes > 2 {
@@ -3370,7 +3471,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1111_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-c: flag=false must keep n_genes constant (iteration {i})");
             }
@@ -3387,8 +3488,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let m1 = g1.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
+        let m2 = g2.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -3400,7 +3501,7 @@ mod tests {
     fn v3c_no_spec_no_indel() {
         // flag=true but grn_spec=None → no length change (Some-gated).
         let g = Genome::founder(2); // no spec
-        let m = g.mutate(0x2222_2222, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let m = g.mutate(0x2222_2222, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert!(m.grn_spec.is_none(), "V-3-c: genome without spec must stay without spec");
     }
 
@@ -3417,7 +3518,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x3333_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 // n_genes==3 alone doesn't prove indel-insert fired — V-3-b duplication also grows
                 // n_genes by 1 (with a NON-zero paralog copy). Distinguish by the novel gene's id:
@@ -3464,7 +3565,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x4444_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes == 2 {
                     let n = spec.n_genes;
@@ -3490,7 +3591,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x5555_0000 + (i as u64);
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 assert!(spec.n_genes >= 2, "V-3-c: n_genes must never breach the floor (iteration {i})");
             }
@@ -3507,7 +3608,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x6666_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &g.grn_spec {
                 let n = spec.n_genes;
                 assert_eq!(spec.weights.len(), n * n, "iteration {i}");
@@ -3529,7 +3630,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x7777_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &g.grn_spec {
                 let mut seen = std::collections::BTreeSet::new();
                 for &id in &spec.gene_ids {
@@ -3563,7 +3664,7 @@ mod tests {
 
         for i in 0..1000 {
             let seed = 0x8888_0000 + (i as u64);
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false, false);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.reg_gain_max, 0, 0, 0, 0, econ.gdev_cap, &MutationGates { has_light: econ.light.is_some(), has_predation: econ.predation.is_some(), enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: econ.ambient_tolerance.is_some(), enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 if spec.n_genes != 2 {
                     let _ph = m.decode(&econ); // must not panic; Some or None both fine
@@ -3582,7 +3683,7 @@ mod tests {
         g.mutation_rate = 256;
 
         let seed = 0x9999_9999;
-        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false)).collect();
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false })).collect();
 
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-c: replay must be seed-deterministic, not run-order-dependent");
@@ -3639,7 +3740,7 @@ mod tests {
 
         for i in 0..100 {
             let seed = 0x1A00_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &g.grn_spec {
                 assert_eq!(spec.n_genes, 2, "V-3-d: flag=false must keep n_genes constant (iteration {i})");
                 assert_eq!(spec.gene_ids, vec![0, 1], "V-3-d: flag=false must never permute gene_ids (iteration {i})");
@@ -3657,8 +3758,8 @@ mod tests {
         let g2 = Genome::founder(2).with_specs(Some(Arc::new(gspec)), None);
 
         let seed = 0xDEAD_BEEF;
-        let m1 = g1.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
-        let m2 = g2.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let m1 = g1.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
+        let m2 = g2.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
 
         assert_eq!(m1.metabolism_eff, m2.metabolism_eff);
         assert_eq!(m1.weights, m2.weights);
@@ -3670,7 +3771,7 @@ mod tests {
     fn v3d_no_spec_no_op() {
         // flag=true but grn_spec=None → no-op (Some-gated).
         let g = Genome::founder(2); // no spec
-        let m = g.mutate(0x2A2A_2A2A, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let m = g.mutate(0x2A2A_2A2A, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert!(m.grn_spec.is_none(), "V-3-d: genome without spec must stay without spec");
     }
 
@@ -3687,7 +3788,7 @@ mod tests {
 
         for i in 0..5000u64 {
             let seed = 0x3A00_0000 + i;
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) && **spec == v3d_manual_swap(&gspec0, 0, 1) {
                     assert_eq!(spec.gene_ids, vec![1, 0], "V-3-d: a real i!=j swap on n_genes=2 must reverse gene_ids");
@@ -3722,7 +3823,7 @@ mod tests {
             if (r_i >> 8) % 2 != (r_j >> 8) % 2 {
                 continue; // i != j — not the self-move branch
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 if **spec == gspec0 {
                     return; // self-move fired; spec byte-identical to parent — no-op proven
@@ -3761,7 +3862,7 @@ mod tests {
             if ti == tj {
                 continue;
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             let Some(spec) = &m.grn_spec else { continue };
             if spec.n_genes != 3 {
                 continue; // V-3-b/c also fired this seed — skip (searching for a clean translocation)
@@ -3807,7 +3908,7 @@ mod tests {
             if ti == tj {
                 continue;
             }
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             let Some(spec) = &m.grn_spec else { continue };
             if spec.n_genes != 3 {
                 continue;
@@ -3848,7 +3949,7 @@ mod tests {
 
         for i in 0..2000u64 {
             let seed = 0xA000_0000 + i;
-            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.light.is_some(), econ.reg_gain_max, econ.predation.is_some(), true, false, false, econ.ambient_tolerance.is_some(), false, 0, 0, 0, 0, econ.gdev_cap, false, false);
+            let m = g.clone().mutate(seed, econ.n_energy_layers, econ.reg_gain_max, 0, 0, 0, 0, econ.gdev_cap, &MutationGates { has_light: econ.light.is_some(), has_predation: econ.predation.is_some(), enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: econ.ambient_tolerance.is_some(), enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
                     let ph = m.decode(&econ).expect("post-translocation genome must decode to Some");
@@ -3870,7 +3971,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x1D1D_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &g.grn_spec {
                 let n = spec.n_genes;
                 assert_eq!(spec.weights.len(), n * n, "iteration {i}");
@@ -3893,7 +3994,7 @@ mod tests {
 
         for i in 0..500 {
             let seed = 0x1E1E_0000 + (i as u64);
-            g = g.mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &g.grn_spec {
                 let mut seen = std::collections::BTreeSet::new();
                 for &id in &spec.gene_ids {
@@ -3913,7 +4014,7 @@ mod tests {
 
         for i in 0..1000u64 {
             let seed = 0x1F1F_0000 + i;
-            let m = g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            let m = g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if let Some(spec) = &m.grn_spec {
                 if v3d_is_pure_reorder(&spec.gene_ids, &gspec0.gene_ids) {
                     assert_eq!(spec.dup_counter, gspec0.dup_counter, "V-3-d: translocation must not touch dup_counter");
@@ -3932,7 +4033,7 @@ mod tests {
         g.mutation_rate = 256;
 
         let seed = 0x1234_5A5A;
-        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, false, 4, false, true, false, false, false, false, 0, 0, 0, 0, 4, false, false)).collect();
+        let results: Vec<Genome> = (0..8).map(|_| g.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: true, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false })).collect();
 
         for m in &results[1..] {
             assert_eq!(m.grn_spec, results[0].grn_spec, "V-3-d: replay must be seed-deterministic, not run-order-dependent");
@@ -4057,7 +4158,7 @@ mod tests {
         let mut saw_change = false;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_0000u64 + gen; // "GDEV" salt already inside mutate(); vary seed
-            g = g.mutate(seed, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: true, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             let gd = g.morphogen_spec.expect("spec must survive mutation").g_dev;
             assert!((1..=4).contains(&gd), "g_dev must stay clamped to [1,4], got {gd} at generation {gen}");
             if gd != 1 {
@@ -4076,15 +4177,15 @@ mod tests {
         g.mutation_rate = 256;
         for gen in 0..64u64 {
             let seed = 0x5644_4556_1111u64 + gen;
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             assert_eq!(g.morphogen_spec.unwrap().g_dev, 1, "flag off: g_dev must never change (generation {gen})");
         }
 
         // Disjoint-stream check: same seed/genome, flag on vs off, every OTHER field must agree.
         let base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(1)));
         let seed = 0xDEAD_BEEF_1234u64;
-        let on = base.clone().mutate(seed, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4, false, false);
-        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let on = base.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: true, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
+        let off = base.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert_eq!(on.metabolism_eff, off.metabolism_eff);
         assert_eq!(on.move_speed, off.move_speed);
         assert_eq!(on.sense_range, off.sense_range);
@@ -4133,7 +4234,7 @@ mod tests {
             let mut lineage = start.clone();
             let mut trajectory = Vec::new();
             for gen in 0..32u64 {
-                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, false, 4, false, false, true, false, false, false, 0, 0, 0, 0, 4, false, false);
+                lineage = lineage.mutate(0x1357_9BDFu64 + gen, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: true, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
                 trajectory.push(lineage.morphogen_spec.unwrap().g_dev);
             }
             trajectory
@@ -4267,7 +4368,7 @@ mod tests {
         let mut saw_change = false;
         for gen in 0..64u64 {
             let seed = 0x544F_504F_0000u64 + gen; // "TOPO" salt already inside mutate(); vary seed
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, true, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: true, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             if g.morphogen_spec.expect("spec must survive mutation").body_plan != BodyPlan::Square {
                 saw_change = true;
             }
@@ -4285,15 +4386,15 @@ mod tests {
         g.mutation_rate = 256;
         for gen in 0..64u64 {
             let seed = 0x544F_504F_1111u64 + gen;
-            g = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+            g = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
             assert_eq!(g.morphogen_spec.unwrap().body_plan, BodyPlan::Square, "flag off: body_plan must never change (generation {gen})");
         }
 
         // Disjoint-stream check: same seed/genome, flag on vs off, every OTHER field must agree.
         let base = Genome::founder(2).with_specs(Some(Arc::new(v4_uniform_gspec())), Some(v4_mspec(4)));
         let seed = 0xDEAD_BEEF_5678u64;
-        let on = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, true, false);
-        let off = base.clone().mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false);
+        let on = base.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: true, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
+        let off = base.clone().mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
         assert_eq!(on.metabolism_eff, off.metabolism_eff);
         assert_eq!(on.move_speed, off.move_speed);
         assert_eq!(on.sense_range, off.sense_range);
@@ -4317,7 +4418,7 @@ mod tests {
             let mut lineage = start.clone();
             let mut trajectory = Vec::new();
             for gen in 0..32u64 {
-                lineage = lineage.mutate(0x544F_504F_9BDFu64 + gen, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, true, false);
+                lineage = lineage.mutate(0x544F_504F_9BDFu64 + gen, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: true, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false });
                 trajectory.push(lineage.morphogen_spec.unwrap().body_plan);
             }
             trajectory
@@ -4341,14 +4442,14 @@ mod tests {
 
         // With enable_oxygen=false, respiratory_pathway must stay 0 (no mutation draw).
         for seed in 0..100u64 {
-            let m = g.mutate(seed, 2, false, 4, false, false, false, false, false, false, 0, 0, 0, 0, 4, false, false); // enable_oxygen=false
+            let m = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: false, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false }); // enable_oxygen=false
             assert_eq!(m.respiratory_pathway, 0, "with enable_oxygen=false, respiratory_pathway must not mutate (seed={seed})");
         }
 
         // With enable_oxygen=true, respiratory_pathway can mutate (at least some seeds must change it).
         let mut mutated_count = 0;
         for seed in 0..1000u64 {
-            let m = g.mutate(seed, 2, false, 4, false, false, false, true, false, false, 0, 0, 0, 0, 4, false, false); // enable_oxygen=true
+            let m = g.mutate(seed, 2, 4, 0, 0, 0, 0, 4, &MutationGates { has_light: false, has_predation: false, enable_variable_length: false, evolve_body_size: false, enable_oxygen: true, has_ambient_tolerance: false, enable_mutation_load: false, enable_body_plan: false, enable_propagule: false, enable_provision: false, provision_rate_locked: false, n_propagule_locked: false }); // enable_oxygen=true
             if m.respiratory_pathway != 0 {
                 mutated_count += 1;
             }

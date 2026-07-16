@@ -33,12 +33,12 @@ mod stages;
 mod traits;
 
 pub use components::{
-    BrainOutput, BrainState, Energy, Grown, Intent, MineralQuota, PendingSpeciation, Sensors, SpeciesId,
-    Velocity, VelocityNext,
+    BrainOutput, BrainState, Energy, Grown, Intent, MineralQuota, Parent, PendingSpeciation,
+    Provisioned, Sensors, SpeciesId, Velocity, VelocityNext,
 };
 pub use det_map::DetMap;
-pub use energy::{EnergyLedger, LedgerSnapshot};
-pub use genome::{isqrt, size_pow_three_quarters, CellGraph, Genome, Phenotype, RespiratoryPathway};
+pub use energy::{count_death, release_provisioned, DeathChannel, EnergyLedger, LedgerSnapshot};
+pub use genome::{isqrt, size_pow_three_quarters, CellGraph, Genome, MutationGates, Phenotype, RespiratoryPathway};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
 pub use homology::genome_distance;
@@ -450,6 +450,14 @@ impl Sim {
             );
         }
 
+        // P-2b (#448): provisioning a body that cannot grow is meaningless — the control arm is
+        // growth-ON/provision-OFF, never the reverse.
+        assert!(
+            !econ.enable_provision || econ.enable_propagule,
+            "enable_provision requires enable_propagule=true (provisioning a still-growing body \
+             makes no sense when nothing can grow)",
+        );
+
         let mut w = World::new();
         w.insert_resource(SimClock { seed: config.seed, tick: 0 });
         w.insert_resource(InputLog::default());
@@ -506,7 +514,8 @@ impl Sim {
                 // Byte-identical to pre-ENV-0a' behavior.
                 let founder = Genome::founder(config.n_layers)
                     .with_specs(econ.grn.clone().map(Arc::new), econ.morphogen)
-                    .with_ambient_tolerance(econ.ambient_tolerance);
+                    .with_ambient_tolerance(econ.ambient_tolerance)
+                    .with_provisioning_seed(econ.n_propagule_init, econ.provision_rate_init);
                 (vec![(founder, config.n_founders, 0)], 1)
             };
 
@@ -588,6 +597,10 @@ impl Sim {
             lost: 0,
             grow_step_counts: [0; 3],
             maturations_total: 0,
+            deaths_by_channel: [0; 4],
+            deaths_growing_by_channel: [0; 4],
+            provision_granted_total: 0,
+            provisioned_released_total: 0,
         });
         w.insert_resource(WorldRes(world));
         w.insert_resource(FieldRes(field));
@@ -651,12 +664,18 @@ impl Sim {
         // P-1 (#429): read the gate BEFORE building the query (avoids a resource/query borrow
         // clash) — `Grown` is folded ONLY under this flag, so off ⇒ byte-identical goldens.
         let enable_propagule = self.world.resource::<EconParams>().enable_propagule;
-        let mut q = self
-            .world
-            .query::<(Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput, &Velocity, Option<&MineralQuota>, &Grown)>();
+        // P-2b (#448): fold ONLY under `enable_provision` (critic F4) — `Provisioned` is on
+        // CHILDREN ONLY, so a REQUIRED `&Provisioned` in this query would filter founders out of
+        // the hash under flag-on; `Option<&Provisioned>` keeps every entity in the query and the
+        // flag decides whether the (usually-0) value is folded at all.
+        let enable_provision = self.world.resource::<EconParams>().enable_provision;
+        let mut q = self.world.query::<(
+            Entity, &Position, &Energy, &Genome, &BrainState, &BrainOutput, &Velocity,
+            Option<&MineralQuota>, &Grown, Option<&Provisioned>,
+        )>();
         let items: Vec<(Entity, u64)> = q
             .iter(&self.world)
-            .map(|(e, p, en, g, bs, bo, v, mq, grown)| {
+            .map(|(e, p, en, g, bs, bo, v, mq, grown, prov)| {
                 let mut h = fnv_mix(FNV_OFFSET, p.0 .0 as u64);
                 h = fnv_mix(h, p.0 .1 as u64);
                 h = fnv_mix(h, en.0 as u64);
@@ -683,6 +702,19 @@ impl Sim {
                 // fold a constant-per-entity value into every golden, shifting them for free).
                 if enable_propagule {
                     h = fnv_mix(h, grown.0 as u64);
+                }
+                // P-2b (#448, critic F119/F138): fold `Provisioned` (a VALUE) ONLY when
+                // `enable_provision` AND non-zero — NOT `Parent(Entity)` (raw entity bits would pin
+                // any future flag-on golden to Bevy's allocator internals). This is a TRIPWIRE, not
+                // a live signal: under the same-tick-drain invariant (all-or-nothing grants)
+                // `Provisioned` is provably 0 at every state_hash boundary, so the fold is vacuous
+                // while the invariant holds and only perturbs the hash if it is ever broken.
+                if enable_provision {
+                    if let Some(p) = prov {
+                        if p.0 != 0 {
+                            h = fnv_mix(h, p.0 as u64);
+                        }
+                    }
                 }
                 (e, h)
             })
@@ -737,9 +769,13 @@ impl Sim {
         if enable_oxygen {
             field_total -= field.0.conserved_total(crate::FieldId::Oxygen.as_usize());
         }
-        let mut q = self.world.query::<(&Energy, Option<&MineralQuota>)>();
+        // P-2b (#448, critic F6): `Provisioned` is conserved agent energy (a parent→child transfer
+        // moves `eu` from the parent's `Energy` into the child's `Provisioned` bank) — add it to
+        // the `agents` sum, mirroring `MineralQuota`, so the transfer is a pure within-`agents`
+        // move and `residual` stays unchanged.
+        let mut q = self.world.query::<(&Energy, Option<&MineralQuota>, Option<&Provisioned>)>();
         let agents: i64 = q.iter(&self.world)
-            .map(|(e, mq)| e.0 + mq.map(|m| m.0).unwrap_or(0))
+            .map(|(e, mq, prov)| e.0 + mq.map(|m| m.0).unwrap_or(0) + prov.map(|p| p.0).unwrap_or(0))
             .sum();
         let ledger = *self.world.resource::<EnergyLedger>();
         ledger.residual(field_total, agents)
@@ -755,6 +791,10 @@ impl Sim {
             blocked_cell: ledger.grow_step_counts[GrowGate::BlockedCell as usize],
             grow_steps_total: ledger.grow_step_counts.iter().sum(),
             maturations_total: ledger.maturations_total,
+            deaths_by_channel: ledger.deaths_by_channel,
+            deaths_growing_by_channel: ledger.deaths_growing_by_channel,
+            provision_granted_total: ledger.provision_granted_total,
+            provisioned_released_total: ledger.provisioned_released_total,
         }
     }
 

@@ -39,6 +39,60 @@ pub struct EnergyLedger {
     /// after `grown.0 += 1`, iff the body just reached its decoded target (critic F126 — NOT at the
     /// maturity early-`continue`, which fires every metab tick for already-mature bodies).
     pub maturations_total: u64,
+    /// P-2b (#448): cumulative deaths per [`DeathChannel`], bumped by [`count_death`] at the
+    /// EXACT alive→dead transition of every death-owning system. Golden-neutral (`EnergyLedger`
+    /// isn't in `state_hash`); P-3's survival-to-maturity denominator (with `deaths_growing_by_channel`).
+    pub deaths_by_channel: [u64; 4],
+    /// P-2b (#448): the subset of `deaths_by_channel` where the body was still growing
+    /// (`grown.0 < growth_cells.len()`) at death — P-3's during-growth mortality numerator.
+    pub deaths_growing_by_channel: [u64; 4],
+    /// P-2b (#448): cumulative `eu` transferred parent→child by `5a_provision` — the ON-arm DOSE
+    /// (critic F107). Lets P-3 distinguish "mechanism didn't fire" (≈0) from "fired, didn't help".
+    pub provision_granted_total: u64,
+    /// P-2b (#448, critic F143/F148): cumulative `eu` released by [`release_provisioned`] (the FIVE
+    /// zero-energy death sites) AND the d0 inline recycle-fold. MUST stay `== 0` under all-or-nothing
+    /// grants (same-tick-drain, F131/F133) — `debug_assert!` is compiled OUT in `--release`, so this
+    /// counter is the falsifiability backstop: a broken invariant would otherwise route a bank into
+    /// `lost` silently with `conservation_residual()` staying 0 (nothing else would observe it).
+    pub provisioned_released_total: u64,
+}
+
+/// P-2b (#448, critic F111): a 4-variant death-channel enum — d0 (background death) is a FOURTH
+/// death mode alongside predation/starvation/hazard-adjacent branches, so `deaths_by_channel`/
+/// `deaths_growing_by_channel` count ALL deaths, not just the three that pre-existed this slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeathChannel {
+    Hazard,
+    Predation,
+    Starvation,
+    Background,
+}
+
+/// P-2b (#448, critic F1/F2): the LIVE, P-3-load-bearing death counter — called EXACTLY at the
+/// alive→dead transition of every death-owning system, with `growing` computed AT the call site
+/// (the ONE source of truth for "was this body still growing" — never re-derived here, critic F64).
+/// Deliberately NOT welded to [`release_provisioned`] (critic F1/F2 — welding a live counter to a
+/// defensive energy release behind one predicate is the exact mechanism of an F1 miscount: a body
+/// with no `Provisioned` component, or a `Provisioned(0)` bank, must still be counted as a death).
+pub fn count_death(ledger: &mut EnergyLedger, channel: DeathChannel, growing: bool) {
+    ledger.deaths_by_channel[channel as usize] += 1;
+    if growing {
+        ledger.deaths_growing_by_channel[channel as usize] += 1;
+    }
+}
+
+/// P-2b (#448, critic F105): the DEFENSIVE, provably-zero energy release at a death site — under
+/// all-or-nothing grants (5a) the bank is drained to 0 same-tick by `stage_grow`, so this books 0 in
+/// production; it exists as the R15 tripwire (`provisioned_released_total`) that would catch a
+/// broken invariant in `--release` (where the `debug_assert!` in `stage_grow`/death sites is
+/// compiled out). `&mut` + `mem::take` ⇒ IDEMPOTENT under re-entry (critic F105 — a second call on
+/// the same entity/tick releases 0, never double-books). `channel` is for symmetry/logging only —
+/// it does NOT bump `deaths_by_channel` (that is [`count_death`]'s job, called separately).
+pub fn release_provisioned(ledger: &mut EnergyLedger, prov: Option<&mut crate::Provisioned>, _channel: DeathChannel) {
+    let taken = prov.map_or(0, |p| std::mem::take(&mut p.0));
+    ledger.lost += taken;
+    debug_assert!(taken >= 0, "release_provisioned: Provisioned bank must never go negative");
+    ledger.provisioned_released_total += taken as u64;
 }
 
 impl EnergyLedger {
@@ -58,4 +112,14 @@ pub struct LedgerSnapshot {
     pub blocked_cell: u64,
     pub grow_steps_total: u64,
     pub maturations_total: u64,
+    /// P-2b (#448): cumulative deaths per [`DeathChannel`] (`[Hazard, Predation, Starvation,
+    /// Background]`), and the still-growing subset — P-3's survival-to-maturity denominators.
+    pub deaths_by_channel: [u64; 4],
+    pub deaths_growing_by_channel: [u64; 4],
+    /// P-2b (#448): cumulative `eu` transferred parent→child by `5a_provision` (the ON-arm dose).
+    pub provision_granted_total: u64,
+    /// P-2b (#448): cumulative `eu` released by a death-site defensive drain — MUST stay 0 under
+    /// all-or-nothing grants (the R15 falsifiability tripwire, since `debug_assert!` is compiled
+    /// out in `--release`).
+    pub provisioned_released_total: u64,
 }
