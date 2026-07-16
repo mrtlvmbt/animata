@@ -21,19 +21,20 @@ const HMAX: i64 = 200;
 
 /// Primary-material → RGB palette (top-down surface colour).
 /// Includes W-10 presentation-only discriminants: SoilDry (9), SoilWet (10).
+/// Pasteled (R-16): matches render/src/biome_palette.rs for consistency across 3D and headless views.
 fn colour(m: u8) -> [u8; 3] {
     match m {
-        x if x == MaterialId::Air as u8 => [180, 180, 190], // air (above-surface empty) — pale grey
-        x if x == MaterialId::Sand as u8 => [222, 200, 120], // aeolian sand — tan
-        x if x == MaterialId::Permafrost as u8 => [205, 232, 240], // permafrost — pale ice
-        x if x == MaterialId::Soil as u8 => [96, 132, 66], // soil — green
-        x if x == MaterialId::Bedrock as u8 => [128, 128, 132], // bedrock — grey
-        x if x == MaterialId::Basalt as u8 => [58, 52, 62], // volcanic basalt — near-black
-        x if x == MaterialId::Tuff as u8 => [172, 150, 138], // volcanic tuff — light brown
-        x if x == MaterialId::Till as u8 => [184, 194, 206], // glacial till — grey-blue
-        x if x == MaterialId::Water as u8 => [40, 70, 130], // coastal water — blue (W-SIM-7, #423)
-        9 => [64, 96, 42],  // W-10: SoilDry (discriminant 9) — darker/drier soil green
-        10 => [128, 164, 90], // W-10: SoilWet (discriminant 10) — lighter/wetter soil green
+        x if x == MaterialId::Air as u8 => [200, 200, 210], // air (above-surface empty) — pale grey (brightened)
+        x if x == MaterialId::Sand as u8 => [235, 220, 150], // aeolian sand — tan (lighter, softer)
+        x if x == MaterialId::Permafrost as u8 => [220, 240, 248], // permafrost — ice grey (lightened)
+        x if x == MaterialId::Soil as u8 => [140, 160, 110], // soil — softer green
+        x if x == MaterialId::Bedrock as u8 => [150, 150, 156], // bedrock — grey (lightened)
+        x if x == MaterialId::Basalt as u8 => [110, 100, 115], // volcanic basalt — dark slate (lifted)
+        x if x == MaterialId::Tuff as u8 => [200, 175, 155], // volcanic tuff — light brown (brightened)
+        x if x == MaterialId::Till as u8 => [205, 215, 230], // glacial till — pale grey-blue (lightened)
+        x if x == MaterialId::Water as u8 => [120, 160, 200], // coastal water — lighter softer blue
+        9 => [210, 195, 135],  // W-10: SoilDry (discriminant 9) — pale ochre (lighter)
+        10 => [150, 135, 90], // W-10: SoilWet (discriminant 10) — softer mid-brown
         _ => [255, 0, 255],                                  // unknown — magenta
     }
 }

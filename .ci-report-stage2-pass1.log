@@ -1,0 +1,71 @@
+→ Ищу CI-run для commit fc516e06 ...
+→ Жду завершения run #29231383171 ...
+commit:     fc516e062abb6e85cbcc96820a92f5189b04b511
+run:        #29231383171
+run_sha:    fc516e062abb6e85cbcc96820a92f5189b04b511
+conclusion: failure
+all_jobs:   false
+url:        https://github.com/mrtlvmbt/animata/actions/runs/29231383171
+→ Падения. Сохраняю логи упавших шагов в .ci-report/failed.log
+─── последние строки лога падений ───
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.5549694Z [32;1m        PASS[0m [   0.005s] (512/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1mincision_step_never_drives_height_negative[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.5600104Z [32;1m        PASS[0m [   0.007s] (513/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1misqrt_sweep_including_non_perfect_squares_and_zero[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.5610132Z [32;1m        PASS[0m [   0.006s] (514/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1mresistance_class_at_is_deterministic_and_bounded[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.5689979Z [32;1m        PASS[0m [   0.007s] (515/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1mtalus_step_conserves_height_exactly[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.5749872Z [32;1m        PASS[0m [   0.005s] (516/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1mtalus_step_moves_material_downhill_on_a_steep_step[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.5773018Z [32;1m        PASS[0m [   0.018s] (517/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1mresistance_is_decorrelated_from_height_not_same_seed[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.6920783Z [32;1m        PASS[0m [   0.114s] (518/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1mvolcanic_edifice_survives_erosion_as_net_local_high[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.8260589Z [32;1m        PASS[0m [   0.134s] (519/586) [35;1mworld[0m [36mgen::glacial::tests[0m[36m::[0m[34;1mdifferent_seed_diverges[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.9010743Z [32;1m        PASS[0m [   0.327s] (520/586) [35;1mworld[0m [36mgen::erosion::tests[0m[36m::[0m[34;1mtectonic_ablation_three_condition_relief_diversity[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:53.9516678Z [32;1m        PASS[0m [   0.126s] (521/586) [35;1mworld[0m [36mgen::glacial::tests[0m[36m::[0m[34;1mglacial_off_leaves_non_ice_cells_outside_k_band_untouched[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0212894Z [31;1m        FAIL[0m [   0.121s] (522/586) [35;1mworld[0m [36mgen::glacial::tests[0m[36m::[0m[34;1mgolden_vector_matches_pinned_glacial_fixture[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0229617Z [31;1m [0m [31;1mstdout[0m [31;1m───[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0239020Z 
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0269615Z     running 1 test
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0299635Z     test gen::glacial::tests::golden_vector_matches_pinned_glacial_fixture ... FAILED
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0309290Z 
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0309607Z     failures:
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0309985Z 
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0310414Z     failures:
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0311167Z         gen::glacial::tests::golden_vector_matches_pinned_glacial_fixture
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0312366Z 
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0313025Z     test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 141 filtered out; finished in 0.12s
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0314146Z     [0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0314886Z [31;1m [0m [31;1mstderr[0m [31;1m───[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0349245Z 
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0350441Z     [0m[31;1mthread 'gen::glacial::tests::golden_vector_matches_pinned_glacial_fixture' (5572) panicked at crates/world/src/gen/glacial.rs:1080:9:[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0352178Z     [31;1massertion `left == right` failed: golden drift (or placeholder awaiting CI pin) at indices [0, 500, 1500, 4000][0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0353099Z       left: [77, 59, 95, 99]
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0353491Z      right: [106, 59, 95, 99]
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0354271Z     note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0354836Z 
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0355295Z [31;1m  Cancelling[0m due to [31;1mtest failure[0m: [1m3[0m tests still running
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0378037Z [32;1m        PASS[0m [   4.755s] (523/586) [35;1mworld[0m [36mgen::caps::tests[0m[36m::[0m[34;1mall_landform_flags_compose_with_any_subset_of_each_other[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:15:54.0592009Z [32;1m        PASS[0m [   0.107s] (524/586) [35;1mworld[0m [36mgen::glacial::tests[0m[36m::[0m[34;1mice_incision_never_raises_a_cell[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:16:20.6467526Z [33;1m        SLOW[0m [> 60.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:17:20.6475161Z [33;1m        SLOW[0m [>120.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:18:20.6480457Z [33;1m        SLOW[0m [>180.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:19:20.6491074Z [33;1m        SLOW[0m [>240.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:20:20.6500370Z [33;1m        SLOW[0m [>300.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:21:20.6517237Z [33;1m        SLOW[0m [>360.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:22:20.6535419Z [33;1m        SLOW[0m [>420.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:23:20.6547034Z [33;1m        SLOW[0m [>480.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:24:20.6555438Z [33;1m        SLOW[0m [>540.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:25:20.6564525Z [33;1m        SLOW[0m [>600.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:26:20.6572452Z [33;1m        SLOW[0m [>660.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:27:20.6590873Z [33;1m        SLOW[0m [>720.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:28:20.6603766Z [33;1m        SLOW[0m [>780.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:29:20.6612763Z [33;1m        SLOW[0m [>840.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:30:20.6626577Z [33;1m        SLOW[0m [>900.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:31:20.6636057Z [33;1m        SLOW[0m [>960.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:32:20.6644160Z [33;1m        SLOW[0m [>1020.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:33:20.6655318Z [33;1m        SLOW[0m [>1080.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:20.6668259Z [33;1m        SLOW[0m [>1140.000s] (───────) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:32.4170855Z [32;1m        PASS[0m [1151.773s] (525/586) [35;1mcli::r30_1_1b_newborn_energy[0m [34;1mr15_conservation_across_reproducing_multicellular_run[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:32.4171950Z ────────────
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:32.4173218Z [31;1m     Summary[0m [1205.578s] [1m525[0m/[1m586[0m tests run: [1m524[0m [32;1mpassed[0m ([1m1[0m [33;1mslow[0m), [1m1[0m [31;1mfailed[0m, [1m34[0m [33;1mskipped[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:32.4175086Z [31;1m        FAIL[0m [   0.121s] (522/586) [35;1mworld[0m [36mgen::glacial::tests[0m[36m::[0m[34;1mgolden_vector_matches_pinned_glacial_fixture[0m
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:32.4176885Z [33;1mwarning[0m: [1m61[0m/[1m586[0m tests were not run due to [33;1mtest failure[0m (run with [1m--no-fail-fast[0m to run all tests, or run with [1m--max-fail[0m)
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:32.4180362Z [31;1merror[0m: test run failed
+v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)	v2 invariants (debug, x86)	2026-07-13T07:34:32.4210857Z ##[error]Process completed with exit code 100.
+VERDICT: RED — conclusion=failure, all_jobs=false (run #29231383171)

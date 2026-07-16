@@ -24,10 +24,12 @@ const UNKNOWN: Color = Color::new(1.0, 0.0, 1.0, 1.0);
 const LIGHT_DIR: Vec3 = Vec3::new(0.577, 0.577, 0.577); // (1,1,1) normalized ≈ 60° elevation, sidelit
 
 /// Ambient light contribution (always present, no shadow).
-const AMBIENT: f32 = 0.3;
+/// Softened from 0.3 → 0.55 to lighten shadows toward pastel toy-diorama look.
+const AMBIENT: f32 = 0.55;
 
 /// Diffuse light strength (modulated by normal·light_dir).
-const DIFFUSE: f32 = 0.7;
+/// Softened from 0.7 → 0.45 to reduce harsh shadow contrast.
+const DIFFUSE: f32 = 0.45;
 
 /// `id` → top-face color. `_ => UNKNOWN` is the "no panic" fallback the acceptance criterion asks for.
 pub fn biome_color(id: u8) -> Color {
@@ -57,19 +59,20 @@ pub fn biome_color(id: u8) -> Color {
 /// Mirrors `world/src/bin/map_dump.rs`'s palette so the interactive 3D view and the headless PPM
 /// preview read identically. `_ => UNKNOWN` keeps the no-panic contract.
 /// Hues are in HSL: (h, s, l) where we keep saturation/lightness consistent and vary hue per material.
+/// Pasteled (R-16): lifted brightness, reduced saturation toward toy-diorama look.
 pub fn material_color(m: u8) -> Color {
     match m {
-        0 => Color::from_rgba(180, 180, 190, 255), // Air (above-surface empty) — pale grey
-        1 => Color::from_rgba(222, 200, 120, 255), // Sand (aeolian dune) — warm tan
-        2 => Color::from_rgba(205, 232, 240, 255), // Permafrost — ice grey
-        3 => Color::from_rgba(96, 132, 66, 255),   // Soil — green
-        4 => Color::from_rgba(128, 128, 132, 255), // Bedrock — cool grey
-        5 => Color::from_rgba(58, 52, 62, 255),    // Basalt (volcanic) — near-black
-        6 => Color::from_rgba(172, 150, 138, 255), // Tuff (volcanic) — light brown
-        7 => Color::from_rgba(184, 194, 206, 255), // Till (glacial) — grey-blue
-        8 => Color::from_rgba(40, 70, 130, 255),   // Water (coastal/ocean) — blue
-        9 => Color::from_rgba(184, 168, 104, 255), // SoilDry — pale ochre
-        10 => Color::from_rgba(96, 80, 48, 255),   // SoilWet — dark umber
+        0 => Color::from_rgba(200, 200, 210, 255), // Air (above-surface empty) — pale grey (brightened)
+        1 => Color::from_rgba(235, 220, 150, 255), // Sand (aeolian dune) — warm tan (lighter, softer)
+        2 => Color::from_rgba(220, 240, 248, 255), // Permafrost — ice grey (lightened)
+        3 => Color::from_rgba(140, 160, 110, 255), // Soil — softer green
+        4 => Color::from_rgba(150, 150, 156, 255), // Bedrock — cool grey (lightened)
+        5 => Color::from_rgba(110, 100, 115, 255), // Basalt (volcanic) — dark slate (lifted from near-black)
+        6 => Color::from_rgba(200, 175, 155, 255), // Tuff (volcanic) — light brown (brightened)
+        7 => Color::from_rgba(205, 215, 230, 255), // Till (glacial) — pale grey-blue (lightened)
+        8 => Color::from_rgba(120, 160, 200, 255), // Water (coastal/ocean) — lighter softer blue
+        9 => Color::from_rgba(210, 195, 135, 255), // SoilDry — pale ochre (lighter)
+        10 => Color::from_rgba(150, 135, 90, 255), // SoilWet — softer mid-brown (lifted from dark umber)
         _ => UNKNOWN,
     }
 }
@@ -114,14 +117,15 @@ pub fn surface_color_v2(
 
     // Height value ramp: interpolate through the same stops as height_color
     // but we multiply the base hue_color by the VALUE to darken/lighten
+    // Lifted floor to brighten lowlands (was 0.4, now 0.78) to prevent dark/muddy render
     const VALUE_STOPS: [(f32, f32); 7] = [
-        (0.00, 0.4),   // lowland — darkened
-        (0.25, 0.5),   //
-        (0.45, 0.7),   //
-        (0.60, 0.8),   //
-        (0.78, 0.6),   // brown (moraine/upland)
-        (0.90, 0.8),   // bare rock
-        (1.00, 0.95),  // peaks — bright
+        (0.00, 0.78),  // lowland — brightened (was 0.4)
+        (0.25, 0.82),  // (was 0.5)
+        (0.45, 0.88),  // (was 0.7)
+        (0.60, 0.92),  // (was 0.8)
+        (0.78, 0.85),  // brown (moraine/upland) (was 0.6)
+        (0.90, 0.92),  // bare rock (was 0.8)
+        (1.00, 1.0),   // peaks — bright (was 0.95)
     ];
 
     let mut lo = &VALUE_STOPS[0];
