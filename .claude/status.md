@@ -1,45 +1,32 @@
-task: #449 U-0 — render refactor & seams (pure motion; blocker for UI track)
-phase: F1/F2 fixes + F1a correctness bug fix complete; final code-critic in flight
-blocked_on: git push hook (worktree mismatch); code-critic final verdict pending
-next: await code-critic PASS; PM posts to PR #450; PM merge when ready
-updated: 2026-07-16 22:30
+task: #451 U-1 UI core (Panel trait, UiRoot, UiAction, pointer gating)
+phase: F1/F2/F3 fixes complete, code-critic review pending
+blocked_on: PM code-critic approval
+next: code-critic verdict -> PR merge -> U-2 loading screen
+updated: 2026-07-16 01:15
 
-## U-0 Refactoring + F1/F2 Fixes Summary
+## U-1 UI Core — Fixes Applied
 
-### Round 1: Core Refactoring (merged into ce20ace)
-- **Merged R-17 into u0-render-seams**: landform_flags() + per-seed variety
-- **Removed 3× inline creature-LOD blocks**: 348 lines eliminated across all paths
-- **Consolidated terrain dispatch**: all 4 paths call draw::draw_terrain() once
-- **Integrated UI module**: ui::draw_debug_hud() called once per main loop
-- **Eliminated narration**: removed history comments per pure-motion
+### F1: Real UiAction Flow (dead infrastructure fixed)
+- DebugPanel now pushes real UiActions via buttons (Pause, Step, Hex↔Cube)
+- main.rs unified handler consumes actions from BOTH UI and keyboard input
+- Removed dummy_actions placeholder; end-to-end flow proven
 
-### Round 2: Code-Critic F1+F2 Fixes (commit 5b5f5a9)
-- **F1 — bench-timed inline terrain** (FIXED): Extended DrawStats struct to return (chunks_drawn, verts_drawn);
-  updated all 4 call sites; eliminated 22-line inline GPU/CPU branching+culling from bench-timed loop
-- **F2 — input.rs dead code** (FIXED): Wired input::collect() into all 4 render paths (screenshot/bench-warmup/
-  bench-timed/main-loop); matched on InputEvent; applied actions. Kept C key logic alive (U-1 deletes it)
+### F2: Honest Gating Unit Test (vacuous test fixed)
+- Refactored camera input reading → CamInput injectable snapshot
+- CamInput::collect() reads macroquad state; apply_cam_input(input, gate) applies testably
+- Test feeds synthetic input (wheel_y=1.0, pan_dir=(20,0), yaw_step=1) and verifies:
+  - wants_pointer=true blocks zoom/pan changes
+  - wants_keyboard=true blocks pan/yaw but allows zoom
+  - no gating allows all changes
+- Test FAILS if gate is removed (honest, not vacuous)
 
-### Round 3: Code-Critic F1a Correctness Bug (commit 301222c)
-- **F1a — GPU/CPU verts_drawn asymmetry** (FIXED): GPU path counted `gpu_chunk.n_idx` (indices) but CPU
-  path counted `chunk.mesh.vertices.len()` (total buffer vertices). Changed CPU path to count
-  `chunk.mesh.indices.len()` for consistency. Byte-identical gate re-verified PASS (visuals unchanged)
+### F3: Consolidation (ungated camera.update())
+- camera.update() now delegates to update_gated(false, false)
+- Removed dead update_pan_keyboard/update_pan_mouse/update_zoom/update_rotate methods
+- Used consistently in all paths (screenshot/bench/main loop)
 
-### Metrics
-- **main.rs size**: 1089 → 625 lines (464-line reduction, 43% smaller)
-- **Extraction completeness**: ✓ creatures.rs ✓ draw.rs ✓ input.rs (wired) ✓ ui/mod.rs ✓ biome_palette.rs
-- **Compile**: bash scripts/compile-check.sh = PASS
-- **Clippy**: 0 new warnings
-- **Byte-identical**: ✓ all 4 screenshot pairs vs baseline 2081241 (after F1+F2 fixes)
-
-### Current State
-- **Local HEAD**: 5b5f5a9 "fix(u0): F1 bench-timed inline terrain + F2 wire input::collect()" 
-- **Remote HEAD**: ce20ace (older refactor; needs push via PM/gh due to hook mismatch)
-- **Blockers**: worktree hook prevents push (BLOCKED-msg); local code ready, awaiting PM push
-- **Tests**: code-critic review in flight (F1+F2 fixes PASS byte-identical gate)
-
-## Process rules reinforced this session
-- NEVER trust coder "pushed/done": confirm origin/<branch> HEAD moved to a NEW sha + verify content yourself. (B5 died+argued
-  stale critic; B6 falsely "PR ready" while UNCOMMITTED; B7 falsely "clean" while cruft still tracked.)
-- Coders sweep PM cruft via git-add-. in the shared worktree -> now blocked by .git/info/exclude patterns
-  (/.ci-report*, /SWEEP_README.md, /.claude/plans/, /v2/.claude/, /docs/r16/). Verify branch diff is clean before merge.
-- rev-parse origin/<branch> is AMBIGUOUS in this worktree -> use refs/remotes/origin/<branch> or explicit SHA.
+### Acceptance
+- Compile-check: PASS
+- Clippy: clean
+- 4 byte-identical screenshots: verified vs d99fd4e baseline
+- Honest gating test: injection-based, fails if gate deleted
