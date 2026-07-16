@@ -269,6 +269,38 @@ fn draw_gpu_terrain(
 // (`HMAX`=relief spread, `RESOURCE_BASE`=cap rescale magnitude for biome+edaphic-driven richness,
 // `WORLD_SALT`=seed permutation).
 
+/// R-17: Per-seed landform variety — select a landform profile (archetype) deterministically
+/// from the seed so different maps look different. 6 archetypes cover all 5 landforms.
+/// ARCHETYPES (idx = (seed_hash >> 8) % 6):
+/// | idx | name           | tect | aeol | volc | glac | coastal | character |
+/// |-----|----------------|------|------|------|------|---------|-----------|
+/// | 0   | Coastal Isles  |  F   |  T   |  F   |  F   |  T      | islands, water, beaches |
+/// | 1   | Rolling Hills  |  T   |  F   |  F   |  F   |  F      | gentle bare hills, no water |
+/// | 2   | Volcanic       |  T   |  F   |  T   |  F   |  F      | basalt/tuff highlands, no water |
+/// | 3   | Glacial Plains |  F   |  T   |  F   |  T   |  F      | till + dunes, cold, no water |
+/// | 4   | Rugged Highland|  T   |  F   |  T   |  T   |  F      | tectonic+volcanic+glacial, no water |
+/// | 5   | Archipelago    |  T   |  T   |  F   |  F   |  T      | varied islands + water |
+fn landform_profile(seed: u64) -> (bool, bool, bool, bool, bool) {
+    // Deterministic integer hash using splitmix64 for good distribution across 6 profiles
+    let mut x = seed;
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+    let idx = ((x >> 8) % 6) as usize;
+
+    // Archetype table: (tectonics, aeolian, volcanic, glacial, coastal)
+    const PROFILES: &[(bool, bool, bool, bool, bool)] = &[
+        (false, true, false, false, true),   // 0: Coastal Isles
+        (true, false, false, false, false),  // 1: Rolling Hills
+        (true, false, true, false, false),   // 2: Volcanic
+        (false, true, false, true, false),   // 3: Glacial Plains
+        (true, false, true, true, false),    // 4: Rugged Highland
+        (true, true, false, false, true),    // 5: Archipelago
+    ];
+
+    PROFILES[idx]
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     // macroquad's default per-draw-call buffer (10 000 verts / 5 000 indices) silently CLAMPS (drops
@@ -303,12 +335,17 @@ async fn main() {
     // In sim mode they MUST stay off — the sim worker builds its world with all-off, and flipping only
     // the render side would desync the pinned-param contract above.
     //
+    // R-17: Standalone uses per-seed landform profiles for variety (6 archetypes via landform_profile).
     // `--v1-dump <path>` REPLACES the ProcgenWorld with a v1-generated dump (carrying its OWN `dim`),
     // holding THIS renderer constant to compare v1 vs v2 worldgen. On load error it falls back to
     // ProcgenWorld. `--dim` only applies in standalone — see the module doc comment for why.
     let make_procgen = |dim: i64| -> Box<dyn WorldView> {
-        let lf = cli_args.standalone; // enable 4 landforms (tectonics/aeolian/volcanic/glacial; coastal OFF for rolling hills)
-        Box::new(world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, lf, lf, lf, lf, false))
+        let (tect, aeol, volc, glac, coast) = if cli_args.standalone {
+            landform_profile(config.seed)   // deterministic, seed-derived variety
+        } else {
+            (false, false, false, false, false)  // sim mode: all-off (unchanged)
+        };
+        Box::new(world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, tect, aeol, volc, glac, coast))
     };
     let default_dim = if cli_args.standalone { cli_args.dim_override.unwrap_or(config.econ.world_dim) } else { config.econ.world_dim };
     let (world_dim, world): (i64, Box<dyn WorldView>) = match &cli_args.v1_dump {
