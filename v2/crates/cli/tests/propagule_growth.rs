@@ -311,6 +311,28 @@ fn flat_graph(body_size: i32) -> CellGraph {
     }
 }
 
+/// A two-module germ/soma body (`germ` GERM cells + `soma` SOMA cells) — for exercising
+/// `hazard_drain`'s DoL soma-only `refuge_mass` branch, distinct from `flat_graph`'s all-soma body.
+fn germ_soma_graph(germ: i32, soma: i32) -> CellGraph {
+    let mut growth_cells: Vec<(u8, u8, CellType, bool)> = Vec::new();
+    for i in 0..germ {
+        growth_cells.push((i as u8, 0, CellType::B, true));
+    }
+    for i in 0..soma {
+        growth_cells.push((i as u8, 1, CellType::A, false));
+    }
+    CellGraph {
+        g_dev: 1,
+        module_type: vec![CellType::B, CellType::A],
+        module_cell_count: vec![germ, soma],
+        module_is_germ: vec![true, false],
+        module_reachable: vec![true, true],
+        module_consortium: vec![0, 1],
+        cell_positions: growth_cells.iter().map(|&(x, z, _, _)| (x, z)).collect(),
+        growth_cells,
+    }
+}
+
 /// (1) Cadence pin — `e_cell` UNAFFORDABLE (`1e9`) so the gate never reaches `Grow`: every metab
 /// tick must land in `BlockedCell` (energy ≫ reserve but ≪ e_cell), never `BlockedLump`, never
 /// `Grow`. `excrete=0` isolates the survival window to the flat (n-invariant, `c_coord=0`,
@@ -391,6 +413,11 @@ fn grow_step_counts_progress_then_stop() {
         sim.step();
     }
     let snap2 = sim.ledger_snapshot();
+    // The maturity `continue` (F73) skips the gate call entirely for an already-mature body — NOT
+    // ONE of the three buckets may move, not just the derived Grow count (PM F2b).
+    assert_eq!(snap2.blocked_lump, snap.blocked_lump, "no bucket may move post-maturity — BlockedLump");
+    assert_eq!(snap2.blocked_cell, snap.blocked_cell, "no bucket may move post-maturity — BlockedCell");
+    assert_eq!(snap2.grow_steps_total, snap.grow_steps_total, "no bucket may move post-maturity — Grow (via the derived total)");
     let grow_count2 = snap2.grow_steps_total - snap2.blocked_lump - snap2.blocked_cell;
     assert_eq!(grow_count2, (k - 1) as u64, "a matured body must never fire another grow step (the maturity continue, F73)");
     assert_eq!(snap2.maturations_total, 1, "no re-maturation");
@@ -464,6 +491,29 @@ fn grow_reserve_settling_hazard_excrete_terms() {
         grow_reserve(&with_both, &ph, &g, n) - grow_reserve(&with_both_no_excrete, &ph, &g, n),
         2 * 8 * base.metab_period as i64,
         "excrete must contribute exactly 2·excrete·metab_period to grow_reserve"
+    );
+
+    // (e) the DoL soma-only `refuge_mass` branch (PM F2a — `flat_graph` above is all-soma, so it
+    // can never distinguish the two branches): a 2-germ/3-soma body must read refuge_mass=3 (soma
+    // only) under `division_of_labor=true`, and refuge_mass=5 (whole body) under `false`.
+    let ph_dol = Phenotype { uptake_layer: 0, cell_type: None, graph: germ_soma_graph(2, 3), respiratory_pathway: None };
+    let body_total = ph_dol.graph.body_size(); // 5
+    let soma_mass = 3i64;
+    let expected_hazard_soma = refuge_attenuate(pred_spec.base_hazard, soma_mass, size_refuge.shift, size_refuge.refuge_k);
+    let expected_hazard_total = refuge_attenuate(pred_spec.base_hazard, body_total, size_refuge.shift, size_refuge.refuge_k);
+    assert_ne!(expected_hazard_soma, expected_hazard_total, "sanity: soma-only mass must differ from total body mass for this fixture");
+
+    let with_hazard_dol = EconParams { predation: Some(pred_spec), division_of_labor: true, ..base.clone() };
+    let with_hazard_no_dol = EconParams { predation: Some(pred_spec), division_of_labor: false, ..base.clone() };
+    assert_eq!(
+        grow_reserve(&with_hazard_dol, &ph_dol, &g, n) - grow_reserve(&base, &ph_dol, &g, n),
+        2 * base.metab_period as i64 * expected_hazard_soma,
+        "division_of_labor=true must read SOMA-ONLY module_cell_count for hazard_drain's refuge_mass"
+    );
+    assert_eq!(
+        grow_reserve(&with_hazard_no_dol, &ph_dol, &g, n) - grow_reserve(&base, &ph_dol, &g, n),
+        2 * base.metab_period as i64 * expected_hazard_total,
+        "division_of_labor=false must read the TOTAL body mass for hazard_drain's refuge_mass"
     );
 }
 

@@ -468,15 +468,20 @@ pub fn stage_grow(
         let gate = grow_gate(&econ, energy.0, 0, reserve);
         ledger.grow_step_counts[gate as usize] += 1;
         if gate == GrowGate::Grow {
-            // Liquid-first payment down to the reserve (critic F129); bank second (0 this slice —
-            // keep the shape so P-2b only fills bank_part from `Provisioned`, do NOT hardcode it).
+            // Liquid-first payment down to the reserve (critic F129); bank second — `bank_part` is
+            // an explicit term (0 this slice, since `prov=0` above), NOT folded away, so P-2b's only
+            // change here is to actually withdraw `bank_part` from `Provisioned` — the ledger
+            // bookkeeping (`liquid_part + bank_part`) already has the right shape and needs no
+            // rewrite (PM F1: booking `dissipated` off a bare `econ.e_cell` constant instead of the
+            // two parts is the exact drift a future prov>0 wire would silently re-open).
             let liquid_part = (energy.0 - reserve).min(econ.e_cell).max(0);
+            let bank_part = econ.e_cell - liquid_part;
             energy.0 -= liquid_part;
             grown.0 += 1;
             if (grown.0 as i64) == target {
                 ledger.maturations_total += 1;
             }
-            ledger.dissipated += econ.e_cell;
+            ledger.dissipated += liquid_part + bank_part;
             ph.graph = ph.graph.rebuild_prefix(grown.0 as usize);
         }
     }
