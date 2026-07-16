@@ -693,7 +693,11 @@ fn provision_transfers_all_or_nothing_and_drains_same_tick() {
     sim.impose_graph_probe(&graphs);
 
     assert_eq!(*sim.grown_entity_probe().get(&child_bits).unwrap(), 1);
-    assert_eq!(*sim.body_size_entity_probe().get(&child_bits).unwrap(), 9, "imposed TARGET reads 9 cells");
+    assert_eq!(
+        *sim.body_size_entity_probe().get(&child_bits).unwrap(), 1,
+        "the imposed graph is TRUNCATED to the 1-cell prefix (materialised size) — the 9-cell TARGET \
+         lives in growth_cells.len(), not body_size()"
+    );
     assert_eq!(*sim.energy_entity_probe().get(&child_bits).unwrap(), PROV_E_CELL, "child spawns with the flat e_cell endowment");
 
     sim.step(); // tick 1: metabolism, THEN 5a_provision, THEN 5b_grow — all the same tick
