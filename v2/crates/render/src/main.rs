@@ -269,36 +269,32 @@ fn draw_gpu_terrain(
 // (`HMAX`=relief spread, `RESOURCE_BASE`=cap rescale magnitude for biome+edaphic-driven richness,
 // `WORLD_SALT`=seed permutation).
 
-/// R-17: Per-seed landform variety — select a landform profile (archetype) deterministically
-/// from the seed so different maps look different. 6 archetypes cover all 5 landforms.
-/// ARCHETYPES (idx = (seed_hash >> 8) % 6):
-/// | idx | name           | tect | aeol | volc | glac | coastal | character |
-/// |-----|----------------|------|------|------|------|---------|-----------|
-/// | 0   | Coastal Isles  |  F   |  T   |  F   |  F   |  T      | islands, water, beaches |
-/// | 1   | Rolling Hills  |  T   |  F   |  F   |  F   |  F      | gentle bare hills, no water |
-/// | 2   | Volcanic       |  T   |  F   |  T   |  F   |  F      | basalt/tuff highlands, no water |
-/// | 3   | Glacial Plains |  F   |  T   |  F   |  T   |  F      | till + dunes, cold, no water |
-/// | 4   | Rugged Highland|  T   |  F   |  T   |  T   |  F      | tectonic+volcanic+glacial, no water |
-/// | 5   | Archipelago    |  T   |  T   |  F   |  F   |  T      | varied islands + water |
-fn landform_profile(seed: u64) -> (bool, bool, bool, bool, bool) {
-    // Deterministic integer hash using splitmix64 for good distribution across 6 profiles
+/// R-17: Per-seed landform variety — each landform toggles independently from seed bits,
+/// allowing free mixing (volcanic + coastal for volcanic islands, volcanic + tectonic, etc).
+/// Uses splitmix64 hash with independent bit positions for each landform.
+/// Guard: never all-off (ensures maps are never flat/featureless).
+fn landform_flags(seed: u64) -> (bool, bool, bool, bool, bool) {
+    // Deterministic hash: splitmix64
     let mut x = seed;
     x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^= x >> 31;
-    let idx = ((x >> 8) % 6) as usize;
 
-    // Archetype table: (tectonics, aeolian, volcanic, glacial, coastal)
-    const PROFILES: &[(bool, bool, bool, bool, bool)] = &[
-        (false, true, false, false, true),   // 0: Coastal Isles
-        (true, false, false, false, false),  // 1: Rolling Hills
-        (true, false, true, false, false),   // 2: Volcanic
-        (false, true, false, true, false),   // 3: Glacial Plains
-        (true, false, true, true, false),    // 4: Rugged Highland
-        (true, true, false, false, true),    // 5: Archipelago
-    ];
+    // Extract independent bits for each landform (well-spaced bit positions)
+    let tect = (x >> 3) & 1 == 1;
+    let aeol = (x >> 13) & 1 == 1;
+    let volc = (x >> 23) & 1 == 1;
+    let glac = (x >> 33) & 1 == 1;
+    let coast = (x >> 43) & 1 == 1;
 
-    PROFILES[idx]
+    // Guard: never all-off (avoid flat/boring maps)
+    let (tect, aeol, volc, glac, coast) = if !(tect || aeol || volc || glac || coast) {
+        (true, aeol, volc, glac, coast)  // force tectonic if all others are off
+    } else {
+        (tect, aeol, volc, glac, coast)
+    };
+
+    (tect, aeol, volc, glac, coast)
 }
 
 #[macroquad::main(window_conf)]
@@ -341,7 +337,7 @@ async fn main() {
     // ProcgenWorld. `--dim` only applies in standalone — see the module doc comment for why.
     let make_procgen = |dim: i64| -> Box<dyn WorldView> {
         let (tect, aeol, volc, glac, coast) = if cli_args.standalone {
-            landform_profile(config.seed)   // deterministic, seed-derived variety
+            landform_flags(config.seed)   // deterministic, seed-derived variety with free landform mixing
         } else {
             (false, false, false, false, false)  // sim mode: all-off (unchanged)
         };
