@@ -37,12 +37,16 @@
 
 mod biome_palette;
 mod camera;
+mod creatures;
+mod draw;
 mod driver;
 mod dump_world;
 mod gpu_terrain;
 mod hex;
+mod input;
 mod terrain;
 mod terrain_cube;
+mod ui;
 
 use camera::IsoCam;
 use macroquad::prelude::*;
@@ -225,7 +229,7 @@ fn load_shader(filename: &str) -> String {
 }
 
 /// Helper to draw terrain using retained GPU buffers.
-fn draw_gpu_terrain(
+pub fn draw_gpu_terrain(
     gpu_chunks: &[gpu_terrain::GpuChunk],
     pipeline: macroquad::miniquad::Pipeline,
     camera: &IsoCam,
@@ -407,12 +411,20 @@ async fn main() {
     // R-13: Screenshot mode — render warmup frames, then capture on the final frame.
     if let Some(screenshot_path) = &cli_args.screenshot {
         for frame_num in 0..=cli_args.screenshot_warmup {
-            if let Some(h) = &handle {
-                if is_key_pressed(KeyCode::Space) {
-                    h.toggle_pause();
-                }
-                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                    h.step_once();
+            // Process input events (screenshot mode: only sim controls)
+            for ev in input::collect() {
+                match ev {
+                    input::InputEvent::TogglePause => {
+                        if let Some(h) = &handle {
+                            h.toggle_pause();
+                        }
+                    }
+                    input::InputEvent::StepOnce => {
+                        if let Some(h) = &handle {
+                            h.step_once();
+                        }
+                    }
+                    _ => {} // screenshot mode ignores terrain and color toggles
                 }
             }
 
@@ -424,130 +436,20 @@ async fn main() {
             let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            // R-15a: EXCLUSIVE terrain draw in --retained mode (no double-draw z-fighting)
-            if cli_args.retained && gpu_pipeline.is_some() {
-                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
-                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
-                // HARD SKIP: GPU path is exclusive; macroquad draw completely bypassed
-            } else if !cli_args.retained {
-                // CPU macroquad path: used ONLY when --retained is NOT active
-                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-                for chunk in terrain_chunks {
-                    let (min, max) = chunk.bounds;
-                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                        draw_mesh(&chunk.mesh);
-                    }
-                }
-            }
-            // When --retained is true AND gpu_pipeline exists: GPU path only (above)
-            // No fallthrough to CPU path in --retained mode
+            // R-15a: Draw terrain (CPU or GPU path)
+            let _ = draw::draw_terrain(
+                &hex_terrain_chunks,
+                &cube_terrain_chunks,
+                &gpu_hex_chunks,
+                &gpu_cube_chunks,
+                gpu_pipeline,
+                &camera,
+                use_cube_terrain,
+                cli_args.retained,
+            );
 
-            if let Some(s) = snap.as_ref() {
-                let px_per_m = camera.px_per_m();
-                for c in &s.creatures {
-                    let (cx, cz) = if use_cube_terrain {
-                        (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
-                    } else {
-                        hex::hex_center(c.pos.0, c.pos.1)
-                    };
-                    let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
-                    let creature_pos = vec3(cx, h + 0.15, cz);
-
-                    if !camera.point_in_frustum(creature_pos) {
-                        continue;
-                    }
-
-                    let color = match c.uptake_layer {
-                        0 => Color::new(1.0, 0.6, 0.2, 1.0),
-                        1 => Color::new(0.2, 0.8, 1.0, 1.0),
-                        2 => Color::new(0.8, 0.2, 1.0, 1.0),
-                        _ => Color::new(0.5, 0.5, 0.5, 1.0),
-                    };
-
-                    if px_per_m < PX_PER_M_FAR_THRESHOLD {
-                        draw_sphere(creature_pos, 0.04, None, color);
-                    } else if px_per_m < PX_PER_M_MID_THRESHOLD {
-                        let body_count = c.body_size.max(1) as usize;
-                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                        let cell_radius = 0.03;
-                        let spacing = cell_radius * 2.2;
-                        let grid_size = (grid_side - 1) as f32 * spacing;
-                        let offset_x = -grid_size / 2.0;
-                        let offset_z = -grid_size / 2.0;
-
-                        let mut drawn = 0;
-                        for row in 0..grid_side {
-                            for col in 0..grid_side {
-                                if drawn >= body_count {
-                                    break;
-                                }
-                                let cell_x = offset_x + col as f32 * spacing;
-                                let cell_z = offset_z + row as f32 * spacing;
-                                let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
-                                draw_sphere(cell_pos, cell_radius, None, color);
-                                drawn += 1;
-                            }
-                            if drawn >= body_count {
-                                break;
-                            }
-                        }
-                    } else {
-                        let size_scale = c.size as f32 / 16.0;
-                        let base_size = 0.15 * size_scale;
-                        let body_count = c.body_size.max(1) as usize;
-
-                        if body_count > 1 {
-                            let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                            let cell_radius = 0.04;
-                            let spacing = cell_radius * 2.0;
-                            let grid_size = (grid_side - 1) as f32 * spacing;
-                            let offset_x = -grid_size / 2.0;
-                            let offset_z = -grid_size / 2.0;
-
-                            let mut drawn = 0;
-                            for row in 0..grid_side {
-                                for col in 0..grid_side {
-                                    if drawn >= body_count {
-                                        break;
-                                    }
-                                    let cell_x = offset_x + col as f32 * spacing;
-                                    let cell_z = offset_z + row as f32 * spacing;
-                                    let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
-                                    draw_sphere(cell_pos, cell_radius, None, color);
-                                    drawn += 1;
-                                }
-                                if drawn >= body_count {
-                                    break;
-                                }
-                            }
-                        } else {
-                            match c.cell_type {
-                                Some(sim_core::CellType::A) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::B) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Mixed) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Diff(_)) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                                None => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Render creatures by LOD tier
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
             set_default_camera();
 
             // R-13 F-B5: Capture on final frame (frame_num == cli_args.screenshot_warmup)
@@ -567,12 +469,20 @@ async fn main() {
     if cli_args.bench {
         // Warmup: 30 frames to reach steady state
         for _ in 0..30 {
-            if let Some(h) = &handle {
-                if is_key_pressed(KeyCode::Space) {
-                    h.toggle_pause();
-                }
-                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                    h.step_once();
+            // Process input events (benchmark warmup: only sim controls)
+            for ev in input::collect() {
+                match ev {
+                    input::InputEvent::TogglePause => {
+                        if let Some(h) = &handle {
+                            h.toggle_pause();
+                        }
+                    }
+                    input::InputEvent::StepOnce => {
+                        if let Some(h) = &handle {
+                            h.step_once();
+                        }
+                    }
+                    _ => {} // benchmark warmup ignores terrain and color toggles
                 }
             }
 
@@ -581,128 +491,20 @@ async fn main() {
 
             camera.update();
             let cam3d = camera.to_camera3d();
-            let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            if cli_args.retained && gpu_pipeline.is_some() {
-                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
-                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
-            } else {
-                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-                for chunk in terrain_chunks {
-                    let (min, max) = chunk.bounds;
-                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                        draw_mesh(&chunk.mesh);
-                    }
-                }
-            }
+            let _ = draw::draw_terrain(
+                &hex_terrain_chunks,
+                &cube_terrain_chunks,
+                &gpu_hex_chunks,
+                &gpu_cube_chunks,
+                gpu_pipeline,
+                &camera,
+                use_cube_terrain,
+                cli_args.retained,
+            );
 
-            if let Some(s) = snap.as_ref() {
-                let px_per_m = camera.px_per_m();
-                for c in &s.creatures {
-                    let (cx, cz) = if use_cube_terrain {
-                        (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
-                    } else {
-                        hex::hex_center(c.pos.0, c.pos.1)
-                    };
-                    let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
-                    let creature_pos = vec3(cx, h + 0.15, cz);
-
-                    if !camera.point_in_frustum(creature_pos) {
-                        continue;
-                    }
-
-                    let color = match c.uptake_layer {
-                        0 => Color::new(1.0, 0.6, 0.2, 1.0),
-                        1 => Color::new(0.2, 0.8, 1.0, 1.0),
-                        2 => Color::new(0.8, 0.2, 1.0, 1.0),
-                        _ => Color::new(0.5, 0.5, 0.5, 1.0),
-                    };
-
-                    if px_per_m < PX_PER_M_FAR_THRESHOLD {
-                        draw_sphere(creature_pos, 0.04, None, color);
-                    } else if px_per_m < PX_PER_M_MID_THRESHOLD {
-                        let body_count = c.body_size.max(1) as usize;
-                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                        let cell_radius = 0.03;
-                        let spacing = cell_radius * 2.2;
-                        let grid_size = (grid_side - 1) as f32 * spacing;
-                        let offset_x = -grid_size / 2.0;
-                        let offset_z = -grid_size / 2.0;
-
-                        let mut drawn = 0;
-                        for row in 0..grid_side {
-                            for col in 0..grid_side {
-                                if drawn >= body_count {
-                                    break;
-                                }
-                                let cell_x = offset_x + col as f32 * spacing;
-                                let cell_z = offset_z + row as f32 * spacing;
-                                let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
-                                draw_sphere(cell_pos, cell_radius, None, color);
-                                drawn += 1;
-                            }
-                            if drawn >= body_count {
-                                break;
-                            }
-                        }
-                    } else {
-                        let size_scale = c.size as f32 / 16.0;
-                        let base_size = 0.15 * size_scale;
-                        let body_count = c.body_size.max(1) as usize;
-
-                        if body_count > 1 {
-                            let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                            let cell_radius = 0.04;
-                            let spacing = cell_radius * 2.0;
-                            let grid_size = (grid_side - 1) as f32 * spacing;
-                            let offset_x = -grid_size / 2.0;
-                            let offset_z = -grid_size / 2.0;
-
-                            let mut drawn = 0;
-                            for row in 0..grid_side {
-                                for col in 0..grid_side {
-                                    if drawn >= body_count {
-                                        break;
-                                    }
-                                    let cell_x = offset_x + col as f32 * spacing;
-                                    let cell_z = offset_z + row as f32 * spacing;
-                                    let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
-                                    draw_sphere(cell_pos, cell_radius, None, color);
-                                    drawn += 1;
-                                }
-                                if drawn >= body_count {
-                                    break;
-                                }
-                            }
-                        } else {
-                            match c.cell_type {
-                                Some(sim_core::CellType::A) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::B) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Mixed) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Diff(_)) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                                None => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
             set_default_camera();
 
             next_frame().await;
@@ -720,12 +522,20 @@ async fn main() {
         for _ in 0..300 {
             let wall_start = Instant::now();
 
-            if let Some(h) = &handle {
-                if is_key_pressed(KeyCode::Space) {
-                    h.toggle_pause();
-                }
-                if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                    h.step_once();
+            // Process input events (benchmark timed: only sim controls)
+            for ev in input::collect() {
+                match ev {
+                    input::InputEvent::TogglePause => {
+                        if let Some(h) = &handle {
+                            h.toggle_pause();
+                        }
+                    }
+                    input::InputEvent::StepOnce => {
+                        if let Some(h) = &handle {
+                            h.step_once();
+                        }
+                    }
+                    _ => {} // benchmark timed ignores terrain and color toggles
                 }
             }
 
@@ -736,140 +546,22 @@ async fn main() {
 
             camera.update();
             let cam3d = camera.to_camera3d();
-            let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            let mut chunks_drawn = 0;
-            let mut frame_verts = 0;
-            if cli_args.retained && gpu_pipeline.is_some() {
-                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
-                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
-                for gpu_chunk in gpu_chunks {
-                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(gpu_chunk.lo, gpu_chunk.hi)) {
-                        chunks_drawn += 1;
-                        frame_verts += gpu_chunk.n_idx as usize;
-                    }
-                }
-            } else {
-                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-                for chunk in terrain_chunks {
-                    let (min, max) = chunk.bounds;
-                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                        draw_mesh(&chunk.mesh);
-                        chunks_drawn += 1;
-                        frame_verts += chunk.mesh.vertices.len();
-                    }
-                }
-            }
-            chunk_count = chunks_drawn;
-            vert_count = frame_verts;
+            let draw_stats = draw::draw_terrain(
+                &hex_terrain_chunks,
+                &cube_terrain_chunks,
+                &gpu_hex_chunks,
+                &gpu_cube_chunks,
+                gpu_pipeline,
+                &camera,
+                use_cube_terrain,
+                cli_args.retained,
+            );
+            chunk_count = draw_stats.chunks_drawn;
+            vert_count = draw_stats.verts_drawn;
 
-            if let Some(s) = snap.as_ref() {
-                let px_per_m = camera.px_per_m();
-                for c in &s.creatures {
-                    let (cx, cz) = if use_cube_terrain {
-                        (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
-                    } else {
-                        hex::hex_center(c.pos.0, c.pos.1)
-                    };
-                    let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
-                    let creature_pos = vec3(cx, h + 0.15, cz);
-
-                    if !camera.point_in_frustum(creature_pos) {
-                        continue;
-                    }
-
-                    let color = match c.uptake_layer {
-                        0 => Color::new(1.0, 0.6, 0.2, 1.0),
-                        1 => Color::new(0.2, 0.8, 1.0, 1.0),
-                        2 => Color::new(0.8, 0.2, 1.0, 1.0),
-                        _ => Color::new(0.5, 0.5, 0.5, 1.0),
-                    };
-
-                    if px_per_m < PX_PER_M_FAR_THRESHOLD {
-                        draw_sphere(creature_pos, 0.04, None, color);
-                    } else if px_per_m < PX_PER_M_MID_THRESHOLD {
-                        let body_count = c.body_size.max(1) as usize;
-                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                        let cell_radius = 0.03;
-                        let spacing = cell_radius * 2.2;
-                        let grid_size = (grid_side - 1) as f32 * spacing;
-                        let offset_x = -grid_size / 2.0;
-                        let offset_z = -grid_size / 2.0;
-
-                        let mut drawn = 0;
-                        for row in 0..grid_side {
-                            for col in 0..grid_side {
-                                if drawn >= body_count {
-                                    break;
-                                }
-                                let cell_x = offset_x + col as f32 * spacing;
-                                let cell_z = offset_z + row as f32 * spacing;
-                                let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
-                                draw_sphere(cell_pos, cell_radius, None, color);
-                                drawn += 1;
-                            }
-                            if drawn >= body_count {
-                                break;
-                            }
-                        }
-                    } else {
-                        let size_scale = c.size as f32 / 16.0;
-                        let base_size = 0.15 * size_scale;
-                        let body_count = c.body_size.max(1) as usize;
-
-                        if body_count > 1 {
-                            let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                            let cell_radius = 0.04;
-                            let spacing = cell_radius * 2.0;
-                            let grid_size = (grid_side - 1) as f32 * spacing;
-                            let offset_x = -grid_size / 2.0;
-                            let offset_z = -grid_size / 2.0;
-
-                            let mut drawn = 0;
-                            for row in 0..grid_side {
-                                for col in 0..grid_side {
-                                    if drawn >= body_count {
-                                        break;
-                                    }
-                                    let cell_x = offset_x + col as f32 * spacing;
-                                    let cell_z = offset_z + row as f32 * spacing;
-                                    let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
-                                    draw_sphere(cell_pos, cell_radius, None, color);
-                                    drawn += 1;
-                                }
-                                if drawn >= body_count {
-                                    break;
-                                }
-                            }
-                        } else {
-                            match c.cell_type {
-                                Some(sim_core::CellType::A) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::B) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Mixed) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Diff(_)) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                                None => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
             set_default_camera();
 
             let cpu_elapsed = cpu_start.elapsed().as_secs_f32() * 1000.0;
@@ -898,37 +590,42 @@ async fn main() {
     }
 
     loop {
-        if let Some(h) = &handle {
-            if is_key_pressed(KeyCode::Space) {
-                h.toggle_pause();
-            }
-            if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
-                h.step_once();
-            }
-        }
-        // R-5: Toggle hex↔cube terrain with 'T' key.
-        if is_key_pressed(KeyCode::T) {
-            use_cube_terrain = !use_cube_terrain;
-        }
-        // Toggle Height↔Material terrain coloring with 'C' (rebuilds the baked-color meshes).
-        if is_key_pressed(KeyCode::C) {
-            color_mode = match color_mode {
-                crate::biome_palette::ColorMode::Height => crate::biome_palette::ColorMode::Material,
-                crate::biome_palette::ColorMode::Material => crate::biome_palette::ColorMode::Height,
-            };
-            hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
-            cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
+        // Process input events from all sources
+        for ev in input::collect() {
+            match ev {
+                input::InputEvent::TogglePause => {
+                    if let Some(h) = &handle {
+                        h.toggle_pause();
+                    }
+                }
+                input::InputEvent::StepOnce => {
+                    if let Some(h) = &handle {
+                        h.step_once();
+                    }
+                }
+                input::InputEvent::ToggleTerrainKind => {
+                    use_cube_terrain = !use_cube_terrain;
+                }
+                input::InputEvent::ToggleColorMode => {
+                    color_mode = match color_mode {
+                        crate::biome_palette::ColorMode::Height => crate::biome_palette::ColorMode::Material,
+                        crate::biome_palette::ColorMode::Material => crate::biome_palette::ColorMode::Height,
+                    };
+                    hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
+                    cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), color_mode, config.seed, cli_args.bare_mode);
 
-            // R-15a: Rebuild GPU chunks if retained mode is active
-            if cli_args.retained && gpu_pipeline.is_some() {
-                use macroquad::prelude::get_internal_gl;
-                gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_hex_chunks);
-                gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_cube_chunks);
+                    // R-15a: Rebuild GPU chunks if retained mode is active
+                    if cli_args.retained && gpu_pipeline.is_some() {
+                        use macroquad::prelude::get_internal_gl;
+                        gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_hex_chunks);
+                        gpu_terrain::free_chunks(unsafe { get_internal_gl() }.quad_context, &gpu_cube_chunks);
 
-                let mut gl = unsafe { get_internal_gl() };
-                let ctx = gl.quad_context;
-                gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
-                gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                        let mut gl = unsafe { get_internal_gl() };
+                        let ctx = gl.quad_context;
+                        gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                        gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                    }
+                }
             }
         }
 
@@ -939,219 +636,32 @@ async fn main() {
         // R-3: Update camera input and build frustum.
         camera.update();
         let cam3d = camera.to_camera3d();
-        let frustum_planes = camera.frustum_planes();
 
         set_camera(&cam3d);
 
-        // R-3: Frustum-cull terrain chunks — only draw chunks whose AABB intersects the frustum.
-        // R-5: Works over both hex and cube layouts (same chunk AABB structure).
         let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-        let mut chunks_drawn = 0;
-        if cli_args.retained && gpu_pipeline.is_some() {
-            let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
-            draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
-            for gpu_chunk in gpu_chunks {
-                if frustum_planes.iter().all(|plane| plane.aabb_intersects(gpu_chunk.lo, gpu_chunk.hi)) {
-                    chunks_drawn += 1;
-                }
-            }
-        } else {
-            for chunk in terrain_chunks {
-                let (min, max) = chunk.bounds;
-                if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                    draw_mesh(&chunk.mesh);
-                    chunks_drawn += 1;
-                }
-            }
-        }
+        let draw_stats = draw::draw_terrain(
+            &hex_terrain_chunks,
+            &cube_terrain_chunks,
+            &gpu_hex_chunks,
+            &gpu_cube_chunks,
+            gpu_pipeline,
+            &camera,
+            use_cube_terrain,
+            cli_args.retained,
+        );
 
-        // R-4/R-5: Creatures rendered by px_per_m LOD tier (point → sphere → morphology).
-        // R-5: Projected into the ACTIVE view (hex or cube).
-        // Tier selection is a pure function of camera zoom ONLY (RnD R21), never per-creature distance.
-        if let Some(s) = snap.as_ref() {
-            let px_per_m = camera.px_per_m(); // Pure fn of ortho_span + viewport; whole frame shares one tier.
-
-            for c in &s.creatures {
-                // R-5: Creature projection follows active terrain layout.
-                let (cx, cz) = if use_cube_terrain {
-                    // Cube mode: square cell center at (col + 0.5, row + 0.5)
-                    (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
-                } else {
-                    // Hex mode: hex center (R-2/R-4 behavior)
-                    hex::hex_center(c.pos.0, c.pos.1)
-                };
-                let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
-                let creature_pos = vec3(cx, h + 0.15, cz);
-
-                // R-3 frustum cull: skip creatures outside the view frustum.
-                if !camera.point_in_frustum(creature_pos) {
-                    continue;
-                }
-
-                // R-7 (biology coloring): Base color by uptake_layer (feeding guild).
-                // Layer 0 (A-guild) = orange/red; layer 1 (B-guild) = cyan/blue; higher layers distinct.
-                // This makes emergence visible: A/B differentiation is the primary visual signal.
-                let color = match c.uptake_layer {
-                    0 => Color::new(1.0, 0.6, 0.2, 1.0), // Orange (A-guild)
-                    1 => Color::new(0.2, 0.8, 1.0, 1.0), // Cyan (B-guild)
-                    2 => Color::new(0.8, 0.2, 1.0, 1.0), // Magenta (layer 2+)
-                    _ => Color::new(0.5, 0.5, 0.5, 1.0), // Gray (undefined layers)
-                };
-
-                // R-4 LOD tier by px_per_m: FAR (point) < MID (sphere) < NEAR (morphology).
-                if px_per_m < PX_PER_M_FAR_THRESHOLD {
-                    // ─── FAR tier: sub-pixel point/billboard (cheapest) ───────────────────────────────
-                    // Creatures so tiny they're unresolvable. Draw a minimal dot.
-                    draw_sphere(creature_pos, 0.04, None, color);
-                } else if px_per_m < PX_PER_M_MID_THRESHOLD {
-                    // ─── MID tier: multicell cluster sphere (R-11 body_size rendering) ──────────────────
-                    // R-11: Draw body as `body_size` cells in a packed cluster arrangement.
-                    // Each cell is a small sphere; cluster is arranged in a square grid.
-                    let body_count = c.body_size.max(1) as usize;
-                    let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                    let cell_radius = 0.03; // Small sub-cell radius
-                    let spacing = cell_radius * 2.2; // Slight spacing between cells
-
-                    // Compute grid offset to center the cluster
-                    let grid_size = (grid_side - 1) as f32 * spacing;
-                    let offset_x = -grid_size / 2.0;
-                    let offset_z = -grid_size / 2.0;
-
-                    // Draw cells in a square grid pattern
-                    let mut drawn = 0;
-                    for row in 0..grid_side {
-                        for col in 0..grid_side {
-                            if drawn >= body_count {
-                                break;
-                            }
-                            let cell_x = offset_x + col as f32 * spacing;
-                            let cell_z = offset_z + row as f32 * spacing;
-                            let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
-                            draw_sphere(cell_pos, cell_radius, None, color);
-                            drawn += 1;
-                        }
-                        if drawn >= body_count {
-                            break;
-                        }
-                    }
-                } else {
-                    // ─── NEAR tier: cell-type morphology + multicell body representation ──────────────────
-                    // R-4/R-11: Scale morphology by `size` (Kleiber); draw body as `body_size` cells.
-                    // Each cell_type has a distinctive form; base color is uptake_layer (feeding guild).
-                    let size_scale = c.size as f32 / 16.0;
-                    let base_size = 0.15 * size_scale;
-                    let body_count = c.body_size.max(1) as usize;
-
-                    // For multicellular bodies (body_count > 1), render a small cluster around the main form.
-                    // This makes multicellularity visible while preserving the cell_type morphology signal.
-                    if body_count > 1 {
-                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                        let cell_radius = 0.04;
-                        let spacing = cell_radius * 2.0;
-                        let grid_size = (grid_side - 1) as f32 * spacing;
-                        let offset_x = -grid_size / 2.0;
-                        let offset_z = -grid_size / 2.0;
-
-                        // Draw cells in a compact grid, with cell_type morphology only on the main cell.
-                        let mut drawn = 0;
-                        for row in 0..grid_side {
-                            for col in 0..grid_side {
-                                if drawn >= body_count {
-                                    break;
-                                }
-                                let cell_x = offset_x + col as f32 * spacing;
-                                let cell_z = offset_z + row as f32 * spacing;
-                                let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
-                                // Render each cell as a small sphere in the base color
-                                draw_sphere(cell_pos, cell_radius, None, color);
-                                drawn += 1;
-                            }
-                            if drawn >= body_count {
-                                break;
-                            }
-                        }
-                    } else {
-                        // Unicellular: draw the full cell_type morphology
-                        match c.cell_type {
-                            Some(sim_core::CellType::A) => {
-                                // Type A: main body + upper accent sphere (a small top ball).
-                                draw_sphere(creature_pos, base_size, None, color);
-                                let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
-                                draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
-                            }
-                            Some(sim_core::CellType::B) => {
-                                // Type B: main body + side accent sphere (a small offset ball).
-                                draw_sphere(creature_pos, base_size, None, color);
-                                let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
-                                draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
-                            }
-                            Some(sim_core::CellType::Mixed) => {
-                                // Type Mixed: main body + front accent sphere (a small forward ball).
-                                draw_sphere(creature_pos, base_size, None, color);
-                                let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
-                                draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
-                            }
-                            Some(sim_core::CellType::Diff(_)) => {
-                                // Diff: differentiated cell, render as neutral sphere (same as None for now)
-                                draw_sphere(creature_pos, base_size, None, color);
-                            }
-                            None => {
-                                // Neutral: single sphere (for non-morphogen configs).
-                                draw_sphere(creature_pos, base_size, None, color);
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
         set_default_camera();
 
-        egui_macroquad::ui(|ctx| {
-            let title = if cli_args.standalone {
-                "v2 render scaffold — R-8 standalone hex-map viewer"
-            } else {
-                "v2 render scaffold — R-7 biology coloring"
-            };
-            egui::Window::new(title).show(ctx, |ui| {
-                match snap.as_ref() {
-                    Some(s) => {
-                        ui.label(format!("tick: {}", s.tick));
-                        ui.label(format!("population: {}", s.population));
-                        ui.label(format!("species: {}", s.species_count));
-                        ui.label(format!("creatures drawn: {}", s.creatures.len()));
-                    }
-                    None if cli_args.standalone => {
-                        ui.label("standalone mode — no sim, terrain only");
-                    }
-                    None => {
-                        ui.label("waiting for the sim worker's first tick…");
-                    }
-                }
-                ui.separator();
-                if !cli_args.standalone {
-                    ui.label("─ Creature Coloring (uptake_layer / feeding guild) ─");
-                    ui.colored_label(egui::Color32::from_rgb(255, 153, 51), "● Orange: Layer 0 (A-guild)");
-                    ui.colored_label(egui::Color32::from_rgb(51, 204, 255), "● Cyan: Layer 1 (B-guild)");
-                    ui.colored_label(egui::Color32::from_rgb(204, 51, 255), "● Magenta: Layer 2+");
-                    ui.separator();
-                }
-                ui.label(format!("terrain: {world_dim}×{world_dim}, {} mesh chunks", terrain_chunks.len()));
-                ui.label(format!("chunks drawn: {}/{}", chunks_drawn, terrain_chunks.len()));
-                ui.label(format!("fps: {}", get_fps()));
-                ui.separator();
-                ui.label("Controls: WASD/drag pan · wheel zoom · Q/E rotate · T hex/cube");
-                if let Some(h) = &handle {
-                    ui.separator();
-                    ui.label(if h.is_paused() {
-                        "PAUSED — Space to resume"
-                    } else {
-                        "running — Space to pause"
-                    });
-                    ui.label("Right / N: step once while paused");
-                }
-            });
-        });
-        egui_macroquad::draw();
+        ui::draw_debug_hud(
+            &snap.as_deref().cloned(),
+            cli_args.standalone,
+            world_dim,
+            draw_stats.chunks_drawn,
+            terrain_chunks.len(),
+        );
+        ui::draw();
 
         next_frame().await;
     }

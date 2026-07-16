@@ -10,7 +10,7 @@
 //! Same `ROWS_PER_CHUNK` chunking + u16-index assert as hex terrain (`terrain.rs`).
 //! Built ONCE at startup — cold terrain immutable for the run.
 
-use crate::biome_palette::{surface_color_v2, cliff_shade, apply_directional_shading, ColorMode};
+use crate::biome_palette::{cell_color, cliff_shade, apply_directional_shading, ColorMode};
 use crate::hex::HEIGHT_SCALE;
 use crate::terrain::TerrainChunk;
 use macroquad::models::{Mesh, Vertex};
@@ -70,16 +70,7 @@ fn build_chunk(
             heights[local_row][col as usize] = world.height(col, row) as f32 * HEIGHT_SCALE;
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
-            let rendered_material = if bare_mode && material == 8 { 1 } else { material };
-            colors[local_row][col as usize] = surface_color_v2(
-                rendered_material,
-                height_val,
-                h_lo,
-                h_hi,
-                col,
-                row,
-                seed,
-            );
+            colors[local_row][col as usize] = cell_color(material, height_val, h_lo, h_hi, col, row, seed, bare_mode);
         }
     }
 

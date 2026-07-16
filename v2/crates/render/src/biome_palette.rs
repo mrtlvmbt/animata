@@ -225,6 +225,38 @@ pub fn apply_directional_shading(c: Color, normal: Vec3) -> Color {
     Color::new(c.r * shade, c.g * shade, c.b * shade, c.a)
 }
 
+/// Compute a cell's top-face color using palette v2 with optional bare-mode water substitution.
+///
+/// This is the canonical cell coloring logic shared by terrain.rs, terrain_cube.rs, and minimap.
+/// Takes the material and height, applies hypsometric normalization, and optionally substitutes
+/// water with sand in bare_mode (for dry-bed visualization).
+///
+/// Parameters:
+/// - `material`: surface material byte (0..=10)
+/// - `height`: cell height value (raw, pre-hypsometric normalization)
+/// - `h_lo`, `h_hi`: the map's observed [p2, p98] relief band for hypsometric scaling
+/// - `col`, `row`: world grid coordinates (for deterministic per-column jitter)
+/// - `seed`: random seed component (for deterministic per-map variation)
+/// - `bare_mode`: if true and material == 8 (water), render as sand (material 1) instead
+pub fn cell_color(
+    material: u8,
+    height: i64,
+    h_lo: i64,
+    h_hi: i64,
+    col: i64,
+    row: i64,
+    seed: u64,
+    bare_mode: bool,
+) -> Color {
+    let top_color = surface_color_v2(material, height, h_lo, h_hi, col, row, seed);
+    if bare_mode && material == 8 {
+        // Water in bare mode: desaturated sand
+        surface_color_v2(1, height, h_lo, h_hi, col, row, seed)
+    } else {
+        top_color
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

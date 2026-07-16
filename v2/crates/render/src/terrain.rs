@@ -8,7 +8,7 @@
 //!
 //! R-3: Each chunk carries a world-space AABB for frustum culling.
 
-use crate::biome_palette::{surface_color_v2, cliff_shade, apply_directional_shading, ColorMode};
+use crate::biome_palette::{cell_color, cliff_shade, apply_directional_shading, ColorMode};
 use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE, HEX_SIZE};
 use macroquad::models::{Mesh, Vertex};
 use macroquad::prelude::*;
@@ -147,14 +147,8 @@ fn build_chunk(
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
 
-            // Compute top color (palette v2 for visual quality)
-            let top_color = surface_color_v2(material, height_val, h_lo, h_hi, col, row, seed);
-            let top_color_bare = if bare_mode && material == 8 {
-                // Water in bare mode: desaturated sand
-                surface_color_v2(1, height_val, h_lo, h_hi, col, row, seed)
-            } else {
-                top_color
-            };
+            // Compute top color (palette v2 for visual quality, with bare_mode water substitution)
+            let top_color_bare = cell_color(material, height_val, h_lo, h_hi, col, row, seed, bare_mode);
 
             // Bevel: shrink the top hexagon by BEVEL_FRAC toward center. These inner corners form the
             // TOP FACE of the shrunk hexagon; the OUTER corners drop by BEVEL_DROP to form the chamfer ring.
