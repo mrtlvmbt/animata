@@ -61,7 +61,7 @@ pub fn draw_terrain(
             if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
                 draw_mesh(&chunk.mesh);
                 chunks_drawn += 1;
-                verts_drawn += chunk.mesh.vertices.len();
+                verts_drawn += chunk.mesh.indices.len();
             }
         }
     }
