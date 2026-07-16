@@ -29,6 +29,16 @@ pub struct EnergyLedger {
     /// Cumulative unrecycled body energy at death (0 in Ф0 — death only at energy 0 — but tracked so
     /// the bucket exists when recycling lands).
     pub lost: i64,
+    /// P-2a (#442): grow-step diagnostic buckets, indexed by `GrowGate` discriminant
+    /// (`Grow`/`BlockedLump`/`BlockedCell`), bumped inside `stage_grow` off the SAME `grow_gate`
+    /// call that decides growth — so each still-growing metab tick hits exactly one slot and the
+    /// buckets can never drift from the decision (critic F74/F81). NOT in `state_hash`/conservation
+    /// (golden-neutral, not folded here — see `conservation_residual`).
+    pub grow_step_counts: [u64; 3],
+    /// P-2a (#442): cumulative maturation count, bumped inside `stage_grow`'s growth branch right
+    /// after `grown.0 += 1`, iff the body just reached its decoded target (critic F126 — NOT at the
+    /// maturity early-`continue`, which fires every metab tick for already-mature bodies).
+    pub maturations_total: u64,
 }
 
 impl EnergyLedger {
@@ -36,4 +46,16 @@ impl EnergyLedger {
     pub fn residual(&self, field_total: i64, agents_total: i64) -> i64 {
         (field_total + agents_total + self.dissipated + self.lost) - self.produced - self.initial
     }
+}
+
+/// P-2a (#442): read-only grow-step diagnostics snapshot, exposed via `Sim::ledger_snapshot()` (cf.
+/// `Sim::conservation_residual()`). `grow_steps_total` is DERIVED (`Σ grow_step_counts`), NOT bumped
+/// independently, so the denominator cannot drift from the buckets (critic F81). This slice's fields
+/// are the P-2a set; P-2b EXTENDS the struct with the death-channel + provision fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LedgerSnapshot {
+    pub blocked_lump: u64,
+    pub blocked_cell: u64,
+    pub grow_steps_total: u64,
+    pub maturations_total: u64,
 }

@@ -37,7 +37,7 @@ pub use components::{
     Velocity, VelocityNext,
 };
 pub use det_map::DetMap;
-pub use energy::EnergyLedger;
+pub use energy::{EnergyLedger, LedgerSnapshot};
 pub use genome::{isqrt, size_pow_three_quarters, CellGraph, Genome, Phenotype, RespiratoryPathway};
 pub use grid::{morton2, NeighborGrid};
 pub use hash::{deterministic_fold, fnv_mix, FNV_OFFSET};
@@ -51,7 +51,7 @@ pub use grn_lut::{
 pub use morphogen::{morphogen, morphogen_steps, topology_mask, BodyPlan, Boundary, Gradient, MorphogenSpec};
 pub use params::{AmbientToleranceSpec, EconParams, EnvFrontierConfig, FieldId, IncomeMode, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
-pub use stages::{expressed_capacity, monod_demand, settling_drain};
+pub use stages::{expressed_capacity, monod_demand, settling_drain, grow_gate, grow_reserve, GrowGate};
 pub use pool::{ScatterParams, SimPool};
 pub use rng::{seed_fold, splitmix64};
 pub use traits::{
@@ -586,6 +586,8 @@ impl Sim {
             produced: 0,
             dissipated: 0,
             lost: 0,
+            grow_step_counts: [0; 3],
+            maturations_total: 0,
         });
         w.insert_resource(WorldRes(world));
         w.insert_resource(FieldRes(field));
@@ -741,6 +743,19 @@ impl Sim {
             .sum();
         let ledger = *self.world.resource::<EnergyLedger>();
         ledger.residual(field_total, agents)
+    }
+
+    /// P-2a (#442): read-only grow-step diagnostics accessor (cf. `conservation_residual` above).
+    /// Populated only where growth runs (a fact of `stage_grow`'s location, critic F79) — all-zero
+    /// when `enable_propagule=false`. Not in `state_hash`/conservation (`EnergyLedger` isn't folded).
+    pub fn ledger_snapshot(&self) -> LedgerSnapshot {
+        let ledger = self.world.resource::<EnergyLedger>();
+        LedgerSnapshot {
+            blocked_lump: ledger.grow_step_counts[GrowGate::BlockedLump as usize],
+            blocked_cell: ledger.grow_step_counts[GrowGate::BlockedCell as usize],
+            grow_steps_total: ledger.grow_step_counts.iter().sum(),
+            maturations_total: ledger.maturations_total,
+        }
     }
 
     /// Read-only per-creature brain snapshot `(entity bits, BrainOutput, BrainState)`, sorted by
