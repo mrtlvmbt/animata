@@ -13,6 +13,7 @@
 
 use macroquad::color::Color;
 use macroquad::prelude::Vec3;
+use world::palette::MATERIAL_COLORS;
 
 /// A loud, unmistakable "unmapped biome id" marker (never a plausible terrain hue) — visible at a
 /// glance if `WorldView::biome` ever returns an id beyond the documented `0..=12` range, rather than
@@ -56,24 +57,13 @@ pub fn biome_color(id: u8) -> Color {
 /// the renderer colours by physical surface material, not biome, because biome misses the landform
 /// substrates the diverse-relief terragen produces — Ocean water, aeolian sand, glacial till,
 /// volcanic basalt/tuff (biome=13 Ocean alone already fell off `biome_color`'s `0..=12` table → magenta sea).
-/// Mirrors `world/src/bin/map_dump.rs`'s palette so the interactive 3D view and the headless PPM
-/// preview read identically. `_ => UNKNOWN` keeps the no-panic contract.
-/// Hues are in HSL: (h, s, l) where we keep saturation/lightness consistent and vary hue per material.
-/// Pasteled (R-16): lifted brightness, reduced saturation toward toy-diorama look.
+/// Reads the canonical palette from `world::palette::MATERIAL_COLORS` (single source of truth,
+/// shared with map_dump). `_ => UNKNOWN` keeps the no-panic contract for out-of-range ids.
 pub fn material_color(m: u8) -> Color {
-    match m {
-        0 => Color::from_rgba(200, 200, 210, 255), // Air (above-surface empty) — pale grey (brightened)
-        1 => Color::from_rgba(235, 220, 150, 255), // Sand (aeolian dune) — warm tan (lighter, softer)
-        2 => Color::from_rgba(220, 240, 248, 255), // Permafrost — ice grey (lightened)
-        3 => Color::from_rgba(140, 160, 110, 255), // Soil — softer green
-        4 => Color::from_rgba(150, 150, 156, 255), // Bedrock — cool grey (lightened)
-        5 => Color::from_rgba(110, 100, 115, 255), // Basalt (volcanic) — dark slate (lifted from near-black)
-        6 => Color::from_rgba(200, 175, 155, 255), // Tuff (volcanic) — light brown (brightened)
-        7 => Color::from_rgba(205, 215, 230, 255), // Till (glacial) — pale grey-blue (lightened)
-        8 => Color::from_rgba(120, 160, 200, 255), // Water (coastal/ocean) — lighter softer blue
-        9 => Color::from_rgba(210, 195, 135, 255), // SoilDry — pale ochre (lighter)
-        10 => Color::from_rgba(150, 135, 90, 255), // SoilWet — softer mid-brown (lifted from dark umber)
-        _ => UNKNOWN,
+    if let Some(&[r, g, b]) = MATERIAL_COLORS.get(m as usize) {
+        Color::from_rgba(r, g, b, 255)
+    } else {
+        UNKNOWN
     }
 }
 

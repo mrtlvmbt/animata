@@ -1,8 +1,8 @@
-task: #440 R-14 look pack (AO, bevel, palette v2, --bare, capacity)
-phase: FINAL — macro detail shot verified, code-critic re-review on correct branch in progress
-blocked_on: code-critic verdict (re-run on origin/render-r12-terragen-preview), then user HEIGHT_SCALE pick
-next: post code-critic verdict to PR #441; await user HEIGHT_SCALE selection; merge when user picks
-updated: 2026-07-16 16:15
+task: #444 R-16 — palette pastel (brighten & soften)
+phase: COMPLETE CODE; awaiting user palette approval before merge
+blocked_on: user verdict on palette tuning (ТЗ: "Do NOT merge — PM relays user verdict")
+next: user reviews before/after PNG evidence in PR #445; approves palette; PM merges
+updated: 2026-07-16 15:40
 
 COMPLETION SUMMARY:
 ✓ Palette v2: two-factor coloring (material hue × height value + ±4% jitter)

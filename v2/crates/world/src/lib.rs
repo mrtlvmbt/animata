@@ -12,6 +12,9 @@ use gen::caps::{classify_and_caps, CAP_MAX, FinalBiome, oxygen_cap_from, nitrate
 /// W-1..W-6 world-gen pipeline stage home (see the module doc).
 pub mod gen;
 
+/// R-16 pasteled material color palette (single canonical source for render + map_dump).
+pub mod palette;
+
 /// `ProcgenWorld` — built ONCE at `::new` from the full integer pipeline, then answers
 /// `WorldView` queries by indexing cached arrays (never re-running erosion per query, which is
 /// `O(iters·n log n)` — see the module doc's cold-init note).

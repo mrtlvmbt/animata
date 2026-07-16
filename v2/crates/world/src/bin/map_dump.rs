@@ -14,29 +14,17 @@
 use std::io::Write;
 use world::gen::caps::classify_and_caps;
 use world::gen::material::MaterialId;
+use world::palette::MATERIAL_COLORS;
 
 /// Matches the production world height ceiling (`cli::HMAX`), so erosion / glacial ELA / all
 /// height-relative thresholds fire exactly as the real generator sees them.
 const HMAX: i64 = 200;
 
 /// Primary-material → RGB palette (top-down surface colour).
-/// Includes W-10 presentation-only discriminants: SoilDry (9), SoilWet (10).
-/// Pasteled (R-16): matches render/src/biome_palette.rs for consistency across 3D and headless views.
+/// Reads the canonical palette from `world::palette::MATERIAL_COLORS` (single source of truth,
+/// shared with render). Out-of-range materials default to magenta.
 fn colour(m: u8) -> [u8; 3] {
-    match m {
-        x if x == MaterialId::Air as u8 => [200, 200, 210], // air (above-surface empty) — pale grey (brightened)
-        x if x == MaterialId::Sand as u8 => [235, 220, 150], // aeolian sand — tan (lighter, softer)
-        x if x == MaterialId::Permafrost as u8 => [220, 240, 248], // permafrost — ice grey (lightened)
-        x if x == MaterialId::Soil as u8 => [140, 160, 110], // soil — softer green
-        x if x == MaterialId::Bedrock as u8 => [150, 150, 156], // bedrock — grey (lightened)
-        x if x == MaterialId::Basalt as u8 => [110, 100, 115], // volcanic basalt — dark slate (lifted)
-        x if x == MaterialId::Tuff as u8 => [200, 175, 155], // volcanic tuff — light brown (brightened)
-        x if x == MaterialId::Till as u8 => [205, 215, 230], // glacial till — pale grey-blue (lightened)
-        x if x == MaterialId::Water as u8 => [120, 160, 200], // coastal water — lighter softer blue
-        9 => [210, 195, 135],  // W-10: SoilDry (discriminant 9) — pale ochre (lighter)
-        10 => [150, 135, 90], // W-10: SoilWet (discriminant 10) — softer mid-brown
-        _ => [255, 0, 255],                                  // unknown — magenta
-    }
+    MATERIAL_COLORS.get(m as usize).copied().unwrap_or([255, 0, 255])
 }
 
 fn parse_seed(s: &str) -> u64 {
