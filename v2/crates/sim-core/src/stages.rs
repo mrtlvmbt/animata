@@ -313,11 +313,130 @@ pub fn stage_metabolism(
     tel.photo_cost_total += photo_cost_this_event;
 }
 
-// ── Stage 5b: Grow — P-1 propagule growth primitive (#429). PINNED immediately after Metabolism,
-//    before Reproduction, running ONLY on metabolism ticks (critic F30/F4 — a grow step firing off
-//    that cadence could grow on a no-bill tick, so the very next lump would land at the HIGHER
-//    n_cells/Kleiber and starve the body). Grows AT MOST one cell per metabolism tick. Gated on
-//    `enable_propagule` (F2) — off ⇒ early return, zero cost, byte-identical. ─────────────────────
+/// P-2a (#442): per-tick deterministic drain covered by the grow reserve, evaluated over ONE
+/// metab-period window: the Kleiber lump (`base_metab_lump`, already ×`metab_period`) PLUS the
+/// per-tick `excrete` + hazard drains amortised across the window (`× metab_period`; settling is
+/// NOT re-multiplied here, it has its own periodic amortisation in `settling_reserve`).
+pub(crate) fn window_drain(econ: &EconParams, ph: &Phenotype, g: &Genome, n: i64) -> i64 {
+    let period = econ.metab_period.max(1) as i64;
+    base_metab_lump(econ, g, n) + (econ.excrete + hazard_drain(econ, ph)) * period
+}
+
+/// P-2a (#442): the D-5 hazard-refuge per-tick drain for the body's CURRENT (pre-growth) size, or 0
+/// when hazard predation isn't the active config (mirrors `stage_predation`'s Hazard branch guard
+/// verbatim — `mode == Hazard && size_refuge.is_some()` — else a naive read would `.unwrap()` a
+/// `None` refuge on `CombatSplit`/`Universal` and panic). `refuge_mass` is soma-only under
+/// `division_of_labor` (mirrors the same filter `stage_predation` applies), not raw body size.
+fn hazard_drain(econ: &EconParams, ph: &Phenotype) -> i64 {
+    let spec = match &econ.predation {
+        Some(s) => s,
+        None => return 0,
+    };
+    if spec.mode != PredationMode::Hazard {
+        return 0;
+    }
+    let refuge = match spec.size_refuge {
+        Some(r) => r,
+        None => return 0,
+    };
+    let refuge_mass = if econ.division_of_labor {
+        ph.graph.module_cell_count.iter().zip(ph.graph.module_is_germ.iter())
+            .filter_map(|(&c, &is_germ)| if !is_germ { Some(c as i64) } else { None })
+            .sum::<i64>().max(1)
+    } else {
+        ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1)
+    };
+    refuge_attenuate(spec.base_hazard, refuge_mass, refuge.shift, refuge.refuge_k)
+}
+
+/// P-2a (#442): wraps the existing [`settling_drain`] (single source of truth, do NOT redefine),
+/// passing the body's CURRENT (pre-growth) size — mirrors `stage_settling`'s own `body_size` read.
+/// Returns 0 when `settling` isn't configured (mirrors `settling_drain`'s own inert gates).
+fn settling_drain_of(econ: &EconParams, ph: &Phenotype) -> i64 {
+    let spec = match &econ.settling {
+        Some(s) => s,
+        None => return 0,
+    };
+    let body_size: i64 = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
+    settling_drain(spec, body_size)
+}
+
+/// P-2a (#442): the periodic settling pulse amortised over the 2-window grow-reserve horizon.
+/// **Normative early-return** (critic F171): all THREE inert gates (`settling == None` OR
+/// `period == 0` OR `strength == 0`) MUST be checked BEFORE the `ceil` div — `period` is the ceil
+/// divisor, and `period == 0` is the shipped "treat as None" compat case (`stage_settling`), so a
+/// literal `ceil` there would integer-divide-by-zero and panic.
+fn settling_reserve(econ: &EconParams, ph: &Phenotype) -> i64 {
+    let spec = match &econ.settling {
+        Some(s) => s,
+        None => return 0,
+    };
+    if spec.period == 0 || spec.strength == 0 {
+        return 0;
+    }
+    let horizon = 2 * econ.metab_period.max(1) as i64;
+    let pulses = (horizon + spec.period as i64 - 1) / spec.period as i64; // ceil, period > 0 here
+    settling_drain_of(econ, ph) * pulses
+}
+
+/// P-2a (#442): the SINGLE reserve source (critic F166) — every reserve call-site goes through
+/// this fn, and the formula lives in exactly ONE place (here), the discipline `base_metab_lump`
+/// already earns. `grow_reserve = 2·window_drain(econ, ph, g, n) + settling_reserve(econ, ph)`: a
+/// full two-metab-window buffer covering every deterministic per-tick drain (Kleiber lump, excrete,
+/// hazard) plus the periodic settling pulse amortised over that horizon.
+///
+/// **Body-size invariant (critic F4 — reads size from TWO sources):** `ph` is the CURRENT
+/// materialised body — it drives `hazard_drain`/`settling_drain_of` via `module_cell_count`, the
+/// PRE-growth mass (conservative over-reserve as the body grows, refuge only rises — F159). `n` is
+/// the body's POST-growth cell count — it drives `base_metab_lump`, the Kleiber lump the body pays
+/// AFTER this grow. Every caller passes `n = grown.0 + 1` alongside the matching (pre-growth) `ph`,
+/// so the two never silently desync.
+pub fn grow_reserve(econ: &EconParams, ph: &Phenotype, g: &Genome, n: i64) -> i64 {
+    2 * window_drain(econ, ph, g, n) + settling_reserve(econ, ph)
+}
+
+/// P-2a (#442): `grow_reserve` + `e_cell`, the still-growing body's total energy threshold to pay
+/// for one more cell AND exit the grow with a full window of buffer (critic F160 — derived from
+/// `grow_reserve` so the reserve is structural, not a coincidental duplicate). P-2b's
+/// `survival_floor` calls this for the still-growing-donor case.
+#[allow(dead_code)] // unused THIS slice — P-2b's survival_floor is the first caller (F160).
+pub(crate) fn grow_threshold(econ: &EconParams, ph: &Phenotype, g: &Genome, grown: i64) -> i64 {
+    econ.e_cell + grow_reserve(econ, ph, g, grown + 1)
+}
+
+/// P-2a (#442): the 3-variant grow-gate classifier (critic F71/F77/F78) — a SINGLE evaluation so
+/// `stage_grow` and the bucket counters never read a stale re-derived copy; the partition is
+/// compiler-exhaustive. `reserve` is computed OUTSIDE (via `grow_reserve`) so this fn stays PURE
+/// and unit-testable (critic F157). Credits `min(prov, e_cell)` (critic F99 — only one cell's worth
+/// can ever pay a cell); no `debug_assert!(prov <= e_cell)` — the `min` IS the guard (critic F145).
+/// `prov` is `0` this slice (no `Provisioned` component yet) ⇒ the gate degenerates to the P-1
+/// liquid gate `energy >= e_cell + reserve` (critic F72).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrowGate {
+    Grow,
+    BlockedLump,
+    BlockedCell,
+}
+
+pub fn grow_gate(econ: &EconParams, energy: i64, prov: i64, reserve: i64) -> GrowGate {
+    let bank = prov.min(econ.e_cell);
+    if energy < reserve {
+        GrowGate::BlockedLump
+    } else if bank + energy < econ.e_cell + reserve {
+        GrowGate::BlockedCell
+    } else {
+        GrowGate::Grow
+    }
+}
+
+// ── Stage 5b: Grow — P-1 propagule growth primitive (#429), P-2a (#442) reserve/gate refactor.
+//    PINNED immediately after Metabolism, before Reproduction, running ONLY on metabolism ticks
+//    (critic F30/F4 — a grow step firing off that cadence could grow on a no-bill tick, so the very
+//    next lump would land at the HIGHER n_cells/Kleiber and starve the body). Grows AT MOST one
+//    cell per metabolism tick. Gated on `enable_propagule` (F2) — off ⇒ early return, zero cost,
+//    byte-identical. P-2a shifts the reserve from ONE lump to a 2-window all-deterministic-drain
+//    buffer (`grow_reserve`) and routes the decision through the pure `grow_gate` classifier so the
+//    bucket counters below read the SAME evaluation `stage_grow` grows on. ────────────────────────
 pub fn stage_grow(
     econ: Res<EconParams>,
     clock: Res<SimClock>,
@@ -339,14 +458,24 @@ pub fn stage_grow(
         if (grown.0 as i64) >= target {
             continue;
         }
-        // Gate: ONE more cell affordable AND the reserve covers the lump the tick AFTER growth
-        // will actually charge (recomputed at Grown+1 via the SHARED helper — no drift, F18/F20).
-        // Deliberately NOT keyed to repro_bar (i64::MAX for a germ-less body would overflow; a
-        // repro-first order would starve growth of any surplus, F34/F35).
-        let next_lump = base_metab_lump(&econ, g, grown.0 as i64 + 1);
-        if energy.0 >= econ.e_cell + next_lump {
+        // Reserve covers ALL FOUR deterministic per-tick drains over a 2-metab-window horizon,
+        // recomputed at Grown+1 via the SHARED helper — no drift (F18/F20/F166). Deliberately NOT
+        // keyed to repro_bar (i64::MAX for a germ-less body would overflow; a repro-first order
+        // would starve growth of any surplus, F34/F35).
+        let reserve = grow_reserve(&econ, &ph, g, grown.0 as i64 + 1);
+        // `prov=0` this slice (no `Provisioned` component yet, F2b out of scope) — degenerates to
+        // the P-1 liquid gate at the wider reserve.
+        let gate = grow_gate(&econ, energy.0, 0, reserve);
+        ledger.grow_step_counts[gate as usize] += 1;
+        if gate == GrowGate::Grow {
+            // Liquid-first payment down to the reserve (critic F129); bank second (0 this slice —
+            // keep the shape so P-2b only fills bank_part from `Provisioned`, do NOT hardcode it).
+            let liquid_part = (energy.0 - reserve).min(econ.e_cell).max(0);
+            energy.0 -= liquid_part;
             grown.0 += 1;
-            energy.0 -= econ.e_cell;
+            if (grown.0 as i64) == target {
+                ledger.maturations_total += 1;
+            }
             ledger.dissipated += econ.e_cell;
             ph.graph = ph.graph.rebuild_prefix(grown.0 as usize);
         }
