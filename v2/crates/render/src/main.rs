@@ -608,10 +608,12 @@ async fn main() {
         let snap = handle.as_ref().and_then(|h| h.latest());
         let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
 
+        // F1: Collect all commands (UiActions + InputEvents) and apply them in one place
+        let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+
         egui_macroquad::ui(|ctx| {
             // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
             // This causes a 1-frame lag (acceptable, identical to v1 behavior).
-            let mut dummy_actions: Vec<ui::UiAction> = Vec::new();
             let mut ui_ctx = ui::UiCtx {
                 world_dim,
                 seed: config.seed,
@@ -621,32 +623,48 @@ async fn main() {
                 snap: snap.as_ref().map(|v| &**v),
                 standalone_mode: cli_args.standalone,
                 terrain_chunks_total: terrain_chunks.len(),
-                actions: &mut dummy_actions,
+                actions: &mut ui_actions,
             };
             let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
             // Apply camera update with gating.
             camera.update_gated(ui_out.wants_pointer, ui_out.wants_keyboard);
 
-            // Process input events with gating.
+            // Collect keyboard input events with gating.
             for ev in input::collect(&ui_out) {
+                // Convert InputEvent to UiAction and collect for unified handling
                 match ev {
                     input::InputEvent::TogglePause => {
-                        if let Some(h) = &handle {
-                            h.toggle_pause();
-                        }
+                        ui_actions.push(ui::UiAction::TogglePause);
                     }
                     input::InputEvent::StepOnce => {
-                        if let Some(h) = &handle {
-                            h.step_once();
-                        }
+                        ui_actions.push(ui::UiAction::StepOnce);
                     }
                     input::InputEvent::ToggleTerrainKind => {
-                        use_cube_terrain = !use_cube_terrain;
+                        ui_actions.push(ui::UiAction::ToggleTerrainKind);
                     }
                 }
             }
         });
+
+        // F1: Apply all actions (from UI buttons and keyboard) in unified handler
+        for action in ui_actions {
+            match action {
+                ui::UiAction::TogglePause => {
+                    if let Some(h) = &handle {
+                        h.toggle_pause();
+                    }
+                }
+                ui::UiAction::StepOnce => {
+                    if let Some(h) = &handle {
+                        h.step_once();
+                    }
+                }
+                ui::UiAction::ToggleTerrainKind => {
+                    use_cube_terrain = !use_cube_terrain;
+                }
+            }
+        }
 
         clear_background(Color::from_rgba(18, 18, 22, 255));
         let cam3d = camera.to_camera3d();
@@ -708,48 +726,74 @@ mod tests {
         assert!(has_mix, "variety gallery requires ≥1 mixed-landform seed (2+ landforms)");
     }
 
-    /// U-1: Test that the pointer/keyboard gating actually gates camera input.
-    /// When UI wants pointer input, mouse-driven camera pan/zoom should be skipped.
-    /// When UI wants keyboard input, keyboard-driven camera pan/rotate should be skipped.
+    /// F2: Honest unit test for pointer/keyboard gating — fails if gate is deleted.
+    /// Injects synthetic CamInput and verifies gating actually blocks changes.
+    /// Test would still pass if gate is deleted (vacuous), so we use synthetic input to force the gate.
     #[test]
-    fn ui_gating_skips_camera_input() {
+    fn ui_gating_blocks_camera_input() {
         let mut camera = camera::IsoCam::new(Vec3::new(0.0, 0.0, 0.0), 0.0, 50.0);
         let initial_focus = camera.focus;
         let initial_ortho = camera.ortho_span;
         let initial_yaw = camera.yaw;
 
-        // When UI wants pointer (e.g., mouse over a panel), the gated update skips zoom and mouse pan.
-        // Since we can't inject mouse state in this unit test, we verify the gate branch is present
-        // by checking that update_gated(wants_pointer=true, wants_keyboard=false) doesn't panic
-        // and produces the same state (no input synthesized).
-        camera.update_gated(true, false); // Pointer wanted, keyboard not wanted
-        assert_eq!(
-            camera.focus, initial_focus,
-            "camera should not move when UI wants pointer (mouse pan gated)"
-        );
+        // Synthetic input: wheel_y=1.0 (zoom in), keyboard pan, and yaw step.
+        let input = camera::CamInput {
+            wheel_y: 1.0,           // Positive wheel → zoom in (decrease span)
+            mouse_delta: None,      // No mouse drag
+            pan_dir: (20.0, 0.0),   // Keyboard pan in x
+            yaw_step: 1,            // E key pressed (rotate +60°)
+        };
+
+        // Test: pointer gating should block zoom.
+        camera.apply_cam_input(&input, true, false); // wants_pointer=true, wants_keyboard=false
         assert_eq!(
             camera.ortho_span, initial_ortho,
-            "camera should not zoom when UI wants pointer (wheel gated)"
+            "FAIL: span changed despite wants_pointer=true; gate is not blocking wheel"
         );
-        // Yaw might change if Q/E are pressed, but they're only gated when wants_keyboard=true
         assert_eq!(
             camera.yaw, initial_yaw,
-            "camera yaw should not rotate when UI wants keyboard (Q/E gated)"
+            "span: keyboard gating should still allow yaw"
         );
 
-        // When UI wants keyboard (e.g., text field focused), keyboard pan and rotate are gated.
-        camera.update_gated(false, true); // Pointer not wanted, keyboard wanted
+        // Reset camera
+        camera.focus = initial_focus;
+        camera.ortho_span = initial_ortho;
+        camera.yaw = initial_yaw;
+
+        // Test: keyboard gating should block pan and yaw, but NOT zoom.
+        camera.apply_cam_input(&input, false, true); // wants_pointer=false, wants_keyboard=true
         assert_eq!(
             camera.focus, initial_focus,
-            "camera should not pan from WASD when UI wants keyboard"
-        );
-        assert_eq!(
-            camera.ortho_span, initial_ortho,
-            "camera should still zoom (wheel is pointer-gated, not keyboard-gated)"
+            "FAIL: focus changed despite wants_keyboard=true; gate is not blocking keyboard pan"
         );
         assert_eq!(
             camera.yaw, initial_yaw,
-            "camera yaw should not rotate when UI wants keyboard (Q/E gated)"
+            "FAIL: yaw changed despite wants_keyboard=true; gate is not blocking E key"
+        );
+        // Zoom SHOULD apply (pointer gate, not keyboard gate)
+        assert!(
+            camera.ortho_span < initial_ortho,
+            "FAIL: zoom did not apply with wants_keyboard=true; pointer gating is broken"
+        );
+
+        // Reset
+        camera.focus = initial_focus;
+        camera.ortho_span = initial_ortho;
+        camera.yaw = initial_yaw;
+
+        // Test: no gating should allow all changes.
+        camera.apply_cam_input(&input, false, false); // wants_pointer=false, wants_keyboard=false
+        assert!(
+            camera.focus.x != initial_focus.x,
+            "pan should apply when gating is off"
+        );
+        assert!(
+            camera.ortho_span < initial_ortho,
+            "zoom should apply when gating is off"
+        );
+        assert!(
+            camera.yaw != initial_yaw,
+            "yaw should apply when gating is off"
         );
     }
 }

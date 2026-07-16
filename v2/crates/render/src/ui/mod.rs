@@ -176,9 +176,25 @@ impl Panel for DebugPanel {
                 ui.label(format!("chunks drawn: {}/{}", ui_ctx.chunks_drawn, ui_ctx.terrain_chunks_total));
                 ui.label(format!("fps: {}", ui_ctx.fps));
                 ui.separator();
-                ui.label("Controls: WASD/drag pan · wheel zoom · Q/E rotate · T hex/cube");
+
+                // F1: Real UiAction flow — buttons push actions that main.rs consumes end-to-end
                 if !ui_ctx.standalone_mode {
-                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("Pause").clicked() {
+                            ui_ctx.actions.push(UiAction::TogglePause);
+                        }
+                        if ui.button("Step").clicked() {
+                            ui_ctx.actions.push(UiAction::StepOnce);
+                        }
+                    });
+                }
+
+                if ui.button("Hex↔Cube").clicked() {
+                    ui_ctx.actions.push(UiAction::ToggleTerrainKind);
+                }
+
+                ui.label("Keyboard: WASD/drag pan · wheel zoom · Q/E rotate");
+                if !ui_ctx.standalone_mode {
                     ui.label("Space: toggle pause · Right/N: step once");
                 }
             });
