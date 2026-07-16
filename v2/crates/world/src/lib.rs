@@ -231,14 +231,22 @@ impl ProcgenWorld {
         // (d) Solid-fraction guard (critic F3): solid cells (height >= solid_level) should be a
         // reasonable fraction (roughly 25-40% at prod HMAX=200). Too few solid cells → too much
         // free movement/energy. Too many → too little usable space. Mirror NoiseWorld's semantics.
-        // R-17: Relaxed to 15-75% to accommodate complex landform combinations (e.g., tectonic+aeolian+glacial)
-        // that naturally generate higher-relief terrain. Single-landform maps stay in [25-50%] range.
+        // R-17: Relaxed to 15-75% for landform-enabled preview worlds (tectonic+aeolian+glacial+coastal+volcanic
+        // naturally generate higher-relief terrain). Strict 15-50% band preserved for the all-off sim path
+        // (each prod call site disables all landforms, preserving acceptance-corridor economy).
+        let any_landform = enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal;
         let solid_count = fields.height.iter().filter(|&&h| h >= solid_level).count();
         let solid_frac = solid_count as f64 / n as f64;
+        let (band_min, band_max, band_desc) = if any_landform {
+            (0.15, 0.75, "landform-on (15–75%)")
+        } else {
+            (0.15, 0.50, "all-off sim (15–50%)")
+        };
         assert!(
-            (0.15..=0.75).contains(&solid_frac_final),
-            "PROCGEN SOLID FRACTION CHECK: solid cells {:.1}% (threshold: 15–75%) —              movement/space balance may be off (critic F3); if drift is legitimate, re-pin after recalibrating solid_level",
-            solid_frac_final * 100.0
+            (band_min..=band_max).contains(&solid_frac_final),
+            "PROCGEN SOLID FRACTION CHECK: solid cells {:.1}% (threshold: {}) — movement/space balance may be off (critic F3); if drift is legitimate, re-pin after recalibrating solid_level",
+            solid_frac_final * 100.0,
+            band_desc
         );
 
         ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, nitrate_resource, surface_material: fields.surface_material, temp_grid }
