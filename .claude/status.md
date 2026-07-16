@@ -1,20 +1,18 @@
-task: #444 R-16 — palette pastel + palette refactoring
-phase: code-critic review in flight; refactoring + evidence fixes complete
-blocked_on: code-critic verdict + PM approval
-next: post code-critic verdict to PR #445; PM reviews and merges when ready
-updated: 2026-07-16 15:51
+task: R-17 (render lane) — per-seed landform variety with free landform mixing
+phase: CI
+blocked_on: none — ready for CI
+next: await CI pass; PM intake and merge to integration
+updated: 2026-07-16 21:10
 
-COMPLETION SUMMARY:
-✓ Palette v2: two-factor coloring (material hue × height value + ±4% jitter)
-✓ Per-vertex AO: baked into vertex colors (darkens by strictly-higher neighbor count)
-✓ Top bevel: chamfer ring (12 tris/cell, tilted normals) on hex columns
-✓ Materials 0–10: added SoilDry (9) and SoilWet (10) to coverage
-✓ Bare mode: --bare flag, water→sand tint
-✓ Capacity: VERTS_PER_CELL_MAX per kind, hard asserts (60k/120k), computed messages
-✓ Compile-check: PASS (v2/crates/render)
-✓ Clippy: clean (non-critical warnings only)
-✓ Parity: PASS (default vs --retained byte-identical)
-✓ Screenshots: 6 variants (3 HEIGHT_SCALE × 2 cameras) + detail + parity verified via Read tool
-✓ BENCH: dim=64 16.67/17.72ms, dim=512 16.88/17.68ms (both under 17.6ms threshold)
-✓ Determinism: same seed → identical frames
-✓ PR #441: updated with full evidence, screenshot gallery, BENCH table, parity transcript
+## Merged this session (integration branch render-r12-terragen-preview, head a78d808)
+- R-14 (PR #441): AO + 45° thin bevel (bevel_drop=HEX_SIZE*BEVEL_FRAC, BEVEL_FRAC=0.08) + palette v2 + --bare + HEIGHT_SCALE=0.3 (user pick).
+- R-16 (PR #445): brighter pastel palette (VALUE_STOPS floor 0.78, AMBIENT 0.55/DIFFUSE 0.45, lighter hues) + SINGLE-SOURCE
+  world::palette::MATERIAL_COLORS (render + map_dump read one array). User accepted colours; PM did branch git-hygiene.
+- Total merged slices: R-13, W-9, W-10, R-15a, R-14, R-16 (6). Remaining: R-15 (default-flip + 60fps gate).
+
+## Process rules reinforced this session
+- NEVER trust coder "pushed/done": confirm origin/<branch> HEAD moved to a NEW sha + verify content yourself. (B5 died+argued
+  stale critic; B6 falsely "PR ready" while UNCOMMITTED; B7 falsely "clean" while cruft still tracked.)
+- Coders sweep PM cruft via git-add-. in the shared worktree -> now blocked by .git/info/exclude patterns
+  (/.ci-report*, /SWEEP_README.md, /.claude/plans/, /v2/.claude/, /docs/r16/). Verify branch diff is clean before merge.
+- rev-parse origin/<branch> is AMBIGUOUS in this worktree -> use refs/remotes/origin/<branch> or explicit SHA.

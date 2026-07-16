@@ -1175,4 +1175,21 @@ mod tests {
         assert!(hex_chunks.iter().any(|c| !c.mesh.vertices.is_empty()));
         assert!(cube_chunks.iter().any(|c| !c.mesh.vertices.is_empty()));
     }
+
+    /// R-17: Variety coverage verification — 8 distinct landform combinations across seeds.
+    /// Confirms ≥5 combos and landform mixing (free mixing vs. archetypes).
+    #[test]
+    fn landform_variety_seeds_coverage() {
+        let mut combos = std::collections::HashSet::new();
+        for seed in 1..=8 {
+            combos.insert(landform_flags(seed as u64));
+        }
+        assert!(combos.len() >= 5, "variety gallery requires ≥5 distinct landform combos, got {}", combos.len());
+        // Verify at least one mix (multiple landforms on same seed)
+        let has_mix = combos.iter().any(|(t, a, v, g, c)| {
+            let count = [*t, *a, *v, *g, *c].iter().filter(|&&x| x).count();
+            count >= 2
+        });
+        assert!(has_mix, "variety gallery requires ≥1 mixed-landform seed (2+ landforms)");
+    }
 }
