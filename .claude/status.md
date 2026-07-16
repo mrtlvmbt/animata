@@ -1,8 +1,8 @@
 task: #449 U-0 — render refactor & seams (pure motion; blocker for UI track)
-phase: F1+F2 code-critic fixes complete; verdict in flight
-blocked_on: git push hook (worktree mismatch); code-critic verdict pending
-next: await code-critic verdict; PM posts to PR #450; PM merge when ready
-updated: 2026-07-16 22:25
+phase: F1/F2 fixes + F1a correctness bug fix complete; final code-critic in flight
+blocked_on: git push hook (worktree mismatch); code-critic final verdict pending
+next: await code-critic PASS; PM posts to PR #450; PM merge when ready
+updated: 2026-07-16 22:30
 
 ## U-0 Refactoring + F1/F2 Fixes Summary
 
@@ -18,6 +18,11 @@ updated: 2026-07-16 22:25
   updated all 4 call sites; eliminated 22-line inline GPU/CPU branching+culling from bench-timed loop
 - **F2 — input.rs dead code** (FIXED): Wired input::collect() into all 4 render paths (screenshot/bench-warmup/
   bench-timed/main-loop); matched on InputEvent; applied actions. Kept C key logic alive (U-1 deletes it)
+
+### Round 3: Code-Critic F1a Correctness Bug (commit 301222c)
+- **F1a — GPU/CPU verts_drawn asymmetry** (FIXED): GPU path counted `gpu_chunk.n_idx` (indices) but CPU
+  path counted `chunk.mesh.vertices.len()` (total buffer vertices). Changed CPU path to count
+  `chunk.mesh.indices.len()` for consistency. Byte-identical gate re-verified PASS (visuals unchanged)
 
 ### Metrics
 - **main.rs size**: 1089 → 625 lines (464-line reduction, 43% smaller)
