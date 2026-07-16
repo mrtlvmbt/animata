@@ -2731,15 +2731,16 @@ mod tests {
     /// candidate list, but a despawn is deferred (Commands), so the corpse stays `q.get`-resolvable
     /// to the second predator within the SAME `stage_predation` call. `bite_shift=1`,
     /// `combat_trait_scale=0` (trait_factor fixed at 256 ⇒ `bite = prey_energy_agg >> 1` exactly, no
-    /// size-refuge division): predator 1's pass computes `prey_loss = (0+K+S)>>1 = K` — the
-    /// entity-id-ordered drain fully kills `prey_zero` (already 0) and `prey_killed` (drained to 0),
-    /// then `remaining_loss` hits 0 and predator 1 never even reads `prey_survivor` this pass.
-    /// Predator 2's pass then sees `prey_energy_agg = S` (the two corpses read 0), `prey_loss=S>>1`,
-    /// partially drains `prey_survivor` (SURVIVES — books nothing) and re-touches both corpses
-    /// (booked already ⇒ skipped, not double-counted). Covers all THREE required cases: (i) drained-
-    /// but-surviving books nothing, (ii) killed-by-drain books exactly once, (iii, critic F5) a prey
-    /// entering at the PINNED exact value `energy.0 == 0` (the lowest entity id, drained first) books
-    /// exactly once across the two predators.
+    /// size-refuge division). `S` (`prey_survivor`'s entry energy) is deliberately FOUR ORDERS OF
+    /// MAGNITUDE above `K` (`prey_killed`'s): both predator passes' bites are large enough (driven
+    /// by the huge aggregate) to fully drain the tiny `prey_zero`/`prey_killed` pool with a wide
+    /// margin, then spill into `prey_survivor` — which, being orders of magnitude bigger, is only
+    /// ever PARTIALLY drained by either pass (survives comfortably, by construction, regardless of
+    /// the exact bite fraction each pass computes). Covers all THREE required cases: (i) drained-
+    /// but-surviving books nothing, (ii) killed-by-drain books exactly once (despite being
+    /// re-touched by BOTH predators), (iii, critic F5) a prey entering at the PINNED exact value
+    /// `energy.0 == 0` (the lowest entity id, drained first) books exactly once across the two
+    /// predators.
     #[test]
     fn d1_aggregate_booked_set_prevents_double_count_across_predators() {
         let spec = PredationSpec {
@@ -2772,7 +2773,7 @@ mod tests {
         let pred_ph = || Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty(), respiratory_pathway: None };
 
         const K: i64 = 100; // prey_killed's entry energy
-        const S: i64 = 100; // prey_survivor's entry energy
+        const S: i64 = 1_000_000; // prey_survivor's entry energy — orders of magnitude above K (see doc above)
         const BANK: i64 = 7; // prey_killed's Provisioned bank — must release into `lost` exactly once
 
         // Spawn order fixes entity-id order (R14): zero < killed < survivor < predators — the
@@ -2788,11 +2789,12 @@ mod tests {
         schedule.add_systems(stage_predation);
         schedule.run(&mut world);
 
-        // (i) drained-but-surviving: predator 1 never reaches `prey_survivor` (remaining_loss hits
-        // 0 exactly at `prey_killed`); predator 2 partially drains it — alive, nothing booked.
+        // (i) drained-but-surviving: prey_survivor is orders of magnitude bigger than the pool's
+        // other two members, so both predator passes' bites (however exactly split) only ever
+        // partially drain it — alive, nothing booked.
         let survivor_energy = world.get::<Energy>(survivor_id).map(|e| e.0).unwrap_or(-1);
         assert!(survivor_energy > 0, "prey_survivor must survive both predator passes: got {survivor_energy}");
-        assert!(survivor_energy < S, "prey_survivor must still be drained SOME by predator 2's pass: got {survivor_energy}");
+        assert!(survivor_energy < S, "prey_survivor must still be drained SOME across both predator passes: got {survivor_energy}");
 
         // (ii)+(iii): prey_killed and prey_zero must each book EXACTLY ONCE despite being
         // re-touched by BOTH predators (the `booked` guard is what makes this non-vacuous — an
