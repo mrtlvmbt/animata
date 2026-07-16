@@ -13,6 +13,7 @@
 
 use macroquad::color::Color;
 use macroquad::prelude::Vec3;
+use world::palette::MATERIAL_COLORS;
 
 /// A loud, unmistakable "unmapped biome id" marker (never a plausible terrain hue) — visible at a
 /// glance if `WorldView::biome` ever returns an id beyond the documented `0..=12` range, rather than
@@ -24,10 +25,12 @@ const UNKNOWN: Color = Color::new(1.0, 0.0, 1.0, 1.0);
 const LIGHT_DIR: Vec3 = Vec3::new(0.577, 0.577, 0.577); // (1,1,1) normalized ≈ 60° elevation, sidelit
 
 /// Ambient light contribution (always present, no shadow).
-const AMBIENT: f32 = 0.3;
+/// Softened from 0.3 → 0.55 to lighten shadows toward pastel toy-diorama look.
+const AMBIENT: f32 = 0.55;
 
 /// Diffuse light strength (modulated by normal·light_dir).
-const DIFFUSE: f32 = 0.7;
+/// Softened from 0.7 → 0.45 to reduce harsh shadow contrast.
+const DIFFUSE: f32 = 0.45;
 
 /// `id` → top-face color. `_ => UNKNOWN` is the "no panic" fallback the acceptance criterion asks for.
 pub fn biome_color(id: u8) -> Color {
@@ -54,23 +57,13 @@ pub fn biome_color(id: u8) -> Color {
 /// the renderer colours by physical surface material, not biome, because biome misses the landform
 /// substrates the diverse-relief terragen produces — Ocean water, aeolian sand, glacial till,
 /// volcanic basalt/tuff (biome=13 Ocean alone already fell off `biome_color`'s `0..=12` table → magenta sea).
-/// Mirrors `world/src/bin/map_dump.rs`'s palette so the interactive 3D view and the headless PPM
-/// preview read identically. `_ => UNKNOWN` keeps the no-panic contract.
-/// Hues are in HSL: (h, s, l) where we keep saturation/lightness consistent and vary hue per material.
+/// Reads the canonical palette from `world::palette::MATERIAL_COLORS` (single source of truth,
+/// shared with map_dump). `_ => UNKNOWN` keeps the no-panic contract for out-of-range ids.
 pub fn material_color(m: u8) -> Color {
-    match m {
-        0 => Color::from_rgba(180, 180, 190, 255), // Air (above-surface empty) — pale grey
-        1 => Color::from_rgba(222, 200, 120, 255), // Sand (aeolian dune) — warm tan
-        2 => Color::from_rgba(205, 232, 240, 255), // Permafrost — ice grey
-        3 => Color::from_rgba(96, 132, 66, 255),   // Soil — green
-        4 => Color::from_rgba(128, 128, 132, 255), // Bedrock — cool grey
-        5 => Color::from_rgba(58, 52, 62, 255),    // Basalt (volcanic) — near-black
-        6 => Color::from_rgba(172, 150, 138, 255), // Tuff (volcanic) — light brown
-        7 => Color::from_rgba(184, 194, 206, 255), // Till (glacial) — grey-blue
-        8 => Color::from_rgba(40, 70, 130, 255),   // Water (coastal/ocean) — blue
-        9 => Color::from_rgba(184, 168, 104, 255), // SoilDry — pale ochre
-        10 => Color::from_rgba(96, 80, 48, 255),   // SoilWet — dark umber
-        _ => UNKNOWN,
+    if let Some(&[r, g, b]) = MATERIAL_COLORS.get(m as usize) {
+        Color::from_rgba(r, g, b, 255)
+    } else {
+        UNKNOWN
     }
 }
 
@@ -114,14 +107,15 @@ pub fn surface_color_v2(
 
     // Height value ramp: interpolate through the same stops as height_color
     // but we multiply the base hue_color by the VALUE to darken/lighten
+    // Lifted floor to brighten lowlands (was 0.4, now 0.78) to prevent dark/muddy render
     const VALUE_STOPS: [(f32, f32); 7] = [
-        (0.00, 0.4),   // lowland — darkened
-        (0.25, 0.5),   //
-        (0.45, 0.7),   //
-        (0.60, 0.8),   //
-        (0.78, 0.6),   // brown (moraine/upland)
-        (0.90, 0.8),   // bare rock
-        (1.00, 0.95),  // peaks — bright
+        (0.00, 0.78),  // lowland — brightened (was 0.4)
+        (0.25, 0.82),  // (was 0.5)
+        (0.45, 0.88),  // (was 0.7)
+        (0.60, 0.92),  // (was 0.8)
+        (0.78, 0.85),  // brown (moraine/upland) (was 0.6)
+        (0.90, 0.92),  // bare rock (was 0.8)
+        (1.00, 1.0),   // peaks — bright (was 0.95)
     ];
 
     let mut lo = &VALUE_STOPS[0];
