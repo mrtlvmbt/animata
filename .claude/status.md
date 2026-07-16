@@ -1,8 +1,8 @@
 task: #440 R-14 look pack (AO, bevel, palette v2, --bare, capacity)
-phase: COMPLETE — PR #441 ready for merge after user HEIGHT_SCALE pick
-blocked_on: user HEIGHT_SCALE selection from {0.2, 0.3, 0.4}
-next: PM relays user pick; merge PR #441
-updated: 2026-07-16 15:40
+phase: FINAL — macro detail shot verified, code-critic re-review on correct branch in progress
+blocked_on: code-critic verdict (re-run on origin/render-r12-terragen-preview), then user HEIGHT_SCALE pick
+next: post code-critic verdict to PR #441; await user HEIGHT_SCALE selection; merge when user picks
+updated: 2026-07-16 16:15
 
 COMPLETION SUMMARY:
 ✓ Palette v2: two-factor coloring (material hue × height value + ±4% jitter)
