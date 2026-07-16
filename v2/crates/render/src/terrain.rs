@@ -9,15 +9,16 @@
 //! R-3: Each chunk carries a world-space AABB for frustum culling.
 
 use crate::biome_palette::{surface_color_v2, cliff_shade, apply_directional_shading, ColorMode};
-use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE};
+use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE, HEX_SIZE};
 use macroquad::models::{Mesh, Vertex};
 use macroquad::prelude::*;
 use sim_core::{Vec2Fixed, WorldView};
 use std::f32::consts::PI;
 
 /// Bevel fraction: shrink the top hexagon by this fraction of HEX_SIZE for the chamfer ring.
-/// ~0.12 keeps the bevel subtle but visibly "toy-ish".
-const BEVEL_FRAC: f32 = 0.12;
+/// ~0.08 keeps the bevel as a thin 45° rim at the very top edge (not a tall shoulder).
+/// The vertical drop is set equal to the horizontal inset (HEX_SIZE * BEVEL_FRAC) for a 45° slope.
+const BEVEL_FRAC: f32 = 0.08;
 
 /// Per-mesh-kind vertex count maximum. Hex with bevel: ~54 verts/cell worst case.
 /// Cube: ~30 verts/cell. Used for adaptive rows_per_chunk and capacity assertions.
@@ -155,13 +156,25 @@ fn build_chunk(
                 top_color
             };
 
-            // Top face: 6 corners, fan-triangulated from corner 0 (4 triangles, 6 unique verts).
-            // Add AO baking per vertex.
+            // Bevel: shrink the top hexagon by BEVEL_FRAC toward center. These inner corners form the
+            // TOP FACE of the shrunk hexagon; the OUTER corners drop by BEVEL_DROP to form the chamfer ring.
+            let center = Vec3::new(cx, h, cz);
+            let bevel_corners: Vec<Vec3> = (0..6)
+                .map(|k| {
+                    let pos = hex_corner(cx, cz, h, k);
+                    // Shrink toward center (horizontal only, keep full height h for top face)
+                    let toward_center = (center - pos) * BEVEL_FRAC;
+                    pos + toward_center
+                })
+                .collect();
+
+            // Top face: fan-triangulated from the shrunk (inner) hexagon at full height h.
+            // Vertices are the inner shrunk corners; AO baking darkens based on strictly-higher neighbors.
             let base = vertices.len() as u16;
             let top_normal = Vec3::new(0.0, 1.0, 0.0); // Top face normal (pointing up)
             for k in 0..6 {
                 let ao_factor = calculate_vertex_ao(col, row, k, world_dim, world);
-                let pos = hex_corner(cx, cz, h, k);
+                let pos = bevel_corners[k];
                 let ao_color = Color::new(
                     top_color_bare.r * ao_factor,
                     top_color_bare.g * ao_factor,
@@ -174,44 +187,41 @@ fn build_chunk(
                 indices.extend_from_slice(&[base, base + k, base + k + 1]);
             }
 
-            // Bevel: shrink the top hexagon by BEVEL_FRAC and add 6 chamfer quads
-            let bevel_corners: Vec<Vec3> = (0..6)
-                .map(|k| {
-                    let pos = hex_corner(cx, cz, h, k);
-                    // Shrink toward center: pos + (center - pos) * BEVEL_FRAC
-                    let center = Vec3::new(cx, h, cz);
-                    let toward_center = (center - pos) * BEVEL_FRAC;
-                    pos + toward_center
-                })
-                .collect();
-
-            // Emit 6 bevel quads (one per edge)
+            // Bevel quads: 6 chamfer quads connecting inner corners (at height h) to outer corners
+            // (at height h - bevel_drop). The drop equals the inset (HEX_SIZE * BEVEL_FRAC) for a 45° slope.
+            let bevel_drop = HEX_SIZE * BEVEL_FRAC;
             for k in 0..6 {
-                let outer_a = hex_corner(cx, cz, h, k);
-                let outer_b = hex_corner(cx, cz, h, (k + 1) % 6);
                 let inner_a = bevel_corners[k];
                 let inner_b = bevel_corners[(k + 1) % 6];
+                let outer_a = Vec3::new(hex_corner(cx, cz, h, k).x, h - bevel_drop, hex_corner(cx, cz, h, k).z);
+                let outer_b = Vec3::new(hex_corner(cx, cz, h, (k + 1) % 6).x, h - bevel_drop, hex_corner(cx, cz, h, (k + 1) % 6).z);
 
-                // Bevel quad normal: slightly tilted (not flat top) for lighting
-                let edge_vec = (outer_b - outer_a).normalize();
-                let inward_vec = (Vec3::new(cx, h, cz) - outer_a).normalize();
-                let mut bevel_normal = (edge_vec.cross(Vec3::new(0.0, 1.0, 0.0)) + inward_vec * 0.3).normalize();
+                // Bevel quad normal: computed from actual quad geometry (includes vertical slope).
+                // For a quad (inner_a, inner_b, outer_b, outer_a), the normal is:
+                // (inner_b - inner_a) × (outer_b - inner_b), which naturally includes the Y component
+                // from the 45° slope (outer corners drop by bevel_drop).
+                let edge1 = inner_b - inner_a;  // Top edge (horizontal)
+                let edge2 = outer_b - inner_b;  // Diagonal edge (includes vertical drop)
+                let mut bevel_normal = edge1.cross(edge2).normalize();
+                // Ensure normal points outward-up (positive Y component)
                 if bevel_normal.y < 0.0 {
                     bevel_normal = -bevel_normal;
                 }
 
                 let bevel_color = cliff_shade(top_color_bare);
                 let bbase = vertices.len() as u16;
-                vertices.push(vertex(outer_a, bevel_color, bevel_normal));
-                vertices.push(vertex(outer_b, bevel_color, bevel_normal));
-                vertices.push(vertex(inner_b, bevel_color, bevel_normal));
+                // Quad: inner_a, inner_b, outer_b, outer_a (forms a slanted rectangle)
                 vertices.push(vertex(inner_a, bevel_color, bevel_normal));
+                vertices.push(vertex(inner_b, bevel_color, bevel_normal));
+                vertices.push(vertex(outer_b, bevel_color, bevel_normal));
+                vertices.push(vertex(outer_a, bevel_color, bevel_normal));
                 indices.extend_from_slice(&[bbase, bbase + 1, bbase + 2, bbase, bbase + 2, bbase + 3]);
             }
 
             // Cliff quads: hidden-face removal (RnD 02 §3) — emit a side ONLY where the neighbour is
             // STRICTLY lower; an equal-or-higher neighbour covers that face, so skip it. Off-grid
             // neighbours (map edge) are treated as height 0 — draws a full cliff at the boundary.
+            // Cliff top edge now starts at h - bevel_drop (the outer rim of the bevel).
             let cliff_color = cliff_shade(top_color_bare);
             for (dir_i, &(ncol, nrow)) in neighbors(col, row).iter().enumerate() {
                 let nh = if (0..world_dim).contains(&ncol) && (0..world_dim).contains(&nrow) {
@@ -223,10 +233,12 @@ fn build_chunk(
                     continue;
                 }
                 let edge = edge_for_direction(dir_i);
-                let top_a = hex_corner(cx, cz, h, edge);
-                let top_b = hex_corner(cx, cz, h, (edge + 1) % 6);
-                let bot_a = Vec3::new(top_a.x, nh, top_a.z);
-                let bot_b = Vec3::new(top_b.x, nh, top_b.z);
+                let outer_a = hex_corner(cx, cz, h, edge);
+                let outer_b = hex_corner(cx, cz, h, (edge + 1) % 6);
+                let top_a = Vec3::new(outer_a.x, h - bevel_drop, outer_a.z);
+                let top_b = Vec3::new(outer_b.x, h - bevel_drop, outer_b.z);
+                let bot_a = Vec3::new(outer_a.x, nh, outer_a.z);
+                let bot_b = Vec3::new(outer_b.x, nh, outer_b.z);
                 let cliff_normal = hex_cliff_normal(dir_i);
                 let cbase = vertices.len() as u16;
                 vertices.push(vertex(top_a, cliff_color, cliff_normal));
