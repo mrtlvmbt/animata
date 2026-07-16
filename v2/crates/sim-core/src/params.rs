@@ -487,7 +487,44 @@ pub struct EconParams {
     /// assert to pass (`income_mode != Footprint`, no light, no O₂, no morphogen
     /// supply_source/adhesion_threshold) — see `Sim::new`.
     pub enable_propagule: bool,
+
+    // ── P-2b: provisioning (#448) ──────────────────────────────────────────────────────────────
+    /// Enable the provisioning subsystem (P-2b, #448): the `Parent`/`Provisioned` components, the
+    /// `5a_provision` stage, the `provision_rate` mutation, and the `Provisioned` hash-fold. `false`
+    /// (default) → nothing changes, byte-identical goldens (the isolation gate). `Sim::new` asserts
+    /// `enable_provision ⇒ enable_propagule` (provisioning a body that cannot grow is meaningless).
+    pub enable_provision: bool,
+    /// Config/founder seed for `Genome::provision_rate` (`--set`-able, default `0` ⇒ golden-neutral
+    /// — the founder is unmodified from `Genome::founder`'s `0`). Critic F163/F165: from the `0`
+    /// sentinel the locus sits on a phenotypically-invisible neutral plateau (all-or-nothing grants
+    /// need `rate ≳ 60–250` at default econ) the ±1 kernel drifts across ~10 steps/run — a dose
+    /// ladder needs a SEEDED rate, not one reached by drift, to test a rung at all.
+    pub provision_rate_init: i32,
+    /// When `true`, `Genome::mutate` SKIPS the `provision_rate` locus (seed-and-lock, critic
+    /// F163/F165) — else the seeded rate mutates ±1 under direct fecundity selection (draining the
+    /// parent's liquid before stage 7) and the dose-ladder rungs decay toward the `0` plateau,
+    /// conflating "dose ineffective" with "dose eroded". Default `false` (golden-neutral).
+    pub provision_rate_locked: bool,
+    /// Config/founder seed for `Genome::n_propagule` (`--set`-able, default `0` ⇒ golden-neutral).
+    /// Critic F172: the founder is born `n_propagule=0` (full/instant sentinel) ⇒ every body is
+    /// born at full target ⇒ zero still-growing children ⇒ `5a_provision` has zero eligible
+    /// targets ⇒ the dose ladder is structurally incapable of firing at seed. A nonzero seed makes
+    /// the P-3 arms born as a real bootstrap propagule (must GROW to target).
+    pub n_propagule_init: i32,
+    /// When `true`, `Genome::mutate` SKIPS the `n_propagule` locus (seed-and-lock, same F165
+    /// argument as `provision_rate_locked`) — else the seeded propagule size relaxes toward the `0`
+    /// sentinel mid-run and the growth substrate the dose ladder measures evaporates. Default
+    /// `false` (golden-neutral).
+    pub n_propagule_locked: bool,
 }
+
+/// P-2b (#448, critic F6): the named, empirically-validated `provision_rate` dose rungs — an
+/// unnamed "rung P-3 intends to use" would be unfalsifiable (the coder could rubber-stamp
+/// `rate=256`). Every element here is verified (test (B), `propagule_growth.rs`) to grant a
+/// NONZERO `provision_granted_total` under `driver_config`-like econ magnitudes — a rung that
+/// grants structural zero (`rate/256·grant_pool < typical need`) is dropped from this list, not
+/// left in to be misread as a "dose ineffective" NULL in P-3.
+pub const PROVISION_RATE_LADDER: &[i64] = &[64, 128, 192, 256];
 
 // ── D′-1 light field ─────────────────────────────────────────────────────────────────────────────
 
@@ -784,6 +821,13 @@ impl Default for EconParams {
             // P-1 (#429): propagule growth OFF by default — false for all existing production
             // configs (byte-identical; no truncation, no grow, no Grown/growth_cells hash-fold).
             enable_propagule: false,
+            // P-2b (#448): provisioning OFF by default — false/0 for all existing production
+            // configs (byte-identical; no Parent/Provisioned, no 5a_provision, no mutation, no fold).
+            enable_provision: false,
+            provision_rate_init: 0,
+            provision_rate_locked: false,
+            n_propagule_init: 0,
+            n_propagule_locked: false,
         }
     }
 }

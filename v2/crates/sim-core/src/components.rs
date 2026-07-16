@@ -7,7 +7,7 @@
 //! `Sensors` (warm) is NOT buffered — written once in Sense, read in Act.
 
 use crate::{Vec2Fixed, BRAIN_HIDDEN, BRAIN_OUTPUTS};
-use bevy_ecs::prelude::Component;
+use bevy_ecs::prelude::{Component, Entity};
 
 /// Horizontal velocity (cells/tick), integer. Double-buffered with [`VelocityNext`].
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -65,6 +65,26 @@ pub struct MineralQuota(pub i64);
 /// byte-identical goldens.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Grown(pub u8);
+
+/// P-2b provisioning (#448): the child's link back to its parent, recorded at birth. Present ONLY
+/// when `EconParams.enable_provision` — founders/world-init get no `Parent` link (they have no
+/// parent). NOT folded into `state_hash` (critic F119): folding raw entity bits would pin any
+/// future flag-on golden to Bevy's `Entities` index/generation reuse, an allocator internal, not
+/// simulation state. A stale/recycled parent (despawned) is detected at READ time (`q.get(parent)
+/// → Err`), never dereferenced blindly.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Parent(pub Entity);
+
+/// P-2b provisioning (#448): a still-growing child's non-liquid energy bank, filled by the parent
+/// (`5a_provision`) and spent ONLY by `stage_grow` (never by metabolism/repro — the F3/F5 firewall:
+/// provisioning funds the offspring's BODY, never its liquid `Energy`/premature reproduction).
+/// Present ONLY when `EconParams.enable_provision`; init `0`. Folded into `state_hash` ONLY when
+/// non-zero (same pattern as `MineralQuota`) — a TRIPWIRE, not a live signal: under the same-tick-
+/// drain invariant (all-or-nothing grants, critic F131/F133) `Provisioned` is provably `0` at
+/// every `state_hash` boundary, so the fold is vacuous while the invariant holds and only
+/// perturbs the hash if it is ever broken (critic F138).
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Provisioned(pub i64);
 
 /// Recurrent hidden state of the brain (M3 / D-Brain-2) — a per-entity **double buffer** of the
 /// `H = BRAIN_HIDDEN` hidden units (`FixedI16` Q8.8). All recurrent edges read `h_old` and write
