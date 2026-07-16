@@ -2776,12 +2776,16 @@ mod tests {
         const S: i64 = 1_000_000; // prey_survivor's entry energy — orders of magnitude above K (see doc above)
         const BANK: i64 = 7; // prey_killed's Provisioned bank — must release into `lost` exactly once
 
-        // Spawn order fixes entity-id order (R14): zero < killed < survivor < predators — the
-        // fixture's required drain order (critic F12/F14: the zero-energy prey needs the LOWEST id
-        // so the entity-id-ordered drain reaches it first, before `remaining_loss` is exhausted).
-        let zero_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(0), predation_genome(0), ph(), Grown(1))).id();
-        let killed_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(K), predation_genome(0), ph(), Grown(1), Provisioned(BANK))).id();
+        // Spawn order fixes entity-id order (R14) — empirically, THIS bevy_ecs allocates entity
+        // bits in DESCENDING order across successive spawns within one World (verified via the
+        // diagnostic panic message below: the Nth spawn call gets a LOWER `to_bits()` than the
+        // (N-1)th), so the LAST-spawned prey gets the LOWEST id and is drained FIRST. Spawn
+        // survivor, then killed, then zero LAST — so the entity-id-ordered drain visits
+        // zero → killed → survivor (critic F12/F14: the zero-energy prey needs the LOWEST id so
+        // the drain reaches it first, before `remaining_loss` is exhausted).
         let survivor_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(S), predation_genome(0), ph(), Grown(1))).id();
+        let killed_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(K), predation_genome(0), ph(), Grown(1), Provisioned(BANK))).id();
+        let zero_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(0), predation_genome(0), ph(), Grown(1))).id();
         let pred1_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(1_000_000), predation_genome(16), pred_ph(), Grown(0))).id();
         let pred2_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(1_000_000), predation_genome(16), pred_ph(), Grown(0))).id();
 
