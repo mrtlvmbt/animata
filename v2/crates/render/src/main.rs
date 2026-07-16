@@ -307,8 +307,8 @@ async fn main() {
     // holding THIS renderer constant to compare v1 vs v2 worldgen. On load error it falls back to
     // ProcgenWorld. `--dim` only applies in standalone — see the module doc comment for why.
     let make_procgen = |dim: i64| -> Box<dyn WorldView> {
-        let lf = cli_args.standalone; // enable all 5 landforms for the standalone terragen preview
-        Box::new(world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, lf, lf, lf, lf, lf))
+        let lf = cli_args.standalone; // enable 4 landforms (tectonics/aeolian/volcanic/glacial; coastal OFF for rolling hills)
+        Box::new(world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, lf, lf, lf, lf, false))
     };
     let default_dim = if cli_args.standalone { cli_args.dim_override.unwrap_or(config.econ.world_dim) } else { config.econ.world_dim };
     let (world_dim, world): (i64, Box<dyn WorldView>) = match &cli_args.v1_dump {
