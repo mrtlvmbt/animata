@@ -37,12 +37,16 @@
 
 mod biome_palette;
 mod camera;
+mod creatures;
+mod draw;
 mod driver;
 mod dump_world;
 mod gpu_terrain;
 mod hex;
+mod input;
 mod terrain;
 mod terrain_cube;
+mod ui;
 
 use camera::IsoCam;
 use macroquad::prelude::*;
@@ -225,7 +229,7 @@ fn load_shader(filename: &str) -> String {
 }
 
 /// Helper to draw terrain using retained GPU buffers.
-fn draw_gpu_terrain(
+pub fn draw_gpu_terrain(
     gpu_chunks: &[gpu_terrain::GpuChunk],
     pipeline: macroquad::miniquad::Pipeline,
     camera: &IsoCam,
@@ -391,130 +395,20 @@ async fn main() {
             let frustum_planes = camera.frustum_planes();
             set_camera(&cam3d);
 
-            // R-15a: EXCLUSIVE terrain draw in --retained mode (no double-draw z-fighting)
-            if cli_args.retained && gpu_pipeline.is_some() {
-                let gpu_chunks = if use_cube_terrain { &gpu_cube_chunks } else { &gpu_hex_chunks };
-                draw_gpu_terrain(gpu_chunks, gpu_pipeline.unwrap(), &camera, &frustum_planes);
-                // HARD SKIP: GPU path is exclusive; macroquad draw completely bypassed
-            } else if !cli_args.retained {
-                // CPU macroquad path: used ONLY when --retained is NOT active
-                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
-                for chunk in terrain_chunks {
-                    let (min, max) = chunk.bounds;
-                    if frustum_planes.iter().all(|plane| plane.aabb_intersects(min, max)) {
-                        draw_mesh(&chunk.mesh);
-                    }
-                }
-            }
-            // When --retained is true AND gpu_pipeline exists: GPU path only (above)
-            // No fallthrough to CPU path in --retained mode
+            // R-15a: Draw terrain (CPU or GPU path)
+            draw::draw_terrain(
+                &hex_terrain_chunks,
+                &cube_terrain_chunks,
+                &gpu_hex_chunks,
+                &gpu_cube_chunks,
+                gpu_pipeline,
+                &camera,
+                use_cube_terrain,
+                cli_args.retained,
+            );
 
-            if let Some(s) = snap.as_ref() {
-                let px_per_m = camera.px_per_m();
-                for c in &s.creatures {
-                    let (cx, cz) = if use_cube_terrain {
-                        (c.pos.0 as f32 + 0.5, c.pos.1 as f32 + 0.5)
-                    } else {
-                        hex::hex_center(c.pos.0, c.pos.1)
-                    };
-                    let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
-                    let creature_pos = vec3(cx, h + 0.15, cz);
-
-                    if !camera.point_in_frustum(creature_pos) {
-                        continue;
-                    }
-
-                    let color = match c.uptake_layer {
-                        0 => Color::new(1.0, 0.6, 0.2, 1.0),
-                        1 => Color::new(0.2, 0.8, 1.0, 1.0),
-                        2 => Color::new(0.8, 0.2, 1.0, 1.0),
-                        _ => Color::new(0.5, 0.5, 0.5, 1.0),
-                    };
-
-                    if px_per_m < PX_PER_M_FAR_THRESHOLD {
-                        draw_sphere(creature_pos, 0.04, None, color);
-                    } else if px_per_m < PX_PER_M_MID_THRESHOLD {
-                        let body_count = c.body_size.max(1) as usize;
-                        let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                        let cell_radius = 0.03;
-                        let spacing = cell_radius * 2.2;
-                        let grid_size = (grid_side - 1) as f32 * spacing;
-                        let offset_x = -grid_size / 2.0;
-                        let offset_z = -grid_size / 2.0;
-
-                        let mut drawn = 0;
-                        for row in 0..grid_side {
-                            for col in 0..grid_side {
-                                if drawn >= body_count {
-                                    break;
-                                }
-                                let cell_x = offset_x + col as f32 * spacing;
-                                let cell_z = offset_z + row as f32 * spacing;
-                                let cell_pos = creature_pos + vec3(cell_x, 0.02, cell_z);
-                                draw_sphere(cell_pos, cell_radius, None, color);
-                                drawn += 1;
-                            }
-                            if drawn >= body_count {
-                                break;
-                            }
-                        }
-                    } else {
-                        let size_scale = c.size as f32 / 16.0;
-                        let base_size = 0.15 * size_scale;
-                        let body_count = c.body_size.max(1) as usize;
-
-                        if body_count > 1 {
-                            let grid_side = (body_count as f32).sqrt().ceil() as i32;
-                            let cell_radius = 0.04;
-                            let spacing = cell_radius * 2.0;
-                            let grid_size = (grid_side - 1) as f32 * spacing;
-                            let offset_x = -grid_size / 2.0;
-                            let offset_z = -grid_size / 2.0;
-
-                            let mut drawn = 0;
-                            for row in 0..grid_side {
-                                for col in 0..grid_side {
-                                    if drawn >= body_count {
-                                        break;
-                                    }
-                                    let cell_x = offset_x + col as f32 * spacing;
-                                    let cell_z = offset_z + row as f32 * spacing;
-                                    let cell_pos = creature_pos + vec3(cell_x, 0.01, cell_z);
-                                    draw_sphere(cell_pos, cell_radius, None, color);
-                                    drawn += 1;
-                                }
-                                if drawn >= body_count {
-                                    break;
-                                }
-                            }
-                        } else {
-                            match c.cell_type {
-                                Some(sim_core::CellType::A) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r.min(1.0), (color.g * 1.3).min(1.0), color.b, 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, base_size * 1.2, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::B) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new(color.r, (color.g * 1.3).min(1.0), color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(base_size * 1.2, 0.0, 0.0), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Mixed) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                    let accent = Color::new((color.r * 1.3).min(1.0), color.g, color.b.min(1.0), 1.0);
-                                    draw_sphere(creature_pos + vec3(0.0, 0.0, base_size * 1.2), base_size * 0.5, None, accent);
-                                }
-                                Some(sim_core::CellType::Diff(_)) => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                                None => {
-                                    draw_sphere(creature_pos, base_size, None, color);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            // Render creatures by LOD tier
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
             set_default_camera();
 
             // R-13 F-B5: Capture on final frame (frame_num == cli_args.screenshot_warmup)
