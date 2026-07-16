@@ -598,3 +598,274 @@ fn grow_gate_wide_reserve_refuses_narrow_would_grow() {
     assert_eq!(grow_count, 0, "the wide 2-window reserve must refuse the growth the narrow P-1 reserve would have allowed");
     assert_eq!(sim.conservation_residual(), 0);
 }
+
+// ── P-2b (#448): provisioning stage (5a_provision) — Parent/Provisioned + all-or-nothing grants ───
+//
+// Fixtures spawn a SINGLE founder that divides ONCE (flat `e_cell` endowment,
+// `newborn_energy_per_cell=false`) under `enable_propagule=true`, so the child is born with a REAL
+// `Parent(founder)` + `Provisioned(0)` link — only the birth seam can create this link, no probe
+// can impose it. `mutation_rate=0` on the founder (pinned BEFORE the one division, not via
+// `lock_repro_probe` after — a mutated `uptake_layer` at the birth-seam mutation would be
+// permanent and reopen the income isolation this fixture relies on) means the child inherits every
+// trait unchanged; `lock_repro_probe()` is still called right after the one birth to freeze further
+// divisions. `impose_graph_probe` then overwrites the CHILD's `Phenotype.graph` to a hand-built
+// 9-cell TARGET truncated to its current `Grown`-many cells (the same technique as the P-1/P-2a
+// fixtures above), so the child reads as "still growing toward 9" against a REAL parent link.
+// Every econ term except `base_metab` is zeroed (predation/settling/excrete/c_coord/breadth/burden
+// all 0 — `excrete=0` for EXACT-energy ISOLATION only, critic F154/F155; the P-3 arms keep
+// `driver_config`'s shipped `excrete=8`), so `window_drain`/`grow_reserve` reduce to the trivial
+// `base_metab · metab_period`, hand-computable without re-deriving the private `base_metab_lump`.
+
+const PROV_E_CELL: i64 = 1000;
+const PROV_C_DIV: i64 = 100;
+const PROV_BASE_METAB: i64 = 2;
+const PROV_METAB_PERIOD: u64 = 1;
+const PROV_REPRO_THRESHOLD: i32 = 1500; // PINNED explicitly (critic F117) — not silently inherited.
+
+fn provision_econ(enable_provision: bool, provision_rate_init: i32) -> EconParams {
+    EconParams {
+        enable_propagule: true,
+        enable_provision,
+        provision_rate_locked: true,
+        n_propagule_locked: true,
+        d0_scaled: 0,
+        e_cell: PROV_E_CELL,
+        c_div: PROV_C_DIV,
+        base_metab: PROV_BASE_METAB,
+        k_size_metab: 0,
+        k_move_cost: 0,
+        k_sense_cost: 0,
+        c_coord: 0,
+        excrete: 0,
+        metab_period: PROV_METAB_PERIOD,
+        metab_reads_n_cells: false,
+        newborn_energy_per_cell: false,
+        provision_rate_init, // unused by this file's founder-building (set on the Genome directly)
+        ..EconParams::default()
+    }
+}
+
+/// Isolated single-founder config: `uptake_layer=1` routes to a `flat_cap=0` layer (income ≡ 0,
+/// mirrors `firewall_config`), `mutation_rate=0` (no genome drift at the one division this fixture
+/// relies on — `firewall_config`'s own default mutation_rate=32 would risk a permanent
+/// `uptake_layer` flip at the birth seam, silently breaking the income isolation).
+fn provision_config(seed: u64, founder_energy: i64, provision_rate: i32, econ: EconParams) -> SimConfig {
+    provision_config_repro(seed, founder_energy, provision_rate, PROV_REPRO_THRESHOLD, econ)
+}
+
+/// As `provision_config`, but with an explicit `repro_threshold` (for fixtures that need the
+/// division to fire at a lower energy bar than the pinned `PROV_REPRO_THRESHOLD`).
+fn provision_config_repro(seed: u64, founder_energy: i64, provision_rate: i32, repro_threshold: i32, econ: EconParams) -> SimConfig {
+    let mut founder = Genome::founder(2);
+    founder.uptake_layer = 1;
+    founder.repro_threshold = repro_threshold;
+    founder.mutation_rate = 0;
+    founder.provision_rate = provision_rate;
+    let layer1 = LayerSpec { regen_rate: 0, flux_alpha_num: 1, flux_alpha_den: 4, flat_cap: 0, world_cap_mult: 0 };
+    let layer0_inert = LayerSpec { flux_alpha_num: 0, flux_alpha_den: 1, ..LayerSpec::default() };
+    SimConfig {
+        n_founders: 1,
+        founder_energy,
+        founder_templates: Some(vec![(founder, 1)]),
+        n_layers: 2,
+        layer_specs: [layer0_inert, layer1, LayerSpec::default(), LayerSpec::default()],
+        econ,
+        ..config_with(seed, DEFAULT_THREADS, MergeStrategy::Canonical)
+    }
+}
+
+/// (A) Provisioning transfer + faster growth (critic F134): ALL-OR-NOTHING grant, same-tick drain,
+/// and a faster-than-unprovisioned-twin materialised `Grown`.
+#[test]
+fn provision_transfers_all_or_nothing_and_drains_same_tick() {
+    let founder_energy = 100_000;
+    let mut sim = build_sim(provision_config(30, founder_energy, 256, provision_econ(true, 0)));
+
+    sim.step(); // tick 0: founder divides — child born with Parent(founder) + Provisioned(0), Grown=1
+
+    let parents = sim.parent_entity_probe();
+    assert_eq!(parents.len(), 1, "exactly one child must be born with a REAL Parent link");
+    let (&child_bits, &parent_bits) = parents.iter().next().unwrap();
+
+    sim.lock_repro_probe(); // freeze further divisions — one child only
+    let mut graphs: BTreeMap<u64, CellGraph> = BTreeMap::new();
+    graphs.insert(child_bits, hand_built_target_graph().rebuild_prefix(1));
+    sim.impose_graph_probe(&graphs);
+
+    assert_eq!(*sim.grown_entity_probe().get(&child_bits).unwrap(), 1);
+    assert_eq!(*sim.body_size_entity_probe().get(&child_bits).unwrap(), 9, "imposed TARGET reads 9 cells");
+    assert_eq!(*sim.energy_entity_probe().get(&child_bits).unwrap(), PROV_E_CELL, "child spawns with the flat e_cell endowment");
+
+    sim.step(); // tick 1: metabolism, THEN 5a_provision, THEN 5b_grow — all the same tick
+
+    // `window_drain`/`grow_reserve` reduce to `base_metab · metab_period` with every other econ
+    // term zeroed (predation/settling/excrete/c_coord/breadth/burden all 0) — no need to re-derive
+    // the private `base_metab_lump`.
+    let lump = PROV_BASE_METAB * PROV_METAB_PERIOD as i64;
+    let reserve = 2 * lump;
+    let after_metab = PROV_E_CELL - lump;
+    let need = (PROV_E_CELL + reserve - after_metab).max(0);
+    assert!(need > 0, "sanity: the child must be BlockedCell before any grant (need > 0)");
+
+    let snap = sim.ledger_snapshot();
+    assert_eq!(
+        snap.provision_granted_total, need as u64,
+        "ALL-OR-NOTHING: the full shortfall must be granted, NOT a partial min()"
+    );
+
+    assert_eq!(
+        *sim.grown_entity_probe().get(&child_bits).unwrap(), 2,
+        "the grant must let the child grow the SAME tick it is funded (same-tick-drain, F131/F133)"
+    );
+    assert_eq!(
+        *sim.provisioned_entity_probe().get(&child_bits).unwrap_or(&-1), 0,
+        "the bank must drain to 0 in the same tick it was granted"
+    );
+
+    let liquid_part = (after_metab - reserve).min(PROV_E_CELL).max(0);
+    let expected_child_energy = after_metab - liquid_part;
+    assert_eq!(*sim.energy_entity_probe().get(&child_bits).unwrap(), expected_child_energy);
+
+    let expected_parent_energy = founder_energy - lump - (PROV_E_CELL + PROV_C_DIV) - lump - need;
+    let parent_energy = *sim.energy_entity_probe().get(&parent_bits).unwrap();
+    assert_eq!(parent_energy, expected_parent_energy);
+    assert!(parent_energy >= 0, "the parent must never overspend to negative (critic F1)");
+
+    assert_eq!(sim.conservation_residual(), 0, "R15 must hold across the transfer + growth");
+
+    // Twin comparison (critic F134): the SAME fixture with `enable_provision=false` must NOT grow
+    // — the child stays BlockedCell (cannot self-fund from e_cell alone at this reserve).
+    let mut twin = build_sim(provision_config(30, founder_energy, 0, provision_econ(false, 0)));
+    let founder_bits_twin = single_entity_bits(&mut twin);
+    twin.step();
+    twin.lock_repro_probe();
+    let child_bits_twin = *twin.energy_entity_probe().keys().find(|&&b| b != founder_bits_twin).expect("twin child must exist");
+    let mut graphs_twin: BTreeMap<u64, CellGraph> = BTreeMap::new();
+    graphs_twin.insert(child_bits_twin, hand_built_target_graph().rebuild_prefix(1));
+    twin.impose_graph_probe(&graphs_twin);
+
+    twin.step();
+    assert_eq!(
+        *twin.grown_entity_probe().get(&child_bits_twin).unwrap(), 1,
+        "without provisioning the child must stay BlockedCell — the SAME child materialises FASTER under provisioning"
+    );
+    assert_eq!(twin.ledger_snapshot().provision_granted_total, 0, "enable_provision=false ⇒ 5a_provision never runs ⇒ dose stays 0");
+    assert!(twin.parent_entity_probe().is_empty(), "enable_provision=false ⇒ no Parent/Provisioned component at all");
+}
+
+/// (A, continued) a child whose parent DIES stops receiving provision — the `q.get(parent) → Err`
+/// path (a stale/despawned parent) must grant nothing and must not panic. `repro_threshold` is
+/// pinned JUST above `e_cell+c_div` so the founder divides leaving itself only 1 `eu` of surplus —
+/// too poor to grant anything (`grant_pool` floors at 0 before it ever covers `survival_floor`) —
+/// and starves the VERY NEXT tick. The child is never funded (BlockedCell forever, `Grown` never
+/// advances), first because the parent is POOR, then because it is GONE; stepping well past that
+/// point must leave `provision_granted_total` at 0 and `conservation_residual()` at 0.
+#[test]
+fn provision_stops_when_parent_dies() {
+    let repro_threshold = PROV_E_CELL as i32 + PROV_C_DIV as i32 + 1; // just above e_cell+c_div
+    let founder_energy = repro_threshold as i64 + PROV_BASE_METAB * PROV_METAB_PERIOD as i64; // divides at tick 0, leaving 1 eu
+    let mut sim = build_sim(provision_config_repro(31, founder_energy, 256, repro_threshold, provision_econ(true, 0)));
+
+    sim.step(); // tick 0: founder divides, leaving itself 1 eu of surplus
+    let parents = sim.parent_entity_probe();
+    assert_eq!(parents.len(), 1);
+    let (&child_bits, &parent_bits) = parents.iter().next().unwrap();
+    sim.lock_repro_probe();
+
+    let mut graphs: BTreeMap<u64, CellGraph> = BTreeMap::new();
+    graphs.insert(child_bits, hand_built_target_graph().rebuild_prefix(1));
+    sim.impose_graph_probe(&graphs);
+
+    sim.step(); // tick 1: the parent's OWN metabolism floors its 1 eu to 0 (lump=2 ≫ 1) — 5a_provision
+                // sees grant_pool=0 (too poor to clear its own survival_floor); stage 7 then starves it.
+    assert!(
+        !sim.energy_entity_probe().contains_key(&parent_bits),
+        "the parent must starve at tick 1 — its post-division 1-eu surplus cannot cover even its own survival_floor"
+    );
+    assert_eq!(sim.ledger_snapshot().provision_granted_total, 0, "the parent was too poor to grant anything before it died");
+
+    // Step well past the parent's death — the `q.get(parent_e) → Err` path must grant nothing and
+    // must not panic. The child persists on its own (never-funded) e_cell buffer.
+    for _ in 0..50 {
+        sim.step();
+    }
+    assert_eq!(sim.ledger_snapshot().provision_granted_total, 0, "a child whose parent has died must receive NO provision, ever");
+    assert_eq!(*sim.grown_entity_probe().get(&child_bits).unwrap(), 1, "never funded ⇒ never grows past its spawn Grown");
+    assert_eq!(sim.conservation_residual(), 0, "R15 must hold even with a stale Parent reference");
+}
+
+/// (B) The provisioning dose ladder (critic F3/F6): under P-3-arm-like econ magnitudes
+/// (`driver_config` — REAL income/GRN/morphogen decode, NOT the hand-built exact-arithmetic fixture
+/// above), `PROVISION_RATE_LADDER`'s LOWEST element must grant a NONZERO dose — else that rung
+/// would be misread in P-3 as "dose ineffective" when it is really "dose never fires" (a plumbing/
+/// reachability failure, not a biological finding). `n_propagule_init`+`n_propagule_locked` seed a
+/// REAL bootstrap-propagule substrate (critic F172 — without this, every body is born at full
+/// target and `5a_provision` has zero eligible children to ever fund).
+#[test]
+fn provision_rate_ladder_lowest_rung_grants_nonzero_dose() {
+    let mut cfg = driver_config(41);
+    cfg.econ.enable_propagule = true;
+    cfg.econ.enable_provision = true;
+    cfg.econ.n_propagule_init = 1;
+    cfg.econ.n_propagule_locked = true;
+    cfg.econ.provision_rate_init = PROVISION_RATE_LADDER[0] as i32;
+    cfg.econ.provision_rate_locked = true;
+    let mut sim = build_sim(cfg);
+    for _ in 0..500 {
+        sim.step();
+    }
+    let snap = sim.ledger_snapshot();
+    assert!(
+        snap.provision_granted_total > 0,
+        "PROVISION_RATE_LADDER's lowest rung ({}) must grant a NONZERO dose under driver_config-like \
+         econ — a structurally-zero rung must be DROPPED from the ladder, not left to be misread as \
+         'dose ineffective' in P-3 (critic F3/F6)",
+        PROVISION_RATE_LADDER[0]
+    );
+    assert_eq!(sim.conservation_residual(), 0, "R15 must hold under the full driver_config tick pipeline");
+}
+
+/// (C) The four instrument knobs survive inheritance (critic F175): with `*_locked=true` + seeded
+/// `*_init>0`, every LIVE genome must still carry the seeded value after many generations; a
+/// `locked=false` control must show the value DRIFT — otherwise the seed-and-lock mechanism would
+/// be unfalsifiable (a no-op flag that happens to never get exercised).
+#[test]
+fn provision_instrument_knobs_locked_vs_unlocked_inheritance() {
+    let mut cfg_locked = driver_config(42);
+    cfg_locked.econ.enable_propagule = true;
+    cfg_locked.econ.enable_provision = true;
+    cfg_locked.econ.n_propagule_init = 2;
+    cfg_locked.econ.n_propagule_locked = true;
+    cfg_locked.econ.provision_rate_init = 100;
+    cfg_locked.econ.provision_rate_locked = true;
+    let mut sim_locked = build_sim(cfg_locked);
+    for _ in 0..500 {
+        sim_locked.step();
+    }
+    assert!(
+        sim_locked.provision_rate_probe().iter().all(|&r| r == 100),
+        "provision_rate_locked=true: every LIVE genome must still carry the seeded rate unchanged"
+    );
+    assert!(
+        sim_locked.n_propagule_probe().iter().all(|&n| n == 2),
+        "n_propagule_locked=true: every LIVE genome must still carry the seeded n_propagule unchanged"
+    );
+
+    let mut cfg_unlocked = driver_config(42);
+    cfg_unlocked.econ.enable_propagule = true;
+    cfg_unlocked.econ.enable_provision = true;
+    cfg_unlocked.econ.n_propagule_init = 2;
+    cfg_unlocked.econ.n_propagule_locked = false;
+    cfg_unlocked.econ.provision_rate_init = 100;
+    cfg_unlocked.econ.provision_rate_locked = false;
+    let mut sim_unlocked = build_sim(cfg_unlocked);
+    for _ in 0..500 {
+        sim_unlocked.step();
+    }
+    assert!(
+        sim_unlocked.provision_rate_probe().iter().any(|&r| r != 100)
+            || sim_unlocked.n_propagule_probe().iter().any(|&n| n != 2),
+        "locked=false: the seeded value must DRIFT under mutation over many generations — else the \
+         locked-vs-unlocked distinction this test exists to prove would be vacuous"
+    );
+}

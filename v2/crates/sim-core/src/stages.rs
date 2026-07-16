@@ -541,7 +541,7 @@ pub fn stage_provision(
                 // fire" (dose≈0) from "fired, didn't help" (dose large, no effect).
                 ledger.provision_granted_total += total_granted as u64;
                 for (child_e, t) in grants {
-                    if let Ok((_, _, _, _, _, _, Some(prov))) = q.get_mut(child_e) {
+                    if let Ok((_, _, _, _, _, _, Some(mut prov))) = q.get_mut(child_e) {
                         prov.0 += t;
                     }
                 }
@@ -2245,11 +2245,11 @@ pub fn stage_swap(mut q: Query<(&mut Position, &PositionNext, &mut Velocity, &Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_respiratory_pathway, compute_hypoxia_factor_x1000, monod_demand, stage_metabolism, stage_predation, stage_sense};
+    use super::{choose_respiratory_pathway, compute_hypoxia_factor_x1000, grow_reserve, grow_threshold, monod_demand, stage_metabolism, stage_predation, stage_sense};
     use crate::predation::{PredationMode, PredationSpec, SizeRefugeSpec};
     use crate::{
-        CellGraph, CellType, Deposit, EconParams, Energy, EnergyLedger, FieldId, FieldRes, FieldStore,
-        Genome, MergeStrategy, Phenotype, Position, RespiratoryPathway, Sensors, SimClock, Telemetry, Vec2Fixed, WorldRes, WorldView,
+        CellGraph, CellType, DeathChannel, Deposit, EconParams, Energy, EnergyLedger, FieldId, FieldRes, FieldStore,
+        Genome, Grown, MergeStrategy, Phenotype, Position, Provisioned, RespiratoryPathway, Sensors, SimClock, Telemetry, Vec2Fixed, WorldRes, WorldView,
     };
     use bevy_ecs::prelude::*;
 
@@ -2381,6 +2381,34 @@ mod tests {
             cell_positions: Vec::new(),
             growth_cells: Vec::new(),
         }
+    }
+
+    /// P-2b (#448, critic F160/F4): the `survival_floor` structural identity — a still-growing
+    /// parent's floor (`g_extra=1`: `e_cell + grow_reserve(econ,ph,g,grown+1)`) must equal
+    /// `grow_threshold(econ,ph,g,grown)` EXACTLY (the SAME fn, not a re-spelled duplicate — F160).
+    /// Also pins the MATURE-parent exception (`g_extra=0`, critic F4): `grow_reserve(econ,ph,g,
+    /// grown)` uses `n=grown` LITERALLY (not `grown+1`) — the sanctioned second caller pattern
+    /// documented on `grow_reserve`'s doc-comment above — and must read a DIFFERENT (smaller)
+    /// value than the still-growing branch for this fixture (else the `g_extra` split would be
+    /// numerically vacuous).
+    #[test]
+    fn survival_floor_structural_identity_grow_threshold() {
+        let econ = EconParams { e_cell: 1000, excrete: 8, ..EconParams::default() };
+        let g = Genome::founder(2);
+        let ph = Phenotype { uptake_layer: 0, cell_type: None, graph: cellgraph_with_cells(vec![3]), respiratory_pathway: None };
+        let grown = 2i64;
+
+        let survival_floor_growing = econ.e_cell + grow_reserve(&econ, &ph, &g, grown + 1);
+        assert_eq!(
+            survival_floor_growing, grow_threshold(&econ, &ph, &g, grown),
+            "F160: the still-growing-parent survival_floor must be grow_threshold's own formula"
+        );
+
+        let survival_floor_mature = grow_reserve(&econ, &ph, &g, grown);
+        assert_ne!(
+            survival_floor_mature, survival_floor_growing,
+            "sanity: g_extra=0 and g_extra=1 must read genuinely different floors for this fixture"
+        );
     }
 
     /// Test-only `EconParams` with every metabolic cost zeroed except `c_coord`, so the coordination
@@ -2552,6 +2580,10 @@ mod tests {
                             graph: cellgraph_with_cells(body_cells.into_iter().map(|x| x as i32).collect()),
                             respiratory_pathway: None,
                         },
+                        // P-2b (#448): `stage_predation`'s query now requires `&Grown` — a harmless
+                        // fixed value (irrelevant here: `enable_provision=false` in every fixture
+                        // using this harness, so `Provisioned` never enters and `growing` is unused).
+                        Grown(0),
                     ))
                     .id()
             })
@@ -2586,6 +2618,7 @@ mod tests {
                 Energy(predator_energy),
                 predation_genome(16),
                 Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty(), respiratory_pathway: None },
+                Grown(0), // P-2b (#448): `stage_predation`'s query now requires `&Grown`
             ))
             .id();
 
@@ -2598,6 +2631,7 @@ mod tests {
                         Energy(energy),
                         predation_genome(0), // combat_trait=0 < predator's 16 → valid prey
                         ph,
+                        Grown(0), // P-2b (#448): `stage_predation`'s query now requires `&Grown`
                     ))
                     .id()
             })
@@ -2689,6 +2723,104 @@ mod tests {
             1_000_000 + 10_000 + 10_000,
             "R15: no energy created or destroyed across the stage"
         );
+    }
+
+    /// P-2b (#448, critic F1/F5/F7, test (D)): the AGGREGATE-predation branch (`size_refuge=None`)
+    /// must book death + `Provisioned`-release EXACTLY ONCE per corpse even when TWO predators in
+    /// the same cell both reach it — the `prey_pool` is rebuilt per predator from the SAME static
+    /// candidate list, but a despawn is deferred (Commands), so the corpse stays `q.get`-resolvable
+    /// to the second predator within the SAME `stage_predation` call. `bite_shift=1`,
+    /// `combat_trait_scale=0` (trait_factor fixed at 256 ⇒ `bite = prey_energy_agg >> 1` exactly, no
+    /// size-refuge division): predator 1's pass computes `prey_loss = (0+K+S)>>1 = K` — the
+    /// entity-id-ordered drain fully kills `prey_zero` (already 0) and `prey_killed` (drained to 0),
+    /// then `remaining_loss` hits 0 and predator 1 never even reads `prey_survivor` this pass.
+    /// Predator 2's pass then sees `prey_energy_agg = S` (the two corpses read 0), `prey_loss=S>>1`,
+    /// partially drains `prey_survivor` (SURVIVES — books nothing) and re-touches both corpses
+    /// (booked already ⇒ skipped, not double-counted). Covers all THREE required cases: (i) drained-
+    /// but-surviving books nothing, (ii) killed-by-drain books exactly once, (iii, critic F5) a prey
+    /// entering at the PINNED exact value `energy.0 == 0` (the lowest entity id, drained first) books
+    /// exactly once across the two predators.
+    #[test]
+    fn d1_aggregate_booked_set_prevents_double_count_across_predators() {
+        let spec = PredationSpec {
+            mode: PredationMode::CombatSplit,
+            bite_shift: 1,
+            combat_trait_scale: 0,
+            efficiency_num: 128,
+            size_refuge: None, // the AGGREGATE path
+            base_hazard: 0,
+        };
+        let mut world = World::new();
+        world.insert_resource(EconParams { predation: Some(spec), ..EconParams::default() });
+        world.insert_resource(FieldRes(Box::new(SingleCellFieldStub)));
+        world.insert_resource(EnergyLedger::default());
+        world.insert_resource(WorldRes(Box::new(TestStubWorld)));
+
+        // Still-growing fixture: 5-cell TARGET (`growth_cells` len 5), `Grown(1)` — so `growing`
+        // reads true for the two prey that die (the during-growth death counters this test checks).
+        let growing_graph = || CellGraph {
+            g_dev: 1,
+            module_type: vec![CellType::A],
+            module_cell_count: vec![1],
+            module_is_germ: vec![false],
+            module_reachable: vec![true],
+            module_consortium: vec![0],
+            cell_positions: vec![(0, 0)],
+            growth_cells: vec![(0, 0, CellType::A, false); 5],
+        };
+        let ph = || Phenotype { uptake_layer: 0, cell_type: None, graph: growing_graph(), respiratory_pathway: None };
+        let pred_ph = || Phenotype { uptake_layer: 0, cell_type: None, graph: CellGraph::empty(), respiratory_pathway: None };
+
+        const K: i64 = 100; // prey_killed's entry energy
+        const S: i64 = 100; // prey_survivor's entry energy
+        const BANK: i64 = 7; // prey_killed's Provisioned bank — must release into `lost` exactly once
+
+        // Spawn order fixes entity-id order (R14): zero < killed < survivor < predators — the
+        // fixture's required drain order (critic F12/F14: the zero-energy prey needs the LOWEST id
+        // so the entity-id-ordered drain reaches it first, before `remaining_loss` is exhausted).
+        let zero_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(0), predation_genome(0), ph(), Grown(1))).id();
+        let killed_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(K), predation_genome(0), ph(), Grown(1), Provisioned(BANK))).id();
+        let survivor_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(S), predation_genome(0), ph(), Grown(1))).id();
+        let pred1_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(1_000_000), predation_genome(16), pred_ph(), Grown(0))).id();
+        let pred2_id = world.spawn((Position(Vec2Fixed(0, 0)), Energy(1_000_000), predation_genome(16), pred_ph(), Grown(0))).id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_predation);
+        schedule.run(&mut world);
+
+        // (i) drained-but-surviving: predator 1 never reaches `prey_survivor` (remaining_loss hits
+        // 0 exactly at `prey_killed`); predator 2 partially drains it — alive, nothing booked.
+        let survivor_energy = world.get::<Energy>(survivor_id).map(|e| e.0).unwrap_or(-1);
+        assert!(survivor_energy > 0, "prey_survivor must survive both predator passes: got {survivor_energy}");
+        assert!(survivor_energy < S, "prey_survivor must still be drained SOME by predator 2's pass: got {survivor_energy}");
+
+        // (ii)+(iii): prey_killed and prey_zero must each book EXACTLY ONCE despite being
+        // re-touched by BOTH predators (the `booked` guard is what makes this non-vacuous — an
+        // un-guarded aggregate branch would book FOUR deaths here, not two).
+        let ledger = *world.resource::<EnergyLedger>();
+        assert_eq!(
+            ledger.deaths_by_channel[DeathChannel::Predation as usize], 2,
+            "exactly two deaths (prey_zero + prey_killed) — NOT four (double-booked by 2 predators)"
+        );
+        assert_eq!(
+            ledger.deaths_growing_by_channel[DeathChannel::Predation as usize], 2,
+            "both dead prey were still growing (Grown=1 < target=5)"
+        );
+        assert_eq!(
+            ledger.provisioned_released_total, BANK as u64,
+            "prey_killed's Provisioned bank must release into `lost` EXACTLY ONCE, not twice"
+        );
+
+        // R15: no energy created or destroyed across the stage — the released Provisioned bank is
+        // part of the conserved total (it was live agent energy before the transfer, critic F6).
+        let pred1_final = world.get::<Energy>(pred1_id).map(|e| e.0).unwrap_or(0);
+        let pred2_final = world.get::<Energy>(pred2_id).map(|e| e.0).unwrap_or(0);
+        let zero_final = world.get::<Energy>(zero_id).map(|e| e.0).unwrap_or(0);
+        let killed_final = world.get::<Energy>(killed_id).map(|e| e.0).unwrap_or(0);
+        let initial_total = 1_000_000 + 1_000_000 + 0 + K + S + BANK;
+        let final_total = pred1_final + pred2_final + zero_final + killed_final + survivor_energy
+            + ledger.dissipated + ledger.lost;
+        assert_eq!(final_total, initial_total, "R15: conservation across the aggregate predation stage, incl. the released Provisioned bank");
     }
 
     // ── D-4: universal size-predation tests (ubiquitous, size-selective) ─────────────────────────

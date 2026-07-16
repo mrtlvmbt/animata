@@ -49,7 +49,7 @@ pub use grn_lut::{
     PREACT_MAX as GRN_PREACT_MAX, PREACT_MIN as GRN_PREACT_MIN,
 };
 pub use morphogen::{morphogen, morphogen_steps, topology_mask, BodyPlan, Boundary, Gradient, MorphogenSpec};
-pub use params::{AmbientToleranceSpec, EconParams, EnvFrontierConfig, FieldId, IncomeMode, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, light_at_tick, tolerance_penalty};
+pub use params::{AmbientToleranceSpec, EconParams, EnvFrontierConfig, FieldId, IncomeMode, LayerSpec, LightSpec, SettlingSpec, SimConfig, D0_MASK, RECYCLE_DEN, PROVISION_RATE_LADDER, light_at_tick, tolerance_penalty};
 pub use predation::{resolve_encounter, refuge_attenuate, Outcome, PredationMode, PredationSpec, SizeRefugeSpec};
 pub use stages::{expressed_capacity, monod_demand, settling_drain, grow_gate, grow_reserve, GrowGate};
 pub use pool::{ScatterParams, SimPool};
@@ -986,6 +986,48 @@ impl Sim {
             .collect()
     }
 
+    /// P-2b (#448): entity-keyed materialised cell count — `entity_bits → Grown.0`, mirroring
+    /// `body_size_entity_probe`'s entity-identity join contract. Lets a provisioning test read a
+    /// SPECIFIC entity's materialised growth progress (distinct from `Phenotype.graph.body_size()`,
+    /// which a test may have imposed to a different, larger TARGET). Test-only: read-only, no state
+    /// mutation, not on the tick path.
+    pub fn grown_entity_probe(&mut self) -> DetMap<u64, i64> {
+        let mut q = self.world.query::<(Entity, &Grown)>();
+        q.iter(&self.world).map(|(e, g)| (e.to_bits(), g.0 as i64)).collect()
+    }
+
+    /// P-2b (#448): entity-keyed `Provisioned` bank readout — `entity_bits → Provisioned.0`, `0` for
+    /// any entity without the component (founders, or every entity when `enable_provision=false`).
+    /// Test-only: read-only, no state mutation, not on the tick path.
+    pub fn provisioned_entity_probe(&mut self) -> DetMap<u64, i64> {
+        let mut q = self.world.query::<(Entity, Option<&Provisioned>)>();
+        q.iter(&self.world).map(|(e, p)| (e.to_bits(), p.map_or(0, |p| p.0))).collect()
+    }
+
+    /// P-2b (#448): entity-keyed `Parent` link readout — `child_bits → parent_bits`, entities
+    /// without a `Parent` (founders, or `enable_provision=false`) are absent from the map. Test-only:
+    /// read-only, no state mutation, not on the tick path.
+    pub fn parent_entity_probe(&mut self) -> DetMap<u64, u64> {
+        let mut q = self.world.query::<(Entity, &Parent)>();
+        q.iter(&self.world).map(|(e, p)| (e.to_bits(), p.0.to_bits())).collect()
+    }
+
+    /// P-2b (#448): population-wide `Genome.provision_rate` readout (un-keyed) — lets a test assert
+    /// every LIVE genome still carries a seeded, LOCKED value (test (C): the instrument-knob
+    /// inheritance check). Test-only: read-only, no state mutation, not on the tick path.
+    pub fn provision_rate_probe(&mut self) -> Vec<i32> {
+        let mut q = self.world.query::<&Genome>();
+        q.iter(&self.world).map(|g| g.provision_rate).collect()
+    }
+
+    /// P-2b (#448): population-wide `Genome.n_propagule` readout (un-keyed) — mirrors
+    /// `provision_rate_probe` for the OTHER seed-and-lock knob. Test-only: read-only, no state
+    /// mutation, not on the tick path.
+    pub fn n_propagule_probe(&mut self) -> Vec<i32> {
+        let mut q = self.world.query::<&Genome>();
+        q.iter(&self.world).map(|g| g.n_propagule).collect()
+    }
+
     /// STEP-A0 (#398) probe-only mutator: overwrite `Phenotype.graph` for entities keyed by
     /// `entity_bits`, bypassing `Genome::decode` entirely. Lets a test IMPOSE a hand-built
     /// `CellGraph` (e.g. an arbitrary germ:soma split at a fixed body_size) on a live population.
@@ -1370,6 +1412,7 @@ fn build_stages() -> Vec<(&'static str, Schedule)> {
         stage!("3_act", stage_act),
         stage!("4_move", stage_move),
         stage!("5_metabolism", stage_metabolism),
+        stage!("5a_provision", stage_provision),
         stage!("5b_grow", stage_grow),
         stage!("6_interactions", stage_interactions),
         stage!("6b_mineral_feed", stage_mineral_feed),
