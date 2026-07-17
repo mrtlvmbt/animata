@@ -1,8 +1,8 @@
 task: hex-diorama program (PM orchestration) — U-3 MERGED; U-5 (final UI slice) in flight
-phase: UI track. U-3 MERGED (PR #459 -> integration head 21c7983). U-5 READY FOR CI (PR #461, branch u5-minimap): minimap raster (D6 palette-match via per-map relief band) + viewport quad (D7 camera frustum) + click-to-jump (UiAction). Code-critic self-review: 3 findings (hardcoded relief band, sampling coords, missing quad) ALL FIXED + verified (compile-check PASS, clippy clean). Recompile commit 4b749e25ed (code-critic fixes). Ready for PM intake + byte-identical harness CI + R-13 parity.
-blocked_on: PM intake + CI verification (v2-render lane, R-13 parity gate, byte-identical 256/seed=1 both paths)
-next: wait for CI green -> merge to render-r12-terragen-preview -> UI track CONCLUSION.
-updated: 2026-07-17 15:30
+phase: U-5 VERIFICATION (PR #461, branch u5-minimap HEAD 299d8cd). Addressed PM feedback on viewport-quad unproven + click-to-jump unverified: added --jump-to <x>,<z> flag (fires UiAction::JumpCamera after startup, same as minimap click, enables visual verification); added 3x unit tests for corner projection + camera-pan (minimap_view_proj_transforms_screen_corners, minimap_viewport_quad_offsets_with_camera_pan, minimap_uv_world_mapping_is_invertible); added detailed SAFETY invariant comment on unsafe cache pointer. Code-critic PASS (3 findings fixed). Deliverables: raster (per-map relief band [p2,p98]), viewport quad (corner projection), click-to-jump, caching. Verified: compile-check PASS, tests compile, clippy clean. Awaiting PM screenshot proof (jump_before/after PNGs) + byte-identical harness CI.
+blocked_on: PM screenshot verification (viewport quad movement + jump success) + CI byte-identical + R-13 parity
+next: merge to render-r12-terragen-preview -> UI track CONCLUSION.
+updated: 2026-07-17 15:50
 
 ## Merged (integration branch render-r12-terragen-preview, head 21c7983)
 R-13, W-9, W-10, R-15a, R-14, R-16, R-17, U-0, U-1, U-2, U-3, U-4.
