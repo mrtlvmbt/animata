@@ -191,4 +191,66 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn minimap_view_proj_transforms_screen_corners() {
+        // Test that view-projection matrix correctly transforms screen corners to world space
+        // This verifies the viewport quad projection math works.
+        let focus = glam::vec3(128.0, 40.0, 128.0);  // Center of 256×256 world
+        let yaw = 0.0;
+        let ortho_span = 100.0;  // Default view span
+        let aspect = 1.0;  // Square viewport
+
+        let vp = minimap_view_proj_matrix(focus, yaw, ortho_span, aspect);
+
+        // Screen corners for a 256×256 viewport
+        let corners = [
+            (0.0, 0.0),      // top-left
+            (256.0, 0.0),    // top-right
+            (256.0, 256.0),  // bottom-right
+            (0.0, 256.0),    // bottom-left
+        ];
+
+        // Project all 4 corners and verify they map within world bounds
+        for (screen_x, screen_y) in corners.iter() {
+            let world_xz = minimap_ground_under_cursor(vp, (*screen_x, *screen_y), (256.0, 256.0));
+
+            // World coordinates should be close to expected range
+            assert!(world_xz.x >= 0.0 && world_xz.x < 256.0, "corner proj x={} out of world bounds", world_xz.x);
+            assert!(world_xz.y >= 0.0 && world_xz.y < 256.0, "corner proj z={} out of world bounds", world_xz.y);
+        }
+    }
+
+    #[test]
+    fn minimap_viewport_quad_offsets_with_camera_pan() {
+        // Verify that camera pan (offset focus) changes the viewport quad position on minimap
+        let dim = 256i64;
+        let yaw = 0.0;
+        let ortho_span = 100.0;
+        let aspect = 1.0;
+
+        // Center camera
+        let focus_center = glam::vec3(128.0, 40.0, 128.0);
+        let vp_center = minimap_view_proj_matrix(focus_center, yaw, ortho_span, aspect);
+
+        // Pan camera to a different position
+        let focus_panned = glam::vec3(64.0, 40.0, 64.0);  // Panned toward corner
+        let vp_panned = minimap_view_proj_matrix(focus_panned, yaw, ortho_span, aspect);
+
+        // Sample one corner (top-left)
+        let corner_screen = (0.0, 0.0);
+        let screen_dims = (256.0, 256.0);
+
+        // Project corner through both VP matrices
+        let world_center = minimap_ground_under_cursor(vp_center, corner_screen, screen_dims);
+        let world_panned = minimap_ground_under_cursor(vp_panned, corner_screen, screen_dims);
+
+        // Map to minimap UV
+        let uv_center = world_to_minimap_uv(world_center, dim);
+        let uv_panned = world_to_minimap_uv(world_panned, dim);
+
+        // Panning the camera should move the projected corner on the minimap
+        let uv_distance = ((uv_panned.x - uv_center.x).powi(2) + (uv_panned.y - uv_center.y).powi(2)).sqrt();
+        assert!(uv_distance > 0.05, "camera pan did not move viewport quad (distance={})", uv_distance);
+    }
 }
