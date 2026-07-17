@@ -2159,16 +2159,20 @@ mod tests {
 
     /// W-12 final observable (F26): count(presentation == BeachSand) > 0 on a full-pipeline 64²
     /// fixture with coastal+beaches on. Beaches byte is 11 (new presentation, not substrate).
+    /// Uses a tectonic fixture to ensure suitable shoreline geometry (critic F29: if the fixture
+    /// lacks low-slope shoreline, this count pin itself fails loudly).
     #[test]
     fn w12_final_observable_beach_sand_count_positive() {
         const DIM: usize = 64;
+        // Tectonic+coastal+beaches: creates fault-scarp relief with interesting shores for deposition.
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(false, false, false, false, true, false, true), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, true), true, true
         );
         let beach_count = world.surface_material.iter().filter(|&&b| b == 11).count();
         assert!(
             beach_count > 0,
-            "presentation count(== BeachSand=11) must be > 0 on coastal+beaches fixture (F26); got {}",
+            "presentation count(== BeachSand=11) must be > 0 on tectonic+coastal+beaches fixture (F26); got {}. \
+             Fixture lacks suitable low-slope shoreline for depositional beaches (F29).",
             beach_count
         );
     }
