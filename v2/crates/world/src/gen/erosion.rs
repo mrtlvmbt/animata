@@ -1397,8 +1397,12 @@ mod tests {
         const DIM: usize = 16;
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, false);
 
+        // W-13 re-pin: warp + BELT_HALF_WIDTH 2→4 + single-fold multifractal (enable_tectonics=true path).
+        // Warp applies to fault-scarp, resistance-band, and ridge-belt distance when tectonics ON.
+        // Terrain changes intentional (cliffs curve, belt widens, crests show sub-ridges).
+        // Drift: [6, 9, 2, 1] cells at indices [0, 36, 100, 255] (subtle/reasonable).
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [113, 116, 104, 95];
+        const EXPECTED: [i64; 4] = [107, 107, 102, 96]; // W-13: re-pinned from run
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
