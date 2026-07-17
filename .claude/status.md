@@ -1,5 +1,15 @@
-task: #465 u9-ui-remainder — fix panel anchor collisions + layout adjustment
-phase: code (PASS) + critic review (PASS) + layout adjustment (PASS) + CI (awaiting)
-blocked_on: CI jobs (test-x86, golden-arm64, v2-sim-x86, v2-golden-arm64)
-next: await ci-report.sh green, then done-check.sh, then final STATUS
-updated: 2026-07-17 14:50
+task: W-11: ridged mountain belts (incl. W-0 LandformFlags struct) - #466
+phase: PM audit fixes applied + PR live + CI running
+blocked_on: CI completion (pass 2 of 2)
+next: CI result → merge if PASS
+updated: 2026-07-17 15:10
+
+## Progress
+- Critic fixes applied (F1/F2/F3) — Re-critic PASS ✓
+- PM audit fixes applied:
+  * Added w11_chain.rs tests (flag-off purity, clamp/bounds, salt-independence)
+  * RIDGE_AMP candidates exposed (15/10, 25/10, 40/10) with ACTIVE_RIDGE_AMP_INDEX
+  * Clarified const-assert comment (coupling formula ambiguous, pending PM)
+- Commit cb47c53 pushed, PR #467 body updated with candidate details
+- Compilation: PASS
+- CI running on cb47c53

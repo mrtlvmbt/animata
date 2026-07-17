@@ -484,6 +484,8 @@ async fn main() {
     let mut rail = ui::rail::ControlRail::new();
     rail.open_panel = initial_flyout;
     ui_root.push(Box::new(rail));
+    ui_root.push(Box::new(ui::toast::ToastPanel::new()));
+    ui_root.push(Box::new(ui::toast::HideHintPanel));
     ui_root.push(Box::new(ui::legend::LegendPanel));
     ui_root.push(Box::new(ui::MinimapPanel));
 
@@ -1309,7 +1311,7 @@ mod tests {
     #[test]
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
-        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false, false);
+        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false, false, false, false);
         let hex_chunks = terrain::build_hex_terrain(dim, &world, SEED, false);
         let cube_chunks = terrain_cube::build_cube_terrain(dim, &world, SEED, false);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");

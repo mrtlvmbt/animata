@@ -50,3 +50,34 @@ pub mod material;
 pub mod moisture;
 pub mod tectonics;
 pub mod volcanic;
+
+/// W-0 landform flags struct — refactored from 5-bool tuple to named fields.
+/// Splitmix64 bit layout: tect/aeolian/volcanic/glacial/coastal at shifts 3/13/23/33/43 (unchanged);
+/// ridges at shift 53, beaches at shift 59. Dependency clamps: `ridges &= tect`, `beaches &= coastal`.
+/// Empty-set guard ORs only the original five (new bits are dependent riders).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LandformFlags {
+    pub tect: bool,
+    pub aeolian: bool,
+    pub volcanic: bool,
+    pub glacial: bool,
+    pub coastal: bool,
+    pub ridges: bool,
+    pub beaches: bool,
+}
+
+impl LandformFlags {
+    /// Convenience constructor: all flags from the original five booleans, ridges and beaches default false.
+    /// **Dependency clamps applied:** ridges only valid if tect is true; beaches only if coastal is true.
+    pub fn from_five(tect: bool, aeolian: bool, volcanic: bool, glacial: bool, coastal: bool) -> Self {
+        LandformFlags { tect, aeolian, volcanic, glacial, coastal, ridges: false, beaches: false }
+    }
+
+    /// Construct with explicit ridges/beaches, applying dependency clamps per W-0 contract.
+    pub fn new(tect: bool, aeolian: bool, volcanic: bool, glacial: bool, coastal: bool, mut ridges: bool, mut beaches: bool) -> Self {
+        // W-0 dependency clamps: ridges requires tect, beaches requires coastal.
+        ridges = ridges && tect;
+        beaches = beaches && coastal;
+        LandformFlags { tect, aeolian, volcanic, glacial, coastal, ridges, beaches }
+    }
+}
