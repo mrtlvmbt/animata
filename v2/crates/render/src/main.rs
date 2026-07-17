@@ -48,6 +48,7 @@ mod loader_state;
 mod raw_chunk;
 mod terrain;
 mod terrain_cube;
+mod tuning;
 mod ui;
 mod world_builder;
 mod world_spec;
@@ -180,9 +181,8 @@ struct CliArgs {
     slow_load: bool,
     /// U-2: `--screenshot-loader <path>`: capture loader modal mid-build, save PNG, exit.
     screenshot_loader: Option<String>,
-    /// U-3: `--screenshot-chip <path>`: capture regen chip mid-build, save PNG, exit.
-    screenshot_chip: Option<String>,
-    /// U-3: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
+    /// U-7: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
+    /// When combined with `--slow-load`, shows the full-screen loader modal mid-regen.
     regen_to: Option<u64>,
     /// U-5: `--jump-to <x>,<z>`: after startup, jump camera to world coords (x, z) for viewport-quad + click-to-jump verification.
     jump_to: Option<(f32, f32)>,
@@ -202,7 +202,6 @@ fn parse_args() -> CliArgs {
     let mut height_scale_override = None;
     let mut slow_load = false;
     let mut screenshot_loader = None;
-    let mut screenshot_chip = None;
     let mut regen_to = None;
     let mut jump_to = None;
 
@@ -256,10 +255,6 @@ fn parse_args() -> CliArgs {
                 screenshot_loader = Some(args.next().expect("--screenshot-loader requires a path"));
                 standalone = true;  // loader implies standalone
             }
-            "--screenshot-chip" => {
-                screenshot_chip = Some(args.next().expect("--screenshot-chip requires a path"));
-                standalone = true;  // chip implies standalone
-            }
             "--regen-to" => {
                 let v = args.next().expect("--regen-to requires a u64 seed value");
                 regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
@@ -276,7 +271,7 @@ fn parse_args() -> CliArgs {
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to, jump_to }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -365,6 +360,9 @@ async fn main() {
     let cli_args = parse_args();
     let config = cli::default_config(cli_args.seed);
 
+    // U-7: Load tuning config (feel + key mapping) once at startup
+    let tuning = tuning::Tuning::load();
+
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
     let mut spec = WorldSpec {
         seed: cli_args.seed,
@@ -436,10 +434,9 @@ async fn main() {
     // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
     let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
 
-    // U-1: Initialize UI root with DebugPanel and RegenChipPanel.
+    // U-1: Initialize UI root with DebugPanel and MinimapPanel.
     let mut ui_root = ui::UiRoot::new();
     ui_root.push(Box::new(ui::DebugPanel));
-    ui_root.push(Box::new(ui::RegenChipPanel));
     // U-5: Add MinimapPanel
     ui_root.push(Box::new(ui::MinimapPanel));
 
@@ -495,10 +492,22 @@ async fn main() {
             let load_state = LoadState::new(target_seed);
             harness_regen_load_state = Some(load_state.clone());
             let (tx, rx) = mpsc::channel();
+            let slow_load_flag = cli_args.slow_load;  // Capture for thread
             let _ = std::thread::spawn(move || {
                 let load_clone = load_state.clone();
                 let mut on_stage = |stage: Stage| {
                     load_clone.set_stage(stage);
+                    // U-7: Wire progress permille based on stage (matches interactive RegenSeed worker)
+                    let progress = match stage {
+                        Stage::GenerateWorld => 0,
+                        Stage::BuildMeshes => 400,
+                        Stage::Done => 1000,
+                    };
+                    load_clone.set_progress(progress);
+                    // Honor --slow-load flag to stretch build stages (allow mid-build captures)
+                    if slow_load_flag {
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                    }
                     true
                 };
                 if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
@@ -554,7 +563,8 @@ async fn main() {
                 .unwrap_or(false);
 
             if regen_still_building {
-                // Chip-visible path: render with UI so regen progress is shown
+                // Modal loader path: render the full-screen loader modal (v1 parity), NOT panels.
+                // CRITICAL: when modal is up, skip ui_root entirely (modal XOR panels, never both).
                 let snap = handle.as_ref().and_then(|h| h.latest());
                 let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
                 let mut ui_actions: Vec<ui::UiAction> = Vec::new();
@@ -570,29 +580,10 @@ async fn main() {
                 egui_macroquad::ui(|ctx| {
                     // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
                     ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
-                    let mut ui_ctx = ui::UiCtx {
-                        world_dim,
-                        seed: spec.seed,
-                        fps: get_fps(),
-                        chunks_drawn: 0,
-                        verts: 0,
-                        snap: snap.as_ref().map(|v| &**v),
-                        standalone_mode: cli_args.standalone,
-                        terrain_chunks_total: terrain_chunks.len(),
-                        actions: &mut ui_actions,
-                        is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
-                        regen_load_state: harness_regen_load_state.as_ref(),
-                        // U-5: pass world reference for minimap
-                        world: Some(world.as_ref()),
-                        bare_mode: spec.bare_mode,
-                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
-                        // U-5: pass camera state for minimap viewport quad
-                        camera_focus: camera.focus,
-                        camera_ortho_span: camera.ortho_span,
-                        camera_yaw: camera.yaw,
-                        screen_dims: (screen_width(), screen_height()),
-                    };
-                    let _ui_out = ui_root.draw(ctx, &mut ui_ctx);
+                    // Draw the loader modal using the same LoadState the regen worker bumps
+                    if let Some(ref load_state) = harness_regen_load_state {
+                        ui::loader::draw(ctx, load_state);
+                    }
                 });
 
                 // Apply UI actions (includes --jump-to)
@@ -606,7 +597,7 @@ async fn main() {
                 }
 
                 clear_background(Color::from_rgba(18, 18, 22, 255));
-                camera.update();
+                camera.update(&tuning);
                 let cam3d = camera.to_camera3d();
                 set_camera(&cam3d);
 
@@ -686,7 +677,7 @@ async fn main() {
                     }
                 }
 
-                camera.update();
+                camera.update(&tuning);
                 let cam3d = camera.to_camera3d();
                 set_camera(&cam3d);
 
@@ -748,7 +739,7 @@ async fn main() {
             clear_background(Color::from_rgba(18, 18, 22, 255));
             let snap = handle.as_ref().and_then(|h| h.latest());
 
-            camera.update();
+            camera.update(&tuning);
             let cam3d = camera.to_camera3d();
             set_camera(&cam3d);
 
@@ -810,7 +801,7 @@ async fn main() {
 
             let cpu_start = Instant::now();
 
-            camera.update();
+            camera.update(&tuning);
             let cam3d = camera.to_camera3d();
             set_camera(&cam3d);
 
@@ -945,56 +936,76 @@ async fn main() {
                 egui_macroquad::ui(|ctx| {
                     // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
                     ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
-                    // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
-                    // This causes a 1-frame lag (acceptable, identical to v1 behavior).
-                    let mut ui_ctx = ui::UiCtx {
-                        world_dim,
-                        seed: spec.seed,  // F4: use spec.seed (spec-driven design)
-                        fps: get_fps(),
-                        chunks_drawn: 0, // Will be updated after drawing
-                        verts: 0,
-                        snap: snap.as_ref().map(|v| &**v),
-                        standalone_mode: cli_args.standalone,
-                        terrain_chunks_total: terrain_chunks.len(),
-                        actions: &mut ui_actions,
-                        // U-3/F12: gate "New world" button visibility
-                        is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
-                        // U-3: pass regen state for RegenChipPanel
-                        regen_load_state: regen_load_state.as_ref(),
-                        // U-5: pass world reference for minimap rendering
-                        world: Some(world.as_ref()),
-                        bare_mode: spec.bare_mode,
-                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
-                        // U-5: pass camera state for minimap viewport quad
-                        camera_focus: camera.focus,
-                        camera_ortho_span: camera.ortho_span,
-                        camera_yaw: camera.yaw,
-                        screen_dims: (screen_width(), screen_height()),
+
+                    // U-7: If regen is in flight, draw the full-screen loader modal (v1 parity).
+                    // CRITICAL: when modal is up, skip ui_root entirely (modal XOR panels, never both).
+                    let mut wants_pointer_regen = false;
+                    let mut wants_keyboard_regen = false;
+                    let ui_out = if let Some(ref load_state) = regen_load_state {
+                        ui::loader::draw(ctx, load_state);
+                        wants_pointer_regen = true;
+                        wants_keyboard_regen = true;
+                        // Return a default UiOut with pointer/keyboard gating set; no panels drawn
+                        ui::UiOut {
+                            wants_pointer: true,
+                            wants_keyboard: true,
+                        }
+                    } else {
+                        // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
+                        // This causes a 1-frame lag (acceptable, identical to v1 behavior).
+                        let mut ui_ctx = ui::UiCtx {
+                            world_dim,
+                            seed: spec.seed,  // F4: use spec.seed (spec-driven design)
+                            fps: get_fps(),
+                            chunks_drawn: 0, // Will be updated after drawing
+                            verts: 0,
+                            snap: snap.as_ref().map(|v| &**v),
+                            standalone_mode: cli_args.standalone,
+                            terrain_chunks_total: terrain_chunks.len(),
+                            actions: &mut ui_actions,
+                            // U-3/F12: gate "New world" button visibility
+                            is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
+                            // U-3: pass regen state (now used for modal display)
+                            regen_load_state: regen_load_state.as_ref(),
+                            // U-5: pass world reference for minimap rendering
+                            world: Some(world.as_ref()),
+                            bare_mode: spec.bare_mode,
+                            cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
+                            // U-5: pass camera state for minimap viewport quad
+                            camera_focus: camera.focus,
+                            camera_ortho_span: camera.ortho_span,
+                            camera_yaw: camera.yaw,
+                            screen_dims: (screen_width(), screen_height()),
+                        };
+                        ui_root.draw(ctx, &mut ui_ctx)
                     };
-                    let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
                     // Apply camera update with gating.
-                    camera.update_gated(ui_out.wants_pointer, ui_out.wants_keyboard);
+                    // U-7: Gate camera input when regen loader modal is showing
+                    camera.update_gated(&tuning, ui_out.wants_pointer || wants_pointer_regen, ui_out.wants_keyboard || wants_keyboard_regen);
 
                     // Collect keyboard input events with gating.
-                    for ev in input::collect(&ui_out) {
-                        // Convert InputEvent to UiAction and collect for unified handling
-                        match ev {
-                            input::InputEvent::TogglePause => {
-                                ui_actions.push(ui::UiAction::TogglePause);
-                            }
-                            input::InputEvent::StepOnce => {
-                                ui_actions.push(ui::UiAction::StepOnce);
-                            }
-                            input::InputEvent::ToggleTerrainKind => {
-                                ui_actions.push(ui::UiAction::ToggleTerrainKind);
-                            }
-                            // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
-                            input::InputEvent::RegenSeed => {
-                                let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
-                                if can_reseed {
-                                    // Trigger reseed with next seed (current+1)
-                                    ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                    // U-7: Skip input when regen loader modal is showing (gated by wants_keyboard_regen)
+                    if !wants_keyboard_regen && !ui_out.wants_keyboard {
+                        for ev in input::collect(&ui_out) {
+                            // Convert InputEvent to UiAction and collect for unified handling
+                            match ev {
+                                input::InputEvent::TogglePause => {
+                                    ui_actions.push(ui::UiAction::TogglePause);
+                                }
+                                input::InputEvent::StepOnce => {
+                                    ui_actions.push(ui::UiAction::StepOnce);
+                                }
+                                input::InputEvent::ToggleTerrainKind => {
+                                    ui_actions.push(ui::UiAction::ToggleTerrainKind);
+                                }
+                                // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
+                                input::InputEvent::RegenSeed => {
+                                    let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
+                                    if can_reseed {
+                                        // Trigger reseed with next seed (current+1)
+                                        ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                                    }
                                 }
                             }
                         }
@@ -1029,10 +1040,22 @@ async fn main() {
                                 let load_state = LoadState::new(target_seed);
                                 regen_load_state = Some(load_state.clone());
                                 let (tx, rx) = mpsc::channel();
+                                let slow_load_flag = cli_args.slow_load;  // Capture for thread
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
                                         load_clone.set_stage(stage);
+                                        // U-7: Wire progress permille based on stage (matches harness worker)
+                                        let progress = match stage {
+                                            Stage::GenerateWorld => 0,
+                                            Stage::BuildMeshes => 400,
+                                            Stage::Done => 1000,
+                                        };
+                                        load_clone.set_progress(progress);
+                                        // Honor --slow-load flag to stretch build stages (matches harness worker)
+                                        if slow_load_flag {
+                                            std::thread::sleep(std::time::Duration::from_millis(600));
+                                        }
                                         true
                                     };
                                     if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
@@ -1164,7 +1187,7 @@ mod tests {
         };
 
         // Test: pointer gating should block zoom, but keyboard should still work.
-        camera.apply_cam_input(&input, true, false); // wants_pointer=true, wants_keyboard=false
+        camera.apply_cam_input(&input, &tuning::Tuning::default(), true, false); // wants_pointer=true, wants_keyboard=false
         assert_eq!(
             camera.ortho_span, initial_ortho,
             "FAIL: zoom changed despite wants_pointer=true; pointer gate should block wheel"
@@ -1196,7 +1219,7 @@ mod tests {
             pan_dir: (20.0, 0.0),   // Keyboard pan in x
             yaw_step: 1,            // E key pressed (rotate +60°)
         };
-        camera.apply_cam_input(&input_keyboard_only, false, true); // wants_pointer=false, wants_keyboard=true
+        camera.apply_cam_input(&input_keyboard_only, &tuning::Tuning::default(), false, true); // wants_pointer=false, wants_keyboard=true
         assert_eq!(
             camera.focus, initial_focus,
             "FAIL: focus changed under keyboard gate + wheel_y=0; gate is not blocking keyboard pan"
@@ -1229,7 +1252,7 @@ mod tests {
             pan_dir: (20.0, 0.0),   // Keyboard pan in x (should be blocked)
             yaw_step: 1,            // E key (should be blocked)
         };
-        camera.apply_cam_input(&input_with_wheel, false, true); // wants_pointer=false, wants_keyboard=true
+        camera.apply_cam_input(&input_with_wheel, &tuning::Tuning::default(), false, true); // wants_pointer=false,wants_keyboard=true
         assert_eq!(
             camera.yaw, initial_yaw,
             "FAIL: yaw changed despite wants_keyboard=true; keyboard gate broken"
@@ -1260,7 +1283,7 @@ mod tests {
         camera.yaw = initial_yaw;
 
         // Test: no gating should allow all changes.
-        camera.apply_cam_input(&input, false, false); // wants_pointer=false, wants_keyboard=false
+        camera.apply_cam_input(&input, &tuning::Tuning::default(), false, false); // wants_pointer=false, wants_keyboard=false
         assert!(
             camera.focus.x != initial_focus.x,
             "pan should apply when gating is off"
