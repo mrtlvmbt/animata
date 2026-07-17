@@ -564,6 +564,11 @@ async fn main() {
                         world: Some(world.as_ref()),
                         bare_mode: spec.bare_mode,
                         cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
+                        // U-5: pass camera state for minimap viewport quad
+                        camera_focus: camera.focus,
+                        camera_ortho_span: camera.ortho_span,
+                        camera_yaw: camera.yaw,
+                        screen_dims: (screen_width(), screen_height()),
                     };
                     let _ui_out = ui_root.draw(ctx, &mut ui_ctx);
                 });
@@ -906,6 +911,11 @@ async fn main() {
                         world: Some(world.as_ref()),
                         bare_mode: spec.bare_mode,
                         cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
+                        // U-5: pass camera state for minimap viewport quad
+                        camera_focus: camera.focus,
+                        camera_ortho_span: camera.ortho_span,
+                        camera_yaw: camera.yaw,
+                        screen_dims: (screen_width(), screen_height()),
                     };
                     let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 

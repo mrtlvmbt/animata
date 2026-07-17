@@ -63,6 +63,14 @@ pub struct UiCtx<'a> {
     pub bare_mode: bool,
     /// U-5: mutable reference to HudCache for texture management (raw pointer to work around borrow checker)
     pub cache: *mut HudCache,
+    /// U-5: camera focus point (for viewport quad in minimap)
+    pub camera_focus: glam::Vec3,
+    /// U-5: camera ortho_span (for viewport quad in minimap)
+    pub camera_ortho_span: f32,
+    /// U-5: camera yaw (for viewport quad in minimap)
+    pub camera_yaw: f32,
+    /// U-5: screen dimensions for camera math
+    pub screen_dims: (f32, f32),
 }
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
@@ -376,6 +384,31 @@ impl Panel for MinimapPanel {
                         mesh.add_triangle(0, 1, 2);
                         mesh.add_triangle(0, 2, 3);
                         painter.add(egui::Shape::mesh(mesh));
+
+                        // Draw viewport quad: project 4 screen corners to world → minimap UV
+                        let aspect = ui_ctx.screen_dims.0 / ui_ctx.screen_dims.1;
+                        let cam_vp = minimap::minimap_view_proj_matrix(
+                            ui_ctx.camera_focus,
+                            ui_ctx.camera_yaw,
+                            ui_ctx.camera_ortho_span,
+                            aspect,
+                        );
+                        let corners = minimap::screen_quad_corners(ui_ctx.screen_dims);
+                        let mut viewport_pts: Vec<egui::Pos2> = Vec::new();
+                        for corner_screen in corners.iter() {
+                            let world_xz = minimap::minimap_ground_under_cursor(cam_vp, *corner_screen, ui_ctx.screen_dims);
+                            let uv = minimap::world_to_minimap_uv(world_xz, ui_ctx.world_dim);
+                            let screen_pos = egui::Pos2::new(
+                                rect.left() + uv.x * rect.width(),
+                                rect.top() + uv.y * rect.height(),
+                            );
+                            viewport_pts.push(screen_pos);
+                        }
+                        // Draw closed quad outline
+                        if viewport_pts.len() == 4 {
+                            let stroke = egui::Stroke::new(1.5, theme::ACCENT);
+                            painter.add(egui::Shape::closed_line(viewport_pts, stroke));
+                        }
 
                         // Handle click to jump
                         if response.clicked() {
