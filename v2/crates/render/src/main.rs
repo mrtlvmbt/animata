@@ -844,10 +844,13 @@ mod tests {
         // Synthetic input: wheel_y=1.0 (zoom in), keyboard pan, and yaw step.
         let input = camera::CamInput {
             wheel_y: 1.0,           // Positive wheel → zoom in (decrease span)
+            mouse_pos: (400.0, 300.0), // Center of 800x600 screen
+            screen_dims: (800.0, 600.0), // Standard test viewport
+            left_button_down: false,
+            left_button_pressed: false,
             mouse_delta: None,      // No mouse drag
             pan_dir: (20.0, 0.0),   // Keyboard pan in x
             yaw_step: 1,            // E key pressed (rotate +60°)
-            current_mouse_pos: (0.0, 0.0), // Test synthetic input (not dragging, so unused)
         };
 
         // Test: pointer gating should block zoom, but keyboard should still work.
