@@ -173,8 +173,8 @@ struct CliArgs {
     cam_preset: CamPreset,
     /// R-15a: `--retained`: use retained-buffer GPU rendering for terrain (default OFF).
     retained: bool,
-    /// R-14: `--bare`: water renders as dry-bed (default OFF).
-    bare_mode: bool,
+    /// W-14: `--water`: restore water submerged tint (debug opt-in; default is dry-bed sand).
+    show_water: bool,
     /// R-14: `--height-scale <f32>`: override the height scale (default 0.2).
     height_scale_override: Option<f32>,
     /// U-2: `--slow-load`: inject ~600ms delay per stage (for loader screenshot capture).
@@ -208,7 +208,7 @@ fn parse_args() -> CliArgs {
     let mut bench = false;
     let mut cam_preset = CamPreset::IsoDefault;
     let mut retained = false;
-    let mut bare_mode = false;
+    let mut show_water = false;
     let mut height_scale_override = None;
     let mut slow_load = false;
     let mut screenshot_loader = None;
@@ -257,7 +257,11 @@ fn parse_args() -> CliArgs {
                 };
             }
             "--retained" => retained = true,
-            "--bare" => bare_mode = true,
+            "--water" => show_water = true,
+            "--bare" => {
+                // W-14: --bare is now a no-op alias (kept for compatibility during transition)
+                eprintln!("render: --bare is deprecated (water now dry by default); use --water to restore submerged tint");
+            }
             "--height-scale" => {
                 let v = args.next().expect("--height-scale requires a value");
                 height_scale_override = Some(v.parse().unwrap_or_else(|_| panic!("--height-scale expects f32, got {v:?}")));
@@ -306,7 +310,7 @@ fn parse_args() -> CliArgs {
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -439,7 +443,7 @@ async fn main() {
     let mut spec = WorldSpec {
         seed: cli_args.seed,
         standalone: cli_args.standalone,
-        bare_mode: cli_args.bare_mode,
+        bare_mode: !cli_args.show_water,  // W-14: default dry-bed (bare_mode=true); --water inverts to show water
         source: if let Some(path) = &cli_args.v1_dump {
             WorldSource::Dump(std::path::PathBuf::from(path))
         } else {
