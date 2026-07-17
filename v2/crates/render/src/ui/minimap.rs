@@ -344,14 +344,15 @@ mod tests {
         let panel_h = 200.0;
         let yaw = 0.0;
 
-        // At yaw=0, screen_right is (0, -1) in (x, z) world coords.
-        // A displacement along +z (v) should map to negative panel y (upward on panel).
+        // At yaw=0, screen_right is (0, -1) in (x, z) world coords (negative z).
+        // A displacement along screen_right (decreasing z → decreasing v → more negative cv)
+        // should map to positive panel x (rightward).
         let center = map_uv_to_panel(0.5, 0.5, yaw, panel_w, panel_h);
-        let displaced_v = map_uv_to_panel(0.5, 0.6, yaw, panel_w, panel_h);
+        let displaced_neg_z = map_uv_to_panel(0.5, 0.4, yaw, panel_w, panel_h);  // Decrease v (z)
 
-        let dy = displaced_v.1 - center.1;
-        assert!(dy.abs() > 0.1, "displacement along v should affect panel y; dy={}", dy);
-        assert!(dy < 0.0, "positive v displacement should map to negative panel y (upward); dy={}", dy);
+        let dx = displaced_neg_z.0 - center.0;
+        assert!(dx.abs() > 0.1, "screen_right displacement should affect panel x; dx={}", dx);
+        assert!(dx > 0.0, "screen_right displacement should map to positive panel x (rightward); dx={}", dx);
     }
 
     #[test]
@@ -360,14 +361,15 @@ mod tests {
         let panel_h = 200.0;
         let yaw = 0.0;
 
-        // At yaw=0, screen_up is (-1, 0) in (x, z) world coords.
-        // A displacement along +x (u) should map to negative panel x (leftward on panel).
+        // At yaw=0, screen_up is (-1, 0) in (x, z) world coords (negative x).
+        // A displacement along screen_up (decreasing x → decreasing u → more negative cu)
+        // should map to negative panel y (upward on panel).
         let center = map_uv_to_panel(0.5, 0.5, yaw, panel_w, panel_h);
-        let displaced_u = map_uv_to_panel(0.6, 0.5, yaw, panel_w, panel_h);
+        let displaced_neg_x = map_uv_to_panel(0.4, 0.5, yaw, panel_w, panel_h);  // Decrease u (x)
 
-        let dx = displaced_u.0 - center.0;
-        assert!(dx.abs() > 0.1, "displacement along u should affect panel x; dx={}", dx);
-        assert!(dx < 0.0, "positive u displacement should map to negative panel x (leftward); dx={}", dx);
+        let dy = displaced_neg_x.1 - center.1;
+        assert!(dy.abs() > 0.1, "screen_up displacement should affect panel y; dy={}", dy);
+        assert!(dy < 0.0, "screen_up displacement should map to negative panel y (upward); dy={}", dy);
     }
 
     #[test]
