@@ -4,7 +4,7 @@
 
 /// Material ID → RGB triple. Single canonical palette source.
 /// Values: R-16 pasteled (brightened, softer hues toward toy-diorama look).
-pub const MATERIAL_COLORS: [[u8; 3]; 11] = [
+pub const MATERIAL_COLORS: [[u8; 3]; 12] = [
     [200, 200, 210], // 0: Air (above-surface empty) — pale grey (brightened)
     [235, 220, 150], // 1: Sand (aeolian dune) — warm tan (lighter, softer)
     [220, 240, 248], // 2: Permafrost — ice grey (lightened)
@@ -16,10 +16,11 @@ pub const MATERIAL_COLORS: [[u8; 3]; 11] = [
     [120, 160, 200], // 8: Water (coastal/ocean) — lighter softer blue
     [210, 195, 135], // 9: SoilDry (W-10 presentation) — pale ochre (lighter)
     [150, 135, 90],  // 10: SoilWet (W-10 presentation) — softer mid-brown
+    [245, 230, 160], // 11: BeachSand (W-12 presentation) — bright sandy yellow (lighter, warmer than aeolian sand)
 ];
 
 /// Material ID → Russian name. Indexed same as MATERIAL_COLORS.
-pub const MATERIAL_NAMES: [&str; 11] = [
+pub const MATERIAL_NAMES: [&str; 12] = [
     "воздух",           // 0: Air
     "песок",            // 1: Sand
     "вечная мерзлота",  // 2: Permafrost
@@ -31,6 +32,7 @@ pub const MATERIAL_NAMES: [&str; 11] = [
     "вода",             // 8: Water
     "сухая почва",      // 9: SoilDry
     "влажная почва",    // 10: SoilWet
+    "пляжный песок",    // 11: BeachSand
 ];
 
 #[cfg(test)]
