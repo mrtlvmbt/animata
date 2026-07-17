@@ -178,6 +178,8 @@ struct CliArgs {
     height_scale_override: Option<f32>,
     /// U-2: `--slow-load`: inject ~600ms delay per stage (for loader screenshot capture).
     slow_load: bool,
+    /// U-2: `--screenshot-loader <path>`: capture loader modal mid-build, save PNG, exit.
+    screenshot_loader: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -193,6 +195,7 @@ fn parse_args() -> CliArgs {
     let mut bare_mode = false;
     let mut height_scale_override = None;
     let mut slow_load = false;
+    let mut screenshot_loader = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -240,10 +243,14 @@ fn parse_args() -> CliArgs {
             "--slow-load" => {
                 slow_load = true;
             }
+            "--screenshot-loader" => {
+                screenshot_loader = Some(args.next().expect("--screenshot-loader requires a path"));
+                standalone = true;  // loader implies standalone
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -636,6 +643,9 @@ async fn main() {
         std::process::exit(0);
     }
 
+    // U-2: Frame counter for --screenshot-loader (capture loader mid-build)
+    let mut loading_frame_count = 0u32;
+
     loop {
         // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
         match &mut app_phase {
@@ -646,6 +656,17 @@ async fn main() {
                 egui_macroquad::ui(|ctx| {
                     ui::loader::draw(ctx, load_state);
                 });
+
+                // U-2: Capture loader screenshot at frame ~20 (stable mid-load state)
+                if let Some(ref screenshot_path) = cli_args.screenshot_loader {
+                    if loading_frame_count == 20 {
+                        let img = get_screen_data();
+                        img.export_png(screenshot_path);
+                        println!("[screenshot-loader] captured loader to {}", screenshot_path);
+                        std::process::exit(0);
+                    }
+                    loading_frame_count += 1;
+                }
 
                 // U-2/F1: Try to receive BuiltWorld from worker thread
                 if let Ok(built) = rx_built_world.try_recv() {
