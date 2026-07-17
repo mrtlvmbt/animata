@@ -219,8 +219,9 @@ impl IsoCam {
             let zoom_factor = (1.0 - ZOOM_RATE * input.wheel_y).max(0.1);
             self.ortho_span = (self.ortho_span * zoom_factor).clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX);
 
-            // CRITICAL: recompute the APPLIED factor after the clamp, not before.
-            let applied_factor = self.ortho_span / old_span;
+            // CRITICAL (F4): the applied zoom is captured implicitly by recalculating the ground point
+            // after the clamp. If clamp made it a no-op (ortho_span unchanged), the before/after
+            // ground points will be identical and focus won't move.
             let cam_vp = self.to_camera3d().matrix();
             let after = ground_under_cursor(cam_vp, input.mouse_pos, input.screen_dims);
 
