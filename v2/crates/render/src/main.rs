@@ -551,7 +551,8 @@ async fn main() {
                 .unwrap_or(false);
 
             if regen_still_building {
-                // Chip-visible path: render with UI so regen progress is shown
+                // Modal loader path: render the full-screen loader modal (v1 parity), NOT panels.
+                // CRITICAL: when modal is up, skip ui_root entirely (modal XOR panels, never both).
                 let snap = handle.as_ref().and_then(|h| h.latest());
                 let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
                 let mut ui_actions: Vec<ui::UiAction> = Vec::new();
@@ -567,29 +568,10 @@ async fn main() {
                 egui_macroquad::ui(|ctx| {
                     // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
                     ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
-                    let mut ui_ctx = ui::UiCtx {
-                        world_dim,
-                        seed: spec.seed,
-                        fps: get_fps(),
-                        chunks_drawn: 0,
-                        verts: 0,
-                        snap: snap.as_ref().map(|v| &**v),
-                        standalone_mode: cli_args.standalone,
-                        terrain_chunks_total: terrain_chunks.len(),
-                        actions: &mut ui_actions,
-                        is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
-                        regen_load_state: harness_regen_load_state.as_ref(),
-                        // U-5: pass world reference for minimap
-                        world: Some(world.as_ref()),
-                        bare_mode: spec.bare_mode,
-                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
-                        // U-5: pass camera state for minimap viewport quad
-                        camera_focus: camera.focus,
-                        camera_ortho_span: camera.ortho_span,
-                        camera_yaw: camera.yaw,
-                        screen_dims: (screen_width(), screen_height()),
-                    };
-                    let _ui_out = ui_root.draw(ctx, &mut ui_ctx);
+                    // Draw the loader modal using the same LoadState the regen worker bumps
+                    if let Some(ref load_state) = harness_regen_load_state {
+                        ui::loader::draw(ctx, load_state);
+                    }
                 });
 
                 // Apply UI actions (includes --jump-to)
@@ -943,43 +925,48 @@ async fn main() {
                     // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
                     ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
 
-                    // U-7: If regen is in flight, draw the full-screen loader modal (v1 parity)
+                    // U-7: If regen is in flight, draw the full-screen loader modal (v1 parity).
+                    // CRITICAL: when modal is up, skip ui_root entirely (modal XOR panels, never both).
                     let mut wants_pointer_regen = false;
                     let mut wants_keyboard_regen = false;
-                    if let Some(ref load_state) = regen_load_state {
+                    let ui_out = if let Some(ref load_state) = regen_load_state {
                         ui::loader::draw(ctx, load_state);
                         wants_pointer_regen = true;
                         wants_keyboard_regen = true;
-                    }
-
-                    // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
-                    // This causes a 1-frame lag (acceptable, identical to v1 behavior).
-                    // U-7: Skip UI panels when regen is in flight (loader modal takes precedence)
-                    let mut ui_ctx = ui::UiCtx {
-                        world_dim,
-                        seed: spec.seed,  // F4: use spec.seed (spec-driven design)
-                        fps: get_fps(),
-                        chunks_drawn: 0, // Will be updated after drawing
-                        verts: 0,
-                        snap: snap.as_ref().map(|v| &**v),
-                        standalone_mode: cli_args.standalone,
-                        terrain_chunks_total: terrain_chunks.len(),
-                        actions: &mut ui_actions,
-                        // U-3/F12: gate "New world" button visibility
-                        is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
-                        // U-3: pass regen state (now used for modal display)
-                        regen_load_state: regen_load_state.as_ref(),
-                        // U-5: pass world reference for minimap rendering
-                        world: Some(world.as_ref()),
-                        bare_mode: spec.bare_mode,
-                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
-                        // U-5: pass camera state for minimap viewport quad
-                        camera_focus: camera.focus,
-                        camera_ortho_span: camera.ortho_span,
-                        camera_yaw: camera.yaw,
-                        screen_dims: (screen_width(), screen_height()),
+                        // Return a default UiOut with pointer/keyboard gating set; no panels drawn
+                        ui::UiOut {
+                            wants_pointer: true,
+                            wants_keyboard: true,
+                        }
+                    } else {
+                        // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
+                        // This causes a 1-frame lag (acceptable, identical to v1 behavior).
+                        let mut ui_ctx = ui::UiCtx {
+                            world_dim,
+                            seed: spec.seed,  // F4: use spec.seed (spec-driven design)
+                            fps: get_fps(),
+                            chunks_drawn: 0, // Will be updated after drawing
+                            verts: 0,
+                            snap: snap.as_ref().map(|v| &**v),
+                            standalone_mode: cli_args.standalone,
+                            terrain_chunks_total: terrain_chunks.len(),
+                            actions: &mut ui_actions,
+                            // U-3/F12: gate "New world" button visibility
+                            is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
+                            // U-3: pass regen state (now used for modal display)
+                            regen_load_state: regen_load_state.as_ref(),
+                            // U-5: pass world reference for minimap rendering
+                            world: Some(world.as_ref()),
+                            bare_mode: spec.bare_mode,
+                            cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
+                            // U-5: pass camera state for minimap viewport quad
+                            camera_focus: camera.focus,
+                            camera_ortho_span: camera.ortho_span,
+                            camera_yaw: camera.yaw,
+                            screen_dims: (screen_width(), screen_height()),
+                        };
+                        ui_root.draw(ctx, &mut ui_ctx)
                     };
-                    let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
                     // Apply camera update with gating.
                     // U-7: Gate camera input when regen loader modal is showing
