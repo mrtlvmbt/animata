@@ -489,8 +489,8 @@ mod tests {
         let screen_dims = (800.0, 600.0);
         let initial_pos = (400.0, 300.0);
 
-        // Press on initial position
-        let input_press = test_input(initial_pos, screen_dims, 0.0, true, false);
+        // Press on initial position (on press frame, both pressed and down are true in macroquad)
+        let input_press = test_input(initial_pos, screen_dims, 0.0, true, true);
         cam.apply_cam_input(&input_press, false, false);
 
         // Hold and move to a new position
@@ -528,8 +528,8 @@ mod tests {
         let screen_dims = (800.0, 600.0);
         let pos1 = (400.0, 300.0);
 
-        // Press
-        let input_press = test_input(pos1, screen_dims, 0.0, true, false);
+        // Press (on press frame, both pressed and down are true in macroquad)
+        let input_press = test_input(pos1, screen_dims, 0.0, true, true);
         cam.apply_cam_input(&input_press, false, false);
         let focus_after_press = cam.focus;
 
