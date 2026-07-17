@@ -184,6 +184,8 @@ struct CliArgs {
     screenshot_chip: Option<String>,
     /// U-3: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
     regen_to: Option<u64>,
+    /// U-5: `--jump-to <x>,<z>`: after startup, jump camera to world coords (x, z) for viewport-quad + click-to-jump verification.
+    jump_to: Option<(f32, f32)>,
 }
 
 fn parse_args() -> CliArgs {
@@ -202,6 +204,7 @@ fn parse_args() -> CliArgs {
     let mut screenshot_loader = None;
     let mut screenshot_chip = None;
     let mut regen_to = None;
+    let mut jump_to = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -262,10 +265,18 @@ fn parse_args() -> CliArgs {
                 regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
                 standalone = true; // reseed harness is standalone
             }
+            "--jump-to" => {
+                let coords_str = args.next().expect("--jump-to requires <x>,<z>");
+                let parts: Vec<&str> = coords_str.split(',').collect();
+                let x = parts.get(0).unwrap_or(&"0").parse::<f32>().unwrap_or_else(|_| panic!("--jump-to x must be f32, got {:?}", parts.get(0)));
+                let z = parts.get(1).unwrap_or(&"0").parse::<f32>().unwrap_or_else(|_| panic!("--jump-to z must be f32, got {:?}", parts.get(1)));
+                jump_to = Some((x, z));
+                standalone = true; // jump harness is standalone
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to, jump_to }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -821,6 +832,8 @@ async fn main() {
     // U-3: Reseed state (in-progress world rebuild on worker thread)
     let mut rx_regen_in_flight: Option<mpsc::Receiver<BuiltWorld>> = None;
     let mut regen_load_state: Option<LoadState> = None;
+    // U-5: Track whether we've fired the --jump-to action (fire once per run)
+    let mut jump_to_fired = false;
 
     loop {
         // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
@@ -889,6 +902,14 @@ async fn main() {
 
                 // F1: Collect all commands (UiActions + InputEvents) and apply them in one place
                 let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+
+                // U-5: Fire --jump-to action once at start of Running phase
+                if !jump_to_fired {
+                    if let Some((x, z)) = cli_args.jump_to {
+                        ui_actions.push(ui::UiAction::JumpCamera(glam::vec2(x, z)));
+                        jump_to_fired = true;
+                    }
+                }
 
                 egui_macroquad::ui(|ctx| {
                     // Plan D3: UI draws BEFORE world input to read previous-frame egui state.

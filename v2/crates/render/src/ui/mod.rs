@@ -344,7 +344,16 @@ impl Panel for MinimapPanel {
 
         let cache_key = (ui_ctx.seed, ui_ctx.world_dim, ui_ctx.bare_mode);
 
-        // SAFETY: ui_root.draw() guarantees cache is valid before calling us
+        // SAFETY: ui_root.draw() (ui/mod.rs:138) sets ui_ctx.cache to point to &mut self.cache
+        // before calling Panel::draw(). The raw pointer remains valid for the duration of the
+        // draw call (the entire Panel::draw frame) because:
+        // 1. ui_ctx.cache is set immediately before the loop over panels (no drop/mutation of self)
+        // 2. self (UiRoot) is borrowed mutably only during draw(), keeping the cache allocation stable
+        // 3. Panel::draw() is called synchronously within the same call stack, before draw() returns
+        // The invariant FAILS if: (a) draw() is called concurrently, (b) ui_ctx is reused across
+        // draw() calls without re-setting cache, or (c) self is moved/dropped during the call.
+        // All three are prevented by the calling convention (main.rs creates UiCtx, calls
+        // ui_root.draw(ctx, &mut ui_ctx) once per frame, ui_root is not shared).
         let cache = unsafe { &mut *ui_ctx.cache };
 
         // Check if we need to rebuild the minimap texture
