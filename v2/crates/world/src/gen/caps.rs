@@ -2134,27 +2134,29 @@ mod tests {
 
     // ── W-12: Beach deposition acceptance tests ───────────────────────────────────────────────────
 
-    /// W-12 flag-off byte-purity: with beaches=false, the full pipeline is byte-identical
-    /// (acceptance criterion: the slice default-off contract preserved).
+    /// W-12 flag-off byte-purity (F-6): gating verification. With beaches=true (and coastal=true),
+    /// beach_deposit runs and modifies height. With beaches=false, it doesn't run.
+    /// The regression contract (goldens must not move with beaches=false) is enforced by the
+    /// golden test suite. This test verifies the gate itself works: beaches=false produces
+    /// different output than beaches=true when coastal is active.
     #[test]
     fn w12_flag_off_byte_purity() {
         const DIM: usize = 64;
-        // WITH beaches ON
+        // WITH beaches ON (coastal+tectonic: beach_deposit can run)
         let (world_beaches_on, _, _) = classify_and_caps_staged(
             SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, true), true, true
         );
-        // WITH beaches OFF (all other landforms ON)
+        // WITH beaches OFF (same landforms but beaches gate prevents beach_deposit)
         let (world_beaches_off, _, _) = classify_and_caps_staged(
             SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, false), true, true
         );
-        // Invariant: height, biome, caps must NOT change when beaches is toggled
-        // (beaches is dependent on coastal, so coastal must be ON for both to make sense)
-        assert_eq!(world_beaches_on.height, world_beaches_off.height,
-            "height should not depend on beaches flag (F-6: flag default-off purity)");
-        assert_eq!(world_beaches_on.final_biome, world_beaches_off.final_biome,
-            "final_biome should not depend on beaches flag");
-        assert_eq!(world_beaches_on.caps, world_beaches_off.caps,
-            "caps should not depend on beaches flag");
+        // When beaches=true with suitable coastal geography, beach_deposit modifies height.
+        // When beaches=false, it doesn't. So we expect DIFFERENT output.
+        // (If they were identical, it would mean the beaches flag isn't gating anything!)
+        // The actual flag-off purity (byte-identical to pre-W-12 baseline) is verified by
+        // golden tests; this test just ensures the gate is functional.
+        assert_ne!(world_beaches_on.height, world_beaches_off.height,
+            "beaches=true and beaches=false SHOULD produce different heights (gate is functional)");
     }
 
     /// W-12 final observable (F26): count(presentation == BeachSand) > 0 on a full-pipeline 64²
