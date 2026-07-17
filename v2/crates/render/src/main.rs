@@ -406,10 +406,10 @@ async fn main() {
     } else {
         // App path: world will be built on worker thread and received in Loading phase
         // Initialize with minimal dummy values (camera will reinit from built.dim after recv)
-        let (tect, aeol, volc, glac, coast) = landform_flags(spec.seed, spec.standalone);
+        let flags = landform_flags(spec.seed, spec.standalone);
         let temp_world: Box<dyn WorldView> = Box::new(world::ProcgenWorld::new(
             config.econ.world_dim, cli::HMAX, cli::RESOURCE_BASE, spec.seed ^ cli::WORLD_SALT, None,
-            tect, aeol, volc, glac, coast  // Use spec.seed (F4), landforms always match eventually
+            flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal, flags.ridges, flags.beaches  // Use spec.seed (F4), landforms always match eventually
         ));
         (Vec::new(), Vec::new(), config.econ.world_dim, temp_world)
     };
@@ -448,10 +448,14 @@ async fn main() {
     // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
     let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
 
-    // U-1: Initialize UI root with DebugPanel and MinimapPanel.
+    // U-9: Initialize UI root with v1-style panels
     let mut ui_root = ui::UiRoot::new();
-    ui_root.push(Box::new(ui::DebugPanel));
-    // U-5: Add MinimapPanel
+    ui_root.push(Box::new(ui::vitals::VitalsPanel));
+    ui_root.push(Box::new(ui::transport::TransportPanel));
+    ui_root.push(Box::new(ui::rail::ControlRail::new()));
+    ui_root.push(Box::new(ui::toast::ToastPanel::new()));
+    ui_root.push(Box::new(ui::toast::HideHintPanel));
+    ui_root.push(Box::new(ui::legend::LegendPanel));
     ui_root.push(Box::new(ui::MinimapPanel));
 
     // R-13: Apply camera preset to ensure deterministic view.
@@ -1245,7 +1249,7 @@ mod tests {
     #[test]
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
-        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false, false);
+        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false, false, false, false);
         let hex_chunks = terrain::build_hex_terrain(dim, &world, SEED, false);
         let cube_chunks = terrain_cube::build_cube_terrain(dim, &world, SEED, false);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");
@@ -1264,8 +1268,8 @@ mod tests {
         }
         assert!(combos.len() >= 5, "variety gallery requires ≥5 distinct landform combos, got {}", combos.len());
         // Verify at least one mix (multiple landforms on same seed)
-        let has_mix = combos.iter().any(|(t, a, v, g, c)| {
-            let count = [*t, *a, *v, *g, *c].iter().filter(|&&x| x).count();
+        let has_mix = combos.iter().any(|flags| {
+            let count = [flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal].iter().filter(|&&x| x).count();
             count >= 2
         });
         assert!(has_mix, "variety gallery requires ≥1 mixed-landform seed (2+ landforms)");

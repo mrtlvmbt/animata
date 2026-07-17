@@ -810,7 +810,7 @@ pub fn classify_and_caps_staged(
     enable_talus_final: bool,
     enable_w10_diversity: bool,
 ) -> (WorldFields, StagedHeights, LandformMasks) {
-    let erosion = erode(seed, hmax, dim, enable_tectonics, enable_volcanic);
+    let erosion = erode(seed, hmax, dim, enable_tectonics, enable_volcanic, false);
     let n = dim * dim;
 
     let volcanic_mask: Vec<Option<MaterialId>> = if enable_volcanic {

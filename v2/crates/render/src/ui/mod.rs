@@ -1,6 +1,11 @@
 pub mod loader;
 pub mod theme;
 pub mod minimap;
+pub mod vitals;
+pub mod transport;
+pub mod rail;
+pub mod toast;
+pub mod legend;
 
 use macroquad::prelude::*;
 use sim_core::RenderSnapshot;
@@ -160,88 +165,6 @@ impl Default for UiRoot {
     }
 }
 
-/// DebugPanel: the first Panel implementation — re-hosts draw_debug_hud content.
-pub struct DebugPanel;
-
-impl Panel for DebugPanel {
-    fn id(&self) -> &'static str {
-        "debug_hud"
-    }
-
-    fn anchor(&self) -> Anchor {
-        Anchor::LeftTop(egui::vec2(10.0, 10.0))
-    }
-
-    fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
-        let title = if ui_ctx.standalone_mode {
-            "v2 render scaffold — R-8 standalone hex-map viewer"
-        } else {
-            "v2 render scaffold — R-7 biology coloring"
-        };
-
-        egui::Window::new(title)
-            .frame(theme::themed_frame(theme::FrameKind::Vitals))
-            .show(ctx, |ui| {
-                match ui_ctx.snap {
-                    Some(s) => {
-                        ui.label(format!("tick: {}", s.tick));
-                        ui.label(format!("population: {}", s.population));
-                        ui.label(format!("species: {}", s.species_count));
-                        ui.label(format!("creatures drawn: {}", s.creatures.len()));
-                    }
-                    None if ui_ctx.standalone_mode => {
-                        ui.label("standalone mode — no sim, terrain only");
-                    }
-                    None => {
-                        ui.label("waiting for the sim worker's first tick…");
-                    }
-                }
-                ui.separator();
-                if !ui_ctx.standalone_mode {
-                    ui.label("─ Creature Coloring (uptake_layer / feeding guild) ─");
-                    ui.colored_label(egui::Color32::from_rgb(255, 153, 51), "● Orange: Layer 0 (A-guild)");
-                    ui.colored_label(egui::Color32::from_rgb(51, 204, 255), "● Cyan: Layer 1 (B-guild)");
-                    ui.colored_label(egui::Color32::from_rgb(204, 51, 255), "● Magenta: Layer 2+");
-                    ui.separator();
-                }
-                ui.label(format!("terrain: {}×{}, {} mesh chunks", ui_ctx.world_dim, ui_ctx.world_dim, ui_ctx.terrain_chunks_total));
-                ui.label(format!("chunks drawn: {}/{}", ui_ctx.chunks_drawn, ui_ctx.terrain_chunks_total));
-                ui.label(format!("fps: {}", ui_ctx.fps));
-                ui.separator();
-
-                // F1: Real UiAction flow — buttons push actions that main.rs consumes end-to-end
-                if !ui_ctx.standalone_mode {
-                    ui.horizontal(|ui| {
-                        if ui.button("Pause").clicked() {
-                            ui_ctx.actions.push(UiAction::TogglePause);
-                        }
-                        if ui.button("Step").clicked() {
-                            ui_ctx.actions.push(UiAction::StepOnce);
-                        }
-                    });
-                }
-
-                if ui.button("Hex↔Cube").clicked() {
-                    ui_ctx.actions.push(UiAction::ToggleTerrainKind);
-                }
-
-                // U-3: "New world" button — only shown in Procgen+standalone mode (F12/F15)
-                // When clicked, regenerate with next seed (current_seed + 1)
-                if ui_ctx.is_procgen && ui_ctx.standalone_mode {
-                    if ui.button("New world (N)").clicked() {
-                        ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1)));
-                    }
-                }
-
-                ui.label("Keyboard: WASD/drag pan · wheel zoom · Q/E rotate");
-                if !ui_ctx.standalone_mode {
-                    ui.label("Space: toggle pause · Right: step once");
-                } else if ui_ctx.is_procgen {
-                    ui.label("N: new world");
-                }
-            });
-    }
-}
 
 /// Dim the panel OUTSIDE the viewport rectangle (four bands around the frame's bounding box, clamped
 /// to the panel). Bands collapse to nothing once the view encloses the whole map.
