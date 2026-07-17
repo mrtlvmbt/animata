@@ -573,6 +573,8 @@ async fn main() {
                         ui::loader::draw(ctx, load_state);
                     }
                 });
+                // CRITICAL: Flush egui render commands to framebuffer (modal won't display without this)
+                egui_macroquad::draw();
 
                 // Apply UI actions (includes --jump-to)
                 for action in ui_actions {
@@ -999,6 +1001,8 @@ async fn main() {
                         }
                     }
                 });
+                // CRITICAL: Flush egui render commands to framebuffer (modal/panels won't display without this)
+                egui_macroquad::draw();
 
                 // F1: Apply all actions (from UI buttons and keyboard) in unified handler
                 for action in ui_actions {
