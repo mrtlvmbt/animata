@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-/// Landform configuration flags (deterministically derived from seed).
+/// Landform configuration flags (deterministically derived from seed or set manually).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LandformFlags {
     pub tect: bool,
@@ -16,6 +16,37 @@ pub struct LandformFlags {
     pub coastal: bool,
     pub ridges: bool,
     pub beaches: bool,
+}
+
+impl LandformFlags {
+    /// Create landform flags without clamps (raw values).
+    /// Clamps are applied later in `apply_guard()` AFTER the guard potentially enables tect/coastal.
+    pub fn new(
+        tect: bool,
+        aeolian: bool,
+        volcanic: bool,
+        glacial: bool,
+        coastal: bool,
+        ridges: bool,
+        beaches: bool,
+    ) -> Self {
+        LandformFlags { tect, aeolian, volcanic, glacial, coastal, ridges, beaches }
+    }
+
+    /// Apply guards and dependency clamps to ensure a valid state.
+    /// Order: (1) if all five original landforms are off, enable tectonic;
+    /// (2) then apply clamps so guard's tect-enabling makes ridges/beaches permissible.
+    pub fn apply_guard(mut self) -> Self {
+        // Guard: never all-off for the original five (avoid flat/boring maps)
+        if !(self.tect || self.aeolian || self.volcanic || self.glacial || self.coastal) {
+            self.tect = true;
+        }
+        // W-0 dependency clamps: ridges requires tect, beaches requires coastal
+        // Applied AFTER guard so that guard's tect-enabling affects clamp results.
+        self.ridges = self.ridges && self.tect;
+        self.beaches = self.beaches && self.coastal;
+        self
+    }
 }
 
 /// World data source: procedural generation or loaded dump.
@@ -33,7 +64,8 @@ pub enum WorldSource {
 ///
 /// All world-build inputs live here, re-derived fresh inside `build_world()`:
 /// - config is NOT stored; it's re-created from `seed` via `cli::default_config(seed)`
-/// - landform flags are NOT stored; they're computed from `(seed, standalone)` via `landform_flags()`
+/// - landform flags are NOT stored by default; they're computed from `(seed, standalone)` via `landform_flags()`
+/// - **U-10**: explicit_landform_flags override (if Some) replaces seed-derived flags
 /// - effective `dim` is an OUTPUT (BuiltWorld::dim), never stored as input
 ///
 /// This design ensures regen is type-safe ("regen == cold launch") and sim mode
@@ -49,6 +81,9 @@ pub struct WorldSpec {
     pub bare_mode: bool,
     /// Where the world comes from (Procgen or Dump).
     pub source: WorldSource,
+    /// U-10: Explicit landform flags override. If Some, use these instead of deriving from seed.
+    /// If None, compute flags from seed via landform_flags(seed, standalone).
+    pub explicit_landform_flags: Option<LandformFlags>,
 }
 
 /// Stage of world building (used for progress reporting via callback).
@@ -111,26 +146,8 @@ pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     let ridg = (x >> 53) & 1 == 1;
     let beach = (x >> 59) & 1 == 1;
 
-    // Guard: never all-off for the original five (avoid flat/boring maps)
-    let tect = if !(tect || aeol || volc || glac || coast) {
-        true  // force tectonic if all original five are off
-    } else {
-        tect
-    };
-
-    // Dependency clamps (per plan W-0)
-    let ridg = ridg && tect;  // ridges need tectonic uplift
-    let beach = beach && coast;  // beaches need coastal datum
-
-    LandformFlags {
-        tect,
-        aeolian: aeol,
-        volcanic: volc,
-        glacial: glac,
-        coastal: coast,
-        ridges: ridg,
-        beaches: beach,
-    }
+    // Apply clamps and guard
+    LandformFlags::new(tect, aeol, volc, glac, coast, ridg, beach).apply_guard()
 }
 
 #[cfg(test)]
@@ -206,6 +223,7 @@ mod tests {
             standalone: true,
             bare_mode: false,
             source: WorldSource::Procgen { dim_request: None },
+            explicit_landform_flags: None,
         };
         // Should be reseedable: Procgen + standalone
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -219,6 +237,7 @@ mod tests {
             standalone: false,  // Sim mode
             bare_mode: false,
             source: WorldSource::Procgen { dim_request: None },
+            explicit_landform_flags: None,
         };
         // Should NOT be reseedable: Procgen but sim mode
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -232,6 +251,7 @@ mod tests {
             standalone: true,
             bare_mode: false,
             source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
+            explicit_landform_flags: None,
         };
         // Should NOT be reseedable: Dump source (even though standalone)
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -245,9 +265,73 @@ mod tests {
             standalone: false,
             bare_mode: false,
             source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
+            explicit_landform_flags: None,
         };
         // Should NOT be reseedable: Dump + sim mode
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
         assert!(!can_reseed, "Dump + sim_mode must NOT allow reseed (F15)");
+    }
+
+    // U-10: Landform flag clamp tests (applied in apply_guard after guard runs)
+    #[test]
+    fn landform_clamps_ridges_requires_tect() {
+        // Guard forces tect when all five originals are off, then clamp permits ridges.
+        let flags = LandformFlags::new(false, false, false, false, false, true, false).apply_guard();
+        assert!(flags.tect && flags.ridges, "guard forces tect, clamp then permits ridges");
+    }
+
+    #[test]
+    fn landform_clamps_beaches_requires_coastal() {
+        // Guard only forces tect (not coastal), so beaches stays clamped false.
+        let flags = LandformFlags::new(false, false, false, false, false, false, true).apply_guard();
+        assert!(flags.tect && !flags.coastal && !flags.beaches, "guard forces tect but not coastal; beaches stays false");
+    }
+
+    #[test]
+    fn landform_clamps_both_dependencies() {
+        // Guard forces tect (rescues ridges), but not coastal (beaches stays false).
+        let flags = LandformFlags::new(false, false, false, false, false, true, true).apply_guard();
+        assert!(flags.tect && flags.ridges && !flags.coastal && !flags.beaches, "guard forces tect; ridges true, beaches false");
+    }
+
+    #[test]
+    fn landform_preserves_valid_dependencies() {
+        // ridges valid when tect=true
+        let flags1 = LandformFlags::new(true, false, false, false, false, true, false).apply_guard();
+        assert!(flags1.ridges, "ridges should be true when tect=true");
+
+        // beaches valid when coastal=true
+        let flags2 = LandformFlags::new(false, false, false, false, true, false, true).apply_guard();
+        assert!(flags2.beaches, "beaches should be true when coastal=true");
+    }
+
+    #[test]
+    fn landform_guard_forces_tect_if_all_off() {
+        let flags = LandformFlags {
+            tect: false,
+            aeolian: false,
+            volcanic: false,
+            glacial: false,
+            coastal: false,
+            ridges: false,
+            beaches: false,
+        };
+        let guarded = flags.apply_guard();
+        assert!(guarded.tect, "guard must force tectonic if all five landforms are off");
+    }
+
+    #[test]
+    fn landform_guard_preserves_existing() {
+        let flags = LandformFlags {
+            tect: true,
+            aeolian: false,
+            volcanic: false,
+            glacial: false,
+            coastal: false,
+            ridges: false,
+            beaches: false,
+        };
+        let guarded = flags.apply_guard();
+        assert!(guarded.tect, "guard should preserve existing tectonic state");
     }
 }
