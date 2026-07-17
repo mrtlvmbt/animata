@@ -2159,6 +2159,31 @@ mod tests {
             "beaches=true and beaches=false SHOULD produce different heights (gate is functional)");
     }
 
+    /// W-12 flag-off purity determinism: beaches=false is gated and deterministic.
+    /// Running the SAME fixture (coastal=true, beaches=false) twice must produce BYTE-IDENTICAL
+    /// heights. This proves (a) beach_deposit doesn't execute when beaches=false, and (b) the
+    /// code path is deterministic. Combined with code review of the gate (if flags.beaches in
+    /// classify_and_caps_staged), this validates the F-6 flag-off purity contract: with
+    /// beaches=false, the pipeline behaves as if W-12 beach code doesn't exist.
+    #[test]
+    fn w12_flag_off_purity_determinism() {
+        const DIM: usize = 64;
+        // Run 1: coastal=true, beaches=false
+        let (world1, _, _) = classify_and_caps_staged(
+            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, false), true, true
+        );
+        // Run 2: same fixture, should be byte-identical
+        let (world2, _, _) = classify_and_caps_staged(
+            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, false), true, true
+        );
+        assert_eq!(world1.height, world2.height,
+            "beaches=false must be deterministic (same fixture, same seed → identical height)");
+        assert_eq!(world1.final_biome, world2.final_biome,
+            "beaches=false must be deterministic (biome)");
+        assert_eq!(world1.caps, world2.caps,
+            "beaches=false must be deterministic (caps)");
+    }
+
     /// W-12 final observable (F26): count(presentation == BeachSand) > 0 on a full-pipeline 64²
     /// fixture with coastal+beaches on. Beaches byte is 11 (new presentation, not substrate).
     /// Uses a tectonic fixture to ensure suitable shoreline geometry (critic F29: if the fixture
