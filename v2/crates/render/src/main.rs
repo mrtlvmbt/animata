@@ -568,6 +568,8 @@ async fn main() {
                 }
 
                 egui_macroquad::ui(|ctx| {
+                    // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
+                    ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
                     let mut ui_ctx = ui::UiCtx {
                         world_dim,
                         seed: spec.seed,
@@ -870,6 +872,8 @@ async fn main() {
                 clear_background(Color::from_rgba(18, 18, 22, 255));
 
                 egui_macroquad::ui(|ctx| {
+                    // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
+                    ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
                     ui::loader::draw(ctx, load_state);
                 });
 
@@ -939,6 +943,8 @@ async fn main() {
                 }
 
                 egui_macroquad::ui(|ctx| {
+                    // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
+                    ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
                     // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
                     // This causes a 1-frame lag (acceptable, identical to v1 behavior).
                     let mut ui_ctx = ui::UiCtx {
