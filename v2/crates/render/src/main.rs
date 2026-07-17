@@ -190,6 +190,8 @@ struct CliArgs {
     screenshot_ui: Option<String>,
     /// U-8: `--yaw <degrees>`: set initial camera yaw (default 0); works in both interactive and screenshot modes.
     yaw_degrees: Option<f32>,
+    /// U-9: `--ui-state visible|hidden`: initial panel visibility for screenshot testing (dev arg; default: visible).
+    ui_state: bool,  // true = visible, false = hidden
 }
 
 fn parse_args() -> CliArgs {
@@ -210,6 +212,7 @@ fn parse_args() -> CliArgs {
     let mut jump_to = None;
     let mut screenshot_ui = None;
     let mut yaw_degrees = None;
+    let mut ui_state = true;  // Default: panels visible
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -282,10 +285,18 @@ fn parse_args() -> CliArgs {
                 let v = args.next().expect("--yaw requires a value");
                 yaw_degrees = Some(v.parse().unwrap_or_else(|_| panic!("--yaw expects f32 degrees, got {v:?}")));
             }
+            "--ui-state" => {
+                let v = args.next().expect("--ui-state requires a value");
+                ui_state = match v.as_str() {
+                    "visible" => true,
+                    "hidden" => false,
+                    other => panic!("--ui-state expects 'visible' or 'hidden', got {other:?}"),
+                };
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -450,6 +461,7 @@ async fn main() {
 
     // U-9: Initialize UI root with v1-style panels
     let mut ui_root = ui::UiRoot::new();
+    ui_root.panels_visible = cli_args.ui_state;  // Apply --ui-state (default: visible)
     ui_root.push(Box::new(ui::vitals::VitalsPanel));
     ui_root.push(Box::new(ui::transport::TransportPanel));
     ui_root.push(Box::new(ui::rail::ControlRail::new()));
