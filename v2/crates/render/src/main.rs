@@ -332,7 +332,7 @@ async fn main() {
     let cli_args = parse_args();
     let config = cli::default_config(cli_args.seed);
 
-    // U-2: Create WorldSpec (single source of truth for world building)
+    // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
     let spec = WorldSpec {
         seed: cli_args.seed,
         standalone: cli_args.standalone,
@@ -340,15 +340,16 @@ async fn main() {
         source: if let Some(path) = &cli_args.v1_dump {
             WorldSource::Dump(std::path::PathBuf::from(path))
         } else {
+            // D5 dim rule: dim_request lives in Procgen, honored only if spec.standalone
             WorldSource::Procgen { dim_request: cli_args.dim_override }
         },
     };
 
     // U-2: For harnesses (screenshot/bench), build world inline before their loops
-    // For app path, we'll spawn a worker thread below
+    // For app path, we'll spawn a worker thread and initialize from recv
     let is_harness = cli_args.screenshot.is_some() || cli_args.bench;
 
-    let (mut hex_terrain_chunks, mut cube_terrain_chunks, world_dim, world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
+    let (mut hex_terrain_chunks, mut cube_terrain_chunks, mut world_dim, mut world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
         // Harnesses: build_world inline (synchronous, no loader)
         let mut on_stage = |_stage: Stage| true;  // No-op callback for harnesses
         let built = world_builder::build_world(&spec, on_stage).expect("build_world failed");
@@ -358,22 +359,18 @@ async fn main() {
         let cube_chunks = convert_raw_chunks(built.cube);
         (hex_chunks, cube_chunks, world_dim, world)
     } else {
-        // App path: will build on worker thread below
-        // For now, create a dummy world to initialize loop variables
-        // This will be replaced when worker completes
-        let temp_dim = config.econ.world_dim;
-        let (tect, aeol, volc, glac, coast) = landform_flags(config.seed, cli_args.standalone);
+        // App path: world will be built on worker thread and received in Loading phase
+        // Initialize with minimal dummy values (camera will reinit from built.dim after recv)
+        let (tect, aeol, volc, glac, coast) = landform_flags(spec.seed, spec.standalone);
         let temp_world: Box<dyn WorldView> = Box::new(world::ProcgenWorld::new(
-            temp_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None,
-            tect, aeol, volc, glac, coast
+            config.econ.world_dim, cli::HMAX, cli::RESOURCE_BASE, spec.seed ^ cli::WORLD_SALT, None,
+            tect, aeol, volc, glac, coast  // Use spec.seed (F4), landforms always match eventually
         ));
-        let temp_hex = Vec::new();
-        let temp_cube = Vec::new();
-        (temp_hex, temp_cube, temp_dim, temp_world)
+        (Vec::new(), Vec::new(), config.econ.world_dim, temp_world)
     };
 
     // R-15a: Retained-buffer GPU terrain initialization (if --retained).
-    let (mut gpu_hex_chunks, mut gpu_cube_chunks, gpu_pipeline) = if cli_args.retained {
+    let (mut gpu_hex_chunks, mut gpu_cube_chunks, mut gpu_pipeline) = if cli_args.retained {
         use macroquad::prelude::get_internal_gl;
 
         let chunk_vert = load_shader("chunk_v2.vert");
@@ -640,89 +637,137 @@ async fn main() {
     }
 
     loop {
-        // U-1: Draw UI first to get pointer/keyboard gating state before processing input.
-        let snap = handle.as_ref().and_then(|h| h.latest());
-        let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+        // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
+        match &mut app_phase {
+            AppPhase::Loading(ref load_state) => {
+                // Loading phase: render loader modal, poll worker for completion
+                clear_background(Color::from_rgba(18, 18, 22, 255));
 
-        // F1: Collect all commands (UiActions + InputEvents) and apply them in one place
-        let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+                egui_macroquad::ui(|ctx| {
+                    ui::loader::draw(ctx, load_state);
+                });
 
-        egui_macroquad::ui(|ctx| {
-            // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
-            // This causes a 1-frame lag (acceptable, identical to v1 behavior).
-            let mut ui_ctx = ui::UiCtx {
-                world_dim,
-                seed: config.seed,
-                fps: get_fps(),
-                chunks_drawn: 0, // Will be updated after drawing
-                verts: 0,
-                snap: snap.as_ref().map(|v| &**v),
-                standalone_mode: cli_args.standalone,
-                terrain_chunks_total: terrain_chunks.len(),
-                actions: &mut ui_actions,
-            };
-            let ui_out = ui_root.draw(ctx, &mut ui_ctx);
+                // U-2/F1: Try to receive BuiltWorld from worker thread
+                if let Ok(built) = rx_built_world.try_recv() {
+                    // Mesh assembly: convert RawChunks to TerrainChunks (GPU-side)
+                    hex_terrain_chunks = convert_raw_chunks(built.hex);
+                    cube_terrain_chunks = convert_raw_chunks(built.cube);
+                    world_dim = built.dim;
+                    world = built.world;
 
-            // Apply camera update with gating.
-            camera.update_gated(ui_out.wants_pointer, ui_out.wants_keyboard);
+                    // U-2/D5: Camera init from built.dim (output, not input)
+                    let (span_x, _) = hex::hex_center(world_dim, 0);
+                    let (_, span_z) = hex::hex_center(0, world_dim);
+                    let world_span = span_x.max(span_z).max(1.0);
+                    let center = Vec3::new(span_x * 0.5, hex::HEIGHT_SCALE * cli::HMAX as f32 * 0.5, span_z * 0.5);
+                    camera = IsoCam::new(center, 0.0, world_span * 1.5);
 
-            // Collect keyboard input events with gating.
-            for ev in input::collect(&ui_out) {
-                // Convert InputEvent to UiAction and collect for unified handling
-                match ev {
-                    input::InputEvent::TogglePause => {
-                        ui_actions.push(ui::UiAction::TogglePause);
+                    // U-2/D5: GPU upload if --retained (GL-thread-only work)
+                    if cli_args.retained {
+                        use macroquad::prelude::get_internal_gl;
+                        let chunk_vert = load_shader("chunk_v2.vert");
+                        let chunk_frag = load_shader("chunk_v2.frag");
+
+                        let mut gl = unsafe { get_internal_gl() };
+                        let ctx = gl.quad_context;
+                        let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
+                        gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                        gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                        gpu_pipeline = Some(pipeline);
                     }
-                    input::InputEvent::StepOnce => {
-                        ui_actions.push(ui::UiAction::StepOnce);
-                    }
-                    input::InputEvent::ToggleTerrainKind => {
-                        ui_actions.push(ui::UiAction::ToggleTerrainKind);
-                    }
+
+                    // Transition to Running
+                    app_phase = AppPhase::Running;
                 }
+
+                next_frame().await;
             }
-        });
+            AppPhase::Running => {
+                // Running phase: render world as normal (original main loop body)
+                let snap = handle.as_ref().and_then(|h| h.latest());
+                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
 
-        // F1: Apply all actions (from UI buttons and keyboard) in unified handler
-        for action in ui_actions {
-            match action {
-                ui::UiAction::TogglePause => {
-                    if let Some(h) = &handle {
-                        h.toggle_pause();
+                // F1: Collect all commands (UiActions + InputEvents) and apply them in one place
+                let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+
+                egui_macroquad::ui(|ctx| {
+                    // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
+                    // This causes a 1-frame lag (acceptable, identical to v1 behavior).
+                    let mut ui_ctx = ui::UiCtx {
+                        world_dim,
+                        seed: spec.seed,  // F4: use spec.seed (spec-driven design)
+                        fps: get_fps(),
+                        chunks_drawn: 0, // Will be updated after drawing
+                        verts: 0,
+                        snap: snap.as_ref().map(|v| &**v),
+                        standalone_mode: cli_args.standalone,
+                        terrain_chunks_total: terrain_chunks.len(),
+                        actions: &mut ui_actions,
+                    };
+                    let ui_out = ui_root.draw(ctx, &mut ui_ctx);
+
+                    // Apply camera update with gating.
+                    camera.update_gated(ui_out.wants_pointer, ui_out.wants_keyboard);
+
+                    // Collect keyboard input events with gating.
+                    for ev in input::collect(&ui_out) {
+                        // Convert InputEvent to UiAction and collect for unified handling
+                        match ev {
+                            input::InputEvent::TogglePause => {
+                                ui_actions.push(ui::UiAction::TogglePause);
+                            }
+                            input::InputEvent::StepOnce => {
+                                ui_actions.push(ui::UiAction::StepOnce);
+                            }
+                            input::InputEvent::ToggleTerrainKind => {
+                                ui_actions.push(ui::UiAction::ToggleTerrainKind);
+                            }
+                        }
+                    }
+                });
+
+                // F1: Apply all actions (from UI buttons and keyboard) in unified handler
+                for action in ui_actions {
+                    match action {
+                        ui::UiAction::TogglePause => {
+                            if let Some(h) = &handle {
+                                h.toggle_pause();
+                            }
+                        }
+                        ui::UiAction::StepOnce => {
+                            if let Some(h) = &handle {
+                                h.step_once();
+                            }
+                        }
+                        ui::UiAction::ToggleTerrainKind => {
+                            use_cube_terrain = !use_cube_terrain;
+                        }
                     }
                 }
-                ui::UiAction::StepOnce => {
-                    if let Some(h) = &handle {
-                        h.step_once();
-                    }
-                }
-                ui::UiAction::ToggleTerrainKind => {
-                    use_cube_terrain = !use_cube_terrain;
-                }
+
+                clear_background(Color::from_rgba(18, 18, 22, 255));
+                let cam3d = camera.to_camera3d();
+                set_camera(&cam3d);
+
+                let draw_stats = draw::draw_terrain(
+                    &hex_terrain_chunks,
+                    &cube_terrain_chunks,
+                    &gpu_hex_chunks,
+                    &gpu_cube_chunks,
+                    gpu_pipeline,
+                    &camera,
+                    use_cube_terrain,
+                    cli_args.retained,
+                );
+
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                set_default_camera();
+
+                ui::draw();
+
+                next_frame().await;
             }
         }
-
-        clear_background(Color::from_rgba(18, 18, 22, 255));
-        let cam3d = camera.to_camera3d();
-        set_camera(&cam3d);
-
-        let draw_stats = draw::draw_terrain(
-            &hex_terrain_chunks,
-            &cube_terrain_chunks,
-            &gpu_hex_chunks,
-            &gpu_cube_chunks,
-            gpu_pipeline,
-            &camera,
-            use_cube_terrain,
-            cli_args.retained,
-        );
-
-        creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
-        set_default_camera();
-
-        ui::draw();
-
-        next_frame().await;
     }
 }
 
