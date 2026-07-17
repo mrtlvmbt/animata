@@ -227,14 +227,14 @@ impl IsoCam {
     /// Apply camera input with gating (F2: testable core).
     /// Test can inject synthetic CamInput and verify that gating actually blocks changes.
     pub fn apply_cam_input(&mut self, input: &CamInput, tuning: &Tuning, wants_pointer: bool, wants_keyboard: bool) {
-        // Keyboard pan
+        // Keyboard pan — U-7: correct screen-basis vectors
         if !wants_keyboard && (input.pan_dir.0 != 0.0 || input.pan_dir.1 != 0.0) {
             let cos_yaw = self.yaw.cos();
             let sin_yaw = self.yaw.sin();
-            let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
-            let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
-            let pan_delta = Vec3::new(input.pan_dir.0, 0.0, input.pan_dir.1);
-            self.focus += local_x * pan_delta.x + local_z * pan_delta.z;
+            let right = Vec3::new(sin_yaw, 0.0, -cos_yaw);      // screen-right on ground
+            let up_screen = Vec3::new(-cos_yaw, 0.0, -sin_yaw); // screen-up on ground
+            // pan_dir.0: +1 = D (pan view right), pan_dir.1: +1 = S (pan view down-screen)
+            self.focus += right * input.pan_dir.0 + up_screen * (-input.pan_dir.1);
         }
 
         // Zoom to cursor (U-4): capture ground point before zoom, recompute applied factor AFTER clamp.
@@ -455,6 +455,7 @@ mod tests {
     #[test]
     fn test_zoom_invariance_mid_range() {
         // U-4 gate (a): Zoom at mid-range span — ground point under cursor stays fixed within epsilon.
+        // F32 rounding through Mat4 inversions requires a relative tolerance, not absolute.
         let (mut cam, _) = test_camera_setup();
         let screen_dims = (800.0, 600.0);
         let screen_pos = (400.0, 300.0); // Center of screen
@@ -472,10 +473,12 @@ mod tests {
         let cam_vp = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
         let after = ground_under_cursor(cam_vp, screen_pos, screen_dims);
 
-        // The points should be nearly identical (within a small epsilon due to floating-point rounding).
-        let epsilon = 1e-4;
-        assert!((before.x - after.x).abs() < epsilon, "ground point X drift: {} vs {}", before.x, after.x);
-        assert!((before.y - after.y).abs() < epsilon, "ground point Z drift: {} vs {}", before.y, after.y);
+        // The zoom-to-cursor construction is exact in real arithmetic (focus shift = before−after recompute).
+        // The residual is pure f32 rounding through two Mat4 inversions. Use a span-relative tolerance
+        // that accounts for this rounding budget without being too loose.
+        let epsilon = cam.ortho_span * 2e-5;
+        assert!((before.x - after.x).abs() < epsilon, "ground point X drift: {} vs {} (epsilon={})", before.x, after.x, epsilon);
+        assert!((before.y - after.y).abs() < epsilon, "ground point Z drift: {} vs {} (epsilon={})", before.y, after.y, epsilon);
     }
 
     #[test]
@@ -673,8 +676,8 @@ mod tests {
     #[test]
     fn test_key_pan_w_at_yaw_0() {
         // U-7: W key pans the view up-screen at yaw=0°.
-        // Verify: pressing W moves focus such that a world-space point projects LOWER on screen
-        // (higher NDC y, since NDC y increases downward in screen space).
+        // Verify: pressing W pans view up ⇒ existing content moves DOWN-screen ⇒ NDC y DECREASES
+        // (NDC y is BOTTOM-UP: +1 = top of screen; see ground_under_cursor:68).
         let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), 0.0, 50.0);
         let screen_dims = (800.0, 600.0);
         let aspect = screen_dims.0 / screen_dims.1;
@@ -701,20 +704,25 @@ mod tests {
         let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
         let ndc_after = cam_vp_after.project_point3(ref_point);
 
-        // W should pan view up, which moves objects down on screen (higher NDC y).
-        // The reference point should project lower (positive delta in NDC y).
+        // W pans view up ⇒ content moves down-screen ⇒ NDC y decreases.
+        let delta_y = ndc_after.y - ndc_before.y;
         assert!(
-            ndc_after.y > ndc_before.y,
-            "W key panning failed at yaw=0: NDC y should increase (move down on screen) after W-pan, but got before={}, after={}",
-            ndc_before.y, ndc_after.y
+            delta_y < 0.0,
+            "W key panning failed at yaw=0: NDC y should decrease after W-pan, but got delta={} (before={}, after={})",
+            delta_y, ndc_before.y, ndc_after.y
+        );
+        // Non-vacuous: ensure delta is meaningful (not a no-op due to broken pan logic)
+        assert!(
+            delta_y.abs() > 1e-4,
+            "W key delta too small (no-op or precision loss): {}",
+            delta_y.abs()
         );
     }
 
     #[test]
     fn test_key_pan_a_at_yaw_0() {
         // U-7: A key pans the view left-screen at yaw=0°.
-        // Verify: pressing A moves focus such that a world-space point projects further RIGHT on screen
-        // (higher NDC x, since NDC x increases rightward).
+        // Verify: pressing A pans view left ⇒ content moves right ⇒ NDC x INCREASES.
         let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), 0.0, 50.0);
         let screen_dims = (800.0, 600.0);
         let aspect = screen_dims.0 / screen_dims.1;
@@ -741,18 +749,25 @@ mod tests {
         let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
         let ndc_after = cam_vp_after.project_point3(ref_point);
 
-        // A should pan view left, which moves objects right on screen (higher NDC x).
+        // A pans view left ⇒ content moves right ⇒ NDC x increases.
+        let delta_x = ndc_after.x - ndc_before.x;
         assert!(
-            ndc_after.x > ndc_before.x,
-            "A key panning failed at yaw=0: NDC x should increase (move right on screen) after A-pan, but got before={}, after={}",
-            ndc_before.x, ndc_after.x
+            delta_x > 0.0,
+            "A key panning failed at yaw=0: NDC x should increase after A-pan, but got delta={} (before={}, after={})",
+            delta_x, ndc_before.x, ndc_after.x
+        );
+        // Non-vacuous: ensure delta is meaningful
+        assert!(
+            delta_x.abs() > 1e-4,
+            "A key delta too small (no-op or precision loss): {}",
+            delta_x.abs()
         );
     }
 
     #[test]
     fn test_key_pan_w_at_yaw_90() {
         // U-7: W key pans the view up-screen at yaw=90°.
-        // At 90° rotation, the screen axes are rotated, but W should still pan up.
+        // At 90° rotation, the screen axes are rotated, but W should still pan up (NDC y decreases).
         let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2, 50.0);
         let screen_dims = (800.0, 600.0);
         let aspect = screen_dims.0 / screen_dims.1;
@@ -779,11 +794,18 @@ mod tests {
         let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
         let ndc_after = cam_vp_after.project_point3(ref_point);
 
-        // W should pan view up at any yaw, so objects move down on screen (higher NDC y).
+        // W pans view up at any yaw ⇒ NDC y decreases.
+        let delta_y = ndc_after.y - ndc_before.y;
         assert!(
-            ndc_after.y > ndc_before.y,
-            "W key panning failed at yaw=90°: NDC y should increase after W-pan, but got before={}, after={}",
-            ndc_before.y, ndc_after.y
+            delta_y < 0.0,
+            "W key panning failed at yaw=90°: NDC y should decrease after W-pan, but got delta={} (before={}, after={})",
+            delta_y, ndc_before.y, ndc_after.y
+        );
+        // Non-vacuous: ensure delta is meaningful
+        assert!(
+            delta_y.abs() > 1e-4,
+            "W key delta too small (no-op or precision loss): {}",
+            delta_y.abs()
         );
     }
 
