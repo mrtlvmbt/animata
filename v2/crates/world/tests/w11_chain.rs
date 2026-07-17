@@ -161,6 +161,33 @@ fn w11_ridge_amplitude_sensitivity_candidates_differ() {
     );
 }
 
+/// **NEW: Single-fold golden vector for ridge_fbm_at (D3 fold-count tripwire)**
+/// Pin exact output values at K probe coordinates to detect if the fold logic changes.
+/// Any accidental extra fold or dropped fold inside the multifractal shifts these values.
+#[test]
+fn w11_ridge_fbm_at_single_fold_golden_vector() {
+    let seed = W11_SEED;
+    const GOLDEN_PROBES: &[(i64, i64, i64)] = &[
+        // (x, z, expected_ridge_value)
+        // Pinned from fixed Musgrave ridged formula: fold = (65536 - |2n - 65536|) / 2
+        (0, 0, 15307),
+        (7, 11, 23374),
+        (14, 22, 26118),
+        (21, 33, 25859),
+        (28, 44, 25021),
+        (35, 55, 21542),
+    ];
+
+    for &(x, z, expected) in GOLDEN_PROBES {
+        let actual = world::gen::erosion::ridge_fbm_at(x, z, seed);
+        assert_eq!(
+            actual, expected,
+            "ridge_fbm_at({}, {}) = {} but expected {} — fold count or arithmetic changed",
+            x, z, actual, expected
+        );
+    }
+}
+
 /// **NEW: Anti-saturation test for ridge_fbm_at (D3 migration)**
 /// The ridged multifractal must normalize to [0, 32768] and show real variation.
 /// Anti-saturation: verify (a) bounds [0, 32768], (b) variation span ≥ VARIATION_SPAN

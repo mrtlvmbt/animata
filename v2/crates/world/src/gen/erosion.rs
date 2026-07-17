@@ -682,11 +682,11 @@ pub fn ridge_fbm_at(x: i64, z: i64, seed: u64) -> i64 {
         // Interpolated noise value [0, 65536)
         let n = value_noise_octave(x, z, period, salted_seed, octave);
 
-        // Per-octave fold: produce ridge pattern with peaks at n=0 and n=65536, valley at n=32768
-        // fold = |2·n - 65536|, clamped to [0, 65536]
+        // Per-octave fold: Musgrave ridged multifractal — sharp CRESTS where noise crosses mid-range
+        // fold = (65536 - |2·n - 65536|) / 2, giving peaks at n=32768 (center), zero at edges (n=0, n=65536)
         // Divided by 2 to normalize output to [0, 32768] before summation
         let abs_dev = ((2 * n - 65536).abs()).min(65536);
-        let folded = abs_dev / 2; // [0, 32768]
+        let folded = (65536 - abs_dev) / 2; // [0, 32768], peak at center n=32768
 
         // Weight by amplitude AND by Musgrave gain (previous octave's folded value)
         // Divisor derived from FBM_MAX normalization: with folded ∈ [0, 32768], amplitudes 8,4,2,1,
