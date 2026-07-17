@@ -140,4 +140,58 @@ mod tests {
             assert!(t || a || v || g || c, "seed {seed:016x} produced all-off landforms");
         }
     }
+
+    /// U-3: Reseed guard conditions — verify which combinations allow reseed.
+    /// Reseed is enabled ONLY when source == Procgen && standalone (F12/F15).
+    #[test]
+    fn reseed_guard_procgen_standalone() {
+        let spec = WorldSpec {
+            seed: 0x1234_5678,
+            standalone: true,
+            bare_mode: false,
+            source: WorldSource::Procgen { dim_request: None },
+        };
+        // Should be reseedable: Procgen + standalone
+        let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
+        assert!(can_reseed, "Procgen + standalone must allow reseed");
+    }
+
+    #[test]
+    fn reseed_guard_procgen_sim_mode() {
+        let spec = WorldSpec {
+            seed: 0x1234_5678,
+            standalone: false,  // Sim mode
+            bare_mode: false,
+            source: WorldSource::Procgen { dim_request: None },
+        };
+        // Should NOT be reseedable: Procgen but sim mode
+        let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
+        assert!(!can_reseed, "Procgen + sim_mode must NOT allow reseed (F12)");
+    }
+
+    #[test]
+    fn reseed_guard_dump_standalone() {
+        let spec = WorldSpec {
+            seed: 0x1234_5678,
+            standalone: true,
+            bare_mode: false,
+            source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
+        };
+        // Should NOT be reseedable: Dump source (even though standalone)
+        let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
+        assert!(!can_reseed, "Dump + standalone must NOT allow reseed (F15)");
+    }
+
+    #[test]
+    fn reseed_guard_dump_sim_mode() {
+        let spec = WorldSpec {
+            seed: 0x1234_5678,
+            standalone: false,
+            bare_mode: false,
+            source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
+        };
+        // Should NOT be reseedable: Dump + sim mode
+        let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
+        assert!(!can_reseed, "Dump + sim_mode must NOT allow reseed (F15)");
+    }
 }

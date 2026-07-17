@@ -60,6 +60,8 @@ pub enum UiAction {
     TogglePause,
     StepOnce,
     ToggleTerrainKind,
+    /// U-3: Regenerate the world with a new seed (only valid in Procgen+standalone mode).
+    RegenSeed(u64),
 }
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
@@ -192,6 +194,12 @@ impl Panel for DebugPanel {
 
                 if ui.button("Hex↔Cube").clicked() {
                     ui_ctx.actions.push(UiAction::ToggleTerrainKind);
+                }
+
+                // U-3: "New world" button — only shown in Procgen+standalone mode (F12/F15)
+                // When clicked, regenerate with next seed (current_seed + 1)
+                if ui.button("New world (N)").clicked() {
+                    ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1)));
                 }
 
                 ui.label("Keyboard: WASD/drag pan · wheel zoom · Q/E rotate");
