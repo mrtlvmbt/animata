@@ -850,7 +850,7 @@ pub fn classify_and_caps_staged(
     // W-9: Final-surface thermal relaxation. When enabled, applies Jacobi diffusion to smooth
     // residual spikes from landforms that ran after the erode loop's early talus pass.
     // When disabled, this is byte-identical to the old path.
-    let post_talus_height = if enable_talus_final && (flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal) {
+    let post_talus_height = if enable_talus_final {
         talus_step_final(dim, &post_coastal_height, SPIKE_MARGIN_FINAL, N_ITERS_FINAL)
     } else {
         post_coastal_height.clone()
@@ -858,8 +858,8 @@ pub fn classify_and_caps_staged(
 
     // W-8: De-needle pass — remove isolated 1-cell height spikes, FINAL landform post-processing
     // BEFORE classify. Only runs when at least one landform is enabled (preserves byte-identical
-    // all-OFF golden path).
-    let post_deneedle_height = if flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal {
+    // all-OFF golden path). W-11/W-12: widened to include ridges and beaches.
+    let post_deneedle_height = if flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal || flags.ridges || flags.beaches {
         de_needle_pass(dim, &post_talus_height)
     } else {
         post_talus_height.clone()
