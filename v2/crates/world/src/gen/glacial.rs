@@ -1076,7 +1076,7 @@ mod tests {
         const DIM64: usize = 64;
 
         // Build eroded baseline with glacial=OFF for seed=2.
-        let height = erode(SEED2, HMAX64, DIM64, false, false).height;
+        let height = erode(SEED2, HMAX64, DIM64, false, false, false).height;
 
         // Run with production profile/k_band (moraine-absorbing fixture as identified in Phase-0b).
         let state = run_glacial(SEED2, DIM64, HMAX64, &height);
@@ -1144,7 +1144,7 @@ mod tests {
         const DIM64: usize = 64;
         const K_CTRL: i64 = 4;
 
-        let height = erode(SEED1, HMAX64, DIM64, false, false).height;
+        let height = erode(SEED1, HMAX64, DIM64, false, false, false).height;
 
         // Production pinned profile: truncated must be 0.
         let state_pinned = run_glacial_with(SEED1, DIM64, HMAX64, &height, &PROFILE, K_BAND);

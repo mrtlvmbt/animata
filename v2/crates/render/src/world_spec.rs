@@ -6,6 +6,18 @@
 
 use std::path::PathBuf;
 
+/// Landform configuration flags (deterministically derived from seed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LandformFlags {
+    pub tect: bool,
+    pub aeolian: bool,
+    pub volcanic: bool,
+    pub glacial: bool,
+    pub coastal: bool,
+    pub ridges: bool,
+    pub beaches: bool,
+}
+
 /// World data source: procedural generation or loaded dump.
 #[derive(Clone, Debug)]
 pub enum WorldSource {
@@ -65,14 +77,23 @@ impl Stage {
 }
 
 /// Landform flags: derived deterministically from seed + standalone mode.
-/// Returns (tectonic, aeolian, volcanic, glacial, coastal).
+/// Returns LandformFlags with tectonic, aeolian, volcanic, glacial, coastal, ridges, beaches.
 ///
 /// Each landform toggles independently (well-spaced bit positions in splitmix64).
-/// Guard: never all-off (ensures maps never become flat/featureless).
-pub fn landform_flags(seed: u64, standalone: bool) -> (bool, bool, bool, bool, bool) {
+/// Dependency clamps: ridges &= tect (needs uplift), beaches &= coastal (needs sea datum).
+/// Guard: never all-off for the original five (ensures maps never become flat/featureless).
+pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     if !standalone {
         // Sim mode: all landforms off (unchanged from original contract)
-        return (false, false, false, false, false);
+        return LandformFlags {
+            tect: false,
+            aeolian: false,
+            volcanic: false,
+            glacial: false,
+            coastal: false,
+            ridges: false,
+            beaches: false,
+        };
     }
 
     // Deterministic hash: splitmix64
@@ -87,15 +108,29 @@ pub fn landform_flags(seed: u64, standalone: bool) -> (bool, bool, bool, bool, b
     let volc = (x >> 23) & 1 == 1;
     let glac = (x >> 33) & 1 == 1;
     let coast = (x >> 43) & 1 == 1;
+    let ridg = (x >> 53) & 1 == 1;
+    let beach = (x >> 59) & 1 == 1;
 
-    // Guard: never all-off (avoid flat/boring maps)
-    let (tect, aeol, volc, glac, coast) = if !(tect || aeol || volc || glac || coast) {
-        (true, aeol, volc, glac, coast)  // force tectonic if all others are off
+    // Guard: never all-off for the original five (avoid flat/boring maps)
+    let tect = if !(tect || aeol || volc || glac || coast) {
+        true  // force tectonic if all original five are off
     } else {
-        (tect, aeol, volc, glac, coast)
+        tect
     };
 
-    (tect, aeol, volc, glac, coast)
+    // Dependency clamps (per plan W-0)
+    let ridg = ridg && tect;  // ridges need tectonic uplift
+    let beach = beach && coast;  // beaches need coastal datum
+
+    LandformFlags {
+        tect,
+        aeolian: aeol,
+        volcanic: volc,
+        glacial: glac,
+        coastal: coast,
+        ridges: ridg,
+        beaches: beach,
+    }
 }
 
 #[cfg(test)]
@@ -122,22 +157,43 @@ mod tests {
 
         let flags3 = landform_flags(0x1234_5679, true);
         // Different seed very likely produces different flags (not guaranteed, but highly probable)
-        // Just verify it returns a tuple
+        // Just verify it returns a struct
         let _ = flags3;
     }
 
     #[test]
     fn landform_flags_sim_mode_all_off() {
         let flags = landform_flags(0xDEAD_BEEF, false);
-        assert_eq!(flags, (false, false, false, false, false), "sim mode must have all landforms off");
+        assert!(!flags.tect && !flags.aeolian && !flags.volcanic && !flags.glacial
+                && !flags.coastal && !flags.ridges && !flags.beaches,
+                "sim mode must have all landforms off");
     }
 
     #[test]
     fn landform_flags_never_all_off() {
-        // Test a range of seeds; at least one landform should always be on
+        // Test a range of seeds; at least one of the original five landforms should always be on
         for seed in [0u64, 1, 42, 0xFFFF_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE] {
-            let (t, a, v, g, c) = landform_flags(seed, true);
-            assert!(t || a || v || g || c, "seed {seed:016x} produced all-off landforms");
+            let flags = landform_flags(seed, true);
+            assert!(flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal,
+                    "seed {seed:016x} produced all-off landforms");
+        }
+    }
+
+    #[test]
+    fn landform_flags_dependency_clamps() {
+        // Ridges must be false if tect is false
+        for seed in [0u64, 1, 42, 0xFFFF_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE] {
+            let flags = landform_flags(seed, true);
+            if flags.ridges {
+                assert!(flags.tect, "seed {seed:016x}: ridges true but tect false");
+            }
+        }
+        // Beaches must be false if coastal is false
+        for seed in [0u64, 1, 42, 0xFFFF_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE] {
+            let flags = landform_flags(seed, true);
+            if flags.beaches {
+                assert!(flags.coastal, "seed {seed:016x}: beaches true but coastal false");
+            }
         }
     }
 

@@ -139,6 +139,14 @@ impl ProcgenWorld {
     /// `final_biome[i] as usize`, and `FinalBiome::Ocean=13` would otherwise index one past the old
     /// 13-element array on ANY submerged cell, regardless of `thermal_verdict_temps` — a guaranteed
     /// panic, not merely a latent gap, the moment `enable_coastal` produces water.
+    ///
+    /// **W-11 (#???):** `enable_ridges` threads straight to `erode_with_tectonics`, dependent on
+    /// `enable_tectonics` (ridges need uplift; dependency clamp in `landform_flags`).
+    /// — `false` (every prod call site) reproduces the pre-#??? world byte-for-byte.
+    ///
+    /// **W-12 (#???):** `enable_beaches` threads straight to `classify_and_caps`, dependent on
+    /// `enable_coastal` (beaches need sea datum; dependency clamp in `landform_flags`).
+    /// — `false` (every prod call site) reproduces the pre-#??? world byte-for-byte.
     pub fn new(
         dim: i64,
         hmax: i64,
@@ -150,6 +158,8 @@ impl ProcgenWorld {
         enable_volcanic: bool,
         enable_glacial: bool,
         enable_coastal: bool,
+        enable_ridges: bool,
+        enable_beaches: bool,
     ) -> Self {
         // W-7 gate: patchiness defaults OFF for acceptance corridors (homogeneous baseline).
         // Specific scenarios (map-gen, visualization) can opt-in by calling with enable_patchiness=true.
@@ -240,10 +250,10 @@ impl ProcgenWorld {
         // (d) Solid-fraction guard (critic F3): solid cells (height >= solid_level) should be a
         // reasonable fraction (roughly 25-40% at prod HMAX=200). Too few solid cells → too much
         // free movement/energy. Too many → too little usable space. Mirror NoiseWorld's semantics.
-        // R-17: Relaxed to 15-75% for landform-enabled preview worlds (tectonic+aeolian+glacial+coastal+volcanic
+        // R-17: Relaxed to 15-75% for landform-enabled preview worlds (tectonic+aeolian+glacial+coastal+volcanic+ridges+beaches
         // naturally generate higher-relief terrain). Strict 15-50% band preserved for the all-off sim path
         // (each prod call site disables all landforms, preserving acceptance-corridor economy).
-        let any_landform = enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal;
+        let any_landform = enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal || enable_ridges || enable_beaches;
         let solid_count = fields.height.iter().filter(|&&h| h >= solid_level).count();
         let solid_frac = solid_count as f64 / n as f64;
         let (band_min, band_max, band_desc) = if any_landform {
@@ -325,7 +335,7 @@ mod tests {
 
     #[test]
     fn resource_nonneg_and_bounded() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false, false, false);
         for x in 0..DIM {
             for z in 0..DIM {
                 let r = w.resource(Vec2Fixed(x, z));
@@ -336,7 +346,7 @@ mod tests {
 
     #[test]
     fn height_wraps_toroidally_like_noise_world_did() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false, false, false);
         assert_eq!(w.height(0, 0), w.height(DIM, 0), "x must wrap at dim");
         assert_eq!(w.height(0, 0), w.height(0, DIM), "z must wrap at dim");
         assert_eq!(w.height(-1, 0), w.height(DIM - 1, 0), "negative x must wrap");
@@ -344,8 +354,8 @@ mod tests {
 
     #[test]
     fn procgen_world_is_deterministic_across_repeated_builds() {
-        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
-        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
+        let a = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false, false, false);
+        let b = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false, false, false);
         for x in 0..DIM {
             for z in 0..DIM {
                 let pos = Vec2Fixed(x, z);
@@ -362,7 +372,7 @@ mod tests {
     /// climate-only "≥2 biomes" check would silently pass even if erosion fully no-oped).
     #[test]
     fn procgen_world_is_rich_and_not_degenerate_at_prod_scale() {
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false, false, false);
 
         let mut min_h = i64::MAX;
         let mut max_h = i64::MIN;
@@ -411,7 +421,7 @@ mod tests {
     fn resource_decoupled_from_solid_level() {
         use gen::material::MaterialId;
 
-        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false);
+        let w = ProcgenWorld::new(DIM, HMAX, 120, SEED, None, false, false, false, false, false, false, false);
         let mut resource_on_solid = Vec::new();
         let mut resource_on_non_solid = Vec::new();
 

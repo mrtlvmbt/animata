@@ -1201,8 +1201,8 @@ mod tests {
 
     #[test]
     fn erode_with_tectonics_is_deterministic_across_repeated_calls() {
-        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false);
-        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false);
+        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false);
+        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false);
         assert_eq!(a, b, "erode_with_tectonics must be byte-identical across repeated calls");
     }
 
@@ -1211,7 +1211,7 @@ mod tests {
         // Both flags false must be IDENTICAL to erode()'s pre-#396 body (this is a pure structural
         // refactor into erode_from_fields/erode_with_tectonics — no behavior change when off).
         let via_erode = erode(SEED, HMAX, 16, false, false, false);
-        let via_flags = erode_with_tectonics(SEED, HMAX, 16, false, false, false);
+        let via_flags = erode_with_tectonics(SEED, HMAX, 16, false, false, false, false);
         assert_eq!(via_erode, via_flags, "erode(..,false) must equal erode_with_tectonics(..,false,false)");
     }
 
@@ -1290,9 +1290,9 @@ mod tests {
         // `K_INCISE_DEN`'s doc) — mirrors `caps.rs`'s `ROCK_SLOPE_THRESHOLD`.
         const STEEP_THRESHOLD: i64 = 4;
 
-        let a = erode_with_tectonics(SEED, HMAX, DIM, false, false, false);
-        let b = erode_with_tectonics(SEED, HMAX, DIM, true, false, false);
-        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, false);
+        let a = erode_with_tectonics(SEED, HMAX, DIM, false, false, false, false);
+        let b = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false);
+        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, false, false);
 
         let a_count = steep_edge_count(&a.height, DIM, STEEP_THRESHOLD);
         let c_count = steep_edge_count(&c.height, DIM, STEEP_THRESHOLD);
@@ -1430,7 +1430,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, true);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, true, false);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
         const EXPECTED: [i64; 4] = [132, 127, 126, 122];

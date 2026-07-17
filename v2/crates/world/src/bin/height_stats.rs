@@ -3,6 +3,7 @@
 //! Usage: height_stats <dim> [seed]
 
 use world::gen::caps::classify_and_caps;
+use world::gen::LandformFlags;
 
 const HMAX: i64 = 200;
 

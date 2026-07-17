@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn sea_level_is_deterministic_and_bounded_away_from_extremes_across_seeds() {
         for seed in [SEED, SEED ^ 1, SEED ^ 2, SEED ^ 0xDEAD_BEEF] {
-            let height = erode(seed, HMAX, DIM, false, false).height;
+            let height = erode(seed, HMAX, DIM, false, false, false).height;
             let a = sea_level(&height);
             let b = sea_level(&height);
             assert_eq!(a, b, "sea_level must be byte-identical across repeated calls");

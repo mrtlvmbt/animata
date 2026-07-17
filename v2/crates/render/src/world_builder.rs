@@ -44,18 +44,20 @@ where
     let world: Box<dyn WorldView + Send> = match &spec.source {
         WorldSource::Procgen { dim_request: _ } => {
             // landform_flags derived from (seed, standalone) — D5
-            let (tect, aeol, volc, glac, coast) = landform_flags(spec.seed, spec.standalone);
+            let flags = landform_flags(spec.seed, spec.standalone);
             Box::new(ProcgenWorld::new(
                 effective_dim,
                 cli::HMAX,
                 cli::RESOURCE_BASE,
                 config.seed ^ cli::WORLD_SALT,
                 None,
-                tect,
-                aeol,
-                volc,
-                glac,
-                coast,
+                flags.tect,
+                flags.aeolian,
+                flags.volcanic,
+                flags.glacial,
+                flags.coastal,
+                flags.ridges,
+                flags.beaches,
             ))
         }
         WorldSource::Dump(path) => {
@@ -63,18 +65,20 @@ where
             // TODO: implement DumpWorld::load(path) to actually load the dump file
             // For now, fallback to Procgen (this makes --v1-dump flag non-functional as of U-3)
             eprintln!("[build_world] Dump loading not yet implemented; falling back to Procgen (--v1-dump flag ignored)");
-            let (tect, aeol, volc, glac, coast) = landform_flags(spec.seed, spec.standalone);
+            let flags = landform_flags(spec.seed, spec.standalone);
             Box::new(ProcgenWorld::new(
                 effective_dim,
                 cli::HMAX,
                 cli::RESOURCE_BASE,
                 config.seed ^ cli::WORLD_SALT,
                 None,
-                tect,
-                aeol,
-                volc,
-                glac,
-                coast,
+                flags.tect,
+                flags.aeolian,
+                flags.volcanic,
+                flags.glacial,
+                flags.coastal,
+                flags.ridges,
+                flags.beaches,
             ))
         }
     };

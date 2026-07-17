@@ -16,6 +16,7 @@
 
 use std::io::Write;
 use world::gen::caps::classify_and_caps;
+use world::gen::LandformFlags;
 
 /// Matches the production world height ceiling (`cli::HMAX`) so every height-relative threshold
 /// fires exactly as the real generator sees it.

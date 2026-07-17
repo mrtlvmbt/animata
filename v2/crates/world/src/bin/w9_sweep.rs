@@ -7,6 +7,7 @@ use world::gen::caps::{
     measure_de_needle_clip_count, count_spikes_exceeding, AMPLITUDE_FLOOR,
 };
 use world::gen::erosion::{de_needle_pass, talus_step_final};
+use world::gen::LandformFlags;
 use std::io::Write;
 
 const HMAX: i64 = 200;
@@ -120,7 +121,7 @@ fn export_candidates(dim: usize) {
     );
 
     // Get production materials from baseline (talus OFF) — materials don't change with talus smoothing
-    let baseline = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(LandformFlags::from_five(true, true, true, true, true)));
+    let baseline = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true));
     let materials = &baseline.surface_material;
 
     // (a) Baseline: talus OFF (post-coastal only)
