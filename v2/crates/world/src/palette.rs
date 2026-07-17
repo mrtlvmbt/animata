@@ -17,3 +17,28 @@ pub const MATERIAL_COLORS: [[u8; 3]; 11] = [
     [210, 195, 135], // 9: SoilDry (W-10 presentation) — pale ochre (lighter)
     [150, 135, 90],  // 10: SoilWet (W-10 presentation) — softer mid-brown
 ];
+
+/// Material ID → Russian name. Indexed same as MATERIAL_COLORS.
+pub const MATERIAL_NAMES: [&str; 11] = [
+    "воздух",           // 0: Air
+    "песок",            // 1: Sand
+    "вечная мерзлота",  // 2: Permafrost
+    "почва",            // 3: Soil
+    "коренная порода",  // 4: Bedrock
+    "базальт",          // 5: Basalt
+    "туф",              // 6: Tuff
+    "морена",           // 7: Till
+    "вода",             // 8: Water
+    "сухая почва",      // 9: SoilDry
+    "влажная почва",    // 10: SoilWet
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_names_colors_parity() {
+        assert_eq!(MATERIAL_NAMES.len(), MATERIAL_COLORS.len(), "MATERIAL_NAMES and MATERIAL_COLORS must have the same length");
+    }
+}

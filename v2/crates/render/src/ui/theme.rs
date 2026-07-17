@@ -8,7 +8,7 @@ use egui::{Color32, CornerRadius, Frame, Margin, Shadow, Stroke};
 // Straight-alpha → premultiplied. egui stores Color32 PREMULTIPLIED; writing translucent tints as
 // `from_rgba_premultiplied(fullRGB, lowAlpha)` is invalid (RGB ≫ alpha) and renders near-opaque
 // (e.g. a "0.10 white" track came out solid white). `from_rgba_unmultiplied` isn't const, so:
-pub(crate) const fn straight(r: u8, g: u8, b: u8, al: u8) -> Color32 {
+pub const fn straight(r: u8, g: u8, b: u8, al: u8) -> Color32 {
     let a = al as u32;
     let pr = ((r as u32 * a + 127) / 255) as u8;
     let pg = ((g as u32 * a + 127) / 255) as u8;
@@ -33,6 +33,8 @@ pub const ACCENT_LINE: Color32 = straight(242, 166, 75, 128); // 0.50 frame
 
 pub const GOOD_GREEN: Color32 = Color32::from_rgb(143, 209, 111); // population sparkline
 pub const HOVER_FILL: Color32 = straight(255, 255, 255, 18); // 0.07 hover
+pub const TOAST_GREEN: Color32 = Color32::from_rgb(166, 224, 140);
+pub const ACCENT_LINE_50: Color32 = straight(242, 166, 75, 128); // 0.50 — frames/rings
 
 // ---- type helpers ----
 pub fn mono(size: f32) -> egui::FontId {
@@ -41,6 +43,27 @@ pub fn mono(size: f32) -> egui::FontId {
 
 pub fn sans(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Proportional)
+}
+
+pub fn tracking_em(size: f32, em: f32) -> f32 { size * em }
+
+pub fn total_tracked_width(ui: &egui::Ui, text: &str, font: &egui::FontId, tracking: f32) -> f32 {
+    let n = text.chars().count();
+    let sum: f32 = text.chars().map(|c| ui.ctx().fonts(|f| f.glyph_width(font, c))).sum();
+    sum + tracking * n.saturating_sub(1) as f32
+}
+
+pub fn paint_tracked(ui: &egui::Ui, pos: egui::Pos2, align: egui::Align2, text: &str, font: egui::FontId, color: Color32, tracking: f32) {
+    let widths: Vec<f32> = text.chars().map(|c| ui.ctx().fonts(|f| f.glyph_width(&font, c))).collect();
+    let total: f32 = widths.iter().sum::<f32>() + tracking * widths.len().saturating_sub(1) as f32;
+    let start_x = match align.x() { egui::Align::Min => pos.x, egui::Align::Center => pos.x - total / 2.0, egui::Align::Max => pos.x - total };
+    let glyph_align = egui::Align2([egui::Align::Min, align.y()]);
+    let painter = ui.painter();
+    let mut x = start_x;
+    for (c, w) in text.chars().zip(widths) {
+        painter.text(egui::pos2(x, pos.y), glyph_align, c, font.clone(), color);
+        x += w + tracking;
+    }
 }
 
 // ---- frames ----

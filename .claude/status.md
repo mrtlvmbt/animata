@@ -1,5 +1,5 @@
-task: U-7 round 3 COMPLETE — camera pan + loader modal + harness workers (all defects fixed + code-critic PASS)
-phase: all code changes verified; awaiting CI gate
-blocked_on: ci-report.sh (48 render tests)
-next: run bash scripts/ci-report.sh to verify all tests pass
-updated: 2026-07-17 12:50
+task: #465 u9-ui-remainder — fix panel anchor collisions + layout adjustment
+phase: code (PASS) + critic review (PASS) + layout adjustment (PASS) + CI (awaiting)
+blocked_on: CI jobs (test-x86, golden-arm64, v2-sim-x86, v2-golden-arm64)
+next: await ci-report.sh green, then done-check.sh, then final STATUS
+updated: 2026-07-17 14:50

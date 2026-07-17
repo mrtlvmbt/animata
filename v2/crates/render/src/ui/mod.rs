@@ -1,11 +1,17 @@
 pub mod loader;
 pub mod theme;
 pub mod minimap;
+pub mod vitals;
+pub mod transport;
+pub mod rail;
+pub mod toast;
+pub mod legend;
 
 use macroquad::prelude::*;
 use sim_core::RenderSnapshot;
 use std::collections::HashMap;
 use sim_core::WorldView;
+use egui::{Color32, RichText, Stroke};
 
 /// UiOut: egui's pointer/keyboard wants from this frame.
 /// Used to gate camera input so UI interaction doesn't drive camera pan/rotate.
@@ -15,31 +21,10 @@ pub struct UiOut {
     pub wants_keyboard: bool,
 }
 
-/// Panel: a renderable UI element with a fixed anchor point and draw callback.
+/// Panel: a renderable UI element with a draw callback.
 pub trait Panel {
     fn id(&self) -> &'static str;
-    fn anchor(&self) -> Anchor;
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx);
-}
-
-/// Anchor: position of a panel on screen (LeftTop/RightTop/LeftBottom/RightBottom + offset).
-#[derive(Clone, Copy, Debug)]
-pub enum Anchor {
-    LeftTop(egui::Vec2),
-    RightTop(egui::Vec2),
-    LeftBottom(egui::Vec2),
-    RightBottom(egui::Vec2),
-}
-
-impl Anchor {
-    fn pos(&self, screen_size: egui::Vec2) -> egui::Pos2 {
-        match self {
-            Anchor::LeftTop(offset) => egui::pos2(offset.x, offset.y),
-            Anchor::RightTop(offset) => egui::pos2(screen_size.x - offset.x, offset.y),
-            Anchor::LeftBottom(offset) => egui::pos2(offset.x, screen_size.y - offset.y),
-            Anchor::RightBottom(offset) => egui::pos2(screen_size.x - offset.x, screen_size.y - offset.y),
-        }
-    }
 }
 
 /// UiCtx: read-only frame state + action sink (passed to Panel::draw).
@@ -75,7 +60,7 @@ pub struct UiCtx<'a> {
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
 /// UI never mutates app state directly; all changes go through actions.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum UiAction {
     TogglePause,
     StepOnce,
@@ -84,6 +69,10 @@ pub enum UiAction {
     RegenSeed(u64),
     /// U-5: Jump camera to a world position (x, z).
     JumpCamera(glam::Vec2),
+    /// U-9: H key toggle — hide/show all panels
+    ToggleUiVisibility,
+    /// U-9: Display a toast message (e.g., "World ready — seed 0x5")
+    PushToast(String),
 }
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
@@ -112,6 +101,13 @@ impl Default for HudCache {
 pub struct UiRoot {
     panels: Vec<Box<dyn Panel>>,
     pub cache: HudCache,
+    /// U-9: true if panels are visible, false if hidden by H toggle
+    pub panels_visible: bool,
+    /// U-9: timer for hide-hint display (ms elapsed since hide)
+    pub hide_hint_elapsed_ms: f32,
+    /// U-9: toast message state (shared with ToastPanel via UiCtx)
+    pub toast_message: Option<String>,
+    pub toast_elapsed_ms: f32,
 }
 
 impl UiRoot {
@@ -119,6 +115,10 @@ impl UiRoot {
         UiRoot {
             panels: Vec::new(),
             cache: HudCache::new(),
+            panels_visible: true,
+            hide_hint_elapsed_ms: 0.0,
+            toast_message: None,
+            toast_elapsed_ms: 0.0,
         }
     }
 
@@ -127,29 +127,108 @@ impl UiRoot {
         self.panels.push(panel);
     }
 
+    /// Toggle panel visibility (H key). Resets hide-hint timer.
+    pub fn toggle_visibility(&mut self) {
+        self.panels_visible = !self.panels_visible;
+        self.hide_hint_elapsed_ms = 0.0;  // Reset timer when toggling
+    }
+
     /// Draw all panels and return pointer/keyboard wants.
     /// Sets the cache pointer in UiCtx to our cache before drawing.
     pub fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) -> UiOut {
         // Set the cache pointer to point to our cache
         ui_ctx.cache = &mut self.cache as *mut HudCache;
 
-        for panel in &mut self.panels {
-            let anchor = panel.anchor();
-            let screen_size = ctx.screen_rect().size();
-            let pivot = anchor.pos(screen_size);
+        // Update toast timer
+        if self.toast_message.is_some() {
+            self.toast_elapsed_ms += 16.0;  // ~60fps
+            if self.toast_elapsed_ms > 2600.0 {
+                self.toast_message = None;  // Expire after 2.6s
+            }
+        }
 
-            egui::Area::new(panel.id().into())
-                .fixed_pos(pivot)
-                .pivot(egui::Align2::LEFT_TOP)
-                .show(ctx, |_| {
-                    panel.draw(ctx, ui_ctx);
+        // Update hide-hint timer
+        if !self.panels_visible {
+            self.hide_hint_elapsed_ms += 16.0;  // ~60fps
+        }
+
+        // Draw regular panels only if visible
+        if self.panels_visible {
+            for panel in &mut self.panels {
+                panel.draw(ctx, ui_ctx);
+            }
+        }
+
+        // Draw toast message if active (always visible, not gated by panels_visible)
+        if let Some(ref msg) = self.toast_message {
+            let dt = self.toast_elapsed_ms;
+            let opacity = if dt < 180.0 { dt / 180.0 } else if dt > 1900.0 { ((2600.0 - dt) / 700.0).max(0.0) } else { 1.0 };
+            let shift_y = if dt < 180.0 { -(180.0 - dt) / 180.0 * 10.0 } else { 0.0 };
+            let a = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * opacity) as u8);
+
+            egui::Area::new(egui::Id::new("toast"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 18.0 + shift_y))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(a(Color32::from_rgba_unmultiplied(12, 15, 14, 209)))
+                        .stroke(Stroke::new(1.0, a(Color32::from_rgba_unmultiplied(143, 209, 111, 77))))
+                        .corner_radius(egui::CornerRadius::same(11))
+                        .inner_margin(egui::Margin::symmetric(18, 10))
+                        .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha((102.0 * opacity) as u8) })
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(msg).font(theme::mono(12.0)).color(a(theme::TOAST_GREEN))).wrap_mode(egui::TextWrapMode::Extend));
+                        });
+                });
+            ctx.request_repaint();
+        }
+
+        // Draw hide-hint if panels are hidden and hint hasn't expired (2.5s = 2500ms)
+        if !self.panels_visible && self.hide_hint_elapsed_ms < 2500.0 {
+            let alpha_factor = if self.hide_hint_elapsed_ms < 200.0 {
+                self.hide_hint_elapsed_ms / 200.0
+            } else if self.hide_hint_elapsed_ms > 1800.0 {
+                ((2500.0 - self.hide_hint_elapsed_ms) / 700.0).max(0.0)
+            } else {
+                1.0
+            };
+
+            let hint_text = RichText::new("press H — интерфейс")
+                .font(theme::mono(10.0))
+                .color(theme::TEXT_LABEL);
+
+            egui::Area::new(egui::Id::new("hide_hint"))
+                .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(18.0, -18.0))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    let base_color = theme::straight(12, 15, 14, 153);
+                    let alpha = (base_color.a() as f32 * alpha_factor) as u8;
+                    let faded_bg = Color32::from_rgba_unmultiplied(
+                        base_color.r(), base_color.g(), base_color.b(), alpha
+                    );
+
+                    let border_color = theme::straight(255, 255, 255, 20);
+                    let border_alpha = (border_color.a() as f32 * alpha_factor) as u8;
+                    let faded_border = Color32::from_rgba_unmultiplied(
+                        border_color.r(), border_color.g(), border_color.b(), border_alpha
+                    );
+
+                    egui::Frame::NONE
+                        .fill(faded_bg)
+                        .stroke(Stroke::new(1.0, faded_border))
+                        .corner_radius(egui::CornerRadius::same(9))
+                        .inner_margin(egui::Margin::symmetric(12, 7))
+                        .show(ui, |ui| {
+                            ui.label(hint_text);
+                        });
                 });
         }
 
         // Compute pointer/keyboard wants from egui state.
+        // When panels are hidden, don't capture input
         UiOut {
-            wants_pointer: ctx.is_pointer_over_area() || ctx.wants_pointer_input(),
-            wants_keyboard: ctx.wants_keyboard_input(),
+            wants_pointer: self.panels_visible && (ctx.is_pointer_over_area() || ctx.wants_pointer_input()),
+            wants_keyboard: self.panels_visible && ctx.wants_keyboard_input(),
         }
     }
 }
@@ -160,92 +239,12 @@ impl Default for UiRoot {
     }
 }
 
-/// DebugPanel: the first Panel implementation — re-hosts draw_debug_hud content.
-pub struct DebugPanel;
-
-impl Panel for DebugPanel {
-    fn id(&self) -> &'static str {
-        "debug_hud"
-    }
-
-    fn anchor(&self) -> Anchor {
-        Anchor::LeftTop(egui::vec2(10.0, 10.0))
-    }
-
-    fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
-        let title = if ui_ctx.standalone_mode {
-            "v2 render scaffold — R-8 standalone hex-map viewer"
-        } else {
-            "v2 render scaffold — R-7 biology coloring"
-        };
-
-        egui::Window::new(title)
-            .frame(theme::themed_frame(theme::FrameKind::Vitals))
-            .show(ctx, |ui| {
-                match ui_ctx.snap {
-                    Some(s) => {
-                        ui.label(format!("tick: {}", s.tick));
-                        ui.label(format!("population: {}", s.population));
-                        ui.label(format!("species: {}", s.species_count));
-                        ui.label(format!("creatures drawn: {}", s.creatures.len()));
-                    }
-                    None if ui_ctx.standalone_mode => {
-                        ui.label("standalone mode — no sim, terrain only");
-                    }
-                    None => {
-                        ui.label("waiting for the sim worker's first tick…");
-                    }
-                }
-                ui.separator();
-                if !ui_ctx.standalone_mode {
-                    ui.label("─ Creature Coloring (uptake_layer / feeding guild) ─");
-                    ui.colored_label(egui::Color32::from_rgb(255, 153, 51), "● Orange: Layer 0 (A-guild)");
-                    ui.colored_label(egui::Color32::from_rgb(51, 204, 255), "● Cyan: Layer 1 (B-guild)");
-                    ui.colored_label(egui::Color32::from_rgb(204, 51, 255), "● Magenta: Layer 2+");
-                    ui.separator();
-                }
-                ui.label(format!("terrain: {}×{}, {} mesh chunks", ui_ctx.world_dim, ui_ctx.world_dim, ui_ctx.terrain_chunks_total));
-                ui.label(format!("chunks drawn: {}/{}", ui_ctx.chunks_drawn, ui_ctx.terrain_chunks_total));
-                ui.label(format!("fps: {}", ui_ctx.fps));
-                ui.separator();
-
-                // F1: Real UiAction flow — buttons push actions that main.rs consumes end-to-end
-                if !ui_ctx.standalone_mode {
-                    ui.horizontal(|ui| {
-                        if ui.button("Pause").clicked() {
-                            ui_ctx.actions.push(UiAction::TogglePause);
-                        }
-                        if ui.button("Step").clicked() {
-                            ui_ctx.actions.push(UiAction::StepOnce);
-                        }
-                    });
-                }
-
-                if ui.button("Hex↔Cube").clicked() {
-                    ui_ctx.actions.push(UiAction::ToggleTerrainKind);
-                }
-
-                // U-3: "New world" button — only shown in Procgen+standalone mode (F12/F15)
-                // When clicked, regenerate with next seed (current_seed + 1)
-                if ui_ctx.is_procgen && ui_ctx.standalone_mode {
-                    if ui.button("New world (N)").clicked() {
-                        ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1)));
-                    }
-                }
-
-                ui.label("Keyboard: WASD/drag pan · wheel zoom · Q/E rotate");
-                if !ui_ctx.standalone_mode {
-                    ui.label("Space: toggle pause · Right: step once");
-                } else if ui_ctx.is_procgen {
-                    ui.label("N: new world");
-                }
-            });
-    }
-}
 
 /// Dim the panel OUTSIDE the viewport rectangle (four bands around the frame's bounding box, clamped
 /// to the panel). Bands collapse to nothing once the view encloses the whole map.
+/// U-8: Veil alpha adjusted to 130 (.51) for darker appearance per user request.
 fn veil_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) {
+    const VEIL_ALPHA: u8 = 130; // User-taste dial: darker veil for visual separation
     let mut lo = rect.max;
     let mut hi = rect.min;
     for p in quad {
@@ -254,7 +253,7 @@ fn veil_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) 
         lo = egui::pos2(lo.x.min(x), lo.y.min(y));
         hi = egui::pos2(hi.x.max(x), hi.y.max(y));
     }
-    let veil = egui::Color32::from_rgba_unmultiplied(5, 7, 10, 71); // .28
+    let veil = egui::Color32::from_rgba_unmultiplied(5, 7, 10, VEIL_ALPHA);
     let band = |a: egui::Pos2, b: egui::Pos2| {
         let r = egui::Rect::from_two_pos(a, b);
         if r.width() > 0.5 && r.height() > 0.5 {
@@ -273,10 +272,6 @@ pub struct MinimapPanel;
 impl Panel for MinimapPanel {
     fn id(&self) -> &'static str {
         "minimap_panel"
-    }
-
-    fn anchor(&self) -> Anchor {
-        Anchor::RightTop(egui::vec2(16.0, 16.0))
     }
 
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
@@ -320,14 +315,21 @@ impl Panel for MinimapPanel {
                         let size = egui::vec2(minimap::MINIMAP_WIDTH as f32, minimap::MINIMAP_HEIGHT as f32);
                         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
-                        // Draw the minimap texture as a quad
+                        // U-8: Draw the minimap texture as a screen-aligned iso diamond through the new projection
                         let painter = ui.painter_at(rect);
                         let mut mesh = egui::Mesh::with_texture(tex.id());
                         for &(u, v) in &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                            let (panel_x, panel_y) = minimap::map_uv_to_panel(
+                                u,
+                                v,
+                                ui_ctx.camera_yaw,
+                                rect.width(),
+                                rect.height(),
+                            );
                             mesh.vertices.push(egui::epaint::Vertex {
                                 pos: egui::Pos2::new(
-                                    rect.left() + u * rect.width(),
-                                    rect.top() + v * rect.height(),
+                                    rect.left() + panel_x,
+                                    rect.top() + panel_y,
                                 ),
                                 uv: egui::pos2(u, v),
                                 color: egui::Color32::WHITE,
@@ -337,8 +339,7 @@ impl Panel for MinimapPanel {
                         mesh.add_triangle(0, 2, 3);
                         painter.add(egui::Shape::mesh(mesh));
 
-                        // Draw viewport quad: project 4 screen corners to world → minimap UV
-                        // (veil will be drawn after this quad is computed)
+                        // U-8: Draw viewport quad through the same screen-aligned projection
                         let aspect = ui_ctx.screen_dims.0 / ui_ctx.screen_dims.1;
                         let cam_vp = minimap::minimap_view_proj_matrix(
                             ui_ctx.camera_focus,
@@ -351,11 +352,14 @@ impl Panel for MinimapPanel {
                         for corner_screen in corners.iter() {
                             let world_xz = minimap::minimap_ground_under_cursor(cam_vp, *corner_screen, ui_ctx.screen_dims);
                             let uv = minimap::world_to_minimap_uv(world_xz, ui_ctx.world_dim);
-                            let screen_pos = egui::Pos2::new(
-                                rect.left() + uv.x * rect.width(),
-                                rect.top() + uv.y * rect.height(),
+                            let (panel_x, panel_y) = minimap::map_uv_to_panel(
+                                uv.x,
+                                uv.y,
+                                ui_ctx.camera_yaw,
+                                rect.width(),
+                                rect.height(),
                             );
-                            viewport_pts.push(screen_pos);
+                            viewport_pts.push(egui::Pos2::new(rect.left() + panel_x, rect.top() + panel_y));
                         }
                         // Draw veil outside the viewport quad (v1 parity)
                         if viewport_pts.len() == 4 {
@@ -368,15 +372,19 @@ impl Panel for MinimapPanel {
                             painter.add(egui::Shape::closed_line(viewport_pts, stroke));
                         }
 
-                        // Handle click to jump
+                        // U-8: Handle click to jump using the inverted screen-aligned projection
                         if response.clicked() {
                             if let Some(pos) = response.interact_pointer_pos() {
-                                let uv_x = (pos.x - rect.left()) / rect.width();
-                                let uv_y = (pos.y - rect.top()) / rect.height();
-                                let world_pos = minimap::minimap_uv_to_world(
-                                    glam::vec2(uv_x as f32, uv_y as f32),
-                                    ui_ctx.world_dim,
+                                let panel_x = pos.x - rect.left();
+                                let panel_y = pos.y - rect.top();
+                                let uv = minimap::panel_to_map_uv(
+                                    panel_x,
+                                    panel_y,
+                                    ui_ctx.camera_yaw,
+                                    rect.width(),
+                                    rect.height(),
                                 );
+                                let world_pos = minimap::minimap_uv_to_world(uv, ui_ctx.world_dim);
                                 ui_ctx.actions.push(UiAction::JumpCamera(world_pos));
                             }
                         }

@@ -113,3 +113,20 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   capture in the SAME frame AFTER drawing the scene and BEFORE `next_frame().await` (draw → capture →
   export → exit). And ALWAYS open the produced PNG with the Read tool before claiming it shows anything
   — a "verified" black file has now happened twice (R-13 F-B5, R-15a parity).
+
+- **`git fetch` via rtk prints "ok fetched" but remote-tracking refs stay STALE** (branch looks
+  rolled-back / PR looks CONFLICTING against a base ref that is actually behind) → Cause: the rtk
+  proxy wraps fetch, reports success, but the `refs/remotes/origin/*` update silently doesn't land
+  (observed twice in one session: u9-ui-remainder "lost" pushed commits; render-r12 base ref stuck
+  one merge behind). → What to do: trust `git ls-remote origin <branch>` for the true remote head;
+  force the ref explicitly with `git fetch origin +<branch>:refs/remotes/origin/<branch>` (inside a
+  bash script file); after any push, verify `ls-remote` == `rev-parse HEAD` before reasoning about
+  the remote state.
+
+- **egui panel ignores its `.anchor(...)` — clipped at right edge or invisible off-corner, and
+  flipping the offset sign does nothing** → Cause: TWO `egui::Area`s share one id (e.g. an outer
+  wrapper Area keyed by `panel.id()` plus the panel's own inner Area with the same string) — id
+  collision makes the outer `fixed_pos`/pivot win; right-side anchors break visibly, left-side ones
+  hide the bug by coincidence. → What to do: one Area per panel, unique ids; don't wrap self-anchoring
+  panels in positioning Areas (U-9 root cause, PR #465 b69b534 — two coder rounds were burned on
+  offset-sign flips before the collision was found).
