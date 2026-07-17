@@ -9,7 +9,7 @@ pub struct LegendPanel;
 impl Panel for LegendPanel {
     fn id(&self) -> &'static str { "legend" }
 
-    fn draw(&mut self, ctx: &egui::Context, _ui_ctx: &mut UiCtx) {
+    fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
         egui::Area::new(egui::Id::new("legend"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 180.0))
             .show(ctx, |ui| {
@@ -26,6 +26,11 @@ impl Panel for LegendPanel {
                     let colors = world::palette::MATERIAL_COLORS;
                     let names = world::palette::MATERIAL_NAMES;
                     for i in 0..colors.len() {
+                        // W-14: skip water row (index 8) in bare_mode, since water never renders in that mode
+                        if ui_ctx.bare_mode && i == 8 {
+                            continue;
+                        }
+
                         let rgb = colors[i];
                         let color = Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
                         let name = names[i];
