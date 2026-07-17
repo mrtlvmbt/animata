@@ -686,6 +686,7 @@ async fn main() {
                         }
                         input::InputEvent::ToggleTerrainKind => {}
                         input::InputEvent::RegenSeed => {}
+                        input::InputEvent::ToggleUiVisibility => {}
                     }
                 }
 
@@ -844,6 +845,9 @@ async fn main() {
                     input::InputEvent::RegenSeed => {
                         // Not used in benchmark mode
                     }
+                    input::InputEvent::ToggleUiVisibility => {
+                        // Not used in benchmark mode
+                    }
                 }
             }
 
@@ -902,6 +906,9 @@ async fn main() {
                         // Not used in benchmark mode
                     }
                     input::InputEvent::RegenSeed => {
+                        // Not used in benchmark mode
+                    }
+                    input::InputEvent::ToggleUiVisibility => {
                         // Not used in benchmark mode
                     }
                 }
@@ -1097,28 +1104,38 @@ async fn main() {
 
                     // Collect keyboard input events with gating.
                     // U-7: Skip input when regen loader modal is showing (gated by wants_keyboard_regen)
-                    if !wants_keyboard_regen && !ui_out.wants_keyboard {
-                        for ev in input::collect(&ui_out) {
-                            // Convert InputEvent to UiAction and collect for unified handling
-                            match ev {
-                                input::InputEvent::TogglePause => {
-                                    ui_actions.push(ui::UiAction::TogglePause);
-                                }
-                                input::InputEvent::StepOnce => {
-                                    ui_actions.push(ui::UiAction::StepOnce);
-                                }
-                                input::InputEvent::ToggleTerrainKind => {
-                                    ui_actions.push(ui::UiAction::ToggleTerrainKind);
-                                }
-                                // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
-                                input::InputEvent::RegenSeed => {
-                                    let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
-                                    if can_reseed {
-                                        // Trigger reseed with next seed (current+1)
-                                        ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                    // U-9: H key is NOT gated — it controls UI visibility
+                    let events = input::collect(&ui_out);
+                    for ev in events {
+                        match ev {
+                            // U-9: H key is never gated
+                            input::InputEvent::ToggleUiVisibility => {
+                                ui_actions.push(ui::UiAction::ToggleUiVisibility);
+                            }
+                            // Other inputs are gated by regen modal and UI focus
+                            _ if !wants_keyboard_regen && !ui_out.wants_keyboard => {
+                                match ev {
+                                    input::InputEvent::TogglePause => {
+                                        ui_actions.push(ui::UiAction::TogglePause);
                                     }
+                                    input::InputEvent::StepOnce => {
+                                        ui_actions.push(ui::UiAction::StepOnce);
+                                    }
+                                    input::InputEvent::ToggleTerrainKind => {
+                                        ui_actions.push(ui::UiAction::ToggleTerrainKind);
+                                    }
+                                    // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
+                                    input::InputEvent::RegenSeed => {
+                                        let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
+                                        if can_reseed {
+                                            // Trigger reseed with next seed (current+1)
+                                            ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
+                            _ => {}
                         }
                     }
                 });
@@ -1138,6 +1155,10 @@ async fn main() {
                         }
                         ui::UiAction::ToggleTerrainKind => {
                             use_cube_terrain = !use_cube_terrain;
+                        }
+                        // U-9: H key toggle panels visibility
+                        ui::UiAction::ToggleUiVisibility => {
+                            ui_root.toggle_visibility();
                         }
                         // U-3: Reseed — spawn async world build on worker, keep rendering old world
                         ui::UiAction::RegenSeed(target_seed) => {

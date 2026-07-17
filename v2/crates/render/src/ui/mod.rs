@@ -11,6 +11,7 @@ use macroquad::prelude::*;
 use sim_core::RenderSnapshot;
 use std::collections::HashMap;
 use sim_core::WorldView;
+use egui::{Color32, RichText, Stroke};
 
 /// UiOut: egui's pointer/keyboard wants from this frame.
 /// Used to gate camera input so UI interaction doesn't drive camera pan/rotate.
@@ -89,6 +90,8 @@ pub enum UiAction {
     RegenSeed(u64),
     /// U-5: Jump camera to a world position (x, z).
     JumpCamera(glam::Vec2),
+    /// U-9: H key toggle — hide/show all panels
+    ToggleUiVisibility,
 }
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
@@ -117,6 +120,10 @@ impl Default for HudCache {
 pub struct UiRoot {
     panels: Vec<Box<dyn Panel>>,
     pub cache: HudCache,
+    /// U-9: true if panels are visible, false if hidden by H toggle
+    pub panels_visible: bool,
+    /// U-9: timer for hide-hint display (ms elapsed since hide)
+    pub hide_hint_elapsed_ms: f32,
 }
 
 impl UiRoot {
@@ -124,6 +131,8 @@ impl UiRoot {
         UiRoot {
             panels: Vec::new(),
             cache: HudCache::new(),
+            panels_visible: true,
+            hide_hint_elapsed_ms: 0.0,
         }
     }
 
@@ -132,29 +141,85 @@ impl UiRoot {
         self.panels.push(panel);
     }
 
+    /// Toggle panel visibility (H key). Resets hide-hint timer.
+    pub fn toggle_visibility(&mut self) {
+        self.panels_visible = !self.panels_visible;
+        self.hide_hint_elapsed_ms = 0.0;  // Reset timer when toggling
+    }
+
     /// Draw all panels and return pointer/keyboard wants.
     /// Sets the cache pointer in UiCtx to our cache before drawing.
     pub fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) -> UiOut {
         // Set the cache pointer to point to our cache
         ui_ctx.cache = &mut self.cache as *mut HudCache;
 
-        for panel in &mut self.panels {
-            let anchor = panel.anchor();
-            let screen_size = ctx.screen_rect().size();
-            let pivot = anchor.pos(screen_size);
+        // Update hide-hint timer
+        if !self.panels_visible {
+            self.hide_hint_elapsed_ms += 16.0;  // ~60fps
+        }
 
-            egui::Area::new(panel.id().into())
-                .fixed_pos(pivot)
-                .pivot(egui::Align2::LEFT_TOP)
-                .show(ctx, |_| {
-                    panel.draw(ctx, ui_ctx);
+        // Draw regular panels only if visible
+        if self.panels_visible {
+            for panel in &mut self.panels {
+                let anchor = panel.anchor();
+                let screen_size = ctx.screen_rect().size();
+                let pivot = anchor.pos(screen_size);
+
+                egui::Area::new(panel.id().into())
+                    .fixed_pos(pivot)
+                    .pivot(egui::Align2::LEFT_TOP)
+                    .show(ctx, |_| {
+                        panel.draw(ctx, ui_ctx);
+                    });
+            }
+        }
+
+        // Draw hide-hint if panels are hidden and hint hasn't expired (2.5s = 2500ms)
+        if !self.panels_visible && self.hide_hint_elapsed_ms < 2500.0 {
+            let alpha_factor = if self.hide_hint_elapsed_ms < 200.0 {
+                self.hide_hint_elapsed_ms / 200.0
+            } else if self.hide_hint_elapsed_ms > 1800.0 {
+                ((2500.0 - self.hide_hint_elapsed_ms) / 700.0).max(0.0)
+            } else {
+                1.0
+            };
+
+            let hint_text = RichText::new("press H — интерфейс")
+                .font(theme::mono(10.0))
+                .color(theme::TEXT_LABEL);
+
+            egui::Area::new(egui::Id::new("hide_hint"))
+                .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(18.0, -18.0))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    let base_color = theme::straight(12, 15, 14, 153);
+                    let alpha = (base_color.a() as f32 * alpha_factor) as u8;
+                    let faded_bg = Color32::from_rgba_unmultiplied(
+                        base_color.r(), base_color.g(), base_color.b(), alpha
+                    );
+
+                    let border_color = theme::straight(255, 255, 255, 20);
+                    let border_alpha = (border_color.a() as f32 * alpha_factor) as u8;
+                    let faded_border = Color32::from_rgba_unmultiplied(
+                        border_color.r(), border_color.g(), border_color.b(), border_alpha
+                    );
+
+                    egui::Frame::NONE
+                        .fill(faded_bg)
+                        .stroke(Stroke::new(1.0, faded_border))
+                        .corner_radius(egui::CornerRadius::same(9))
+                        .inner_margin(egui::Margin::symmetric(12, 7))
+                        .show(ui, |ui| {
+                            ui.label(hint_text);
+                        });
                 });
         }
 
         // Compute pointer/keyboard wants from egui state.
+        // When panels are hidden, don't capture input
         UiOut {
-            wants_pointer: ctx.is_pointer_over_area() || ctx.wants_pointer_input(),
-            wants_keyboard: ctx.wants_keyboard_input(),
+            wants_pointer: self.panels_visible && (ctx.is_pointer_over_area() || ctx.wants_pointer_input()),
+            wants_keyboard: self.panels_visible && ctx.wants_keyboard_input(),
         }
     }
 }
