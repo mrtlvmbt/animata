@@ -55,7 +55,14 @@ mod world_spec;
 use camera::IsoCam;
 use macroquad::prelude::*;
 use sim_core::WorldView;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::Instant;
+use world_spec::{landform_flags, WorldSpec, WorldSource, Stage};
+use loader_state::{LoadState, AppPhase};
+use raw_chunk::{RawChunk, BuiltWorld};
+use terrain::TerrainChunk;
 
 // ── R-4 LOD tier thresholds (px_per_m-driven) ──────────────────────────────────────────────────────
 /// FAR tier: creatures are sub-pixel or nearly invisible (point/billboard). Triggers when px_per_m < 5.
@@ -68,6 +75,28 @@ const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 
 /// NEAR tier: creatures are minimal cell-type morphology (differentiated small shapes).
 /// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
+
+// ── U-2: World building and assembly helpers ─────────────────────────────────────────────────────────
+
+/// Convert a RawChunk (worker-thread-safe buffers) to a TerrainChunk (GPU-side Mesh).
+/// Called on the main thread after build_world completes.
+fn raw_chunk_to_terrain_chunk(raw: RawChunk) -> TerrainChunk {
+    let mesh = Mesh {
+        vertices: raw.vertices,
+        indices: raw.indices,
+        texture: None,
+    };
+    TerrainChunk {
+        mesh,
+        bounds: (raw.lo, raw.hi),
+    }
+}
+
+/// Convert all raw chunks to terrain chunks (GPU assembly).
+fn convert_raw_chunks(raw_chunks: Vec<RawChunk>) -> Vec<TerrainChunk> {
+    raw_chunks.into_iter().map(raw_chunk_to_terrain_chunk).collect()
+}
+
 fn window_conf() -> Conf {
     // R-13: Pre-parse args to detect --bench mode for vsync configuration
     let is_bench = std::env::args().any(|arg| arg == "--bench");
@@ -147,6 +176,8 @@ struct CliArgs {
     bare_mode: bool,
     /// R-14: `--height-scale <f32>`: override the height scale (default 0.2).
     height_scale_override: Option<f32>,
+    /// U-2: `--slow-load`: inject ~600ms delay per stage (for loader screenshot capture).
+    slow_load: bool,
 }
 
 fn parse_args() -> CliArgs {
@@ -161,6 +192,7 @@ fn parse_args() -> CliArgs {
     let mut retained = false;
     let mut bare_mode = false;
     let mut height_scale_override = None;
+    let mut slow_load = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -205,10 +237,13 @@ fn parse_args() -> CliArgs {
                 let v = args.next().expect("--height-scale requires a value");
                 height_scale_override = Some(v.parse().unwrap_or_else(|_| panic!("--height-scale expects f32, got {v:?}")));
             }
+            "--slow-load" => {
+                slow_load = true;
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -277,34 +312,6 @@ pub fn draw_gpu_terrain(
 // (`HMAX`=relief spread, `RESOURCE_BASE`=cap rescale magnitude for biome+edaphic-driven richness,
 // `WORLD_SALT`=seed permutation).
 
-/// R-17: Per-seed landform variety — each landform toggles independently from seed bits,
-/// allowing free mixing (volcanic + coastal for volcanic islands, volcanic + tectonic, etc).
-/// Uses splitmix64 hash with independent bit positions for each landform.
-/// Guard: never all-off (ensures maps are never flat/featureless).
-fn landform_flags(seed: u64) -> (bool, bool, bool, bool, bool) {
-    // Deterministic hash: splitmix64
-    let mut x = seed;
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
-    x ^= x >> 31;
-
-    // Extract independent bits for each landform (well-spaced bit positions)
-    let tect = (x >> 3) & 1 == 1;
-    let aeol = (x >> 13) & 1 == 1;
-    let volc = (x >> 23) & 1 == 1;
-    let glac = (x >> 33) & 1 == 1;
-    let coast = (x >> 43) & 1 == 1;
-
-    // Guard: never all-off (avoid flat/boring maps)
-    let (tect, aeol, volc, glac, coast) = if !(tect || aeol || volc || glac || coast) {
-        (true, aeol, volc, glac, coast)  // force tectonic if all others are off
-    } else {
-        (tect, aeol, volc, glac, coast)
-    };
-
-    (tect, aeol, volc, glac, coast)
-}
-
 #[macroquad::main(window_conf)]
 async fn main() {
     // macroquad's default per-draw-call buffer (10 000 verts / 5 000 indices) silently CLAMPS (drops
@@ -324,51 +331,46 @@ async fn main() {
 
     let cli_args = parse_args();
     let config = cli::default_config(cli_args.seed);
-    // R-8: `--dim` only applies in standalone — in sim mode the worker thread builds its OWN world
-    // from `config.econ.world_dim` (via `cli::build_sim`), so overriding it here alone would desync
-    // the render's terrain from the sim's, breaking the pinned-param contract below.
-    // The render's OWN WorldView (boxed so it can be either the native `ProcgenWorld` or a v1 dump).
-    // Built ONCE from the SAME (dim, hmax, resource_base, seed) tuple the sim worker uses — the single
-    // source of provenance the pinned-param contract above requires. W-6 WIRE: use `cli::HMAX`,
-    // `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The ProcgenWorld pipeline (integer
-    // relief + erosion + biome/edaphic + caps) runs once here and caches all per-cell fields — never
-    // re-run per frame or per query.
-    //
-    // Landform stages (tectonics/aeolian/volcanic/glacial/coastal, all default-off in the sim path):
-    // turn ON in STANDALONE only, to preview the full diverse-relief terragen (map_dump does the same).
-    // In sim mode they MUST stay off — the sim worker builds its world with all-off, and flipping only
-    // the render side would desync the pinned-param contract above.
-    //
-    // R-17: Standalone uses per-seed landform profiles for variety (6 archetypes via landform_profile).
-    // `--v1-dump <path>` REPLACES the ProcgenWorld with a v1-generated dump (carrying its OWN `dim`),
-    // holding THIS renderer constant to compare v1 vs v2 worldgen. On load error it falls back to
-    // ProcgenWorld. `--dim` only applies in standalone — see the module doc comment for why.
-    let make_procgen = |dim: i64| -> Box<dyn WorldView> {
-        let (tect, aeol, volc, glac, coast) = if cli_args.standalone {
-            landform_flags(config.seed)   // deterministic, seed-derived variety with free landform mixing
+
+    // U-2: Create WorldSpec (single source of truth for world building)
+    let spec = WorldSpec {
+        seed: cli_args.seed,
+        standalone: cli_args.standalone,
+        bare_mode: cli_args.bare_mode,
+        source: if let Some(path) = &cli_args.v1_dump {
+            WorldSource::Dump(std::path::PathBuf::from(path))
         } else {
-            (false, false, false, false, false)  // sim mode: all-off (unchanged)
-        };
-        Box::new(world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, tect, aeol, volc, glac, coast))
-    };
-    let default_dim = if cli_args.standalone { cli_args.dim_override.unwrap_or(config.econ.world_dim) } else { config.econ.world_dim };
-    let (world_dim, world): (i64, Box<dyn WorldView>) = match &cli_args.v1_dump {
-        Some(path) => match dump_world::DumpWorld::load(path) {
-            Ok(w) => {
-                let dim = w.dim;
-                println!("[v1-dump] loaded {path}: dim {dim} — drawing v1 worldgen in the v2 renderer");
-                (dim, Box::new(w))
-            }
-            Err(e) => {
-                eprintln!("[v1-dump] {e}; falling back to ProcgenWorld");
-                (default_dim, make_procgen(default_dim))
-            }
+            WorldSource::Procgen { dim_request: cli_args.dim_override }
         },
-        None => (default_dim, make_procgen(default_dim)),
     };
-    // Build terrain meshes (palette v2: material HUE × height VALUE + jitter).
-    let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), config.seed, cli_args.bare_mode);
-    let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), config.seed, cli_args.bare_mode);
+
+    // U-2: For harnesses (screenshot/bench), build world inline before their loops
+    // For app path, we'll spawn a worker thread below
+    let is_harness = cli_args.screenshot.is_some() || cli_args.bench;
+
+    let (mut hex_terrain_chunks, mut cube_terrain_chunks, world_dim, world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
+        // Harnesses: build_world inline (synchronous, no loader)
+        let mut on_stage = |_stage: Stage| true;  // No-op callback for harnesses
+        let built = world_builder::build_world(&spec, on_stage).expect("build_world failed");
+        let world_dim = built.dim;
+        let world = built.world;
+        let hex_chunks = convert_raw_chunks(built.hex);
+        let cube_chunks = convert_raw_chunks(built.cube);
+        (hex_chunks, cube_chunks, world_dim, world)
+    } else {
+        // App path: will build on worker thread below
+        // For now, create a dummy world to initialize loop variables
+        // This will be replaced when worker completes
+        let temp_dim = config.econ.world_dim;
+        let (tect, aeol, volc, glac, coast) = landform_flags(config.seed, cli_args.standalone);
+        let temp_world: Box<dyn WorldView> = Box::new(world::ProcgenWorld::new(
+            temp_dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None,
+            tect, aeol, volc, glac, coast
+        ));
+        let temp_hex = Vec::new();
+        let temp_cube = Vec::new();
+        (temp_hex, temp_cube, temp_dim, temp_world)
+    };
 
     // R-15a: Retained-buffer GPU terrain initialization (if --retained).
     let (mut gpu_hex_chunks, mut gpu_cube_chunks, gpu_pipeline) = if cli_args.retained {
@@ -413,6 +415,36 @@ async fn main() {
     if cli_args.screenshot.is_some() || cli_args.bench {
         cli_args.cam_preset.apply_to_camera(&mut camera, center, world_span);
     }
+
+    // U-2: App path: spawn world builder on worker thread
+    let (mut app_phase, rx_built_world): (AppPhase, mpsc::Receiver<BuiltWorld>) = if !is_harness {
+        let load_state = LoadState::new(cli_args.seed);
+        let spec_worker = spec.clone();
+        let slow_load_flag = cli_args.slow_load;
+
+        let (tx, rx) = mpsc::channel();
+
+        let load_clone = load_state.clone();
+
+        let _ = std::thread::spawn(move || {
+            let mut on_stage = |stage: Stage| {
+                load_clone.set_stage(stage);
+                if slow_load_flag {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                }
+                true
+            };
+            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage) {
+                load_clone.mark_done();
+                let _ = tx.send(built);
+            }
+        });
+
+        (AppPhase::Loading(load_state), rx)
+    } else {
+        // Harnesses don't use AppPhase
+        (AppPhase::Running, mpsc::channel().1)
+    };
 
     // R-13: Screenshot mode — render warmup frames, then capture on the final frame.
     if let Some(screenshot_path) = &cli_args.screenshot {
@@ -719,7 +751,7 @@ mod tests {
     fn landform_variety_seeds_coverage() {
         let mut combos = std::collections::HashSet::new();
         for seed in 1..=8 {
-            combos.insert(landform_flags(seed as u64));
+            combos.insert(landform_flags(seed as u64, true));  // standalone mode for variety
         }
         assert!(combos.len() >= 5, "variety gallery requires ≥5 distinct landform combos, got {}", combos.len());
         // Verify at least one mix (multiple landforms on same seed)
