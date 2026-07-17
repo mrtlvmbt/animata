@@ -12,7 +12,7 @@ impl Panel for LegendPanel {
 
     fn draw(&mut self, ctx: &egui::Context, _ui_ctx: &mut UiCtx) {
         egui::Area::new(egui::Id::new("legend"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 420.0))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(18.0, 420.0))
             .show(ctx, |ui| {
                 theme::themed_frame(theme::FrameKind::Vitals).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y = 6.0;

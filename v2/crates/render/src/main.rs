@@ -290,7 +290,10 @@ fn parse_args() -> CliArgs {
                 ui_state = match v.as_str() {
                     "visible" => true,
                     "hidden" => false,
-                    other => panic!("--ui-state expects 'visible' or 'hidden', got {other:?}"),
+                    other => {
+                        eprintln!("render: --ui-state '{}' not recognized (use 'visible' or 'hidden'), defaulting to visible", other);
+                        true  // Default to visible
+                    }
                 };
             }
             other => eprintln!("render: ignoring unknown arg {other:?}"),

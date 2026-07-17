@@ -19,6 +19,7 @@ impl Panel for VitalsPanel {
         egui::Area::new(egui::Id::new("vitals"))
             .anchor(egui::Align2::LEFT_TOP, egui::vec2(18.0, 18.0))
             .show(ctx, |ui| {
+                ui.set_min_width(180.0);  // Prevent SIZE value from wrapping
                 theme::themed_frame(theme::FrameKind::Vitals).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 16.0;
