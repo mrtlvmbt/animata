@@ -147,7 +147,7 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             y += 10.0 + 13.0;
 
             // --- STEP NAME (Russian label) ---
-            let stage_label = if step_index < STAGES.len() {
+            let stage_label = if step_index < 14 {
                 Stage::from_u8(step_index as u8)
                     .map(|s| s.label_ru())
                     .unwrap_or("Неизвестно")
