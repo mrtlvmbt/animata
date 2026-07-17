@@ -657,6 +657,9 @@ async fn main() {
                     ui::loader::draw(ctx, load_state);
                 });
 
+                // Flush egui to framebuffer (critical: must happen before capture or get_screen_data)
+                egui_macroquad::draw();
+
                 // U-2: Capture loader screenshot at frame ~20 (stable mid-load state)
                 if let Some(ref screenshot_path) = cli_args.screenshot_loader {
                     if loading_frame_count == 20 {
