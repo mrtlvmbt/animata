@@ -1,5 +1,12 @@
-task: #465 u9-ui-remainder — fix panel anchor collisions + layout adjustment
-phase: code (PASS) + critic review (PASS) + layout adjustment (PASS) + CI (awaiting)
-blocked_on: CI jobs (test-x86, golden-arm64, v2-sim-x86, v2-golden-arm64)
-next: await ci-report.sh green, then done-check.sh, then final STATUS
-updated: 2026-07-17 14:50
+task: W-11: ridged mountain belts (incl. W-0 LandformFlags struct) - #466
+phase: code (critic fixes applied) + PR ready
+blocked_on: PR creation + CI
+next: create PR → run CI → await PASS → merge
+updated: 2026-07-17 15:00
+
+## Progress
+Critic found 3 bugs (F1/F2/F3) in flags usage. Fixed:
+- F1: Use LandformFlags::new() with enable parameters + clamps (lib.rs)
+- F2: Widen de_needle_pass gate to all 7 flags (caps.rs:862)
+- F3: Remove redundant flag condition from talus_step_final (caps.rs:853)
+Commits 0b75a2a pushed. Compilation: PASS.
