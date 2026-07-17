@@ -465,7 +465,6 @@ async fn main() {
     ui_root.push(Box::new(ui::vitals::VitalsPanel));
     ui_root.push(Box::new(ui::transport::TransportPanel));
     ui_root.push(Box::new(ui::rail::ControlRail::new()));
-    ui_root.push(Box::new(ui::toast::ToastPanel::new()));
     ui_root.push(Box::new(ui::legend::LegendPanel));
     ui_root.push(Box::new(ui::MinimapPanel));
 
