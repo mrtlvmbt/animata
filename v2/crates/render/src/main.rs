@@ -44,9 +44,13 @@ mod dump_world;
 mod gpu_terrain;
 mod hex;
 mod input;
+mod loader_state;
+mod raw_chunk;
 mod terrain;
 mod terrain_cube;
 mod ui;
+mod world_builder;
+mod world_spec;
 
 use camera::IsoCam;
 use macroquad::prelude::*;
