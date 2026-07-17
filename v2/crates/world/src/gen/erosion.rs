@@ -196,10 +196,11 @@ const FBM_MAX: i64 = 15 * 65536;  // 983040: (8+4+2+1) * HASH_SCALE
 
 /// W-11: Ridge field scaling denominator. Derived to keep |ridge_delta| in tens of units, not hmax.
 /// Fold term (2*ridged - MAX) ranges [−32768, +32768]; with RIDGE_AMP * mountainness,
-/// max |delta| before RIDGE_SCALE division is approximately RIDGE_AMP_NUM/DEN * 32768 * mountainness.
-/// For mountainness~256 and candidate 25/10: ≈250*32768*256 / (10*RIDGE_SCALE) = tens when RIDGE_SCALE ≈ 200.
-/// Target: p99(|delta|) ≤ hmax/2 (tens of units for typical hmax=200); test validates this bound.
-const RIDGE_SCALE: i64 = 200;
+/// max |delta| before RIDGE_SCALE division: RIDGE_AMP_NUM/DEN * 32768 * mountainness.
+/// Worst case (amp=40/10, mountainness=256): (40*32768*256)/(10*RIDGE_SCALE) = 33,554,432/RIDGE_SCALE.
+/// Target: p99(|delta|) ≤ hmax/2 = 100 (tens of units for hmax=200).
+/// Solution: RIDGE_SCALE=500,000 → typical ~10 units, worst ~67 units, p99 in range.
+const RIDGE_SCALE: i64 = 500_000;
 
 #[inline]
 const fn linear_index(x: usize, z: usize, dim: usize) -> usize {
