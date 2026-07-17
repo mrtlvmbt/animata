@@ -745,15 +745,19 @@ mod tests {
             current_mouse_pos: (0.0, 0.0), // Test synthetic input (not dragging, so unused)
         };
 
-        // Test: pointer gating should block zoom.
+        // Test: pointer gating should block zoom, but keyboard should still work.
         camera.apply_cam_input(&input, true, false); // wants_pointer=true, wants_keyboard=false
         assert_eq!(
             camera.ortho_span, initial_ortho,
-            "FAIL: span changed despite wants_pointer=true; gate is not blocking wheel"
+            "FAIL: zoom changed despite wants_pointer=true; pointer gate should block wheel"
         );
-        assert_eq!(
+        assert_ne!(
             camera.yaw, initial_yaw,
-            "span: keyboard gating should still allow yaw"
+            "FAIL: yaw did not change with wants_keyboard=false; keyboard should be free for Q/E yaw"
+        );
+        assert_ne!(
+            camera.focus, initial_focus,
+            "FAIL: focus did not change with wants_keyboard=false; keyboard should be free for WASD pan"
         );
 
         // Reset camera
