@@ -175,12 +175,18 @@ const RIDGE_WARP_SALT: u64 = 0x5741_5250_5F52_4944; // "WARP_RID" (ASCII, folded
 /// Implementer's call, documented, locked by test coverage.
 const BELT_HALF_WIDTH: i64 = 2;
 
-/// W-11: Ridge amplitude numerator and denominator. The ridge height delta is scaled as
-/// `(RIDGE_AMP * mask * (2*ridged - MAX)) / SCALE`. Implementer's call — determines the visual
-/// prominence of ridges. Const-assert-coupled to W-9 margins (MAX_LOCAL_STEP_FINAL pattern) so
-/// final anti-spike gate holds.
-const RIDGE_AMP_NUM: i64 = 25;
-const RIDGE_AMP_DEN: i64 = 10;
+/// W-11: Ridge amplitude numerator and denominator candidates. The ridge height delta is scaled as
+/// `(RIDGE_AMP * mask * (2*ridged - MAX)) / SCALE`. RIDGE_AMP affects visual prominence and must
+/// stay within bounds w.r.t. W-9 margins (MAX_SPIKE_FINAL=12, NEEDLE_MARGIN=30); coupling formula
+/// requires PM clarification. Flip ACTIVE_RIDGE_AMP_INDEX to select a candidate for gallery build.
+const RIDGE_AMP_CANDIDATES: [(i64, i64); 3] = [
+    (15, 10), // Conservative: amplitude 1.5x MAX/SCALE
+    (25, 10), // Default: amplitude 2.5x MAX/SCALE (current)
+    (40, 10), // Aggressive: amplitude 4.0x MAX/SCALE
+];
+const ACTIVE_RIDGE_AMP_INDEX: usize = 1; // Default = index 1 (25/10)
+const RIDGE_AMP_NUM: i64 = RIDGE_AMP_CANDIDATES[ACTIVE_RIDGE_AMP_INDEX].0;
+const RIDGE_AMP_DEN: i64 = RIDGE_AMP_CANDIDATES[ACTIVE_RIDGE_AMP_INDEX].1;
 
 /// W-11: Divisor for ridge field scaling. Used to bring raw fbm values into a comparable range
 /// with height deltas.
