@@ -64,6 +64,21 @@ const FAULT_STEP_DEN: i64 = 12;
 /// swallow the whole map).
 const FAULT_BAND_HALFWIDTH: i64 = 2;
 
+/// W-13: Fault-space domain warp amplitude candidates (cells at dim=512 baseline).
+/// The warp deforms fault traces from infinite straight lines into smooth curved (fractal, multi-octave)
+/// traces. Larger amplitude = more dramatic curvature. User selects the gallery verdict at intake.
+/// Coder ships all candidates, only ACTIVE_WARP_AMP_INDEX is used in production.
+const WARP_AMP_CANDIDATES: &[i64] = &[
+    12,  // Conservative: moderate curvature (candidate 0)
+    18,  // Default: strong curvature (candidate 1)  [ACTIVE, user-selectable]
+    24,  // Aggressive: very pronounced curvature (candidate 2)
+];
+const ACTIVE_WARP_AMP_INDEX: usize = 1; // Default = candidate 1 (18 cells at dim=512)
+
+/// W-13: Salt distinguishing the fault warp noise stream from tectonics and other noise sources.
+/// Decorrelates warp field from fault placement, height, and resistance (same pattern as RESISTANCE_SALT).
+const FAULT_WARP_SALT: u64 = 0x5741_5250_4641_554C; // "WARPFAUL" (ASCII, folded)
+
 /// One fault line: an integer point + direction (defines an INFINITE line, never a bounded segment
 /// — see the module doc's linearity proof), a cached squared direction length (avoids recomputing
 /// `dx*dx+dz*dz` per cell), and a `polarity` (`+1`/`-1`) deciding which side of the line is uplifted
@@ -99,6 +114,58 @@ pub fn build_faults(seed: u64, dim: usize) -> Vec<Fault> {
     (0..N_FAULTS).map(|i| fault_at(i, seed, dim)).collect()
 }
 
+/// W-13: Fault-space domain warp field — de-straighten fault traces by warping query coordinates.
+/// Three octaves of value_noise with dim-scaled amplitude, applied to both x and z independently
+/// (own salt FAULT_WARP_SALT to decorrelate from other noise streams). Returns `(wx, wz)` offsets
+/// in cells, wrapping-free (applied to i64 coords fed to line math — no grid indexing clamp).
+///
+/// **Warp formula:**
+/// - Base period = dim / 4 (octave 0)
+/// - 3 octaves (halving amplitude per octave: 1.0, 0.5, 0.25 as fractions of `WARP_AMP_BASE`)
+/// - Per-octave fold to [-1, 1] range (max amplitude), then scaled by `WARP_AMP` (dim-dependent)
+/// - `WARP_AMP = (dim >> 6) + 2` cells at dim=512 gives ~10 cells; at dim=256 gives ~6 cells
+///
+/// **Warp candidates & ACTIVE index:** [`WARP_AMP_CANDIDATES`] + [`ACTIVE_WARP_AMP_INDEX`],
+/// PM selects gallery before intake — coder ships all candidates, only the active one is used in production.
+pub fn fault_warp_at(x: i64, z: i64, seed: u64, dim: usize) -> (i64, i64) {
+    use crate::gen::height::value_noise_octave;
+
+    let dim_i64 = dim as i64;
+    let base_period = (dim_i64 / 4).max(1);
+    let salted_seed_x = seed ^ FAULT_WARP_SALT ^ 0x5841; // "XA" (ASCII, for x-component)
+    let salted_seed_z = seed ^ FAULT_WARP_SALT ^ 0x5A41; // "ZA" (ASCII, for z-component)
+
+    // Compute warp for x and z independently
+    let mut wx = 0i64;
+    let mut wz = 0i64;
+
+    let mut period = base_period;
+    let mut amp = 65536i64; // Start with half the value_noise_octave range
+
+    for octave in 0..3 {
+        // X-component warp
+        let nx = value_noise_octave(x, z, period, salted_seed_x, octave);
+        let folded_x = 65536 - ((2 * nx - 65536).abs()).min(65536);
+        wx += (folded_x * amp) / 65536;
+
+        // Z-component warp (decorrelated from x)
+        let nz = value_noise_octave(z, x, period, salted_seed_z, octave);
+        let folded_z = 65536 - ((2 * nz - 65536).abs()).min(65536);
+        wz += (folded_z * amp) / 65536;
+
+        period = (period / 2).max(1);
+        amp >>= 1; // Halve amplitude each octave
+    }
+
+    // Scale by WARP_AMP (selected candidate is applied by caller; this function returns raw octave sum)
+    // Normalize to [-WARP_AMP_BASE, WARP_AMP_BASE] first
+    let warp_scale = WARP_AMP_CANDIDATES[ACTIVE_WARP_AMP_INDEX];
+    wx = (wx * warp_scale) / 65536;
+    wz = (wz * warp_scale) / 65536;
+
+    (wx, wz)
+}
+
 /// Signed 2D cross product of `(x,z) − (px,pz)` against the fault's direction — see the module doc
 /// for the geometric meaning (sign = side, magnitude ∝ perpendicular distance × direction length).
 #[inline]
@@ -132,6 +199,26 @@ pub fn is_in_fault_band(x: i64, z: i64, faults: &[Fault]) -> bool {
         let c = cross(f, x, z);
         c * c <= half_sq * f.dlen_sq
     })
+}
+
+/// W-13: Compute the perpendicular distance from `(x, z)` to the nearest fault line using the
+/// analytic integer point-to-line formula: `d² = cross² / dlen_sq`, returning `isqrt(d²)`.
+/// Called by erosion.rs's band_ramp_at to compute distance ramps at warped coordinates.
+pub fn fault_min_distance(x: i64, z: i64, faults: &[Fault]) -> i64 {
+    use sim_core::isqrt;
+
+    let mut min_dist = i64::MAX;
+
+    for f in faults {
+        let c = cross(f, x, z);
+        let c_sq = c * c;
+        // d² = cross² / dlen_sq
+        let d_sq = c_sq / f.dlen_sq; // Integer division
+        let d = isqrt(d_sq);
+        min_dist = min_dist.min(d);
+    }
+
+    min_dist
 }
 
 #[cfg(test)]

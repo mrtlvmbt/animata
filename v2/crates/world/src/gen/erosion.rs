@@ -170,10 +170,11 @@ const RIDGE_SEED_SALT: u64 = 0x5249_4447_4553_5F30; // "RIDGES_0" (ASCII, folded
 /// coordinates, kept independent from ridge field itself.
 const RIDGE_WARP_SALT: u64 = 0x5741_5250_5F52_4944; // "WARP_RID" (ASCII, folded)
 
-/// W-11: Fault-band belt half-width (integer D8 distance ramp in cells). Determines the perpendicular
-/// distance over which the `band_ramp` decays from 1 to 0 when moving away from a fault band.
+/// W-13: Fault-band belt half-width (integer D8 distance ramp in cells). Widened from 2 to 4
+/// to support curved warped belt traces (straight belt was too thin to read visually as a ridge lineament).
+/// Determines the perpendicular distance over which the `band_ramp` decays from 1 to 0 when moving away from a fault band.
 /// Implementer's call, documented, locked by test coverage.
-const BELT_HALF_WIDTH: i64 = 2;
+const BELT_HALF_WIDTH: i64 = 4;
 
 /// W-11: Ridge amplitude numerator and denominator candidates. The ridge height delta is scaled as
 /// `(RIDGE_AMP * mask * (2*ridged - MAX)) / SCALE`. RIDGE_AMP affects visual prominence and must
@@ -659,41 +660,65 @@ fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, res
     ErosionState { dim, height, surface_material, drainage, export_total }
 }
 
-/// W-11 ridge helper: compute raw unclamped fBm value at position (x, z) for ridge field.
-/// Uses value_noise (same interpolation as height.rs) but with RIDGE_SEED_SALT for decorrelation.
-fn ridge_fbm_at(x: i64, z: i64, seed: u64) -> i64 {
-    use crate::gen::height::{value_noise_octave};
-    let mut total: i64 = 0;
-    let mut amplitude = 8i64; // Start amplitude (same pattern as height.rs)
-    let mut period = 64i64;  // Base period
+/// W-13: Ridge field as a ridged multifractal — per-octave fold + Musgrave gain (fixed-point).
+/// Folds each octave BEFORE summation (fold_i = HALF - |2·n_i - HALF|) and weights octave i by the
+/// previous octave's folded value (crests grow sub-ridges, flats stay calm). Returns the READY
+/// ridged field normalized to [0, 32768] — exactly what the delta formula consumes (no inline fold).
+/// **SINGLE fold implementation** (not a raw fbm; the inline re-fold at the call site must be removed).
+/// Made public for testing (tests probe the field directly).
+pub fn ridge_fbm_at(x: i64, z: i64, seed: u64) -> i64 {
+    use crate::gen::height::value_noise_octave;
+
+    const HALF: i64 = 65536 / 2; // 32768, for folding value_noise_octave range [0, 65536)
+    const MAX_FOLDED: i64 = 32768; // Max of the folded range
+
     let salted_seed = seed ^ RIDGE_SEED_SALT;
-    for _o in 0..4 {
-        // 4 octaves, matching height.rs
-        let n = value_noise_octave(x, z, period, salted_seed, 0); // octave 0 for each call
-        total += amplitude * n;
-        amplitude >>= 1;
+    let mut total: i64 = 0;
+    let mut amplitude = 8i64; // Start amplitude
+    let mut period = 64i64; // Base period
+    let mut gain = 256i64; // Musgrave gain weight for this octave (fixed-point /256)
+
+    for octave in 0..4 {
+        // Interpolated noise value [0, 65536)
+        let n = value_noise_octave(x, z, period, salted_seed, octave);
+
+        // Per-octave fold: fold_i = HALF - |2·n_i - HALF|
+        // This produces a ridged ridge pattern (peaks at n=0 and n=HALF)
+        let folded = HALF - ((2 * n - 65536).abs().min(65536));
+
+        // Weight by amplitude AND by Musgrave gain (previous octave's folded value)
+        let weighted = (folded * amplitude * gain) / (256 * 65536);
+        total += weighted;
+
+        // Update for next octave
+        amplitude >>= 1; // Halve amplitude
         period = (period / 2).max(1);
+        // Gain for next octave = folded value of this octave (Musgrave: crests grow sub-ridges)
+        gain = folded * 256 / HALF; // Scale back to fixed-point denominator 256
     }
-    total
+
+    // Clamp and normalize to [0, 32768]
+    total.max(0).min(MAX_FOLDED)
 }
 
-/// W-11 ridge helper: compute ridge height delta with parameterizable amplitude.
-/// Takes raw FBM and amplitude candidates; returns unclamped height delta.
+/// W-13: Compute ridge height delta with parameterizable amplitude.
+/// Takes ALREADY-RIDGED field (from ridge_fbm_at, in [0,32768]) — no internal normalization or fold.
+/// Single fold implementation: the fold is IN ridge_fbm_at, not here. The delta formula remains unchanged:
+/// `delta = (RIDGE_AMP * mountainness * (2*r - MAX)) / SCALE`.
 /// Exposed for testing different amplitude values without recompilation.
+/// **Signature change (D3):** `ridged: i64` (already-folded, [0,32768]) replaces `raw_fbm: i64`.
 pub fn ridge_delta_compute(
-    raw_fbm: i64,
+    ridged: i64,
     mountainness: i64,
     ridge_amp_num: i64,
     ridge_amp_den: i64,
     hmax: i64,
 ) -> i64 {
-    // Normalize raw_fbm to [0, 32768] BEFORE the fold to avoid saturation
-    let fbm_norm = (raw_fbm.max(0) * 32768) / FBM_MAX;
     const MAX: i64 = 32768;
-    let ridged = (MAX - ((2 * fbm_norm - MAX).abs())).max(0);
     // Apply ridge height: h += (RIDGE_AMP * mountainness * (2*r - MAX)) / SCALE
+    // ridged is already in [0, 32768], so (2*ridged - MAX) ranges [-32768, +32768]
     let ridge_delta = (ridge_amp_num * mountainness * (2 * ridged - MAX)) / (ridge_amp_den * RIDGE_SCALE);
-    ridge_delta.clamp(-(hmax), hmax) // Return unclamped delta for inspection
+    ridge_delta.clamp(-(hmax), hmax)
 }
 
 /// W-11 ridge helper: compute warp offsets using low-octave fbm.
@@ -706,28 +731,23 @@ fn ridge_warp_at(x: i64, z: i64, seed: u64) -> (i64, i64) {
     (dx, dz)
 }
 
-/// W-11 ridge helper: compute band-ramp mask (D8 distance decay from fault band).
-/// Returns ramp value in [0, 256] (fixed-point 256 = 1.0).
-fn band_ramp_at(x: usize, z: usize, dim: usize, faults: &[crate::gen::tectonics::Fault]) -> i64 {
-    // BFS/distance to nearest fault band cell
-    let mut dist = i64::MAX;
-    for fz in 0..dim {
-        for fx in 0..dim {
-            if crate::gen::tectonics::is_in_fault_band(fx as i64, fz as i64, faults) {
-                let dx = ((x as i64) - (fx as i64)).abs();
-                let dz = ((z as i64) - (fz as i64)).abs();
-                let d8_dist = dx.max(dz); // Chebyshev/D8 distance
-                dist = dist.min(d8_dist);
-            }
-        }
-    }
-    if dist == 0 {
+/// W-13: Analytic band-ramp mask (O(1) per cell, kills O(dim⁴) defect).
+/// Returns ramp value in [0, 256] (fixed-point 256 = 1.0). Computes integer distance from the
+/// warped point to the NEAREST fault line using the analytic point-to-line formula (via
+/// tectonics::fault_min_distance). Linear ramp: 256 at dist=0, 0 at dist=BELT_HALF_WIDTH.
+/// **D2 change:** replaces O(dim²) grid scan with O(1) per-cell distance calculation.
+/// All three fault consumers (scarp delta, resistance band, ridge belt distance) evaluate at the
+/// WARPED coordinates (passed by the caller in erosion.rs).
+fn band_ramp_at(x: i64, z: i64, faults: &[crate::gen::tectonics::Fault]) -> i64 {
+    let min_dist = crate::gen::tectonics::fault_min_distance(x, z, faults);
+
+    if min_dist == 0 {
         256
-    } else if dist > BELT_HALF_WIDTH {
+    } else if min_dist > BELT_HALF_WIDTH {
         0
     } else {
         // Linear ramp: 256 at dist=0, 0 at dist=BELT_HALF_WIDTH
-        (256 * (BELT_HALF_WIDTH - dist)) / BELT_HALF_WIDTH
+        (256 * (BELT_HALF_WIDTH - min_dist)) / BELT_HALF_WIDTH
     }
 }
 
@@ -785,7 +805,11 @@ pub fn erode_with_tectonics(
             for z in 0..dim {
                 for x in 0..dim {
                     let idx = linear_index(x, z, dim);
-                    let delta = crate::gen::tectonics::fault_scarp_delta(x as i64, z as i64, &faults, hmax);
+                    // W-13: Query at warped coordinates (fault traces become curved via domain warp)
+                    let (wx, wz) = crate::gen::tectonics::fault_warp_at(x as i64, z as i64, seed, dim);
+                    let warped_x = (x as i64) + wx;
+                    let warped_z = (z as i64) + wz;
+                    let delta = crate::gen::tectonics::fault_scarp_delta(warped_x, warped_z, &faults, hmax);
                     height[idx] = (height[idx] + delta).clamp(0, hmax);
                 }
             }
@@ -795,14 +819,18 @@ pub fn erode_with_tectonics(
             for z in 0..dim {
                 for x in 0..dim {
                     let idx = linear_index(x, z, dim);
-                    if crate::gen::tectonics::is_in_fault_band(x as i64, z as i64, &faults) {
+                    // W-13: Query at warped coordinates (resistance band follows the same curved trace)
+                    let (wx, wz) = crate::gen::tectonics::fault_warp_at(x as i64, z as i64, seed, dim);
+                    let warped_x = (x as i64) + wx;
+                    let warped_z = (z as i64) + wz;
+                    if crate::gen::tectonics::is_in_fault_band(warped_x, warped_z, &faults) {
                         resistance[idx] = N_RESIST_CLASSES - 1; // hardest class — resistant fault stands proud (module doc, RnD 17 §3)
                     }
                 }
             }
         }
 
-        // W-11: Ridge stage (applied inside the fault scope to preserve byte-identity when faults are off)
+        // W-13: Ridge stage (applied inside the fault scope to preserve byte-identity when faults are off)
         if enable_ridges {
             // Compute histogram percentiles (p50, p80) on post-uplift height
             let mut height_sorted = height.clone();
@@ -816,8 +844,12 @@ pub fn erode_with_tectonics(
                 for x in 0..dim {
                     let idx = linear_index(x, z, dim);
 
-                    // Band ramp: 1 at fault band, 0 beyond BELT_HALF_WIDTH
-                    let band_r = band_ramp_at(x, z, dim, &faults);
+                    // W-13: Band ramp with analytic distance (O(1) per cell, kills O(dim⁴) defect).
+                    // Query at warped coordinates — belt distance warped too, following the curved fault trace.
+                    let (fault_wx, fault_wz) = crate::gen::tectonics::fault_warp_at(x as i64, z as i64, seed, dim);
+                    let warped_fault_x = (x as i64) + fault_wx;
+                    let warped_fault_z = (z as i64) + fault_wz;
+                    let band_r = band_ramp_at(warped_fault_x, warped_fault_z, &faults);
                     if band_r == 0 {
                         continue; // Skip cells completely outside belt
                     }
@@ -841,20 +873,18 @@ pub fn erode_with_tectonics(
                         continue;
                     }
 
-                    // Apply warp to sample coordinates
+                    // Apply warp to sample coordinates for ridge texture
                     let (warp_x, warp_z) = ridge_warp_at(x as i64, z as i64, seed);
                     let sample_x = (x as i64) + warp_x;
                     let sample_z = (z as i64) + warp_z;
 
-                    // Ridged field: r = MAX - |2*f - MAX| where f is normalized fbm in [0, MAX]
-                    let raw_fbm = ridge_fbm_at(sample_x, sample_z, seed);
-                    // Normalize raw_fbm to [0, 32768] BEFORE the fold to avoid saturation
-                    let fbm_norm = (raw_fbm.max(0) * 32768) / FBM_MAX;
-                    const MAX: i64 = 32768;
-                    let ridged = (MAX - ((2 * fbm_norm - MAX).abs())).max(0);
+                    // W-13: `ridge_fbm_at` returns READY ridged field [0, 32768] (already folded).
+                    // Single fold implementation: fold is IN ridge_fbm_at, not here.
+                    // Route directly to ridge_delta_compute (no inline normalize+fold).
+                    let ridged = ridge_fbm_at(sample_x, sample_z, seed);
 
                     // Apply ridge height: h += (RIDGE_AMP * mountainness * (2*r - MAX)) / SCALE
-                    let ridge_delta = (RIDGE_AMP_NUM * mountainness * (2 * ridged - MAX)) / (RIDGE_AMP_DEN * RIDGE_SCALE);
+                    let ridge_delta = ridge_delta_compute(ridged, mountainness, RIDGE_AMP_NUM, RIDGE_AMP_DEN, hmax);
                     height[idx] = (height[idx] + ridge_delta).clamp(0, hmax);
                 }
             }
