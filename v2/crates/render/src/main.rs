@@ -180,6 +180,8 @@ struct CliArgs {
     slow_load: bool,
     /// U-2: `--screenshot-loader <path>`: capture loader modal mid-build, save PNG, exit.
     screenshot_loader: Option<String>,
+    /// U-3: `--screenshot-chip <path>`: capture regen chip mid-build, save PNG, exit.
+    screenshot_chip: Option<String>,
     /// U-3: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
     regen_to: Option<u64>,
 }
@@ -198,6 +200,7 @@ fn parse_args() -> CliArgs {
     let mut height_scale_override = None;
     let mut slow_load = false;
     let mut screenshot_loader = None;
+    let mut screenshot_chip = None;
     let mut regen_to = None;
 
     let mut args = std::env::args().skip(1);
@@ -250,6 +253,10 @@ fn parse_args() -> CliArgs {
                 screenshot_loader = Some(args.next().expect("--screenshot-loader requires a path"));
                 standalone = true;  // loader implies standalone
             }
+            "--screenshot-chip" => {
+                screenshot_chip = Some(args.next().expect("--screenshot-chip requires a path"));
+                standalone = true;  // chip implies standalone
+            }
             "--regen-to" => {
                 let v = args.next().expect("--regen-to requires a u64 seed value");
                 regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
@@ -258,7 +265,7 @@ fn parse_args() -> CliArgs {
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -348,7 +355,7 @@ async fn main() {
     let config = cli::default_config(cli_args.seed);
 
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
-    let spec = WorldSpec {
+    let mut spec = WorldSpec {
         seed: cli_args.seed,
         standalone: cli_args.standalone,
         bare_mode: cli_args.bare_mode,
@@ -418,9 +425,10 @@ async fn main() {
     // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
     let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
 
-    // U-1: Initialize UI root with DebugPanel.
+    // U-1: Initialize UI root with DebugPanel and RegenChipPanel.
     let mut ui_root = ui::UiRoot::new();
     ui_root.push(Box::new(ui::DebugPanel));
+    ui_root.push(Box::new(ui::RegenChipPanel));
 
     // R-13: Apply camera preset to ensure deterministic view.
     let world_span = span_x.max(span_z).max(1.0);
@@ -713,6 +721,7 @@ async fn main() {
 
     // U-3: Reseed state (in-progress world rebuild on worker thread)
     let mut rx_regen_in_flight: Option<mpsc::Receiver<BuiltWorld>> = None;
+    let mut regen_load_state: Option<LoadState> = None;
 
     loop {
         // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
@@ -797,6 +806,8 @@ async fn main() {
                         actions: &mut ui_actions,
                         // U-3/F12: gate "New world" button visibility
                         is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
+                        // U-3: pass regen state for RegenChipPanel
+                        regen_load_state: regen_load_state.as_ref(),
                     };
                     let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
@@ -853,9 +864,15 @@ async fn main() {
                                     bare_mode: spec.bare_mode,
                                     source: spec.source.clone(),
                                 };
+                                let load_state = LoadState::new(target_seed);
+                                regen_load_state = Some(load_state.clone());
                                 let (tx, rx) = mpsc::channel();
                                 let _ = std::thread::spawn(move || {
-                                    let mut on_stage = |_stage: Stage| true;  // No-op callback (progress chip deferred to U-3b)
+                                    let load_clone = load_state.clone();
+                                    let mut on_stage = |stage: Stage| {
+                                        load_clone.set_stage(stage);
+                                        true
+                                    };
                                     if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
                                         let _ = tx.send(built);
                                     }
@@ -892,6 +909,7 @@ async fn main() {
                         }
 
                         rx_regen_in_flight = None;
+                        regen_load_state = None;
                     }
                 }
 

@@ -1,8 +1,8 @@
 task: U-3 in-game world reseed (#458)
-phase: PR created (PR #459, base render-r12-terragen-preview)
-blocked_on: code-critic self-review (async), then PM intake + CI test-verify
-next: merge after code-critic PASS + PM byte-identical harness test
-updated: 2026-07-17 14:30
+phase: determinism FIXED + chip implemented; code-critic review pending
+blocked_on: code-critic review (chip visual needs PM verification)
+next: code-critic → PM byte-identical test + manual chip visibility check (N key) → merge
+updated: 2026-07-17 14:45
 
 ## Merged (integration branch render-r12-terragen-preview, head 7e23407)
 R-13, W-9, W-10, R-15a, R-14, R-16, R-17, U-0, U-1, U-2. DECISIONS rows: animata-pm #51/#53/#55/#56
