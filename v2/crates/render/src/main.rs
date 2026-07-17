@@ -390,9 +390,9 @@ async fn main() {
         },
     };
 
-    // U-2: For harnesses (screenshot/bench), build world inline before their loops
+    // U-2: For harnesses (screenshot/bench/screenshot-ui), build world inline before their loops
     // For app path, we'll spawn a worker thread and initialize from recv
-    let is_harness = cli_args.screenshot.is_some() || cli_args.bench;
+    let is_harness = cli_args.screenshot.is_some() || cli_args.bench || cli_args.screenshot_ui.is_some();
 
     let (mut hex_terrain_chunks, mut cube_terrain_chunks, mut world_dim, mut world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
         // Harnesses: build_world inline (synchronous, no loader)
@@ -456,7 +456,7 @@ async fn main() {
 
     // R-13: Apply camera preset to ensure deterministic view.
     let world_span = span_x.max(span_z).max(1.0);
-    if cli_args.screenshot.is_some() || cli_args.bench {
+    if cli_args.screenshot.is_some() || cli_args.bench || cli_args.screenshot_ui.is_some() {
         cli_args.cam_preset.apply_to_camera(&mut camera, center, world_span);
     }
 
