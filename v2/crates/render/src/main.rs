@@ -466,7 +466,6 @@ async fn main() {
     ui_root.push(Box::new(ui::transport::TransportPanel));
     ui_root.push(Box::new(ui::rail::ControlRail::new()));
     ui_root.push(Box::new(ui::toast::ToastPanel::new()));
-    ui_root.push(Box::new(ui::toast::HideHintPanel));
     ui_root.push(Box::new(ui::legend::LegendPanel));
     ui_root.push(Box::new(ui::MinimapPanel));
 
@@ -1020,6 +1019,11 @@ async fn main() {
                     world_dim = built.dim;
                     world = built.world;
 
+                    // U-9: Show "World ready" toast on regen completion
+                    let toast_msg = format!("World ready — seed 0x{:x}", spec.seed);
+                    ui_root.toast_message = Some(toast_msg);
+                    ui_root.toast_elapsed_ms = 0.0;
+
                     // U-2/D5: Camera init from built.dim (output, not input)
                     let (span_x, _) = hex::hex_center(world_dim, 0);
                     let (_, span_z) = hex::hex_center(0, world_dim);
@@ -1171,6 +1175,11 @@ async fn main() {
                         // U-9: H key toggle panels visibility
                         ui::UiAction::ToggleUiVisibility => {
                             ui_root.toggle_visibility();
+                        }
+                        // U-9: Display a toast message
+                        ui::UiAction::PushToast(msg) => {
+                            ui_root.toast_message = Some(msg);
+                            ui_root.toast_elapsed_ms = 0.0;
                         }
                         // U-3: Reseed — spawn async world build on worker, keep rendering old world
                         ui::UiAction::RegenSeed(target_seed) => {

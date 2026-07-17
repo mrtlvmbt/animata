@@ -40,32 +40,3 @@ impl Panel for ToastPanel {
     }
 }
 
-pub struct HideHintPanel;
-
-impl Panel for HideHintPanel {
-    fn id(&self) -> &'static str { "hide_hint" }
-    fn anchor(&self) -> Anchor { Anchor::LeftBottom(egui::vec2(18.0, 18.0)) }
-
-    fn draw(&mut self, ctx: &egui::Context, _ui_ctx: &mut UiCtx) {
-        egui::Area::new(egui::Id::new("hide_hint"))
-            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(18.0, -18.0))
-            .interactable(false)
-            .show(ctx, |ui| {
-                egui::Frame::NONE
-                    .fill(theme::straight(12, 15, 14, 153))
-                    .stroke(Stroke::new(1.0, theme::straight(255, 255, 255, 20)))
-                    .corner_radius(egui::CornerRadius::same(9))
-                    .inner_margin(egui::Margin::symmetric(12, 7))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 8.0;
-                            ui.label(RichText::new("press").font(theme::mono(10.0)).color(theme::TEXT_LABEL));
-                            egui::Frame::NONE.fill(theme::straight(255, 255, 255, 26)).corner_radius(egui::CornerRadius::same(5)).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
-                                ui.label(RichText::new("H").font(theme::mono(10.0)).color(theme::TEXT));
-                            });
-                            ui.label(RichText::new("— интерфейс").font(theme::mono(10.0)).color(theme::TEXT_LABEL));
-                        });
-                    });
-            });
-    }
-}

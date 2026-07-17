@@ -81,7 +81,7 @@ pub struct UiCtx<'a> {
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
 /// UI never mutates app state directly; all changes go through actions.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum UiAction {
     TogglePause,
     StepOnce,
@@ -92,6 +92,8 @@ pub enum UiAction {
     JumpCamera(glam::Vec2),
     /// U-9: H key toggle — hide/show all panels
     ToggleUiVisibility,
+    /// U-9: Display a toast message (e.g., "World ready — seed 0x5")
+    PushToast(String),
 }
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
@@ -124,6 +126,9 @@ pub struct UiRoot {
     pub panels_visible: bool,
     /// U-9: timer for hide-hint display (ms elapsed since hide)
     pub hide_hint_elapsed_ms: f32,
+    /// U-9: toast message state (shared with ToastPanel via UiCtx)
+    pub toast_message: Option<String>,
+    pub toast_elapsed_ms: f32,
 }
 
 impl UiRoot {
@@ -133,6 +138,8 @@ impl UiRoot {
             cache: HudCache::new(),
             panels_visible: true,
             hide_hint_elapsed_ms: 0.0,
+            toast_message: None,
+            toast_elapsed_ms: 0.0,
         }
     }
 
@@ -153,6 +160,14 @@ impl UiRoot {
         // Set the cache pointer to point to our cache
         ui_ctx.cache = &mut self.cache as *mut HudCache;
 
+        // Update toast timer
+        if self.toast_message.is_some() {
+            self.toast_elapsed_ms += 16.0;  // ~60fps
+            if self.toast_elapsed_ms > 2600.0 {
+                self.toast_message = None;  // Expire after 2.6s
+            }
+        }
+
         // Update hide-hint timer
         if !self.panels_visible {
             self.hide_hint_elapsed_ms += 16.0;  // ~60fps
@@ -172,6 +187,30 @@ impl UiRoot {
                         panel.draw(ctx, ui_ctx);
                     });
             }
+        }
+
+        // Draw toast message if active (always visible, not gated by panels_visible)
+        if let Some(ref msg) = self.toast_message {
+            let dt = self.toast_elapsed_ms;
+            let opacity = if dt < 180.0 { dt / 180.0 } else if dt > 1900.0 { ((2600.0 - dt) / 700.0).max(0.0) } else { 1.0 };
+            let shift_y = if dt < 180.0 { -(180.0 - dt) / 180.0 * 10.0 } else { 0.0 };
+            let a = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * opacity) as u8);
+
+            egui::Area::new(egui::Id::new("toast"))
+                .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 18.0 + shift_y))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::NONE
+                        .fill(a(Color32::from_rgba_unmultiplied(12, 15, 14, 209)))
+                        .stroke(Stroke::new(1.0, a(Color32::from_rgba_unmultiplied(143, 209, 111, 77))))
+                        .corner_radius(egui::CornerRadius::same(11))
+                        .inner_margin(egui::Margin::symmetric(18, 10))
+                        .shadow(egui::epaint::Shadow { offset: [0, 10], blur: 30, spread: 0, color: Color32::from_black_alpha((102.0 * opacity) as u8) })
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(RichText::new(msg).font(theme::mono(12.0)).color(a(theme::TOAST_GREEN))).wrap_mode(egui::TextWrapMode::Extend));
+                        });
+                });
+            ctx.request_repaint();
         }
 
         // Draw hide-hint if panels are hidden and hint hasn't expired (2.5s = 2500ms)
