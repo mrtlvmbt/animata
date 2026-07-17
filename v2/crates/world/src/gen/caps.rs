@@ -2173,28 +2173,115 @@ mod tests {
         );
     }
 
-    /// W-12 mask consistency: no BeachSand cell (presentation == 11) is submerged.
-    /// Re-derived final mask: beach_mask = candidate & !submerged_final.
+    /// W-12 mask consistency (F20): no BeachSand cell (presentation == 11) is submerged.
+    /// This is guaranteed by the presentation emission logic (line ~1152):
+    /// `is_beach_final = flags.beaches && beach_mask_candidate[idx] && !submerged_final[idx]`.
+    /// Any cell with presentation == 11 was explicitly filtered on !submerged_final.
+    /// This test verifies the invariant holds.
     #[test]
     fn w12_beach_sand_cells_are_never_submerged() {
         const DIM: usize = 64;
         let (world, _, _) = classify_and_caps_staged(
             SEED, HMAX, DIM, false, LandformFlags::new(false, false, false, false, true, false, true), true, true
         );
-        // Recompute sea_level and submerged for checking (re-derive from the final height)
-        let coastal_result = run_coastal(SEED, DIM, HMAX, {
-            // For this test, we need the post-aeolian input to run_coastal. Since we're working
-            // from the final output, we accept this as a safety assertion rather than a strict
-            // test of the internal derivation.
-            &world.height
-        });
+        // Verify: every BeachSand cell must be LAND (not submerged). We check this by re-deriving
+        // submerged_final using the same logic as the pipeline (is_submerged at sea_level).
+        let coastal_datum = run_coastal(SEED, DIM, HMAX, &world.height);
         for (idx, &material_byte) in world.surface_material.iter().enumerate() {
             if material_byte == 11 { // BeachSand
+                // BeachSand should only be on LAND cells.
                 assert!(
-                    !coastal_result.submerged[idx],
-                    "BeachSand cell {} is submerged (violation of F20 mask derivation)",
-                    idx
+                    world.height[idx] > coastal_datum.sea_level,
+                    "BeachSand cell {} has height {} <= sea_level {} (should be land)",
+                    idx, world.height[idx], coastal_datum.sea_level
                 );
+            }
+        }
+    }
+
+    /// W-12 beach clamp invariant (F19+F20+F23): candidate beach cells after deposition must
+    /// satisfy h_post_deposit ≥ sea_level + 1. This is a LOAD-BEARING constraint (critic F22) —
+    /// at BEACH_RAMP_SLOPE < 1 the target would land at sea_level (WATER), silently vanishing.
+    /// Because talus_step_final + de_needle_pass mutate height after deposition, this test
+    /// is NOT on the final post-deneedle height, but on a deterministic re-run of beach_deposit.
+    #[test]
+    fn w12_beach_deposit_clamp_invariant() {
+        const DIM: usize = 64;
+        // Construct a fixture with coastal+beaches ON to trigger beach_deposit.
+        let erosion = erode(SEED, HMAX, DIM, false, false, false);
+        let coastal_datum = run_coastal(SEED, DIM, HMAX, &erosion.height);
+
+        // Re-run beach_deposit on the post-coastal height (before talus/de_needle).
+        let (post_deposit, _beach_mask) = beach_deposit(DIM, &coastal_datum.height, coastal_datum.sea_level, &coastal_datum.submerged);
+
+        // Verify: every cell that was in a candidate beach (and relaxed) must be >= sea_level + 1.
+        for idx in 0..DIM * DIM {
+            if !coastal_datum.submerged[idx] { // LAND
+                let h_before = coastal_datum.height[idx];
+                let h_after = post_deposit[idx];
+                // If the cell was relaxed (h_after < h_before), it must land at sea_level + 1 minimum.
+                if h_after < h_before {
+                    assert!(
+                        h_after >= coastal_datum.sea_level + 1,
+                        "cell {} deposited to {} but clamp should enforce >= sea_level+1={}",
+                        idx, h_after, coastal_datum.sea_level + 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// W-12 cliff-untouched (F27): steep shore cells (max_drop >= BEACH_SLOPE_MAX) must receive
+    /// zero height delta during beach deposition. This validates the slope-gate polarity.
+    #[test]
+    fn w12_cliff_cells_untouched_by_deposition() {
+        const DIM: usize = 64;
+        let erosion = erode(SEED, HMAX, DIM, false, false, false);
+        let coastal_datum = run_coastal(SEED, DIM, HMAX, &erosion.height);
+
+        let (post_deposit, _) = beach_deposit(DIM, &coastal_datum.height, coastal_datum.sea_level, &coastal_datum.submerged);
+
+        // Iterate over every cell in the shore band.
+        for z in 0..DIM {
+            for x in 0..DIM {
+                let idx = z * DIM + x;
+                if coastal_datum.submerged[idx] {
+                    continue; // Skip water cells.
+                }
+
+                let h = coastal_datum.height[idx];
+                // Skip cells outside the shore band.
+                if h <= coastal_datum.sea_level || h > coastal_datum.sea_level + BEACH_BAND {
+                    continue;
+                }
+
+                // Skip cells beyond the distance-to-water threshold.
+                if beach_bfs_distance(DIM, &coastal_datum.submerged)[idx] > BEACH_DISTANCE_TO_WATER {
+                    continue;
+                }
+
+                // Compute local slope (max D8 drop).
+                let mut max_drop = 0i64;
+                for &(dx, dz) in &D8_OFFSETS_CAPS {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx < 0 || nz < 0 || nx as usize >= DIM || nz as usize >= DIM {
+                        continue;
+                    }
+                    let neighbor_idx = (nz as usize) * DIM + (nx as usize);
+                    let drop = (h - coastal_datum.height[neighbor_idx]).max(0);
+                    max_drop = max_drop.max(drop);
+                }
+
+                // If slope is steep (>= BEACH_SLOPE_MAX), cell must be untouched.
+                if max_drop >= BEACH_SLOPE_MAX {
+                    assert_eq!(
+                        post_deposit[idx], coastal_datum.height[idx],
+                        "cell {} with max_drop={} >= BEACH_SLOPE_MAX={} should be untouched by deposition (cliff), \
+                         but height changed from {} to {}",
+                        idx, max_drop, BEACH_SLOPE_MAX, coastal_datum.height[idx], post_deposit[idx]
+                    );
+                }
             }
         }
     }
