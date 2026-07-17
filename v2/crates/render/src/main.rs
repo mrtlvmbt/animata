@@ -844,10 +844,13 @@ mod tests {
         // Synthetic input: wheel_y=1.0 (zoom in), keyboard pan, and yaw step.
         let input = camera::CamInput {
             wheel_y: 1.0,           // Positive wheel → zoom in (decrease span)
+            mouse_pos: (400.0, 300.0), // Center of 800x600 screen
+            screen_dims: (800.0, 600.0), // Standard test viewport
+            left_button_down: false,
+            left_button_pressed: false,
             mouse_delta: None,      // No mouse drag
             pan_dir: (20.0, 0.0),   // Keyboard pan in x
             yaw_step: 1,            // E key pressed (rotate +60°)
-            current_mouse_pos: (0.0, 0.0), // Test synthetic input (not dragging, so unused)
         };
 
         // Test: pointer gating should block zoom, but keyboard should still work.
@@ -870,20 +873,75 @@ mod tests {
         camera.ortho_span = initial_ortho;
         camera.yaw = initial_yaw;
 
-        // Test: keyboard gating should block pan and yaw, but NOT zoom.
-        camera.apply_cam_input(&input, false, true); // wants_pointer=false, wants_keyboard=true
+        // Test (U-1): keyboard gating should block pan and yaw, but NOT zoom.
+        // Sub-case (a): Pure keyboard gating — wheel_y=0, pan_dir!=0, yaw_step!=0.
+        // Focus should remain exactly frozen (no zoom-to-cursor side effect).
+        let input_keyboard_only = camera::CamInput {
+            wheel_y: 0.0,            // NO wheel input
+            mouse_pos: (400.0, 300.0),
+            screen_dims: (800.0, 600.0),
+            left_button_down: false,
+            left_button_pressed: false,
+            mouse_delta: None,
+            pan_dir: (20.0, 0.0),   // Keyboard pan in x
+            yaw_step: 1,            // E key pressed (rotate +60°)
+        };
+        camera.apply_cam_input(&input_keyboard_only, false, true); // wants_pointer=false, wants_keyboard=true
         assert_eq!(
             camera.focus, initial_focus,
-            "FAIL: focus changed despite wants_keyboard=true; gate is not blocking keyboard pan"
+            "FAIL: focus changed under keyboard gate + wheel_y=0; gate is not blocking keyboard pan"
         );
         assert_eq!(
             camera.yaw, initial_yaw,
-            "FAIL: yaw changed despite wants_keyboard=true; gate is not blocking E key"
+            "FAIL: yaw changed under keyboard gate; gate is not blocking E key"
+        );
+        assert_eq!(
+            camera.ortho_span, initial_ortho,
+            "FAIL: ortho_span changed with wheel_y=0; something is wrong"
+        );
+
+        // Reset camera
+        camera.focus = initial_focus;
+        camera.ortho_span = initial_ortho;
+        camera.yaw = initial_yaw;
+
+        // Sub-case (b): Keyboard gating with zoom-to-cursor (U-4 new semantics).
+        // wheel_y!=0 is pointer-domain, correctly allowed under wants_keyboard=true.
+        // Focus SHOULD shift to keep ground point under cursor (U-4 zoom-to-cursor feature).
+        // Pan (keyboard) and yaw (keyboard) should still be blocked.
+        let input_with_wheel = camera::CamInput {
+            wheel_y: 1.0,            // Positive wheel → zoom in (decrease span)
+            mouse_pos: (400.0, 300.0), // Center of screen → zoom-to-cursor is ~neutral
+            screen_dims: (800.0, 600.0),
+            left_button_down: false,
+            left_button_pressed: false,
+            mouse_delta: None,
+            pan_dir: (20.0, 0.0),   // Keyboard pan in x (should be blocked)
+            yaw_step: 1,            // E key (should be blocked)
+        };
+        camera.apply_cam_input(&input_with_wheel, false, true); // wants_pointer=false, wants_keyboard=true
+        assert_eq!(
+            camera.yaw, initial_yaw,
+            "FAIL: yaw changed despite wants_keyboard=true; keyboard gate broken"
         );
         // Zoom SHOULD apply (pointer gate, not keyboard gate)
         assert!(
             camera.ortho_span < initial_ortho,
             "FAIL: zoom did not apply with wants_keyboard=true; pointer gating is broken"
+        );
+        // Focus may shift slightly due to zoom-to-cursor, but keyboard pan should be blocked.
+        // At screen center, zoom-to-cursor is nearly neutral (focus shift ~0), so allow epsilon.
+        let focus_shift_x = (camera.focus.x - initial_focus.x).abs();
+        let focus_shift_z = (camera.focus.z - initial_focus.z).abs();
+        assert!(
+            focus_shift_x < 0.01,
+            "FAIL: focus X shifted too much under zoom-to-cursor at screen center; expected ~0, got {}",
+            focus_shift_x
+        );
+        assert!(
+            focus_shift_z < 0.01,
+            "FAIL: focus Z shifted too much under zoom-to-cursor at screen center; expected ~0, got {}",
+            focus_shift_z
         );
 
         // Reset
