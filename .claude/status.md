@@ -1,8 +1,8 @@
 task: U-4 zoom-to-cursor and left-drag pan (#456)
-phase: code review (PR #457 created, self-review via code-critic in flight)
-blocked_on: code-critic verdict completion; then PM test run (unit tests + manual feel check)
-next: apply code-critic findings if FAIL; stage-review; push to u4-camera-feel; await PM test gate
-updated: 2026-07-17 11:45
+phase: code review (self-review via code-critic pending; PR #457 staged)
+blocked_on: code-critic verdict; PM cloud test run (unit tests + manual feel check)
+next: code-critic findings → fix or accept → PR comment; then PM intake: unit tests run + feel verification
+updated: 2026-07-17 11:50
 
 ## Merged (integration branch render-r12-terragen-preview, head 7e23407)
 R-13, W-9, W-10, R-15a, R-14, R-16, R-17, U-0, U-1, U-2. DECISIONS rows: animata-pm #51/#53/#55/#56
