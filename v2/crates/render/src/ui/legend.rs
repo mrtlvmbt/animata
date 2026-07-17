@@ -1,14 +1,13 @@
 //! Material legend panel: swatch + name for each material type.
 
 use egui::{Color32, RichText};
-use crate::ui::{Anchor, Panel, UiCtx};
+use crate::ui::{Panel, UiCtx};
 use super::theme;
 
 pub struct LegendPanel;
 
 impl Panel for LegendPanel {
     fn id(&self) -> &'static str { "legend" }
-    fn anchor(&self) -> Anchor { Anchor::RightTop(egui::vec2(18.0, 420.0)) }
 
     fn draw(&mut self, ctx: &egui::Context, _ui_ctx: &mut UiCtx) {
         egui::Area::new(egui::Id::new("legend"))

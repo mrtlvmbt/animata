@@ -1,7 +1,7 @@
 //! Transport panel (bottom-left): play/pause + step controls, sim-mode only.
 
 use egui::{RichText, Shape, Stroke, StrokeKind};
-use crate::ui::{Anchor, Panel, UiAction, UiCtx};
+use crate::ui::{Panel, UiAction, UiCtx};
 use super::theme;
 
 pub struct TransportPanel;
@@ -9,10 +9,6 @@ pub struct TransportPanel;
 impl Panel for TransportPanel {
     fn id(&self) -> &'static str {
         "transport"
-    }
-
-    fn anchor(&self) -> Anchor {
-        Anchor::LeftBottom(egui::vec2(18.0, 22.0))
     }
 
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {

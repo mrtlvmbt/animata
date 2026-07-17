@@ -1,7 +1,7 @@
 //! Control rail (bottom-right): vertical icon buttons with flyout panels.
 
 use egui::{Align, Layout, RichText, Shape, Stroke, StrokeKind};
-use crate::ui::{Anchor, Panel, UiAction, UiCtx};
+use crate::ui::{Panel, UiAction, UiCtx};
 use super::theme;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -13,7 +13,6 @@ impl ControlRail { pub fn new() -> Self { ControlRail { open_panel: None } } }
 
 impl Panel for ControlRail {
     fn id(&self) -> &'static str { "rail" }
-    fn anchor(&self) -> Anchor { Anchor::RightBottom(egui::vec2(18.0, 22.0)) }
 
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
         egui::Area::new(egui::Id::new("rail"))

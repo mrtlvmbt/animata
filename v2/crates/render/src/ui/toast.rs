@@ -1,7 +1,7 @@
 //! Toast and hide-hint panels.
 
 use egui::{Color32, RichText, Stroke};
-use crate::ui::{Anchor, Panel, UiCtx};
+use crate::ui::{Panel, UiCtx};
 use super::theme;
 
 #[derive(Default)]
@@ -12,7 +12,6 @@ impl ToastPanel { pub fn new() -> Self { ToastPanel { state: ToastState::default
 
 impl Panel for ToastPanel {
     fn id(&self) -> &'static str { "toast" }
-    fn anchor(&self) -> Anchor { Anchor::LeftTop(egui::vec2(0.0, 0.0)) }
 
     fn draw(&mut self, ctx: &egui::Context, _ui_ctx: &mut UiCtx) {
         self.state.elapsed_ms += 16.0;

@@ -21,31 +21,10 @@ pub struct UiOut {
     pub wants_keyboard: bool,
 }
 
-/// Panel: a renderable UI element with a fixed anchor point and draw callback.
+/// Panel: a renderable UI element with a draw callback.
 pub trait Panel {
     fn id(&self) -> &'static str;
-    fn anchor(&self) -> Anchor;
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx);
-}
-
-/// Anchor: position of a panel on screen (LeftTop/RightTop/LeftBottom/RightBottom + offset).
-#[derive(Clone, Copy, Debug)]
-pub enum Anchor {
-    LeftTop(egui::Vec2),
-    RightTop(egui::Vec2),
-    LeftBottom(egui::Vec2),
-    RightBottom(egui::Vec2),
-}
-
-impl Anchor {
-    fn pos(&self, screen_size: egui::Vec2) -> egui::Pos2 {
-        match self {
-            Anchor::LeftTop(offset) => egui::pos2(offset.x, offset.y),
-            Anchor::RightTop(offset) => egui::pos2(screen_size.x - offset.x, offset.y),
-            Anchor::LeftBottom(offset) => egui::pos2(offset.x, screen_size.y - offset.y),
-            Anchor::RightBottom(offset) => egui::pos2(screen_size.x - offset.x, screen_size.y - offset.y),
-        }
-    }
 }
 
 /// UiCtx: read-only frame state + action sink (passed to Panel::draw).
@@ -176,16 +155,7 @@ impl UiRoot {
         // Draw regular panels only if visible
         if self.panels_visible {
             for panel in &mut self.panels {
-                let anchor = panel.anchor();
-                let screen_size = ctx.screen_rect().size();
-                let pivot = anchor.pos(screen_size);
-
-                egui::Area::new(panel.id().into())
-                    .fixed_pos(pivot)
-                    .pivot(egui::Align2::LEFT_TOP)
-                    .show(ctx, |_| {
-                        panel.draw(ctx, ui_ctx);
-                    });
+                panel.draw(ctx, ui_ctx);
             }
         }
 
@@ -302,10 +272,6 @@ pub struct MinimapPanel;
 impl Panel for MinimapPanel {
     fn id(&self) -> &'static str {
         "minimap_panel"
-    }
-
-    fn anchor(&self) -> Anchor {
-        Anchor::RightTop(egui::vec2(16.0, 16.0))
     }
 
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {

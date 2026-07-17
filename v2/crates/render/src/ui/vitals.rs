@@ -1,7 +1,7 @@
 //! Vitals panel (top-left): compact always-on strip showing world seed, dim, and optionally population.
 
 use egui::{Align, Layout, RichText};
-use crate::ui::{Anchor, Panel, UiCtx};
+use crate::ui::{Panel, UiCtx};
 use super::theme;
 
 pub struct VitalsPanel;
@@ -9,10 +9,6 @@ pub struct VitalsPanel;
 impl Panel for VitalsPanel {
     fn id(&self) -> &'static str {
         "vitals"
-    }
-
-    fn anchor(&self) -> Anchor {
-        Anchor::LeftTop(egui::vec2(18.0, 18.0))
     }
 
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
