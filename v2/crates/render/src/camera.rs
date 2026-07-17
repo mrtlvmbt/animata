@@ -14,8 +14,8 @@ const ORTHO_SPAN_MIN: f32 = 5.0;
 /// Maximum ortho span (zoom limit — view too far).
 const ORTHO_SPAN_MAX: f32 = 200.0;
 
-/// Zoom rate per scroll tick (0.1 = 10% change).
-const ZOOM_RATE: f32 = 0.1;
+/// Zoom rate per scroll tick (0.075 = 7.5% change).
+const ZOOM_RATE: f32 = 0.075;
 
 /// Pan speed (world units per second) — keyboard-driven.
 const PAN_SPEED: f32 = 20.0;
@@ -673,5 +673,171 @@ mod tests {
         // This point should project within the orthographic bounds [-1, 1]
         assert!(far_ndc.x >= -1.001 && far_ndc.x <= 1.001, "far point X NDC out of bounds: {}", far_ndc.x);
         assert!(far_ndc.y >= -1.001 && far_ndc.y <= 1.001, "far point Y NDC out of bounds: {}", far_ndc.y);
+    }
+
+    #[test]
+    fn test_key_pan_w_at_yaw_0() {
+        // U-7: W key pans the view up-screen at yaw=0°.
+        // Verify: pressing W moves focus such that a world-space point projects LOWER on screen
+        // (higher NDC y, since NDC y increases downward in screen space).
+        let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), 0.0, 50.0);
+        let screen_dims = (800.0, 600.0);
+        let aspect = screen_dims.0 / screen_dims.1;
+
+        // Get the NDC projection of a reference point before panning
+        let ref_point = vec3(0.0, 0.0, 10.0); // A point forward in the world
+        let cam_vp_before = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
+        let ndc_before = cam_vp_before.project_point3(ref_point);
+
+        // Apply W-key pan: pan_dir = (0, -dt*PAN_SPEED)
+        let input = CamInput {
+            wheel_y: 0.0,
+            mouse_pos: (400.0, 300.0),
+            screen_dims,
+            left_button_down: false,
+            left_button_pressed: false,
+            pan_dir: (0.0, -1.0), // W key: pan_z < 0
+            yaw_step: 0,
+            mouse_delta: None,
+        };
+        cam.apply_cam_input(&input, false, false);
+
+        // Get NDC projection of the same point after panning
+        let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
+        let ndc_after = cam_vp_after.project_point3(ref_point);
+
+        // W should pan view up, which moves objects down on screen (higher NDC y).
+        // The reference point should project lower (positive delta in NDC y).
+        assert!(
+            ndc_after.y > ndc_before.y,
+            "W key panning failed at yaw=0: NDC y should increase (move down on screen) after W-pan, but got before={}, after={}",
+            ndc_before.y, ndc_after.y
+        );
+    }
+
+    #[test]
+    fn test_key_pan_a_at_yaw_0() {
+        // U-7: A key pans the view left-screen at yaw=0°.
+        // Verify: pressing A moves focus such that a world-space point projects further RIGHT on screen
+        // (higher NDC x, since NDC x increases rightward).
+        let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), 0.0, 50.0);
+        let screen_dims = (800.0, 600.0);
+        let aspect = screen_dims.0 / screen_dims.1;
+
+        // Get the NDC projection of a reference point before panning
+        let ref_point = vec3(10.0, 0.0, 0.0); // A point to the right in the world
+        let cam_vp_before = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
+        let ndc_before = cam_vp_before.project_point3(ref_point);
+
+        // Apply A-key pan: pan_dir = (-dt*PAN_SPEED, 0)
+        let input = CamInput {
+            wheel_y: 0.0,
+            mouse_pos: (400.0, 300.0),
+            screen_dims,
+            left_button_down: false,
+            left_button_pressed: false,
+            pan_dir: (-1.0, 0.0), // A key: pan_x < 0
+            yaw_step: 0,
+            mouse_delta: None,
+        };
+        cam.apply_cam_input(&input, false, false);
+
+        // Get NDC projection of the same point after panning
+        let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
+        let ndc_after = cam_vp_after.project_point3(ref_point);
+
+        // A should pan view left, which moves objects right on screen (higher NDC x).
+        assert!(
+            ndc_after.x > ndc_before.x,
+            "A key panning failed at yaw=0: NDC x should increase (move right on screen) after A-pan, but got before={}, after={}",
+            ndc_before.x, ndc_after.x
+        );
+    }
+
+    #[test]
+    fn test_key_pan_w_at_yaw_90() {
+        // U-7: W key pans the view up-screen at yaw=90°.
+        // At 90° rotation, the screen axes are rotated, but W should still pan up.
+        let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), std::f32::consts::FRAC_PI_2, 50.0);
+        let screen_dims = (800.0, 600.0);
+        let aspect = screen_dims.0 / screen_dims.1;
+
+        // Use a reference point that makes sense at yaw=90°
+        let ref_point = vec3(-10.0, 0.0, 0.0); // At yaw=90°, -X is forward on screen
+        let cam_vp_before = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
+        let ndc_before = cam_vp_before.project_point3(ref_point);
+
+        // Apply W-key pan
+        let input = CamInput {
+            wheel_y: 0.0,
+            mouse_pos: (400.0, 300.0),
+            screen_dims,
+            left_button_down: false,
+            left_button_pressed: false,
+            pan_dir: (0.0, -1.0), // W key: pan_z < 0
+            yaw_step: 0,
+            mouse_delta: None,
+        };
+        cam.apply_cam_input(&input, false, false);
+
+        // Get NDC projection after panning
+        let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
+        let ndc_after = cam_vp_after.project_point3(ref_point);
+
+        // W should pan view up at any yaw, so objects move down on screen (higher NDC y).
+        assert!(
+            ndc_after.y > ndc_before.y,
+            "W key panning failed at yaw=90°: NDC y should increase after W-pan, but got before={}, after={}",
+            ndc_before.y, ndc_after.y
+        );
+    }
+
+    #[test]
+    fn test_key_rotation_q_decreases_yaw() {
+        // U-7: Q key rotates counter-clockwise (decreases yaw).
+        let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), 0.0, 50.0);
+        let original_yaw = cam.yaw;
+
+        let input = CamInput {
+            wheel_y: 0.0,
+            mouse_pos: (400.0, 300.0),
+            screen_dims: (800.0, 600.0),
+            left_button_down: false,
+            left_button_pressed: false,
+            pan_dir: (0.0, 0.0),
+            yaw_step: -1, // Q key
+            mouse_delta: None,
+        };
+        cam.apply_cam_input(&input, false, false);
+
+        // Yaw should decrease (wrap to 2π - step if it goes negative)
+        let expected_yaw = if original_yaw < YAW_STEP {
+            original_yaw + std::f32::consts::TAU - YAW_STEP
+        } else {
+            original_yaw - YAW_STEP
+        };
+        assert!((cam.yaw - expected_yaw).abs() < 1e-5, "Q key should decrease yaw, but got {}", cam.yaw);
+    }
+
+    #[test]
+    fn test_key_rotation_e_increases_yaw() {
+        // U-7: E key rotates clockwise (increases yaw).
+        let mut cam = IsoCam::new(vec3(0.0, 0.0, 0.0), 0.0, 50.0);
+        let original_yaw = cam.yaw;
+
+        let input = CamInput {
+            wheel_y: 0.0,
+            mouse_pos: (400.0, 300.0),
+            screen_dims: (800.0, 600.0),
+            left_button_down: false,
+            left_button_pressed: false,
+            pan_dir: (0.0, 0.0),
+            yaw_step: 1, // E key
+            mouse_delta: None,
+        };
+        cam.apply_cam_input(&input, false, false);
+
+        let expected_yaw = (original_yaw + YAW_STEP) % std::f32::consts::TAU;
+        assert!((cam.yaw - expected_yaw).abs() < 1e-5, "E key should increase yaw, but got {}", cam.yaw);
     }
 }

@@ -48,6 +48,7 @@ mod loader_state;
 mod raw_chunk;
 mod terrain;
 mod terrain_cube;
+mod tuning;
 mod ui;
 mod world_builder;
 mod world_spec;
@@ -180,9 +181,8 @@ struct CliArgs {
     slow_load: bool,
     /// U-2: `--screenshot-loader <path>`: capture loader modal mid-build, save PNG, exit.
     screenshot_loader: Option<String>,
-    /// U-3: `--screenshot-chip <path>`: capture regen chip mid-build, save PNG, exit.
-    screenshot_chip: Option<String>,
-    /// U-3: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
+    /// U-7: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
+    /// When combined with `--slow-load`, shows the full-screen loader modal mid-regen.
     regen_to: Option<u64>,
     /// U-5: `--jump-to <x>,<z>`: after startup, jump camera to world coords (x, z) for viewport-quad + click-to-jump verification.
     jump_to: Option<(f32, f32)>,
@@ -202,7 +202,6 @@ fn parse_args() -> CliArgs {
     let mut height_scale_override = None;
     let mut slow_load = false;
     let mut screenshot_loader = None;
-    let mut screenshot_chip = None;
     let mut regen_to = None;
     let mut jump_to = None;
 
@@ -256,10 +255,6 @@ fn parse_args() -> CliArgs {
                 screenshot_loader = Some(args.next().expect("--screenshot-loader requires a path"));
                 standalone = true;  // loader implies standalone
             }
-            "--screenshot-chip" => {
-                screenshot_chip = Some(args.next().expect("--screenshot-chip requires a path"));
-                standalone = true;  // chip implies standalone
-            }
             "--regen-to" => {
                 let v = args.next().expect("--regen-to requires a u64 seed value");
                 regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
@@ -276,7 +271,7 @@ fn parse_args() -> CliArgs {
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to, jump_to }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -436,10 +431,9 @@ async fn main() {
     // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
     let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
 
-    // U-1: Initialize UI root with DebugPanel and RegenChipPanel.
+    // U-1: Initialize UI root with DebugPanel and MinimapPanel.
     let mut ui_root = ui::UiRoot::new();
     ui_root.push(Box::new(ui::DebugPanel));
-    ui_root.push(Box::new(ui::RegenChipPanel));
     // U-5: Add MinimapPanel
     ui_root.push(Box::new(ui::MinimapPanel));
 
@@ -945,8 +939,19 @@ async fn main() {
                 egui_macroquad::ui(|ctx| {
                     // U-6: Set DPI scale for Retina/HiDPI displays (high_dpi=true in window_conf)
                     ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
+
+                    // U-7: If regen is in flight, draw the full-screen loader modal (v1 parity)
+                    let mut wants_pointer_regen = false;
+                    let mut wants_keyboard_regen = false;
+                    if let Some(ref load_state) = regen_load_state {
+                        ui::loader::draw(ctx, load_state);
+                        wants_pointer_regen = true;
+                        wants_keyboard_regen = true;
+                    }
+
                     // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
                     // This causes a 1-frame lag (acceptable, identical to v1 behavior).
+                    // U-7: Skip UI panels when regen is in flight (loader modal takes precedence)
                     let mut ui_ctx = ui::UiCtx {
                         world_dim,
                         seed: spec.seed,  // F4: use spec.seed (spec-driven design)
@@ -959,7 +964,7 @@ async fn main() {
                         actions: &mut ui_actions,
                         // U-3/F12: gate "New world" button visibility
                         is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
-                        // U-3: pass regen state for RegenChipPanel
+                        // U-3: pass regen state (now used for modal display)
                         regen_load_state: regen_load_state.as_ref(),
                         // U-5: pass world reference for minimap rendering
                         world: Some(world.as_ref()),
@@ -974,27 +979,31 @@ async fn main() {
                     let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
                     // Apply camera update with gating.
-                    camera.update_gated(ui_out.wants_pointer, ui_out.wants_keyboard);
+                    // U-7: Gate camera input when regen loader modal is showing
+                    camera.update_gated(ui_out.wants_pointer || wants_pointer_regen, ui_out.wants_keyboard || wants_keyboard_regen);
 
                     // Collect keyboard input events with gating.
-                    for ev in input::collect(&ui_out) {
-                        // Convert InputEvent to UiAction and collect for unified handling
-                        match ev {
-                            input::InputEvent::TogglePause => {
-                                ui_actions.push(ui::UiAction::TogglePause);
-                            }
-                            input::InputEvent::StepOnce => {
-                                ui_actions.push(ui::UiAction::StepOnce);
-                            }
-                            input::InputEvent::ToggleTerrainKind => {
-                                ui_actions.push(ui::UiAction::ToggleTerrainKind);
-                            }
-                            // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
-                            input::InputEvent::RegenSeed => {
-                                let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
-                                if can_reseed {
-                                    // Trigger reseed with next seed (current+1)
-                                    ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                    // U-7: Skip input when regen loader modal is showing (gated by wants_keyboard_regen)
+                    if !wants_keyboard_regen && !ui_out.wants_keyboard {
+                        for ev in input::collect(&ui_out) {
+                            // Convert InputEvent to UiAction and collect for unified handling
+                            match ev {
+                                input::InputEvent::TogglePause => {
+                                    ui_actions.push(ui::UiAction::TogglePause);
+                                }
+                                input::InputEvent::StepOnce => {
+                                    ui_actions.push(ui::UiAction::StepOnce);
+                                }
+                                input::InputEvent::ToggleTerrainKind => {
+                                    ui_actions.push(ui::UiAction::ToggleTerrainKind);
+                                }
+                                // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
+                                input::InputEvent::RegenSeed => {
+                                    let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
+                                    if can_reseed {
+                                        // Trigger reseed with next seed (current+1)
+                                        ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                                    }
                                 }
                             }
                         }

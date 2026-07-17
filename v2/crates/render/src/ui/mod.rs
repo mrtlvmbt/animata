@@ -243,85 +243,28 @@ impl Panel for DebugPanel {
     }
 }
 
-/// U-3: RegenChipPanel — small non-modal corner indicator during in-game world reseed.
-/// Shows pulsing dot + stage text (Generating world / Building meshes).
-/// Draws nothing when no regen is in flight.
-pub struct RegenChipPanel;
-
-impl Panel for RegenChipPanel {
-    fn id(&self) -> &'static str {
-        "regen_chip"
+/// Dim the panel OUTSIDE the viewport rectangle (four bands around the frame's bounding box, clamped
+/// to the panel). Bands collapse to nothing once the view encloses the whole map.
+fn veil_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) {
+    let mut lo = rect.max;
+    let mut hi = rect.min;
+    for p in quad {
+        let x = p.x.clamp(rect.left(), rect.right());
+        let y = p.y.clamp(rect.top(), rect.bottom());
+        lo = egui::pos2(lo.x.min(x), lo.y.min(y));
+        hi = egui::pos2(hi.x.max(x), hi.y.max(y));
     }
-
-    fn anchor(&self) -> Anchor {
-        Anchor::RightTop(egui::vec2(16.0, 16.0))
-    }
-
-    fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
-        // Only draw if regen is in flight
-        let Some(load_state) = ui_ctx.regen_load_state else {
-            return;
-        };
-
-        let progress = load_state.get_progress() as f32 / 1000.0;
-        let step_index = load_state.get_stage() as usize;
-        let t = ctx.input(|i| i.time);
-
-        let stages = &["Generating world", "Building meshes"];
-        let stage_text = stages.get(step_index).copied().unwrap_or("Building...");
-
-        // Chip dimensions
-        let chip_w = 160.0;
-        let chip_h = 60.0;
-
-        egui::Area::new(egui::Id::new("regen_chip_inner"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(0.0, 0.0))
-            .show(ctx, |ui| {
-                // Dark glass background chip
-                let chip_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(chip_w, chip_h));
-                ui.painter().rect_filled(chip_rect, 6.0, theme::straight(7, 9, 8, 200));
-
-                // Pulsing dot
-                let (opacity, scale) = {
-                    let p = ((t % 1.6) / 1.6) as f32;
-                    let tri = 1.0 - (2.0 * p - 1.0).abs();
-                    (0.55 + 0.45 * tri, 1.0 + 0.25 * tri)
-                };
-                let dot_pos = egui::pos2(10.0, 12.0);
-                ui.painter().circle_filled(dot_pos, 3.0 * scale, theme::ACCENT.gamma_multiply(opacity));
-
-                // Stage text
-                ui.painter().text(
-                    egui::pos2(22.0, 8.0),
-                    egui::Align2::LEFT_TOP,
-                    stage_text,
-                    theme::sans(11.0),
-                    theme::TEXT_FAINT,
-                );
-
-                // Progress bar background
-                let prog_rect = egui::Rect::from_min_size(egui::pos2(8.0, 30.0), egui::vec2(144.0, 4.0));
-                ui.painter().rect_filled(prog_rect, 1.0, theme::straight(255, 255, 255, 26));
-
-                // Progress bar fill
-                let fill_w = (144.0 * progress).max(0.0).min(144.0);
-                if fill_w > 0.0 {
-                    let fill_rect = egui::Rect::from_min_size(egui::pos2(8.0, 30.0), egui::vec2(fill_w, 4.0));
-                    ui.painter().rect_filled(fill_rect, 1.0, theme::ACCENT);
-                }
-
-                // Progress percent text
-                let pct = (progress * 100.0).round() as u32;
-                ui.painter().text(
-                    egui::pos2(chip_w / 2.0, 42.0),
-                    egui::Align2::CENTER_TOP,
-                    format!("{}%", pct),
-                    theme::mono(9.0),
-                    theme::TEXT_FAINT,
-                );
-            });
-    }
+    let veil = egui::Color32::from_rgba_unmultiplied(5, 7, 10, 71); // .28
+    let band = |a: egui::Pos2, b: egui::Pos2| {
+        let r = egui::Rect::from_two_pos(a, b);
+        if r.width() > 0.5 && r.height() > 0.5 {
+            painter.rect_filled(r, 0.0, veil);
+        }
+    };
+    band(rect.left_top(), egui::pos2(rect.right(), lo.y)); // top
+    band(egui::pos2(rect.left(), hi.y), rect.right_bottom()); // bottom
+    band(egui::pos2(rect.left(), lo.y), egui::pos2(lo.x, hi.y)); // left
+    band(egui::pos2(hi.x, lo.y), egui::pos2(rect.right(), hi.y)); // right
 }
 
 /// U-5: MinimapPanel — isometric minimap with viewport quad and click-to-jump.
@@ -395,6 +338,7 @@ impl Panel for MinimapPanel {
                         painter.add(egui::Shape::mesh(mesh));
 
                         // Draw viewport quad: project 4 screen corners to world → minimap UV
+                        // (veil will be drawn after this quad is computed)
                         let aspect = ui_ctx.screen_dims.0 / ui_ctx.screen_dims.1;
                         let cam_vp = minimap::minimap_view_proj_matrix(
                             ui_ctx.camera_focus,
@@ -413,6 +357,11 @@ impl Panel for MinimapPanel {
                             );
                             viewport_pts.push(screen_pos);
                         }
+                        // Draw veil outside the viewport quad (v1 parity)
+                        if viewport_pts.len() == 4 {
+                            veil_outside(&painter, rect, &viewport_pts);
+                        }
+
                         // Draw closed quad outline
                         if viewport_pts.len() == 4 {
                             let stroke = egui::Stroke::new(1.5, theme::ACCENT);
