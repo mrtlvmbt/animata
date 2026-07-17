@@ -1,0 +1,143 @@
+//! U-2: World specification and deterministic landform configuration.
+//!
+//! Centralizes all inputs to world building (seed, flags, source), ensuring
+//! that both the app worker thread and harnesses use the same `build_world(spec)`
+//! path with deterministic flag derivation from seed.
+
+use std::path::PathBuf;
+
+/// World data source: procedural generation or loaded dump.
+#[derive(Clone, Debug)]
+pub enum WorldSource {
+    /// Procedurally generate a world. `dim_request` is honored ONLY in standalone mode;
+    /// sim mode ignores it to preserve the pinned-param contract (render dim must match
+    /// the sim worker's world).
+    Procgen { dim_request: Option<i64> },
+    /// Load a v1-format world dump from a file (carries its own dim).
+    Dump(PathBuf),
+}
+
+/// Specification for world building (single source of truth for app + harnesses).
+///
+/// All world-build inputs live here, re-derived fresh inside `build_world()`:
+/// - config is NOT stored; it's re-created from `seed` via `cli::default_config(seed)`
+/// - landform flags are NOT stored; they're computed from `(seed, standalone)` via `landform_flags()`
+/// - effective `dim` is an OUTPUT (BuiltWorld::dim), never stored as input
+///
+/// This design ensures regen is type-safe ("regen == cold launch") and sim mode
+/// can never read a stale launch-seed config through the back door.
+#[derive(Clone, Debug)]
+pub struct WorldSpec {
+    /// RNG seed for terrain generation and creature spawning.
+    pub seed: u64,
+    /// If true, apply standalone landform variety (seed-derived flags).
+    /// If false (sim mode), all landforms stay off (preserves pinned-param contract).
+    pub standalone: bool,
+    /// If true, water renders as dry-bed sand tint instead of water color.
+    pub bare_mode: bool,
+    /// Where the world comes from (Procgen or Dump).
+    pub source: WorldSource,
+}
+
+/// Stage of world building (used for progress reporting via callback).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Stage {
+    GenerateWorld = 0,
+    BuildMeshes = 1,
+    Done = 2,
+}
+
+impl Stage {
+    /// Convert to ordinal for atomic storage (u8).
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Convert from ordinal.
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Stage::GenerateWorld),
+            1 => Some(Stage::BuildMeshes),
+            2 => Some(Stage::Done),
+            _ => None,
+        }
+    }
+}
+
+/// Landform flags: derived deterministically from seed + standalone mode.
+/// Returns (tectonic, aeolian, volcanic, glacial, coastal).
+///
+/// Each landform toggles independently (well-spaced bit positions in splitmix64).
+/// Guard: never all-off (ensures maps never become flat/featureless).
+pub fn landform_flags(seed: u64, standalone: bool) -> (bool, bool, bool, bool, bool) {
+    if !standalone {
+        // Sim mode: all landforms off (unchanged from original contract)
+        return (false, false, false, false, false);
+    }
+
+    // Deterministic hash: splitmix64
+    let mut x = seed;
+    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
+    x ^= x >> 31;
+
+    // Extract independent bits for each landform (well-spaced bit positions)
+    let tect = (x >> 3) & 1 == 1;
+    let aeol = (x >> 13) & 1 == 1;
+    let volc = (x >> 23) & 1 == 1;
+    let glac = (x >> 33) & 1 == 1;
+    let coast = (x >> 43) & 1 == 1;
+
+    // Guard: never all-off (avoid flat/boring maps)
+    let (tect, aeol, volc, glac, coast) = if !(tect || aeol || volc || glac || coast) {
+        (true, aeol, volc, glac, coast)  // force tectonic if all others are off
+    } else {
+        (tect, aeol, volc, glac, coast)
+    };
+
+    (tect, aeol, volc, glac, coast)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stage_roundtrip_u8() {
+        assert_eq!(Stage::GenerateWorld.as_u8(), 0);
+        assert_eq!(Stage::BuildMeshes.as_u8(), 1);
+        assert_eq!(Stage::Done.as_u8(), 2);
+
+        assert_eq!(Stage::from_u8(0), Some(Stage::GenerateWorld));
+        assert_eq!(Stage::from_u8(1), Some(Stage::BuildMeshes));
+        assert_eq!(Stage::from_u8(2), Some(Stage::Done));
+        assert_eq!(Stage::from_u8(3), None);
+    }
+
+    #[test]
+    fn landform_flags_deterministic() {
+        let flags1 = landform_flags(0x1234_5678, true);
+        let flags2 = landform_flags(0x1234_5678, true);
+        assert_eq!(flags1, flags2, "same seed must produce same flags");
+
+        let flags3 = landform_flags(0x1234_5679, true);
+        // Different seed very likely produces different flags (not guaranteed, but highly probable)
+        // Just verify it returns a tuple
+        let _ = flags3;
+    }
+
+    #[test]
+    fn landform_flags_sim_mode_all_off() {
+        let flags = landform_flags(0xDEAD_BEEF, false);
+        assert_eq!(flags, (false, false, false, false, false), "sim mode must have all landforms off");
+    }
+
+    #[test]
+    fn landform_flags_never_all_off() {
+        // Test a range of seeds; at least one landform should always be on
+        for seed in [0u64, 1, 42, 0xFFFF_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE] {
+            let (t, a, v, g, c) = landform_flags(seed, true);
+            assert!(t || a || v || g || c, "seed {seed:016x} produced all-off landforms");
+        }
+    }
+}
