@@ -51,6 +51,10 @@ pub struct UiCtx<'a> {
     pub standalone_mode: bool,
     pub terrain_chunks_total: usize,
     pub actions: &'a mut Vec<UiAction>,
+    /// U-3: true if source is Procgen (needed for reseed button gating per F12)
+    pub is_procgen: bool,
+    /// U-3: optional LoadState for in-flight reseed progress tracking
+    pub regen_load_state: Option<&'a crate::loader_state::LoadState>,
 }
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
@@ -60,6 +64,8 @@ pub enum UiAction {
     TogglePause,
     StepOnce,
     ToggleTerrainKind,
+    /// U-3: Regenerate the world with a new seed (only valid in Procgen+standalone mode).
+    RegenSeed(u64),
 }
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
@@ -194,10 +200,101 @@ impl Panel for DebugPanel {
                     ui_ctx.actions.push(UiAction::ToggleTerrainKind);
                 }
 
+                // U-3: "New world" button — only shown in Procgen+standalone mode (F12/F15)
+                // When clicked, regenerate with next seed (current_seed + 1)
+                if ui_ctx.is_procgen && ui_ctx.standalone_mode {
+                    if ui.button("New world (N)").clicked() {
+                        ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1)));
+                    }
+                }
+
                 ui.label("Keyboard: WASD/drag pan · wheel zoom · Q/E rotate");
                 if !ui_ctx.standalone_mode {
-                    ui.label("Space: toggle pause · Right/N: step once");
+                    ui.label("Space: toggle pause · Right: step once");
+                } else if ui_ctx.is_procgen {
+                    ui.label("N: new world");
                 }
+            });
+    }
+}
+
+/// U-3: RegenChipPanel — small non-modal corner indicator during in-game world reseed.
+/// Shows pulsing dot + stage text (Generating world / Building meshes).
+/// Draws nothing when no regen is in flight.
+pub struct RegenChipPanel;
+
+impl Panel for RegenChipPanel {
+    fn id(&self) -> &'static str {
+        "regen_chip"
+    }
+
+    fn anchor(&self) -> Anchor {
+        Anchor::RightTop(egui::vec2(16.0, 16.0))
+    }
+
+    fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
+        // Only draw if regen is in flight
+        let Some(load_state) = ui_ctx.regen_load_state else {
+            return;
+        };
+
+        let progress = load_state.get_progress() as f32 / 1000.0;
+        let step_index = load_state.get_stage() as usize;
+        let t = ctx.input(|i| i.time);
+
+        let stages = &["Generating world", "Building meshes"];
+        let stage_text = stages.get(step_index).copied().unwrap_or("Building...");
+
+        // Chip dimensions
+        let chip_w = 160.0;
+        let chip_h = 60.0;
+
+        egui::Area::new(egui::Id::new("regen_chip_inner"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(0.0, 0.0))
+            .show(ctx, |ui| {
+                // Dark glass background chip
+                let chip_rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(chip_w, chip_h));
+                ui.painter().rect_filled(chip_rect, 6.0, theme::straight(7, 9, 8, 200));
+
+                // Pulsing dot
+                let (opacity, scale) = {
+                    let p = ((t % 1.6) / 1.6) as f32;
+                    let tri = 1.0 - (2.0 * p - 1.0).abs();
+                    (0.55 + 0.45 * tri, 1.0 + 0.25 * tri)
+                };
+                let dot_pos = egui::pos2(10.0, 12.0);
+                ui.painter().circle_filled(dot_pos, 3.0 * scale, theme::ACCENT.gamma_multiply(opacity));
+
+                // Stage text
+                ui.painter().text(
+                    egui::pos2(22.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    stage_text,
+                    theme::sans(11.0),
+                    theme::TEXT_FAINT,
+                );
+
+                // Progress bar background
+                let prog_rect = egui::Rect::from_min_size(egui::pos2(8.0, 30.0), egui::vec2(144.0, 4.0));
+                ui.painter().rect_filled(prog_rect, 1.0, theme::straight(255, 255, 255, 26));
+
+                // Progress bar fill
+                let fill_w = (144.0 * progress).max(0.0).min(144.0);
+                if fill_w > 0.0 {
+                    let fill_rect = egui::Rect::from_min_size(egui::pos2(8.0, 30.0), egui::vec2(fill_w, 4.0));
+                    ui.painter().rect_filled(fill_rect, 1.0, theme::ACCENT);
+                }
+
+                // Progress percent text
+                let pct = (progress * 100.0).round() as u32;
+                ui.painter().text(
+                    egui::pos2(chip_w / 2.0, 42.0),
+                    egui::Align2::CENTER_TOP,
+                    format!("{}%", pct),
+                    theme::mono(9.0),
+                    theme::TEXT_FAINT,
+                );
             });
     }
 }

@@ -180,6 +180,10 @@ struct CliArgs {
     slow_load: bool,
     /// U-2: `--screenshot-loader <path>`: capture loader modal mid-build, save PNG, exit.
     screenshot_loader: Option<String>,
+    /// U-3: `--screenshot-chip <path>`: capture regen chip mid-build, save PNG, exit.
+    screenshot_chip: Option<String>,
+    /// U-3: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
+    regen_to: Option<u64>,
 }
 
 fn parse_args() -> CliArgs {
@@ -196,6 +200,8 @@ fn parse_args() -> CliArgs {
     let mut height_scale_override = None;
     let mut slow_load = false;
     let mut screenshot_loader = None;
+    let mut screenshot_chip = None;
+    let mut regen_to = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -247,10 +253,19 @@ fn parse_args() -> CliArgs {
                 screenshot_loader = Some(args.next().expect("--screenshot-loader requires a path"));
                 standalone = true;  // loader implies standalone
             }
+            "--screenshot-chip" => {
+                screenshot_chip = Some(args.next().expect("--screenshot-chip requires a path"));
+                standalone = true;  // chip implies standalone
+            }
+            "--regen-to" => {
+                let v = args.next().expect("--regen-to requires a u64 seed value");
+                regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
+                standalone = true; // reseed harness is standalone
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -340,7 +355,7 @@ async fn main() {
     let config = cli::default_config(cli_args.seed);
 
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
-    let spec = WorldSpec {
+    let mut spec = WorldSpec {
         seed: cli_args.seed,
         standalone: cli_args.standalone,
         bare_mode: cli_args.bare_mode,
@@ -410,9 +425,10 @@ async fn main() {
     // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
     let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
 
-    // U-1: Initialize UI root with DebugPanel.
+    // U-1: Initialize UI root with DebugPanel and RegenChipPanel.
     let mut ui_root = ui::UiRoot::new();
     ui_root.push(Box::new(ui::DebugPanel));
+    ui_root.push(Box::new(ui::RegenChipPanel));
 
     // R-13: Apply camera preset to ensure deterministic view.
     let world_span = span_x.max(span_z).max(1.0);
@@ -450,61 +466,200 @@ async fn main() {
         (AppPhase::Running, mpsc::channel().1)
     };
 
+    // U-3/F14: Regen state for harness mode (if --regen-to is set)
+    // In screenshot mode, we may need to rebuild the world to a target seed.
+    // This rx_regen_built will receive the BuiltWorld when ready.
+    let mut harness_regen_load_state: Option<LoadState> = None;
+    let rx_regen_built: Option<mpsc::Receiver<BuiltWorld>> = if let Some(target_seed) = cli_args.regen_to {
+        if is_harness {
+            // Harness mode: spawn async regen on a worker thread, wait for result before capture
+            let regen_spec = WorldSpec {
+                seed: target_seed,
+                standalone: spec.standalone,
+                bare_mode: spec.bare_mode,
+                source: spec.source.clone(),
+            };
+            let load_state = LoadState::new(target_seed);
+            harness_regen_load_state = Some(load_state.clone());
+            let (tx, rx) = mpsc::channel();
+            let _ = std::thread::spawn(move || {
+                let load_clone = load_state.clone();
+                let mut on_stage = |stage: Stage| {
+                    load_clone.set_stage(stage);
+                    true
+                };
+                if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                    let _ = tx.send(built);
+                }
+            });
+            Some(rx)
+        } else {
+            None  // Will be handled in the main loop
+        }
+    } else {
+        None
+    };
+
     // R-13: Screenshot mode — render warmup frames, then capture on the final frame.
     if let Some(screenshot_path) = &cli_args.screenshot {
-        for frame_num in 0..=cli_args.screenshot_warmup {
-            // Screenshot mode: no UI, so gating is off (empty UiOut)
-            let no_ui = ui::UiOut::default();
-            // Process input events (screenshot mode: only sim controls)
-            for ev in input::collect(&no_ui) {
-                match ev {
-                    input::InputEvent::TogglePause => {
-                        if let Some(h) = &handle {
-                            h.toggle_pause();
-                        }
-                    }
-                    input::InputEvent::StepOnce => {
-                        if let Some(h) = &handle {
-                            h.step_once();
-                        }
-                    }
-                    input::InputEvent::ToggleTerrainKind => {
-                        // Not used in screenshot mode
+        // U-3/F14: Regen handling — different strategies for chip capture vs determinism gate.
+        // --slow-load + --regen-to: render Running frames (old world + chip) while regen builds (chip visible).
+        // Otherwise: block immediately on regen before rendering (determinism contract).
+        let mut rx_regen_blocking = rx_regen_built;
+        let render_with_regen = cli_args.slow_load && rx_regen_blocking.is_some();
+
+        if !render_with_regen {
+            // Determinism gate path (no --slow-load): block on regen before rendering
+            if let Some(ref rx_regen) = rx_regen_blocking {
+                if let Ok(built) = rx_regen.recv() {
+                    hex_terrain_chunks = convert_raw_chunks(built.hex);
+                    cube_terrain_chunks = convert_raw_chunks(built.cube);
+                    world_dim = built.dim;
+                    world = built.world;
+                    if cli_args.retained {
+                        use macroquad::prelude::get_internal_gl;
+                        let chunk_vert = load_shader("chunk_v2.vert");
+                        let chunk_frag = load_shader("chunk_v2.frag");
+                        let mut gl = unsafe { get_internal_gl() };
+                        let ctx = gl.quad_context;
+                        let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
+                        gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                        gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                        gpu_pipeline = Some(pipeline);
                     }
                 }
             }
+            rx_regen_blocking = None;  // Already consumed
+        }
 
-            clear_background(Color::from_rgba(18, 18, 22, 255));
-            let snap = handle.as_ref().and_then(|h| h.latest());
+        for frame_num in 0..=cli_args.screenshot_warmup {
+            // U-3: When --slow-load + regen in flight, render Running phase (old world + chip).
+            // LoadState progress indicates if regen is still building (< 1000 permille = < 100%).
+            let regen_still_building = render_with_regen && harness_regen_load_state.as_ref()
+                .map(|ls| ls.get_progress() < 1000)
+                .unwrap_or(false);
 
-            camera.update();
-            let cam3d = camera.to_camera3d();
-            let frustum_planes = camera.frustum_planes();
-            set_camera(&cam3d);
+            if regen_still_building {
+                // Chip-visible path: render with UI so regen progress is shown
+                let snap = handle.as_ref().and_then(|h| h.latest());
+                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+                let mut ui_actions: Vec<ui::UiAction> = Vec::new();
 
-            // R-15a: Draw terrain (CPU or GPU path)
-            let _ = draw::draw_terrain(
-                &hex_terrain_chunks,
-                &cube_terrain_chunks,
-                &gpu_hex_chunks,
-                &gpu_cube_chunks,
-                gpu_pipeline,
-                &camera,
-                use_cube_terrain,
-                cli_args.retained,
-            );
+                egui_macroquad::ui(|ctx| {
+                    let mut ui_ctx = ui::UiCtx {
+                        world_dim,
+                        seed: spec.seed,
+                        fps: get_fps(),
+                        chunks_drawn: 0,
+                        verts: 0,
+                        snap: snap.as_ref().map(|v| &**v),
+                        standalone_mode: cli_args.standalone,
+                        terrain_chunks_total: terrain_chunks.len(),
+                        actions: &mut ui_actions,
+                        is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
+                        regen_load_state: harness_regen_load_state.as_ref(),
+                    };
+                    let _ui_out = ui_root.draw(ctx, &mut ui_ctx);
+                });
 
-            // Render creatures by LOD tier
-            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
-            set_default_camera();
+                clear_background(Color::from_rgba(18, 18, 22, 255));
+                camera.update();
+                let cam3d = camera.to_camera3d();
+                set_camera(&cam3d);
 
-            // R-13 F-B5: Capture on final frame (frame_num == cli_args.screenshot_warmup)
-            // AFTER all rendering, BEFORE next_frame() to read the full backbuffer
-            if frame_num == cli_args.screenshot_warmup {
-                let img = get_screen_data();
-                img.export_png(screenshot_path);
-                println!("[screenshot] captured to {}", screenshot_path);
-                std::process::exit(0);
+                let _ = draw::draw_terrain(
+                    &hex_terrain_chunks,
+                    &cube_terrain_chunks,
+                    &gpu_hex_chunks,
+                    &gpu_cube_chunks,
+                    gpu_pipeline,
+                    &camera,
+                    use_cube_terrain,
+                    cli_args.retained,
+                );
+
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                set_default_camera();
+                ui::draw();  // Render the chip UI
+
+                // Capture at final frame while regen is still in progress (chip guaranteed visible under --slow-load)
+                if frame_num == cli_args.screenshot_warmup {
+                    let img = get_screen_data();
+                    img.export_png(screenshot_path);
+                    println!("[screenshot] captured chip mid-regen to {}", screenshot_path);
+                    std::process::exit(0);
+                }
+            } else if render_with_regen && frame_num == 0 {
+                // Regen just completed: swap worlds now before rendering
+                if let Some(ref rx) = rx_regen_blocking {
+                    if let Ok(built) = rx.recv() {
+                        hex_terrain_chunks = convert_raw_chunks(built.hex);
+                        cube_terrain_chunks = convert_raw_chunks(built.cube);
+                        world_dim = built.dim;
+                        world = built.world;
+                        spec.seed = built.seed;
+                        if cli_args.retained {
+                            use macroquad::prelude::get_internal_gl;
+                            let chunk_vert = load_shader("chunk_v2.vert");
+                            let chunk_frag = load_shader("chunk_v2.frag");
+                            let mut gl = unsafe { get_internal_gl() };
+                            let ctx = gl.quad_context;
+                            let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
+                            gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                            gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                            gpu_pipeline = Some(pipeline);
+                        }
+                        harness_regen_load_state = None;
+                        rx_regen_blocking = None;
+                    }
+                }
+                // Fall through to normal render
+            }
+
+            // Normal screenshot render (after regen complete or no regen)
+            if !regen_still_building {
+                let no_ui = ui::UiOut::default();
+                for ev in input::collect(&no_ui) {
+                    match ev {
+                        input::InputEvent::TogglePause => {
+                            if let Some(h) = &handle { h.toggle_pause(); }
+                        }
+                        input::InputEvent::StepOnce => {
+                            if let Some(h) = &handle { h.step_once(); }
+                        }
+                        input::InputEvent::ToggleTerrainKind => {}
+                        input::InputEvent::RegenSeed => {}
+                    }
+                }
+
+                clear_background(Color::from_rgba(18, 18, 22, 255));
+                let snap = handle.as_ref().and_then(|h| h.latest());
+
+                camera.update();
+                let cam3d = camera.to_camera3d();
+                set_camera(&cam3d);
+
+                let _ = draw::draw_terrain(
+                    &hex_terrain_chunks,
+                    &cube_terrain_chunks,
+                    &gpu_hex_chunks,
+                    &gpu_cube_chunks,
+                    gpu_pipeline,
+                    &camera,
+                    use_cube_terrain,
+                    cli_args.retained,
+                );
+
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                set_default_camera();
+
+                // R-13 F-B5: Capture on final frame
+                if frame_num == cli_args.screenshot_warmup {
+                    let img = get_screen_data();
+                    img.export_png(screenshot_path);
+                    println!("[screenshot] captured to {}", screenshot_path);
+                    std::process::exit(0);
+                }
             }
 
             next_frame().await;
@@ -531,6 +686,9 @@ async fn main() {
                         }
                     }
                     input::InputEvent::ToggleTerrainKind => {
+                        // Not used in benchmark mode
+                    }
+                    input::InputEvent::RegenSeed => {
                         // Not used in benchmark mode
                     }
                 }
@@ -590,6 +748,9 @@ async fn main() {
                     input::InputEvent::ToggleTerrainKind => {
                         // Not used in benchmark mode
                     }
+                    input::InputEvent::RegenSeed => {
+                        // Not used in benchmark mode
+                    }
                 }
             }
 
@@ -645,6 +806,10 @@ async fn main() {
 
     // U-2: Frame counter for --screenshot-loader (capture loader mid-build)
     let mut loading_frame_count = 0u32;
+
+    // U-3: Reseed state (in-progress world rebuild on worker thread)
+    let mut rx_regen_in_flight: Option<mpsc::Receiver<BuiltWorld>> = None;
+    let mut regen_load_state: Option<LoadState> = None;
 
     loop {
         // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
@@ -727,6 +892,10 @@ async fn main() {
                         standalone_mode: cli_args.standalone,
                         terrain_chunks_total: terrain_chunks.len(),
                         actions: &mut ui_actions,
+                        // U-3/F12: gate "New world" button visibility
+                        is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
+                        // U-3: pass regen state for RegenChipPanel
+                        regen_load_state: regen_load_state.as_ref(),
                     };
                     let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
@@ -745,6 +914,14 @@ async fn main() {
                             }
                             input::InputEvent::ToggleTerrainKind => {
                                 ui_actions.push(ui::UiAction::ToggleTerrainKind);
+                            }
+                            // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
+                            input::InputEvent::RegenSeed => {
+                                let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
+                                if can_reseed {
+                                    // Trigger reseed with next seed (current+1)
+                                    ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                                }
                             }
                         }
                     }
@@ -766,6 +943,61 @@ async fn main() {
                         ui::UiAction::ToggleTerrainKind => {
                             use_cube_terrain = !use_cube_terrain;
                         }
+                        // U-3: Reseed — spawn async world build on worker, keep rendering old world
+                        ui::UiAction::RegenSeed(target_seed) => {
+                            if rx_regen_in_flight.is_none() && matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone {
+                                let regen_spec = WorldSpec {
+                                    seed: target_seed,
+                                    standalone: spec.standalone,
+                                    bare_mode: spec.bare_mode,
+                                    source: spec.source.clone(),
+                                };
+                                let load_state = LoadState::new(target_seed);
+                                regen_load_state = Some(load_state.clone());
+                                let (tx, rx) = mpsc::channel();
+                                let _ = std::thread::spawn(move || {
+                                    let load_clone = load_state.clone();
+                                    let mut on_stage = |stage: Stage| {
+                                        load_clone.set_stage(stage);
+                                        true
+                                    };
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                                        let _ = tx.send(built);
+                                    }
+                                });
+                                rx_regen_in_flight = Some(rx);
+                            }
+                        }
+                    }
+                }
+
+                // U-3: Poll for in-flight reseed completion and swap worlds if ready
+                if let Some(ref mut rx) = rx_regen_in_flight {
+                    if let Ok(built) = rx.try_recv() {
+                        // Reseed complete: swap worlds and rebuild meshes
+                        hex_terrain_chunks = convert_raw_chunks(built.hex);
+                        cube_terrain_chunks = convert_raw_chunks(built.cube);
+                        world_dim = built.dim;
+                        world = built.world;
+
+                        // Update spec.seed to match the new world
+                        spec.seed = built.seed;
+
+                        // U-2/D5: GPU upload if --retained
+                        if cli_args.retained {
+                            use macroquad::prelude::get_internal_gl;
+                            let chunk_vert = load_shader("chunk_v2.vert");
+                            let chunk_frag = load_shader("chunk_v2.frag");
+                            let mut gl = unsafe { get_internal_gl() };
+                            let ctx = gl.quad_context;
+                            let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
+                            gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                            gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                            gpu_pipeline = Some(pipeline);
+                        }
+
+                        rx_regen_in_flight = None;
+                        regen_load_state = None;
                     }
                 }
 

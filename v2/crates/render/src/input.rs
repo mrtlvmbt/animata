@@ -9,10 +9,12 @@ use crate::ui::UiOut;
 pub enum InputEvent {
     /// Space: toggle sim pause (only valid if sim is running)
     TogglePause,
-    /// Right or N: step the sim once while paused (only valid if sim is running)
+    /// Right: step the sim once while paused (only valid if sim is running)
     StepOnce,
     /// T: toggle between hex and cube terrain rendering
     ToggleTerrainKind,
+    /// U-3: N key — regenerate the world with a new seed (only valid in Procgen+standalone mode)
+    RegenSeed,
 }
 
 /// Collect all input events this frame, respecting UI gating.
@@ -26,8 +28,12 @@ pub fn collect(ui_out: &UiOut) -> Vec<InputEvent> {
         if is_key_pressed(KeyCode::Space) {
             events.push(InputEvent::TogglePause);
         }
-        if is_key_pressed(KeyCode::Right) || is_key_pressed(KeyCode::N) {
+        if is_key_pressed(KeyCode::Right) {
             events.push(InputEvent::StepOnce);
+        }
+        // U-3: N key for world reseed (gating to Procgen+standalone happens in main.rs)
+        if is_key_pressed(KeyCode::N) {
+            events.push(InputEvent::RegenSeed);
         }
         if is_key_pressed(KeyCode::T) {
             events.push(InputEvent::ToggleTerrainKind);

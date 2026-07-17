@@ -1,8 +1,8 @@
-task: U-4 zoom-to-cursor and left-drag pan (#456)
-phase: code review (code-critic found test bug, fixed; awaiting PM test run)
-blocked_on: PM cloud test run (unit tests + manual feel check)
-next: PM intake: unit tests run + manual feel verification → merge decision
-updated: 2026-07-17 12:00
+task: U-3 in-game world reseed (#458)
+phase: COMPLETE (determinism verified, chip capture evidence committed)
+blocked_on: code-critic review + PM test-verify (byte-identical confirmation)
+next: PM intake: verify chip PNG + re-run determinism tests → merge
+updated: 2026-07-17 15:10
 
 ## Merged (integration branch render-r12-terragen-preview, head 7e23407)
 R-13, W-9, W-10, R-15a, R-14, R-16, R-17, U-0, U-1, U-2. DECISIONS rows: animata-pm #51/#53/#55/#56
