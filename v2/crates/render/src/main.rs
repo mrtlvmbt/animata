@@ -44,14 +44,25 @@ mod dump_world;
 mod gpu_terrain;
 mod hex;
 mod input;
+mod loader_state;
+mod raw_chunk;
 mod terrain;
 mod terrain_cube;
 mod ui;
+mod world_builder;
+mod world_spec;
 
 use camera::IsoCam;
 use macroquad::prelude::*;
 use sim_core::WorldView;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::Instant;
+use world_spec::{landform_flags, WorldSpec, WorldSource, Stage};
+use loader_state::{LoadState, AppPhase};
+use raw_chunk::{RawChunk, BuiltWorld};
+use terrain::TerrainChunk;
 
 // ── R-4 LOD tier thresholds (px_per_m-driven) ──────────────────────────────────────────────────────
 /// FAR tier: creatures are sub-pixel or nearly invisible (point/billboard). Triggers when px_per_m < 5.
@@ -64,6 +75,28 @@ const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 
 /// NEAR tier: creatures are minimal cell-type morphology (differentiated small shapes).
 /// Triggers when px_per_m >= 20 (ortho_span <= ~38, zoomed in close).
+
+// ── U-2: World building and assembly helpers ─────────────────────────────────────────────────────────
+
+/// Convert a RawChunk (worker-thread-safe buffers) to a TerrainChunk (GPU-side Mesh).
+/// Called on the main thread after build_world completes.
+fn raw_chunk_to_terrain_chunk(raw: RawChunk) -> TerrainChunk {
+    let mesh = Mesh {
+        vertices: raw.vertices,
+        indices: raw.indices,
+        texture: None,
+    };
+    TerrainChunk {
+        mesh,
+        bounds: (raw.lo, raw.hi),
+    }
+}
+
+/// Convert all raw chunks to terrain chunks (GPU assembly).
+fn convert_raw_chunks(raw_chunks: Vec<RawChunk>) -> Vec<TerrainChunk> {
+    raw_chunks.into_iter().map(raw_chunk_to_terrain_chunk).collect()
+}
+
 fn window_conf() -> Conf {
     // R-13: Pre-parse args to detect --bench mode for vsync configuration
     let is_bench = std::env::args().any(|arg| arg == "--bench");
@@ -143,6 +176,10 @@ struct CliArgs {
     bare_mode: bool,
     /// R-14: `--height-scale <f32>`: override the height scale (default 0.2).
     height_scale_override: Option<f32>,
+    /// U-2: `--slow-load`: inject ~600ms delay per stage (for loader screenshot capture).
+    slow_load: bool,
+    /// U-2: `--screenshot-loader <path>`: capture loader modal mid-build, save PNG, exit.
+    screenshot_loader: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -157,6 +194,8 @@ fn parse_args() -> CliArgs {
     let mut retained = false;
     let mut bare_mode = false;
     let mut height_scale_override = None;
+    let mut slow_load = false;
+    let mut screenshot_loader = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -201,10 +240,17 @@ fn parse_args() -> CliArgs {
                 let v = args.next().expect("--height-scale requires a value");
                 height_scale_override = Some(v.parse().unwrap_or_else(|_| panic!("--height-scale expects f32, got {v:?}")));
             }
+            "--slow-load" => {
+                slow_load = true;
+            }
+            "--screenshot-loader" => {
+                screenshot_loader = Some(args.next().expect("--screenshot-loader requires a path"));
+                standalone = true;  // loader implies standalone
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -273,34 +319,6 @@ pub fn draw_gpu_terrain(
 // (`HMAX`=relief spread, `RESOURCE_BASE`=cap rescale magnitude for biome+edaphic-driven richness,
 // `WORLD_SALT`=seed permutation).
 
-/// R-17: Per-seed landform variety — each landform toggles independently from seed bits,
-/// allowing free mixing (volcanic + coastal for volcanic islands, volcanic + tectonic, etc).
-/// Uses splitmix64 hash with independent bit positions for each landform.
-/// Guard: never all-off (ensures maps are never flat/featureless).
-fn landform_flags(seed: u64) -> (bool, bool, bool, bool, bool) {
-    // Deterministic hash: splitmix64
-    let mut x = seed;
-    x = (x ^ (x >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
-    x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
-    x ^= x >> 31;
-
-    // Extract independent bits for each landform (well-spaced bit positions)
-    let tect = (x >> 3) & 1 == 1;
-    let aeol = (x >> 13) & 1 == 1;
-    let volc = (x >> 23) & 1 == 1;
-    let glac = (x >> 33) & 1 == 1;
-    let coast = (x >> 43) & 1 == 1;
-
-    // Guard: never all-off (avoid flat/boring maps)
-    let (tect, aeol, volc, glac, coast) = if !(tect || aeol || volc || glac || coast) {
-        (true, aeol, volc, glac, coast)  // force tectonic if all others are off
-    } else {
-        (tect, aeol, volc, glac, coast)
-    };
-
-    (tect, aeol, volc, glac, coast)
-}
-
 #[macroquad::main(window_conf)]
 async fn main() {
     // macroquad's default per-draw-call buffer (10 000 verts / 5 000 indices) silently CLAMPS (drops
@@ -320,54 +338,46 @@ async fn main() {
 
     let cli_args = parse_args();
     let config = cli::default_config(cli_args.seed);
-    // R-8: `--dim` only applies in standalone — in sim mode the worker thread builds its OWN world
-    // from `config.econ.world_dim` (via `cli::build_sim`), so overriding it here alone would desync
-    // the render's terrain from the sim's, breaking the pinned-param contract below.
-    // The render's OWN WorldView (boxed so it can be either the native `ProcgenWorld` or a v1 dump).
-    // Built ONCE from the SAME (dim, hmax, resource_base, seed) tuple the sim worker uses — the single
-    // source of provenance the pinned-param contract above requires. W-6 WIRE: use `cli::HMAX`,
-    // `cli::RESOURCE_BASE`, `cli::WORLD_SALT` directly (now pub). The ProcgenWorld pipeline (integer
-    // relief + erosion + biome/edaphic + caps) runs once here and caches all per-cell fields — never
-    // re-run per frame or per query.
-    //
-    // Landform stages (tectonics/aeolian/volcanic/glacial/coastal, all default-off in the sim path):
-    // turn ON in STANDALONE only, to preview the full diverse-relief terragen (map_dump does the same).
-    // In sim mode they MUST stay off — the sim worker builds its world with all-off, and flipping only
-    // the render side would desync the pinned-param contract above.
-    //
-    // R-17: Standalone uses per-seed landform profiles for variety (6 archetypes via landform_profile).
-    // `--v1-dump <path>` REPLACES the ProcgenWorld with a v1-generated dump (carrying its OWN `dim`),
-    // holding THIS renderer constant to compare v1 vs v2 worldgen. On load error it falls back to
-    // ProcgenWorld. `--dim` only applies in standalone — see the module doc comment for why.
-    let make_procgen = |dim: i64| -> Box<dyn WorldView> {
-        let (tect, aeol, volc, glac, coast) = if cli_args.standalone {
-            landform_flags(config.seed)   // deterministic, seed-derived variety with free landform mixing
+
+    // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
+    let spec = WorldSpec {
+        seed: cli_args.seed,
+        standalone: cli_args.standalone,
+        bare_mode: cli_args.bare_mode,
+        source: if let Some(path) = &cli_args.v1_dump {
+            WorldSource::Dump(std::path::PathBuf::from(path))
         } else {
-            (false, false, false, false, false)  // sim mode: all-off (unchanged)
-        };
-        Box::new(world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, config.seed ^ cli::WORLD_SALT, None, tect, aeol, volc, glac, coast))
-    };
-    let default_dim = if cli_args.standalone { cli_args.dim_override.unwrap_or(config.econ.world_dim) } else { config.econ.world_dim };
-    let (world_dim, world): (i64, Box<dyn WorldView>) = match &cli_args.v1_dump {
-        Some(path) => match dump_world::DumpWorld::load(path) {
-            Ok(w) => {
-                let dim = w.dim;
-                println!("[v1-dump] loaded {path}: dim {dim} — drawing v1 worldgen in the v2 renderer");
-                (dim, Box::new(w))
-            }
-            Err(e) => {
-                eprintln!("[v1-dump] {e}; falling back to ProcgenWorld");
-                (default_dim, make_procgen(default_dim))
-            }
+            // D5 dim rule: dim_request lives in Procgen, honored only if spec.standalone
+            WorldSource::Procgen { dim_request: cli_args.dim_override }
         },
-        None => (default_dim, make_procgen(default_dim)),
     };
-    // Build terrain meshes (palette v2: material HUE × height VALUE + jitter).
-    let mut hex_terrain_chunks = terrain::build_hex_terrain(world_dim, world.as_ref(), config.seed, cli_args.bare_mode);
-    let mut cube_terrain_chunks = terrain_cube::build_cube_terrain(world_dim, world.as_ref(), config.seed, cli_args.bare_mode);
+
+    // U-2: For harnesses (screenshot/bench), build world inline before their loops
+    // For app path, we'll spawn a worker thread and initialize from recv
+    let is_harness = cli_args.screenshot.is_some() || cli_args.bench;
+
+    let (mut hex_terrain_chunks, mut cube_terrain_chunks, mut world_dim, mut world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
+        // Harnesses: build_world inline (synchronous, no loader)
+        let mut on_stage = |_stage: Stage| true;  // No-op callback for harnesses
+        let built = world_builder::build_world(&spec, on_stage).expect("build_world failed");
+        let world_dim = built.dim;
+        let world = built.world;
+        let hex_chunks = convert_raw_chunks(built.hex);
+        let cube_chunks = convert_raw_chunks(built.cube);
+        (hex_chunks, cube_chunks, world_dim, world)
+    } else {
+        // App path: world will be built on worker thread and received in Loading phase
+        // Initialize with minimal dummy values (camera will reinit from built.dim after recv)
+        let (tect, aeol, volc, glac, coast) = landform_flags(spec.seed, spec.standalone);
+        let temp_world: Box<dyn WorldView> = Box::new(world::ProcgenWorld::new(
+            config.econ.world_dim, cli::HMAX, cli::RESOURCE_BASE, spec.seed ^ cli::WORLD_SALT, None,
+            tect, aeol, volc, glac, coast  // Use spec.seed (F4), landforms always match eventually
+        ));
+        (Vec::new(), Vec::new(), config.econ.world_dim, temp_world)
+    };
 
     // R-15a: Retained-buffer GPU terrain initialization (if --retained).
-    let (mut gpu_hex_chunks, mut gpu_cube_chunks, gpu_pipeline) = if cli_args.retained {
+    let (mut gpu_hex_chunks, mut gpu_cube_chunks, mut gpu_pipeline) = if cli_args.retained {
         use macroquad::prelude::get_internal_gl;
 
         let chunk_vert = load_shader("chunk_v2.vert");
@@ -409,6 +419,36 @@ async fn main() {
     if cli_args.screenshot.is_some() || cli_args.bench {
         cli_args.cam_preset.apply_to_camera(&mut camera, center, world_span);
     }
+
+    // U-2: App path: spawn world builder on worker thread
+    let (mut app_phase, rx_built_world): (AppPhase, mpsc::Receiver<BuiltWorld>) = if !is_harness {
+        let load_state = LoadState::new(cli_args.seed);
+        let spec_worker = spec.clone();
+        let slow_load_flag = cli_args.slow_load;
+
+        let (tx, rx) = mpsc::channel();
+
+        let load_clone = load_state.clone();
+
+        let _ = std::thread::spawn(move || {
+            let mut on_stage = |stage: Stage| {
+                load_clone.set_stage(stage);
+                if slow_load_flag {
+                    std::thread::sleep(std::time::Duration::from_millis(600));
+                }
+                true
+            };
+            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage) {
+                load_clone.mark_done();
+                let _ = tx.send(built);
+            }
+        });
+
+        (AppPhase::Loading(load_state), rx)
+    } else {
+        // Harnesses don't use AppPhase
+        (AppPhase::Running, mpsc::channel().1)
+    };
 
     // R-13: Screenshot mode — render warmup frames, then capture on the final frame.
     if let Some(screenshot_path) = &cli_args.screenshot {
@@ -603,90 +643,155 @@ async fn main() {
         std::process::exit(0);
     }
 
+    // U-2: Frame counter for --screenshot-loader (capture loader mid-build)
+    let mut loading_frame_count = 0u32;
+
     loop {
-        // U-1: Draw UI first to get pointer/keyboard gating state before processing input.
-        let snap = handle.as_ref().and_then(|h| h.latest());
-        let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+        // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
+        match &mut app_phase {
+            AppPhase::Loading(ref load_state) => {
+                // Loading phase: render loader modal, poll worker for completion
+                clear_background(Color::from_rgba(18, 18, 22, 255));
 
-        // F1: Collect all commands (UiActions + InputEvents) and apply them in one place
-        let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+                egui_macroquad::ui(|ctx| {
+                    ui::loader::draw(ctx, load_state);
+                });
 
-        egui_macroquad::ui(|ctx| {
-            // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
-            // This causes a 1-frame lag (acceptable, identical to v1 behavior).
-            let mut ui_ctx = ui::UiCtx {
-                world_dim,
-                seed: config.seed,
-                fps: get_fps(),
-                chunks_drawn: 0, // Will be updated after drawing
-                verts: 0,
-                snap: snap.as_ref().map(|v| &**v),
-                standalone_mode: cli_args.standalone,
-                terrain_chunks_total: terrain_chunks.len(),
-                actions: &mut ui_actions,
-            };
-            let ui_out = ui_root.draw(ctx, &mut ui_ctx);
+                // Flush egui to framebuffer (critical: must happen before capture or get_screen_data)
+                egui_macroquad::draw();
 
-            // Apply camera update with gating.
-            camera.update_gated(ui_out.wants_pointer, ui_out.wants_keyboard);
-
-            // Collect keyboard input events with gating.
-            for ev in input::collect(&ui_out) {
-                // Convert InputEvent to UiAction and collect for unified handling
-                match ev {
-                    input::InputEvent::TogglePause => {
-                        ui_actions.push(ui::UiAction::TogglePause);
+                // U-2: Capture loader screenshot at frame ~20 (stable mid-load state)
+                if let Some(ref screenshot_path) = cli_args.screenshot_loader {
+                    if loading_frame_count == 20 {
+                        let img = get_screen_data();
+                        img.export_png(screenshot_path);
+                        println!("[screenshot-loader] captured loader to {}", screenshot_path);
+                        std::process::exit(0);
                     }
-                    input::InputEvent::StepOnce => {
-                        ui_actions.push(ui::UiAction::StepOnce);
-                    }
-                    input::InputEvent::ToggleTerrainKind => {
-                        ui_actions.push(ui::UiAction::ToggleTerrainKind);
-                    }
+                    loading_frame_count += 1;
                 }
+
+                // U-2/F1: Try to receive BuiltWorld from worker thread
+                if let Ok(built) = rx_built_world.try_recv() {
+                    // Mesh assembly: convert RawChunks to TerrainChunks (GPU-side)
+                    hex_terrain_chunks = convert_raw_chunks(built.hex);
+                    cube_terrain_chunks = convert_raw_chunks(built.cube);
+                    world_dim = built.dim;
+                    world = built.world;
+
+                    // U-2/D5: Camera init from built.dim (output, not input)
+                    let (span_x, _) = hex::hex_center(world_dim, 0);
+                    let (_, span_z) = hex::hex_center(0, world_dim);
+                    let world_span = span_x.max(span_z).max(1.0);
+                    let center = Vec3::new(span_x * 0.5, hex::HEIGHT_SCALE * cli::HMAX as f32 * 0.5, span_z * 0.5);
+                    camera = IsoCam::new(center, 0.0, world_span * 1.5);
+
+                    // U-2/D5: GPU upload if --retained (GL-thread-only work)
+                    if cli_args.retained {
+                        use macroquad::prelude::get_internal_gl;
+                        let chunk_vert = load_shader("chunk_v2.vert");
+                        let chunk_frag = load_shader("chunk_v2.frag");
+
+                        let mut gl = unsafe { get_internal_gl() };
+                        let ctx = gl.quad_context;
+                        let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
+                        gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
+                        gpu_cube_chunks = gpu_terrain::upload_chunks(ctx, &cube_terrain_chunks);
+                        gpu_pipeline = Some(pipeline);
+                    }
+
+                    // Transition to Running
+                    app_phase = AppPhase::Running;
+                }
+
+                next_frame().await;
             }
-        });
+            AppPhase::Running => {
+                // Running phase: render world as normal (original main loop body)
+                let snap = handle.as_ref().and_then(|h| h.latest());
+                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
 
-        // F1: Apply all actions (from UI buttons and keyboard) in unified handler
-        for action in ui_actions {
-            match action {
-                ui::UiAction::TogglePause => {
-                    if let Some(h) = &handle {
-                        h.toggle_pause();
+                // F1: Collect all commands (UiActions + InputEvents) and apply them in one place
+                let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+
+                egui_macroquad::ui(|ctx| {
+                    // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
+                    // This causes a 1-frame lag (acceptable, identical to v1 behavior).
+                    let mut ui_ctx = ui::UiCtx {
+                        world_dim,
+                        seed: spec.seed,  // F4: use spec.seed (spec-driven design)
+                        fps: get_fps(),
+                        chunks_drawn: 0, // Will be updated after drawing
+                        verts: 0,
+                        snap: snap.as_ref().map(|v| &**v),
+                        standalone_mode: cli_args.standalone,
+                        terrain_chunks_total: terrain_chunks.len(),
+                        actions: &mut ui_actions,
+                    };
+                    let ui_out = ui_root.draw(ctx, &mut ui_ctx);
+
+                    // Apply camera update with gating.
+                    camera.update_gated(ui_out.wants_pointer, ui_out.wants_keyboard);
+
+                    // Collect keyboard input events with gating.
+                    for ev in input::collect(&ui_out) {
+                        // Convert InputEvent to UiAction and collect for unified handling
+                        match ev {
+                            input::InputEvent::TogglePause => {
+                                ui_actions.push(ui::UiAction::TogglePause);
+                            }
+                            input::InputEvent::StepOnce => {
+                                ui_actions.push(ui::UiAction::StepOnce);
+                            }
+                            input::InputEvent::ToggleTerrainKind => {
+                                ui_actions.push(ui::UiAction::ToggleTerrainKind);
+                            }
+                        }
+                    }
+                });
+
+                // F1: Apply all actions (from UI buttons and keyboard) in unified handler
+                for action in ui_actions {
+                    match action {
+                        ui::UiAction::TogglePause => {
+                            if let Some(h) = &handle {
+                                h.toggle_pause();
+                            }
+                        }
+                        ui::UiAction::StepOnce => {
+                            if let Some(h) = &handle {
+                                h.step_once();
+                            }
+                        }
+                        ui::UiAction::ToggleTerrainKind => {
+                            use_cube_terrain = !use_cube_terrain;
+                        }
                     }
                 }
-                ui::UiAction::StepOnce => {
-                    if let Some(h) = &handle {
-                        h.step_once();
-                    }
-                }
-                ui::UiAction::ToggleTerrainKind => {
-                    use_cube_terrain = !use_cube_terrain;
-                }
+
+                clear_background(Color::from_rgba(18, 18, 22, 255));
+                let cam3d = camera.to_camera3d();
+                set_camera(&cam3d);
+
+                let draw_stats = draw::draw_terrain(
+                    &hex_terrain_chunks,
+                    &cube_terrain_chunks,
+                    &gpu_hex_chunks,
+                    &gpu_cube_chunks,
+                    gpu_pipeline,
+                    &camera,
+                    use_cube_terrain,
+                    cli_args.retained,
+                );
+
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                set_default_camera();
+
+                ui::draw();
+
+                next_frame().await;
             }
         }
-
-        clear_background(Color::from_rgba(18, 18, 22, 255));
-        let cam3d = camera.to_camera3d();
-        set_camera(&cam3d);
-
-        let draw_stats = draw::draw_terrain(
-            &hex_terrain_chunks,
-            &cube_terrain_chunks,
-            &gpu_hex_chunks,
-            &gpu_cube_chunks,
-            gpu_pipeline,
-            &camera,
-            use_cube_terrain,
-            cli_args.retained,
-        );
-
-        creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
-        set_default_camera();
-
-        ui::draw();
-
-        next_frame().await;
     }
 }
 
@@ -715,7 +820,7 @@ mod tests {
     fn landform_variety_seeds_coverage() {
         let mut combos = std::collections::HashSet::new();
         for seed in 1..=8 {
-            combos.insert(landform_flags(seed as u64));
+            combos.insert(landform_flags(seed as u64, true));  // standalone mode for variety
         }
         assert!(combos.len() >= 5, "variety gallery requires ≥5 distinct landform combos, got {}", combos.len());
         // Verify at least one mix (multiple landforms on same seed)

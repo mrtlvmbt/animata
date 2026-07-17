@@ -1,3 +1,4 @@
+pub mod loader;
 pub mod theme;
 
 use macroquad::prelude::*;
