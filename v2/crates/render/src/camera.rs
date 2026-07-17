@@ -227,14 +227,12 @@ impl IsoCam {
     /// Apply camera input with gating (F2: testable core).
     /// Test can inject synthetic CamInput and verify that gating actually blocks changes.
     pub fn apply_cam_input(&mut self, input: &CamInput, tuning: &Tuning, wants_pointer: bool, wants_keyboard: bool) {
-        // Keyboard pan — pan axes derived from screen directions, accounting for 45° base azimuth
-        // in view_proj_matrix. Screen-right corresponds to (45° + yaw), screen-up to (45° + yaw + 90°).
+        // Keyboard pan
         if !wants_keyboard && (input.pan_dir.0 != 0.0 || input.pan_dir.1 != 0.0) {
-            let azim = std::f32::consts::FRAC_PI_4 + self.yaw; // 45° + yaw, matching view_proj_matrix
-            let cos_azim = azim.cos();
-            let sin_azim = azim.sin();
-            let local_x = Vec3::new(cos_azim, 0.0, sin_azim);  // screen-right direction
-            let local_z = Vec3::new(-sin_azim, 0.0, cos_azim); // screen-up direction
+            let cos_yaw = self.yaw.cos();
+            let sin_yaw = self.yaw.sin();
+            let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
+            let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
             let pan_delta = Vec3::new(input.pan_dir.0, 0.0, input.pan_dir.1);
             self.focus += local_x * pan_delta.x + local_z * pan_delta.z;
         }
@@ -289,14 +287,12 @@ impl IsoCam {
         }
 
         // Middle/right-drag pan (legacy, kept for backward compatibility).
-        // Pan axes derived from screen directions, matching keyboard pan basis.
         if !wants_pointer {
             if let Some((curr_x, curr_y)) = input.mouse_delta {
-                let azim = std::f32::consts::FRAC_PI_4 + self.yaw; // 45° + yaw
-                let cos_azim = azim.cos();
-                let sin_azim = azim.sin();
-                let local_x = Vec3::new(cos_azim, 0.0, sin_azim);
-                let local_z = Vec3::new(-sin_azim, 0.0, cos_azim);
+                let cos_yaw = self.yaw.cos();
+                let sin_yaw = self.yaw.sin();
+                let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
+                let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
                 let delta = (curr_x - self.last_mouse_pos.0, curr_y - self.last_mouse_pos.1);
                 let world_delta_x = -delta.0 * tuning.drag_sensitivity * self.ortho_span / 200.0;
                 let world_delta_z = delta.1 * tuning.drag_sensitivity * self.ortho_span / 200.0;
