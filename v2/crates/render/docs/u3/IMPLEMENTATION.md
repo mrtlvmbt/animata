@@ -37,6 +37,14 @@
 - Regen completes → chip disappears automatically
 - Non-modal: input stays live, old world renders beneath the chip during build
 
-**Deferred:**
-- Automated screenshot capture during chip display (would require significant refactoring of screenshot mode's blocking recv loop)
-- Manual PM verification of chip visual appearance and legibility required
+**Chip capture mechanism (`--slow-load + --regen-to + --screenshot`):**
+- When all three flags are set, screenshot mode renders Running phase frames (not blocking immediately)
+- Uses LoadState progress to detect if regen is still building (< 1000 permille = < 100%)
+- Renders old world + chip UI on each frame while regen progresses in background
+- Captures screenshot at final warmup frame while regen is guaranteed still mid-build (due to --slow-load delays)
+- Determinism gate path (no --slow-load) unaffected — still blocks immediately on regen (see code comment at line ~503)
+
+**Evidence:** `chip_mid_regen.png` — captured during regen of seed 3→7 with `--slow-load --regen-to 7`
+- Chip visible in top-left corner with "Building..." stage text and pulsing dot
+- Old world (seed 3 with blue water terrain) renders beneath chip (non-modal)
+- Debug panel shows terrain state; input would remain live during actual play
