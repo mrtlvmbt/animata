@@ -558,6 +558,14 @@ async fn main() {
                 let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
                 let mut ui_actions: Vec<ui::UiAction> = Vec::new();
 
+                // U-5: Fire --jump-to action in harness on frame 0 (before any rendering)
+                if frame_num == 0 && !jump_to_fired {
+                    if let Some((x, z)) = cli_args.jump_to {
+                        ui_actions.push(ui::UiAction::JumpCamera(glam::vec2(x, z)));
+                        jump_to_fired = true;
+                    }
+                }
+
                 egui_macroquad::ui(|ctx| {
                     let mut ui_ctx = ui::UiCtx {
                         world_dim,
@@ -583,6 +591,16 @@ async fn main() {
                     };
                     let _ui_out = ui_root.draw(ctx, &mut ui_ctx);
                 });
+
+                // Apply UI actions (includes --jump-to)
+                for action in ui_actions {
+                    match action {
+                        ui::UiAction::JumpCamera(world_pos) => {
+                            camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
+                        }
+                        _ => {}  // Ignore other actions in harness
+                    }
+                }
 
                 clear_background(Color::from_rgba(18, 18, 22, 255));
                 camera.update();
@@ -656,6 +674,14 @@ async fn main() {
 
                 clear_background(Color::from_rgba(18, 18, 22, 255));
                 let snap = handle.as_ref().and_then(|h| h.latest());
+
+                // U-5: Fire --jump-to action in harness on frame 0 (normal screenshot path)
+                if frame_num == 0 && !jump_to_fired {
+                    if let Some((x, z)) = cli_args.jump_to {
+                        camera.focus = glam::vec3(x, camera.focus.y, z);
+                        jump_to_fired = true;
+                    }
+                }
 
                 camera.update();
                 let cam3d = camera.to_camera3d();
