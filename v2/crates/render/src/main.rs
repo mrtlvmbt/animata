@@ -186,6 +186,10 @@ struct CliArgs {
     regen_to: Option<u64>,
     /// U-5: `--jump-to <x>,<z>`: after startup, jump camera to world coords (x, z) for viewport-quad + click-to-jump verification.
     jump_to: Option<(f32, f32)>,
+    /// U-8: `--screenshot-ui <path>`: screenshot mode with UiRoot panels rendered (running mode), no loader.
+    screenshot_ui: Option<String>,
+    /// U-8: `--yaw <degrees>`: set initial camera yaw (default 0); works in both interactive and screenshot modes.
+    yaw_degrees: Option<f32>,
 }
 
 fn parse_args() -> CliArgs {
@@ -204,6 +208,8 @@ fn parse_args() -> CliArgs {
     let mut screenshot_loader = None;
     let mut regen_to = None;
     let mut jump_to = None;
+    let mut screenshot_ui = None;
+    let mut yaw_degrees = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -268,10 +274,18 @@ fn parse_args() -> CliArgs {
                 jump_to = Some((x, z));
                 standalone = true; // jump harness is standalone
             }
+            "--screenshot-ui" => {
+                screenshot_ui = Some(args.next().expect("--screenshot-ui requires a path"));
+                standalone = true;  // screenshot-ui mode is standalone
+            }
+            "--yaw" => {
+                let v = args.next().expect("--yaw requires a value");
+                yaw_degrees = Some(v.parse().unwrap_or_else(|_| panic!("--yaw expects f32 degrees, got {v:?}")));
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -444,6 +458,11 @@ async fn main() {
     let world_span = span_x.max(span_z).max(1.0);
     if cli_args.screenshot.is_some() || cli_args.bench {
         cli_args.cam_preset.apply_to_camera(&mut camera, center, world_span);
+    }
+
+    // U-8: Apply initial yaw override if provided (works in both interactive and screenshot modes).
+    if let Some(yaw_deg) = cli_args.yaw_degrees {
+        camera.yaw = yaw_deg * std::f32::consts::PI / 180.0;
     }
 
     // U-2: App path: spawn world builder on worker thread
@@ -702,6 +721,94 @@ async fn main() {
                     println!("[screenshot] captured to {}", screenshot_path);
                     std::process::exit(0);
                 }
+            }
+
+            next_frame().await;
+        }
+    }
+
+    // U-8: Screenshot-UI mode — render with UiRoot panels (running mode UI, no loader modal).
+    if let Some(screenshot_ui_path) = &cli_args.screenshot_ui {
+        let mut jump_to_fired = false;
+        for frame_num in 0..=cli_args.screenshot_warmup {
+            // Normal Running phase: render terrain, creatures, and UI panels
+            let snap = handle.as_ref().and_then(|h| h.latest());
+            let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+            let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+
+            // Fire --jump-to action on frame 0
+            if frame_num == 0 && !jump_to_fired {
+                if let Some((x, z)) = cli_args.jump_to {
+                    ui_actions.push(ui::UiAction::JumpCamera(glam::vec2(x, z)));
+                    jump_to_fired = true;
+                }
+            }
+
+            clear_background(Color::from_rgba(18, 18, 22, 255));
+            camera.update(&tuning);
+
+            let cam3d = camera.to_camera3d();
+            set_camera(&cam3d);
+
+            let _ = draw::draw_terrain(
+                &hex_terrain_chunks,
+                &cube_terrain_chunks,
+                &gpu_hex_chunks,
+                &gpu_cube_chunks,
+                gpu_pipeline,
+                &camera,
+                use_cube_terrain,
+                cli_args.retained,
+            );
+
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+            set_default_camera();
+
+            // Draw UI panels (including minimap)
+            let mut ui_ctx_ui = ui::UiCtx {
+                world_dim,
+                seed: spec.seed,
+                fps: 60,
+                chunks_drawn: terrain_chunks.len(),
+                verts: 0,
+                snap: snap.as_ref().map(|v| &**v),
+                standalone_mode: cli_args.standalone,
+                terrain_chunks_total: terrain_chunks.len(),
+                actions: &mut ui_actions,
+                is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
+                regen_load_state: None,  // No loader in screenshot-ui mode
+                world: Some(world.as_ref()),
+                bare_mode: spec.bare_mode,
+                cache: std::ptr::null_mut(),
+                camera_focus: camera.focus,
+                camera_ortho_span: camera.ortho_span,
+                camera_yaw: camera.yaw,
+                screen_dims: (screen_width(), screen_height()),
+            };
+
+            egui_macroquad::ui(|ctx| {
+                ctx.set_pixels_per_point(macroquad::miniquad::window::dpi_scale());
+                ui_root.draw(ctx, &mut ui_ctx_ui);
+            });
+
+            // Apply UI actions
+            for action in ui_actions {
+                match action {
+                    ui::UiAction::JumpCamera(world_pos) => {
+                        camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
+                    }
+                    _ => {}  // Ignore other actions in harness
+                }
+            }
+
+            ui::draw();  // Render the egui overlay
+
+            // Capture on final frame
+            if frame_num == cli_args.screenshot_warmup {
+                let img = get_screen_data();
+                img.export_png(screenshot_ui_path);
+                println!("[screenshot-ui] captured to {}", screenshot_ui_path);
+                std::process::exit(0);
             }
 
             next_frame().await;

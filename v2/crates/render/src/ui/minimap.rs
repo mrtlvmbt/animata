@@ -166,6 +166,89 @@ pub fn minimap_uv_to_world(uv: glam::Vec2, dim: i64) -> glam::Vec2 {
     )
 }
 
+/// U-8: Project map UV coordinates to screen-aligned isometric diamond on the minimap panel.
+///
+/// Derives the projection from the iso camera's ground basis:
+/// - screen_right = (sinY, 0, −cosY) in world (x, y, z)
+/// - screen_up = (−cosY, 0, −sinY) in world (x, y, z)
+///
+/// Where Y is the camera yaw. The projection applies these basis vectors to map fractions,
+/// foreshortens by FS = sin(35.264°), and scales to fit the panel with margin.
+///
+/// Args:
+/// - u, v: map fractions in [0, 1]
+/// - yaw: camera yaw rotation (radians)
+/// - panel_w, panel_h: panel dimensions in pixels
+///
+/// Returns: (x, y) screen coordinates on the panel
+pub fn map_uv_to_panel(u: f32, v: f32, yaw: f32, panel_w: f32, panel_h: f32) -> (f32, f32) {
+    const FS: f32 = 0.577_350_3; // sin(35.264°)
+
+    // Center the UV fractions
+    let cu = u - 0.5;
+    let cv = v - 0.5;
+
+    let sin_yaw = yaw.sin();
+    let cos_yaw = yaw.cos();
+
+    // Project map fractions through the screen basis:
+    // panel_x ∝ dot((cu, cv), screen_right_xz) = cu·sinY − cv·cosY
+    let panel_x_unnormalized = cu * sin_yaw - cv * cos_yaw;
+
+    // panel_y ∝ −dot((cu, cv), screen_up_xz)·FS = −(−cu·cosY − cv·sinY)·FS = (cu·cosY + cv·sinY)·FS
+    let panel_y_unnormalized = (cu * cos_yaw + cv * sin_yaw) * FS;
+
+    // Scale to fit the panel with margin
+    let s = ((panel_w * 0.5 - 6.0) / 1.0).min((panel_h * 0.5 - 6.0) / FS);
+    let center_x = panel_w * 0.5;
+    let center_y = panel_h * 0.5;
+
+    (
+        center_x + panel_x_unnormalized * s,
+        center_y + panel_y_unnormalized * s,
+    )
+}
+
+/// U-8: Invert the map_uv_to_panel projection for click-to-jump.
+///
+/// Given a screen coordinate on the minimap panel, recover the map UV fraction.
+/// Returns uv clamped to [0, 1].
+pub fn panel_to_map_uv(x: f32, y: f32, yaw: f32, panel_w: f32, panel_h: f32) -> glam::Vec2 {
+    const FS: f32 = 0.577_350_3;
+
+    // Undo centering and scaling
+    let s = ((panel_w * 0.5 - 6.0) / 1.0).min((panel_h * 0.5 - 6.0) / FS);
+    let center_x = panel_w * 0.5;
+    let center_y = panel_h * 0.5;
+
+    let panel_x_unnormalized = (x - center_x) / s;
+    let panel_y_unnormalized = (y - center_y) / s;
+
+    let sin_yaw = yaw.sin();
+    let cos_yaw = yaw.cos();
+
+    // Solve the linear system:
+    // panel_x_unnormalized = cu·sinY − cv·cosY
+    // panel_y_unnormalized / FS = cu·cosY + cv·sinY
+    //
+    // This is: [sinY   −cosY ] [cu] = [panel_x_unnormalized]
+    //          [cosY    sinY ] [cv]   [panel_y_unnormalized / FS]
+    //
+    // Determinant = sinY·sinY − (−cosY)·cosY = sin²Y + cos²Y = 1
+    // Inverse = [sinY   cosY]
+    //           [−cosY  sinY]
+
+    let panel_y_scaled = panel_y_unnormalized / FS;
+    let cu = panel_x_unnormalized * sin_yaw + panel_y_scaled * cos_yaw;
+    let cv = -panel_x_unnormalized * cos_yaw + panel_y_scaled * sin_yaw;
+
+    // Uncenter the fractions
+    let u = cu + 0.5;
+    let v = cv + 0.5;
+
+    glam::vec2(u.clamp(0.0, 1.0), v.clamp(0.0, 1.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +335,92 @@ mod tests {
         // Panning the camera should move the projected corner on the minimap
         let uv_distance = ((uv_panned.x - uv_center.x).powi(2) + (uv_panned.y - uv_center.y).powi(2)).sqrt();
         assert!(uv_distance > 0.05, "camera pan did not move viewport quad (distance={})", uv_distance);
+    }
+
+    // U-8: Orientation mechanical acceptance tests
+    #[test]
+    fn map_uv_to_panel_screen_right_at_yaw_0() {
+        let panel_w = 200.0;
+        let panel_h = 200.0;
+        let yaw = 0.0;
+
+        // At yaw=0, screen_right is (0, -1) in (x, z) world coords.
+        // A displacement along +z (v) should map to negative panel y (upward on panel).
+        let center = map_uv_to_panel(0.5, 0.5, yaw, panel_w, panel_h);
+        let displaced_v = map_uv_to_panel(0.5, 0.6, yaw, panel_w, panel_h);
+
+        let dy = displaced_v.1 - center.1;
+        assert!(dy.abs() > 0.1, "displacement along v should affect panel y; dy={}", dy);
+        assert!(dy < 0.0, "positive v displacement should map to negative panel y (upward); dy={}", dy);
+    }
+
+    #[test]
+    fn map_uv_to_panel_screen_up_at_yaw_0() {
+        let panel_w = 200.0;
+        let panel_h = 200.0;
+        let yaw = 0.0;
+
+        // At yaw=0, screen_up is (-1, 0) in (x, z) world coords.
+        // A displacement along +x (u) should map to negative panel x (leftward on panel).
+        let center = map_uv_to_panel(0.5, 0.5, yaw, panel_w, panel_h);
+        let displaced_u = map_uv_to_panel(0.6, 0.5, yaw, panel_w, panel_h);
+
+        let dx = displaced_u.0 - center.0;
+        assert!(dx.abs() > 0.1, "displacement along u should affect panel x; dx={}", dx);
+        assert!(dx < 0.0, "positive u displacement should map to negative panel x (leftward); dx={}", dx);
+    }
+
+    #[test]
+    fn map_uv_to_panel_screen_right_at_yaw_90() {
+        let panel_w = 200.0;
+        let panel_h = 200.0;
+        let yaw = std::f32::consts::PI / 2.0;  // 90°
+
+        // At yaw=90°, screen_right is (1, 0) in (x, z) world coords.
+        // A displacement along +x (u) should map to positive panel x (rightward).
+        let center = map_uv_to_panel(0.5, 0.5, yaw, panel_w, panel_h);
+        let displaced_u = map_uv_to_panel(0.6, 0.5, yaw, panel_w, panel_h);
+
+        let dx = displaced_u.0 - center.0;
+        assert!(dx.abs() > 0.1, "displacement along u should affect panel x; dx={}", dx);
+        assert!(dx > 0.0, "positive u displacement should map to positive panel x (rightward) at yaw=90°; dx={}", dx);
+    }
+
+    #[test]
+    fn map_uv_to_panel_roundtrip() {
+        let panel_w = 200.0;
+        let panel_h = 200.0;
+        let yaw = std::f32::consts::PI / 6.0;  // 30°
+
+        // Test roundtrip for various points on a grid
+        for u_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            for v_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                let panel_pos = map_uv_to_panel(u_test, v_test, yaw, panel_w, panel_h);
+                let recovered_uv = panel_to_map_uv(panel_pos.0, panel_pos.1, yaw, panel_w, panel_h);
+
+                let u_error = (recovered_uv.x - u_test).abs();
+                let v_error = (recovered_uv.y - v_test).abs();
+
+                assert!(u_error < 1e-4, "u roundtrip error at ({}, {}): {} vs {}", u_test, v_test, recovered_uv.x, u_test);
+                assert!(v_error < 1e-4, "v roundtrip error at ({}, {}): {} vs {}", u_test, v_test, recovered_uv.y, v_test);
+            }
+        }
+    }
+
+    #[test]
+    fn map_uv_to_panel_magnitude_check_at_yaw_0() {
+        let panel_w = 200.0;
+        let panel_h = 200.0;
+        let yaw = 0.0;
+
+        let center = map_uv_to_panel(0.5, 0.5, yaw, panel_w, panel_h);
+        let corner = map_uv_to_panel(0.0, 0.0, yaw, panel_w, panel_h);
+
+        let dx = (corner.0 - center.0).abs();
+        let dy = (corner.1 - center.1).abs();
+
+        // At yaw=0, corner (-0.5, -0.5) maps to panel displacement (-(-0.5), (-0.5)*FS) = (0.5, -0.5*FS)
+        // So |dy| should be much larger than |dx|
+        assert!(dy > dx, "at yaw=0, y-displacement should dominate for corner; dx={}, dy={}", dx, dy);
     }
 }
