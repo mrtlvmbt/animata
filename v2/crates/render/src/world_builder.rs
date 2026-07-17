@@ -43,8 +43,8 @@ where
     // Step 3: Create the world (ProcgenWorld or loaded dump)
     let world: Box<dyn WorldView + Send> = match &spec.source {
         WorldSource::Procgen { dim_request: _ } => {
-            // landform_flags derived from (seed, standalone) — D5
-            let flags = landform_flags(spec.seed, spec.standalone);
+            // U-10: Use explicit flags if provided; otherwise derive from seed (D5)
+            let flags = spec.explicit_landform_flags.unwrap_or_else(|| landform_flags(spec.seed, spec.standalone));
             Box::new(ProcgenWorld::new(
                 effective_dim,
                 cli::HMAX,
@@ -65,7 +65,8 @@ where
             // TODO: implement DumpWorld::load(path) to actually load the dump file
             // For now, fallback to Procgen (this makes --v1-dump flag non-functional as of U-3)
             eprintln!("[build_world] Dump loading not yet implemented; falling back to Procgen (--v1-dump flag ignored)");
-            let flags = landform_flags(spec.seed, spec.standalone);
+            // U-10: Use explicit flags if provided; otherwise derive from seed
+            let flags = spec.explicit_landform_flags.unwrap_or_else(|| landform_flags(spec.seed, spec.standalone));
             Box::new(ProcgenWorld::new(
                 effective_dim,
                 cli::HMAX,

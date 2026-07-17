@@ -56,6 +56,10 @@ pub struct UiCtx<'a> {
     pub camera_yaw: f32,
     /// U-5: screen dimensions for camera math
     pub screen_dims: (f32, f32),
+    /// U-10: manual landform mode flag (for N key regen in manual mode)
+    pub landform_manual_mode: bool,
+    /// U-10: manual landform flags (used by N key regen when manual_mode=true)
+    pub landform_manual_flags: crate::world_spec::LandformFlags,
 }
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
@@ -67,6 +71,8 @@ pub enum UiAction {
     ToggleTerrainKind,
     /// U-3: Regenerate the world with a new seed (only valid in Procgen+standalone mode).
     RegenSeed(u64),
+    /// U-10: Regenerate the world with explicit landform flags.
+    RegenWithLandforms(u64, crate::world_spec::LandformFlags),
     /// U-5: Jump camera to a world position (x, z).
     JumpCamera(glam::Vec2),
     /// U-9: H key toggle — hide/show all panels

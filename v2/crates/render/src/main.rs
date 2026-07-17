@@ -193,6 +193,9 @@ struct CliArgs {
     /// U-9: `--ui-state visible|hidden|world|view|perf|pop`: initial panel visibility and flyout state.
     /// visible/hidden: control panel visibility; world/view/perf/pop: open that flyout on startup.
     ui_state_value: String,  // "visible" | "hidden" | "world" | "view" | "perf" | "pop"
+    /// U-10: `--landforms <csv>`: explicit landform flags (e.g., "tect,coastal,beaches").
+    /// If set, overrides seed-derived flags for determinism testing.
+    landforms: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -214,6 +217,7 @@ fn parse_args() -> CliArgs {
     let mut screenshot_ui = None;
     let mut yaw_degrees = None;
     let mut ui_state_value = "visible".to_string();  // Default: panels visible
+    let mut landforms: Option<String> = None;  // U-10: explicit landform flags
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -296,13 +300,48 @@ fn parse_args() -> CliArgs {
                     }
                 };
             }
+            "--landforms" => {
+                landforms = Some(args.next().expect("--landforms requires a CSV value"));
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
+// ── U-10: Parse landform flags from CSV string ──────────────────────────────────────────────────
+/// Parse explicit landform flags from a CSV string (e.g., "tect,coastal,beaches").
+/// Valid field names: tect, aeolian, volcanic, glacial, coastal, ridges, beaches.
+/// Invalid names are logged via eprintln but do not cause a panic (GL-loop safety).
+/// Returns LandformFlags with clamps applied.
+fn parse_landform_flags(csv: &str) -> world_spec::LandformFlags {
+    let mut tect = false;
+    let mut aeolian = false;
+    let mut volcanic = false;
+    let mut glacial = false;
+    let mut coastal = false;
+    let mut ridges = false;
+    let mut beaches = false;
+
+    for token in csv.split(',') {
+        let token = token.trim();
+        match token {
+            "tect" => tect = true,
+            "aeolian" => aeolian = true,
+            "volcanic" => volcanic = true,
+            "glacial" => glacial = true,
+            "coastal" => coastal = true,
+            "ridges" => ridges = true,
+            "beaches" => beaches = true,
+            "" => {}  // Skip empty tokens (e.g., trailing comma)
+            other => eprintln!("render: --landforms: unrecognized flag '{other}' (valid: tect, aeolian, volcanic, glacial, coastal, ridges, beaches)"),
+        }
+    }
+
+    world_spec::LandformFlags::new(tect, aeolian, volcanic, glacial, coastal, ridges, beaches).apply_guard()
+}
+
 /// Load a shader source from file. Tries multiple paths to find assets/shaders/ relative to the repo root.
 fn load_shader(filename: &str) -> String {
     // Try v2 local paths first, then fallback to v1 paths (for compatibility)
@@ -392,6 +431,9 @@ async fn main() {
     let tuning = tuning::Tuning::load();
 
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
+    // U-10: Parse --landforms CLI flag if provided
+    let explicit_flags = cli_args.landforms.as_ref().map(|csv| parse_landform_flags(csv));
+
     let mut spec = WorldSpec {
         seed: cli_args.seed,
         standalone: cli_args.standalone,
@@ -402,6 +444,7 @@ async fn main() {
             // D5 dim rule: dim_request lives in Procgen, honored only if spec.standalone
             WorldSource::Procgen { dim_request: cli_args.dim_override }
         },
+        explicit_landform_flags: explicit_flags,
     };
 
     // U-2: For harnesses (screenshot/bench/screenshot-ui), build world inline before their loops
@@ -482,6 +525,11 @@ async fn main() {
     ui_root.push(Box::new(ui::vitals::VitalsPanel));
     ui_root.push(Box::new(ui::transport::TransportPanel));
     let mut rail = ui::rail::ControlRail::new();
+    // U-10/F4: If explicit landform flags provided via CLI, initialize UI to manual mode
+    if let Some(ref flags) = explicit_flags {
+        rail.landform_manual_mode = true;
+        rail.landform_manual_flags = *flags;
+    }
     rail.open_panel = initial_flyout;
     ui_root.push(Box::new(rail));
     ui_root.push(Box::new(ui::toast::ToastPanel::new()));
@@ -541,6 +589,7 @@ async fn main() {
                 standalone: spec.standalone,
                 bare_mode: spec.bare_mode,
                 source: spec.source.clone(),
+                explicit_landform_flags: explicit_flags.clone(),
             };
             let load_state = LoadState::new(target_seed);
             harness_regen_load_state = Some(load_state.clone());
@@ -819,6 +868,11 @@ async fn main() {
                 camera_ortho_span: camera.ortho_span,
                 camera_yaw: camera.yaw,
                 screen_dims: (screen_width(), screen_height()),
+                landform_manual_mode: false,
+                landform_manual_flags: world_spec::LandformFlags {
+                    tect: true, aeolian: false, volcanic: false, glacial: false,
+                    coastal: false, ridges: false, beaches: false,
+                },
             };
 
             egui_macroquad::ui(|ctx| {
@@ -1129,6 +1183,11 @@ async fn main() {
                             camera_ortho_span: camera.ortho_span,
                             camera_yaw: camera.yaw,
                             screen_dims: (screen_width(), screen_height()),
+                            landform_manual_mode: false,
+                            landform_manual_flags: world_spec::LandformFlags {
+                                tect: true, aeolian: false, volcanic: false, glacial: false,
+                                coastal: false, ridges: false, beaches: false,
+                            },
                         };
                         ui_root.draw(ctx, &mut ui_ctx)
                     };
@@ -1201,6 +1260,7 @@ async fn main() {
                             ui_root.toast_elapsed_ms = 0.0;
                         }
                         // U-3: Reseed — spawn async world build on worker, keep rendering old world
+                        // U-10: Support explicit landform flags in regen
                         ui::UiAction::RegenSeed(target_seed) => {
                             if rx_regen_in_flight.is_none() && matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone {
                                 let regen_spec = WorldSpec {
@@ -1208,6 +1268,7 @@ async fn main() {
                                     standalone: spec.standalone,
                                     bare_mode: spec.bare_mode,
                                     source: spec.source.clone(),
+                                    explicit_landform_flags: spec.explicit_landform_flags.clone(),
                                 };
                                 let load_state = LoadState::new(target_seed);
                                 regen_load_state = Some(load_state.clone());
@@ -1225,6 +1286,42 @@ async fn main() {
                                         };
                                         load_clone.set_progress(progress);
                                         // Honor --slow-load flag to stretch build stages (matches harness worker)
+                                        if slow_load_flag {
+                                            std::thread::sleep(std::time::Duration::from_millis(600));
+                                        }
+                                        true
+                                    };
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                                        let _ = tx.send(built);
+                                    }
+                                });
+                                rx_regen_in_flight = Some(rx);
+                            }
+                        }
+                        // U-10: Regenerate with explicit landform flags
+                        ui::UiAction::RegenWithLandforms(target_seed, flags) => {
+                            if rx_regen_in_flight.is_none() && matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone {
+                                let regen_spec = WorldSpec {
+                                    seed: target_seed,
+                                    standalone: spec.standalone,
+                                    bare_mode: spec.bare_mode,
+                                    source: spec.source.clone(),
+                                    explicit_landform_flags: Some(flags),
+                                };
+                                let load_state = LoadState::new(target_seed);
+                                regen_load_state = Some(load_state.clone());
+                                let (tx, rx) = mpsc::channel();
+                                let slow_load_flag = cli_args.slow_load;
+                                let _ = std::thread::spawn(move || {
+                                    let load_clone = load_state.clone();
+                                    let mut on_stage = |stage: Stage| {
+                                        load_clone.set_stage(stage);
+                                        let progress = match stage {
+                                            Stage::GenerateWorld => 0,
+                                            Stage::BuildMeshes => 400,
+                                            Stage::Done => 1000,
+                                        };
+                                        load_clone.set_progress(progress);
                                         if slow_load_flag {
                                             std::thread::sleep(std::time::Duration::from_millis(600));
                                         }
@@ -1334,6 +1431,55 @@ mod tests {
             count >= 2
         });
         assert!(has_mix, "variety gallery requires ≥1 mixed-landform seed (2+ landforms)");
+    }
+
+    // U-10: CSV parser tests for --landforms flag
+    #[test]
+    fn parse_landform_flags_single() {
+        let flags = parse_landform_flags("tect");
+        assert!(flags.tect);
+        assert!(!flags.aeolian && !flags.volcanic && !flags.glacial && !flags.coastal);
+    }
+
+    #[test]
+    fn parse_landform_flags_multiple() {
+        let flags = parse_landform_flags("tect,coastal,beaches");
+        assert!(flags.tect);
+        assert!(flags.coastal);
+        assert!(flags.beaches);
+        assert!(!flags.aeolian && !flags.volcanic && !flags.glacial);
+    }
+
+    #[test]
+    fn parse_landform_flags_with_spaces() {
+        let flags = parse_landform_flags("tect , aeolian , volcanic");
+        assert!(flags.tect && flags.aeolian && flags.volcanic);
+    }
+
+    #[test]
+    fn parse_landform_flags_empty_string() {
+        let flags = parse_landform_flags("");
+        // Should apply guard and force tect since all are off
+        assert!(flags.tect, "empty CSV should force tectonic via guard");
+    }
+
+    #[test]
+    fn parse_landform_flags_invalid_ignored() {
+        // Invalid tokens should be ignored (logged via eprintln, but no panic)
+        let flags = parse_landform_flags("tect,invalid_flag,coastal");
+        assert!(flags.tect && flags.coastal);
+        assert!(!flags.aeolian);
+    }
+
+    #[test]
+    fn parse_landform_flags_dependency_clamps() {
+        // ridges without tect should be clamped to false
+        let flags = parse_landform_flags("ridges");
+        assert!(!flags.tect && !flags.ridges, "ridges should be false when tect is false");
+
+        // beaches without coastal should be clamped to false
+        let flags2 = parse_landform_flags("beaches");
+        assert!(!flags2.coastal && !flags2.beaches, "beaches should be false when coastal is false");
     }
 
     /// F2: Honest unit test for pointer/keyboard gating — fails if gate is deleted.

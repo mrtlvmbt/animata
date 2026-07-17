@@ -7,14 +7,40 @@ use super::theme;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum RailPanel { World, View, Perf, Pop }
 
-pub struct ControlRail { pub open_panel: Option<RailPanel> }
+pub struct ControlRail {
+    pub open_panel: Option<RailPanel>,
+    /// U-10: Landform toggle mode (true=manual, false=auto from seed)
+    pub landform_manual_mode: bool,
+    /// U-10: Manually selected landform flags (only used when manual_mode=true)
+    pub landform_manual_flags: super::super::world_spec::LandformFlags,
+}
 
-impl ControlRail { pub fn new() -> Self { ControlRail { open_panel: None } } }
+impl ControlRail {
+    pub fn new() -> Self {
+        ControlRail {
+            open_panel: None,
+            landform_manual_mode: false,
+            landform_manual_flags: super::super::world_spec::LandformFlags {
+                tect: true,
+                aeolian: false,
+                volcanic: false,
+                glacial: false,
+                coastal: false,
+                ridges: false,
+                beaches: false,
+            },
+        }
+    }
+}
 
 impl Panel for ControlRail {
     fn id(&self) -> &'static str { "rail" }
 
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
+        // U-10/F2: Propagate landform state to UiCtx for N key regen handler
+        ui_ctx.landform_manual_mode = self.landform_manual_mode;
+        ui_ctx.landform_manual_flags = self.landform_manual_flags;
+
         egui::Area::new(egui::Id::new("rail"))
             .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-18.0, -22.0))
             .show(ctx, |ui| {
@@ -39,7 +65,7 @@ impl Panel for ControlRail {
             });
 
         if let Some(panel) = self.open_panel {
-            draw_flyout(ctx, panel, ui_ctx);
+            draw_flyout(ctx, panel, ui_ctx, self);
         }
     }
 }
@@ -74,20 +100,141 @@ fn paint_rail_icon(p: &egui::Painter, icon: RailIcon, r: egui::Rect, col: egui::
     }
 }
 
-fn draw_flyout(ctx: &egui::Context, panel: RailPanel, ui_ctx: &mut UiCtx) {
-    let width = match panel { RailPanel::World | RailPanel::View => 238.0, RailPanel::Pop => 248.0, RailPanel::Perf => 222.0 };
+fn draw_flyout(ctx: &egui::Context, panel: RailPanel, ui_ctx: &mut UiCtx, rail: &mut ControlRail) {
+    let width = match panel { RailPanel::World | RailPanel::View => 280.0, RailPanel::Pop => 248.0, RailPanel::Perf => 222.0 };
     egui::Area::new(egui::Id::new("flyout")).anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-84.0, -22.0)).show(ctx, |ui| {
         theme::themed_frame(theme::FrameKind::Flyout).show(ui, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 7.0;
             match panel {
-                RailPanel::World => { caps_tracked(ui, "WORLD", 10.0, 0.18, theme::TEXT_FAINT); ui.add_space(7.0); kv(ui, "seed", format!("0x{:X}", ui_ctx.seed)); kv(ui, "size", format!("{}×{}", ui_ctx.world_dim, ui_ctx.world_dim)); if let Some(snap) = ui_ctx.snap { hairline(ui); kv(ui, "tick", format!("{}", snap.tick)); } if ui_ctx.is_procgen && ui_ctx.standalone_mode { hairline(ui); if ui.button("New world").clicked() { ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1))); } } }
+                RailPanel::World => draw_world_panel(ui, ui_ctx, rail),
                 RailPanel::View => { caps_tracked(ui, "VIEW", 10.0, 0.18, theme::TEXT_FAINT); ui.add_space(7.0); if ui.button("Hex ↔ Cube").clicked() { ui_ctx.actions.push(UiAction::ToggleTerrainKind); } }
                 RailPanel::Perf => { caps_tracked(ui, "FPS", 10.0, 0.18, theme::TEXT_FAINT); ui.add_space(7.0); ui.label(RichText::new(format!("{:.0}", ui_ctx.fps)).font(theme::mono(26.0)).color(theme::TEXT)); hairline(ui); kv(ui, "chunks", format!("{}", ui_ctx.chunks_drawn)); kv(ui, "verts", format!("{}", ui_ctx.verts)); }
                 RailPanel::Pop => { caps_tracked(ui, "POP", 10.0, 0.18, theme::TEXT_FAINT); ui.add_space(7.0); if let Some(snap) = ui_ctx.snap { kv(ui, "count", format!("{}", snap.population)); kv(ui, "species", format!("{}", snap.species_count)); } }
             }
         });
     });
+}
+
+/// U-10: Draw the World panel with landform toggles section
+fn draw_world_panel(ui: &mut egui::Ui, ui_ctx: &mut UiCtx, rail: &mut ControlRail) {
+    caps_tracked(ui, "WORLD", 10.0, 0.18, theme::TEXT_FAINT);
+    ui.add_space(7.0);
+    kv(ui, "seed", format!("0x{:X}", ui_ctx.seed));
+    kv(ui, "size", format!("{}×{}", ui_ctx.world_dim, ui_ctx.world_dim));
+
+    if let Some(snap) = ui_ctx.snap {
+        hairline(ui);
+        kv(ui, "tick", format!("{}", snap.tick));
+    }
+
+    if ui_ctx.is_procgen && ui_ctx.standalone_mode {
+        hairline(ui);
+
+        // U-10: Landform toggles section
+        caps_tracked(ui, "ЛАНДШАФТЫ", 9.0, 0.18, theme::TEXT_FAINT);
+        ui.add_space(5.0);
+
+        // Mode toggle: авто / вручную
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Режим:").font(theme::sans(11.0)).color(theme::TEXT_LABEL));
+            if ui.selectable_label(!rail.landform_manual_mode, "авто").clicked() {
+                rail.landform_manual_mode = false;
+            }
+            if ui.selectable_label(rail.landform_manual_mode, "вручную").clicked() {
+                rail.landform_manual_mode = true;
+            }
+        });
+
+        ui.add_space(4.0);
+
+        // If manual mode, show checkboxes with dependency clamps; if auto, show read-only derived flags
+        let mut flags = if rail.landform_manual_mode {
+            rail.landform_manual_flags
+        } else {
+            // Auto mode: show seed-derived flags (read-only)
+            crate::world_spec::landform_flags(ui_ctx.seed, true)
+        };
+
+        // Checkbox rows (with clamp logic)
+        let mut tect_check = flags.tect;
+        let mut aeol_check = flags.aeolian;
+        let mut volc_check = flags.volcanic;
+        let mut glac_check = flags.glacial;
+        let mut coast_check = flags.coastal;
+        let mut ridg_check = flags.ridges;
+        let mut beach_check = flags.beaches;
+
+        // Row 1: тектоника, эоловые, вулканы
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(rail.landform_manual_mode, |ui| {
+                if ui.checkbox(&mut tect_check, "тектоника").changed() {
+                    // Clear ridges if tect was toggled off
+                    if !tect_check {
+                        ridg_check = false;
+                    }
+                }
+            });
+            ui.add_enabled_ui(rail.landform_manual_mode, |ui| {
+                ui.checkbox(&mut aeol_check, "эоловые");
+            });
+            ui.add_enabled_ui(rail.landform_manual_mode, |ui| {
+                ui.checkbox(&mut volc_check, "вулканы");
+            });
+        });
+
+        // Row 2: ледники, побережье
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(rail.landform_manual_mode, |ui| {
+                ui.checkbox(&mut glac_check, "ледники");
+            });
+            ui.add_enabled_ui(rail.landform_manual_mode, |ui| {
+                if ui.checkbox(&mut coast_check, "побережье").changed() {
+                    // Clear beaches if coastal was toggled off
+                    if !coast_check {
+                        beach_check = false;
+                    }
+                }
+            });
+        });
+
+        // Row 3: хребты (depends on tect), пляжи (depends on coastal)
+        ui.horizontal(|ui| {
+            // Ridges checkbox: disabled if tect is false (in manual mode)
+            let ridges_enabled = tect_check;
+            ui.add_enabled_ui(ridges_enabled && rail.landform_manual_mode, |ui| {
+                ui.checkbox(&mut ridg_check, "хребты");
+            });
+
+            // Beaches checkbox: disabled if coastal is false (in manual mode)
+            let beaches_enabled = coast_check;
+            ui.add_enabled_ui(beaches_enabled && rail.landform_manual_mode, |ui| {
+                ui.checkbox(&mut beach_check, "пляжи");
+            });
+        });
+
+        // Apply clamps and update stored state
+        if rail.landform_manual_mode {
+            flags = crate::world_spec::LandformFlags::new(
+                tect_check, aeol_check, volc_check, glac_check, coast_check, ridg_check, beach_check
+            ).apply_guard();  // U-10/F3: Apply guard to ensure valid state
+            rail.landform_manual_flags = flags;
+        }
+
+        // Empty-set guard hint (show if all 5 main landforms would be off)
+        if !tect_check && !aeol_check && !volc_check && !glac_check && !coast_check && rail.landform_manual_mode {
+            ui.label(RichText::new("пусто → тектоника включится сама").font(theme::sans(10.0)).color(theme::TEXT_FAINT));
+        }
+
+        ui.add_space(6.0);
+        if ui.button("Новый мир").clicked() {
+            if rail.landform_manual_mode {
+                ui_ctx.actions.push(UiAction::RegenWithLandforms(ui_ctx.seed.wrapping_add(1), flags));
+            } else {
+                ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1)));
+            }
+        }
+    }
 }
 
 fn kv(ui: &mut egui::Ui, label: &str, value: String) {
