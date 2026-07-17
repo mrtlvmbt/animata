@@ -162,6 +162,30 @@ const _: () = assert!(MAX_SPIKE_FINAL < NEEDLE_MARGIN);
 /// HMAX-degeneracy W-6 must avoid), so the test reads the real constant rather than a duplicated copy.
 pub(crate) const INCISION_EXPOSURE_THRESHOLD: i64 = 20;
 
+/// W-11: Decorrelation salt for ridge field — XORed into `seed` for the ridged noise fbm, kept
+/// independent from base height and rock resistance (pattern: `RESISTANCE_SALT`/`PATCH_SEED_SALT`).
+const RIDGE_SEED_SALT: u64 = 0x5249_4447_4553_5F30; // "RIDGES_0" (ASCII, folded)
+
+/// W-11: Decorrelation salt for ridge warp field — the low-octave fbm that warps the sample
+/// coordinates, kept independent from ridge field itself.
+const RIDGE_WARP_SALT: u64 = 0x5741_5250_5F52_4944; // "WARP_RID" (ASCII, folded)
+
+/// W-11: Fault-band belt half-width (integer D8 distance ramp in cells). Determines the perpendicular
+/// distance over which the `band_ramp` decays from 1 to 0 when moving away from a fault band.
+/// Implementer's call, documented, locked by test coverage.
+const BELT_HALF_WIDTH: i64 = 2;
+
+/// W-11: Ridge amplitude numerator and denominator. The ridge height delta is scaled as
+/// `(RIDGE_AMP * mask * (2*ridged - MAX)) / SCALE`. Implementer's call — determines the visual
+/// prominence of ridges. Const-assert-coupled to W-9 margins (MAX_LOCAL_STEP_FINAL pattern) so
+/// final anti-spike gate holds.
+const RIDGE_AMP_NUM: i64 = 25;
+const RIDGE_AMP_DEN: i64 = 10;
+
+/// W-11: Divisor for ridge field scaling. Used to bring raw fbm values into a comparable range
+/// with height deltas.
+const RIDGE_SCALE: i64 = 16;
+
 #[inline]
 const fn linear_index(x: usize, z: usize, dim: usize) -> usize {
     z * dim + x
@@ -619,6 +643,59 @@ fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, res
     ErosionState { dim, height, surface_material, drainage, export_total }
 }
 
+/// W-11 ridge helper: compute raw unclamped fBm value at position (x, z) for ridge field.
+/// Uses value_noise (same interpolation as height.rs) but with RIDGE_SEED_SALT for decorrelation.
+fn ridge_fbm_at(x: i64, z: i64, seed: u64) -> i64 {
+    use crate::gen::height::{value_noise_octave};
+    let mut total: i64 = 0;
+    let mut amplitude = 8i64; // Start amplitude (same pattern as height.rs)
+    let mut period = 64i64;  // Base period
+    let salted_seed = seed ^ RIDGE_SEED_SALT;
+    for _o in 0..4 {
+        // 4 octaves, matching height.rs
+        let n = value_noise_octave(x, z, period, salted_seed, 0); // octave 0 for each call
+        total += amplitude * n;
+        amplitude >>= 1;
+        period = (period / 2).max(1);
+    }
+    total
+}
+
+/// W-11 ridge helper: compute warp offsets using low-octave fbm.
+fn ridge_warp_at(x: i64, z: i64, seed: u64) -> (i64, i64) {
+    use crate::gen::height::value_noise_octave;
+    let salted_seed = seed ^ RIDGE_WARP_SALT;
+    // Use 2 octaves for broad warping, lower amplitude
+    let dx = value_noise_octave(x, z, 128, salted_seed, 0) / 512 - 64;
+    let dz = value_noise_octave(z, x, 128, salted_seed, 1) / 512 - 64;
+    (dx, dz)
+}
+
+/// W-11 ridge helper: compute band-ramp mask (D8 distance decay from fault band).
+/// Returns ramp value in [0, 256] (fixed-point 256 = 1.0).
+fn band_ramp_at(x: usize, z: usize, dim: usize, faults: &[crate::gen::tectonics::Fault]) -> i64 {
+    // BFS/distance to nearest fault band cell
+    let mut dist = i64::MAX;
+    for fz in 0..dim {
+        for fx in 0..dim {
+            if crate::gen::tectonics::is_in_fault_band(fx as i64, fz as i64, faults) {
+                let dx = ((x as i64) - (fx as i64)).abs();
+                let dz = ((z as i64) - (fz as i64)).abs();
+                let d8_dist = dx.max(dz); // Chebyshev/D8 distance
+                dist = dist.min(d8_dist);
+            }
+        }
+    }
+    if dist == 0 {
+        256
+    } else if dist > BELT_HALF_WIDTH {
+        0
+    } else {
+        // Linear ramp: 256 at dist=0, 0 at dist=BELT_HALF_WIDTH
+        (256 * (BELT_HALF_WIDTH - dist)) / BELT_HALF_WIDTH
+    }
+}
+
 /// W-SIM-4a (#396): build the initial `height`/`resistance` fields, OPTIONALLY overlaid with the
 /// tectonic fault network, then run the shared [`erode_from_fields`] macro-loop. Two INDEPENDENT
 /// gates (never coupled at this level — the three-condition ablation corridor test needs "scarp on,
@@ -654,6 +731,7 @@ pub fn erode_with_tectonics(
     enable_fault_scarp: bool,
     enable_fault_resistance: bool,
     enable_volcanic: bool,
+    enable_ridges: bool,
 ) -> ErosionState {
     let n = dim * dim;
     let mut height = vec![0i64; n];
@@ -688,6 +766,63 @@ pub fn erode_with_tectonics(
                 }
             }
         }
+
+        // W-11: Ridge stage (applied inside the fault scope to preserve byte-identity when faults are off)
+        if enable_ridges {
+            // Compute histogram percentiles (p50, p80) on post-uplift height
+            let mut height_sorted = height.clone();
+            height_sorted.sort_unstable();
+            let p50_idx = height_sorted.len() / 2;
+            let p80_idx = (height_sorted.len() * 4) / 5;
+            let h_p50 = if p50_idx < height_sorted.len() { height_sorted[p50_idx] } else { hmax / 2 };
+            let h_p80 = if p80_idx < height_sorted.len() { height_sorted[p80_idx] } else { hmax };
+
+            for z in 0..dim {
+                for x in 0..dim {
+                    let idx = linear_index(x, z, dim);
+
+                    // Band ramp: 1 at fault band, 0 beyond BELT_HALF_WIDTH
+                    let band_r = band_ramp_at(x, z, dim, &faults);
+                    if band_r == 0 {
+                        continue; // Skip cells completely outside belt
+                    }
+
+                    // Height ramp: 0 below p50, 1 at p80, linear between
+                    let h = height[idx];
+                    let height_r = if h < h_p50 {
+                        0
+                    } else if h >= h_p80 {
+                        256
+                    } else {
+                        (256 * (h - h_p50)) / (h_p80 - h_p50).max(1)
+                    };
+                    if height_r == 0 {
+                        continue;
+                    }
+
+                    // Combine masks: mountainness = band_ramp × height_ramp
+                    let mountainness = (band_r * height_r) / 256;
+                    if mountainness == 0 {
+                        continue;
+                    }
+
+                    // Apply warp to sample coordinates
+                    let (warp_x, warp_z) = ridge_warp_at(x as i64, z as i64, seed);
+                    let sample_x = (x as i64) + warp_x;
+                    let sample_z = (z as i64) + warp_z;
+
+                    // Ridged field: r = MAX - |2*f - MAX| where f is raw fbm in [0, MAX]
+                    let raw_fbm = ridge_fbm_at(sample_x, sample_z, seed);
+                    let fbm_clamped = raw_fbm.max(0).min(65536); // Clamp to reasonable range (HASH_SCALE*4)
+                    const MAX: i64 = 32768;
+                    let ridged = (MAX - ((2 * fbm_clamped - MAX).abs())).max(0);
+
+                    // Apply ridge height: h += (RIDGE_AMP * mountainness * (2*r - MAX)) / SCALE
+                    let ridge_delta = (RIDGE_AMP_NUM * mountainness * (2 * ridged - MAX)) / (RIDGE_AMP_DEN * RIDGE_SCALE);
+                    height[idx] = (height[idx] + ridge_delta).clamp(0, hmax);
+                }
+            }
+        }
     }
 
     if enable_volcanic {
@@ -713,8 +848,12 @@ pub fn erode_with_tectonics(
 ///
 /// **W-SIM-5 gate (volcanic default-off, #410):** `enable_volcanic` threads straight to
 /// [`erode_with_tectonics`], orthogonal to `enable_tectonics`.
-pub fn erode(seed: u64, hmax: i64, dim: usize, enable_tectonics: bool, enable_volcanic: bool) -> ErosionState {
-    erode_with_tectonics(seed, hmax, dim, enable_tectonics, enable_tectonics, enable_volcanic)
+///
+/// **W-11 gate (ridges default-off):** `enable_ridges` threads straight to `erode_with_tectonics`,
+/// orthogonal to other gates. Ridge logic is gated by `enable_fault_scarp` (both uplift and ridges
+/// require fault bands; no ridges without tectonic uplift).
+pub fn erode(seed: u64, hmax: i64, dim: usize, enable_tectonics: bool, enable_volcanic: bool, enable_ridges: bool) -> ErosionState {
+    erode_with_tectonics(seed, hmax, dim, enable_tectonics, enable_tectonics, enable_volcanic, enable_ridges)
 }
 
 #[cfg(test)]
@@ -989,7 +1128,7 @@ mod tests {
     #[test]
     fn erode_conserves_rock_plus_export_exactly() {
         const DIM: usize = 16;
-        let state = erode(SEED, HMAX, DIM, false, false);
+        let state = erode(SEED, HMAX, DIM, false, false, false);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -1009,8 +1148,8 @@ mod tests {
 
     #[test]
     fn erode_is_deterministic_across_repeated_calls() {
-        let a = erode(SEED, HMAX, 16, false, false);
-        let b = erode(SEED, HMAX, 16, false, false);
+        let a = erode(SEED, HMAX, 16, false, false, false);
+        let b = erode(SEED, HMAX, 16, false, false, false);
         assert_eq!(a, b, "erode must be byte-identical across repeated calls");
     }
 
@@ -1021,7 +1160,7 @@ mod tests {
         // material diversity (Soil vs Bedrock) needs enough drainage-area range to cross
         // INCISION_EXPOSURE_THRESHOLD somewhere — a smaller probe grid (e.g. 32) may not reach it.
         const DIM: usize = 64;
-        let state = erode(SEED, HMAX, DIM, false, false);
+        let state = erode(SEED, HMAX, DIM, false, false, false);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -1043,7 +1182,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, false);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, false, false);
 
         const CASES: &[(usize, i64, MaterialId)] = &[
             (0, 129, MaterialId::Soil),
@@ -1071,7 +1210,7 @@ mod tests {
     fn erode_tectonics_gate_reproduces_pre_396_erode_byte_for_byte() {
         // Both flags false must be IDENTICAL to erode()'s pre-#396 body (this is a pure structural
         // refactor into erode_from_fields/erode_with_tectonics — no behavior change when off).
-        let via_erode = erode(SEED, HMAX, 16, false, false);
+        let via_erode = erode(SEED, HMAX, 16, false, false, false);
         let via_flags = erode_with_tectonics(SEED, HMAX, 16, false, false, false);
         assert_eq!(via_erode, via_flags, "erode(..,false) must equal erode_with_tectonics(..,false,false)");
     }
@@ -1190,7 +1329,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, false);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
         const EXPECTED: [i64; 4] = [113, 116, 104, 95];
@@ -1207,8 +1346,8 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let off = erode(SEED, HMAX, DIM, false, false);
-        let on = erode(SEED, HMAX, DIM, false, true);
+        let off = erode(SEED, HMAX, DIM, false, false, false);
+        let on = erode(SEED, HMAX, DIM, false, true, false);
         assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
     }
 
@@ -1227,8 +1366,8 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 16;
-        let a = erode(SEED, HMAX, DIM, false, false);
-        let b = erode(SEED, HMAX, DIM, false, false);
+        let a = erode(SEED, HMAX, DIM, false, false, false);
+        let b = erode(SEED, HMAX, DIM, false, false, false);
         assert_eq!(a, b, "erode(..,enable_volcanic=false) must be byte-identical across repeated calls");
     }
 
@@ -1242,7 +1381,7 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let state = erode(SEED, HMAX, DIM, false, true);
+        let state = erode(SEED, HMAX, DIM, false, true, false);
         let vents = crate::gen::volcanic::build_vents(SEED, DIM);
 
         for vent in &vents {

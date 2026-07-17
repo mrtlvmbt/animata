@@ -802,32 +802,28 @@ pub fn classify_and_caps_staged(
     hmax: i64,
     dim: usize,
     enable_patchiness: bool,
-    enable_tectonics: bool,
-    enable_aeolian: bool,
-    enable_volcanic: bool,
-    enable_glacial: bool,
-    enable_coastal: bool,
+    flags: crate::gen::LandformFlags,
     enable_talus_final: bool,
     enable_w10_diversity: bool,
 ) -> (WorldFields, StagedHeights, LandformMasks) {
-    let erosion = erode(seed, hmax, dim, enable_tectonics, enable_volcanic);
+    let erosion = erode(seed, hmax, dim, flags.tect, flags.volcanic, flags.ridges);
     let n = dim * dim;
 
-    let volcanic_mask: Vec<Option<MaterialId>> = if enable_volcanic {
+    let volcanic_mask: Vec<Option<MaterialId>> = if flags.volcanic {
         let vents = crate::gen::volcanic::build_vents(seed, dim);
         crate::gen::volcanic::edifice_material_mask(dim, &vents)
     } else {
         vec![None; n]
     };
 
-    let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if enable_glacial {
+    let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if flags.glacial {
         let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height);
         (g.height, g.material)
     } else {
         (erosion.height.clone(), vec![None; n])
     };
 
-    let (post_aeolian_height, sand_depth) = if enable_aeolian {
+    let (post_aeolian_height, sand_depth) = if flags.aeolian {
         let initial_sand: Vec<i64> = (0..n)
             .map(|idx| {
                 let x = (idx % dim) as i64;
@@ -844,7 +840,7 @@ pub fn classify_and_caps_staged(
         (post_glacial_height.clone(), vec![0i64; n])
     };
 
-    let (post_coastal_height, submerged) = if enable_coastal {
+    let (post_coastal_height, submerged) = if flags.coastal {
         let c = crate::gen::coastal::run_coastal(seed, dim, hmax, &post_aeolian_height);
         (c.height, c.submerged)
     } else {
@@ -854,7 +850,7 @@ pub fn classify_and_caps_staged(
     // W-9: Final-surface thermal relaxation. When enabled, applies Jacobi diffusion to smooth
     // residual spikes from landforms that ran after the erode loop's early talus pass.
     // When disabled, this is byte-identical to the old path.
-    let post_talus_height = if enable_talus_final && (enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal) {
+    let post_talus_height = if enable_talus_final && (flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal) {
         talus_step_final(dim, &post_coastal_height, SPIKE_MARGIN_FINAL, N_ITERS_FINAL)
     } else {
         post_coastal_height.clone()
@@ -863,7 +859,7 @@ pub fn classify_and_caps_staged(
     // W-8: De-needle pass — remove isolated 1-cell height spikes, FINAL landform post-processing
     // BEFORE classify. Only runs when at least one landform is enabled (preserves byte-identical
     // all-OFF golden path).
-    let post_deneedle_height = if enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal {
+    let post_deneedle_height = if flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal {
         de_needle_pass(dim, &post_talus_height)
     } else {
         post_talus_height.clone()
@@ -925,7 +921,7 @@ pub fn classify_and_caps_staged(
             };
 
             let material = volcanic_mask[idx].or(glacial_mask[idx]).unwrap_or_else(|| {
-                reconcile_primary_material(enable_aeolian, erosion.surface_material[idx], sand_depth[idx])
+                reconcile_primary_material(flags.aeolian, erosion.surface_material[idx], sand_depth[idx])
             });
 
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
@@ -944,7 +940,7 @@ pub fn classify_and_caps_staged(
             // Gated by enable_w10_diversity AND any-landform-ON: OFF paths (W-10 disabled OR no landforms)
             // are byte-identical to pre-W-10. This allows tests to compare with-pass vs without-pass.
             let mut presentation_byte = material as u8;
-            let any_landform_on = enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal;
+            let any_landform_on = flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal;
             if enable_w10_diversity && any_landform_on && material == MaterialId::Soil {
                 // Stage (a): Split Soil into {SoilDry, Soil, SoilWet} by moisture threshold.
                 if moisture < SOILDRY_THRESHOLD {
@@ -973,19 +969,14 @@ pub fn classify_and_caps(
     hmax: i64,
     dim: usize,
     enable_patchiness: bool,
-    enable_tectonics: bool,
-    enable_aeolian: bool,
-    enable_volcanic: bool,
-    enable_glacial: bool,
-    enable_coastal: bool,
+    flags: crate::gen::LandformFlags,
 ) -> WorldFields {
     // W-9: Thin wrapper — talus_step_final is gated the SAME as de_needle: any_landform_on
     // Production output CHANGES when landforms are enabled (exactly why two-pass golden re-pin is prescribed).
     // W-10: Material diversity is gated and enabled by default in production.
-    let enable_talus_final = enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal;
+    let enable_talus_final = flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal || flags.ridges || flags.beaches;
     let (world_fields, _, _) = classify_and_caps_staged(
-        seed, hmax, dim, enable_patchiness, enable_tectonics, enable_aeolian,
-        enable_volcanic, enable_glacial, enable_coastal, enable_talus_final, true, // enable_w10_diversity
+        seed, hmax, dim, enable_patchiness, flags, enable_talus_final, true, // enable_w10_diversity
     );
     world_fields
 }

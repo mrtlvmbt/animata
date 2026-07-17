@@ -38,7 +38,7 @@ fn main() {
     let out = args.get(3).cloned().unwrap_or_else(|| format!("terrain_{dim}_{seed:#x}.bin"));
 
     // patchiness=false, then all five landforms ON.
-    let f = classify_and_caps(seed, HMAX, dim, false, true, true, true, true, true);
+    let f = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true));
     assert_eq!(f.height.len(), dim * dim, "height must be dim*dim");
     assert_eq!(f.surface_material.len(), dim * dim, "surface_material must be dim*dim");
 

@@ -44,7 +44,7 @@ fn main() {
     let out = args.get(3).cloned().unwrap_or_else(|| format!("map_{dim}_{seed:#x}.ppm"));
 
     // patchiness=false, then all five landforms ON.
-    let fields = classify_and_caps(seed, HMAX, dim, false, true, true, true, true, true);
+    let fields = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true));
     assert_eq!(fields.surface_material.len(), dim * dim, "surface_material must be dim*dim");
 
     // P6 binary PPM: header then RGB triples, row-major (idx = z*dim + x).

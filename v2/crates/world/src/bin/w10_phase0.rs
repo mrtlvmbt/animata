@@ -5,6 +5,7 @@
 use world::gen::caps::classify_and_caps_staged;
 use world::gen::material::MaterialId;
 use world::gen::moisture::moisture_at;
+use world::gen::LandformFlags;
 
 const HMAX: i64 = 200;
 
@@ -37,12 +38,12 @@ fn main() {
         // Run the post-W-9 classification (all landforms enabled, talus disabled to match Phase-0 intent).
         // Actually, we want the POST-talus field since that's what classify uses.
         let (_, staged, _) = classify_and_caps_staged(
-            seed, HMAX, dim, false, true, true, true, true, true, false, true  // enable_w10=true
+            seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, true  // enable_w10=true
         );
 
         let _n = dim * dim;
         let post_deneedle_height = &staged.post_deneedle;
-        let erosion = world::gen::erosion::erode(seed, HMAX, dim, true, true);
+        let erosion = world::gen::erosion::erode(seed, HMAX, dim, true, true, false);
 
         // Collect moisture and slope for Soil cells only
         let mut soil_moistures = Vec::new();

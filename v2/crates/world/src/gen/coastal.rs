@@ -332,7 +332,7 @@ mod tests {
     const DIM: usize = 64;
 
     fn base_fixture() -> Vec<i64> {
-        erode(SEED, HMAX, DIM, false, false).height
+        erode(SEED, HMAX, DIM, false, false, false).height
     }
 
     #[test]

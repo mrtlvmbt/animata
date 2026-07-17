@@ -709,7 +709,7 @@ mod tests {
     const DIM: usize = 64;
 
     fn eroded_fixture() -> Vec<i64> {
-        erode(SEED, HMAX, DIM, false, false).height
+        erode(SEED, HMAX, DIM, false, false, false).height
     }
 
     #[test]
@@ -931,7 +931,7 @@ mod tests {
     /// not the post-till height where moraine relief could confound the measurement.
     #[test]
     fn u_trough_structural_signature_on_at_least_3_valley_segments() {
-        let off = erode(SEED, HMAX, DIM, false, false);
+        let off = erode(SEED, HMAX, DIM, false, false, false);
         let state = run_glacial(SEED, DIM, HMAX, &off.height);
 
         let mask = ice_mask(SEED, DIM, &off.height);
