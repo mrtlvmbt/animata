@@ -1,5 +1,5 @@
-task: U-7 round 3 COMPLETE — camera pan + loader modal + harness workers (all defects fixed + code-critic PASS)
-phase: all code changes verified; awaiting CI gate
-blocked_on: ci-report.sh (48 render tests)
-next: run bash scripts/ci-report.sh to verify all tests pass
-updated: 2026-07-17 12:50
+task: U-8 minimap screen-aligned iso-diamond projection + yaw rotation
+phase: harness plumbing fixes committed; ready for re-capture
+blocked_on: none
+next: PM re-run full suite with screenshot captures (expect 256×256 world, terrain visible, veil bands at viewport quad)
+updated: 2026-07-17 15:00

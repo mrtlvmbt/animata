@@ -245,7 +245,9 @@ impl Panel for DebugPanel {
 
 /// Dim the panel OUTSIDE the viewport rectangle (four bands around the frame's bounding box, clamped
 /// to the panel). Bands collapse to nothing once the view encloses the whole map.
+/// U-8: Veil alpha adjusted to 130 (.51) for darker appearance per user request.
 fn veil_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) {
+    const VEIL_ALPHA: u8 = 130; // User-taste dial: darker veil for visual separation
     let mut lo = rect.max;
     let mut hi = rect.min;
     for p in quad {
@@ -254,7 +256,7 @@ fn veil_outside(painter: &egui::Painter, rect: egui::Rect, quad: &[egui::Pos2]) 
         lo = egui::pos2(lo.x.min(x), lo.y.min(y));
         hi = egui::pos2(hi.x.max(x), hi.y.max(y));
     }
-    let veil = egui::Color32::from_rgba_unmultiplied(5, 7, 10, 71); // .28
+    let veil = egui::Color32::from_rgba_unmultiplied(5, 7, 10, VEIL_ALPHA);
     let band = |a: egui::Pos2, b: egui::Pos2| {
         let r = egui::Rect::from_two_pos(a, b);
         if r.width() > 0.5 && r.height() > 0.5 {
@@ -320,14 +322,21 @@ impl Panel for MinimapPanel {
                         let size = egui::vec2(minimap::MINIMAP_WIDTH as f32, minimap::MINIMAP_HEIGHT as f32);
                         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
-                        // Draw the minimap texture as a quad
+                        // U-8: Draw the minimap texture as a screen-aligned iso diamond through the new projection
                         let painter = ui.painter_at(rect);
                         let mut mesh = egui::Mesh::with_texture(tex.id());
                         for &(u, v) in &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                            let (panel_x, panel_y) = minimap::map_uv_to_panel(
+                                u,
+                                v,
+                                ui_ctx.camera_yaw,
+                                rect.width(),
+                                rect.height(),
+                            );
                             mesh.vertices.push(egui::epaint::Vertex {
                                 pos: egui::Pos2::new(
-                                    rect.left() + u * rect.width(),
-                                    rect.top() + v * rect.height(),
+                                    rect.left() + panel_x,
+                                    rect.top() + panel_y,
                                 ),
                                 uv: egui::pos2(u, v),
                                 color: egui::Color32::WHITE,
@@ -337,8 +346,7 @@ impl Panel for MinimapPanel {
                         mesh.add_triangle(0, 2, 3);
                         painter.add(egui::Shape::mesh(mesh));
 
-                        // Draw viewport quad: project 4 screen corners to world → minimap UV
-                        // (veil will be drawn after this quad is computed)
+                        // U-8: Draw viewport quad through the same screen-aligned projection
                         let aspect = ui_ctx.screen_dims.0 / ui_ctx.screen_dims.1;
                         let cam_vp = minimap::minimap_view_proj_matrix(
                             ui_ctx.camera_focus,
@@ -351,11 +359,14 @@ impl Panel for MinimapPanel {
                         for corner_screen in corners.iter() {
                             let world_xz = minimap::minimap_ground_under_cursor(cam_vp, *corner_screen, ui_ctx.screen_dims);
                             let uv = minimap::world_to_minimap_uv(world_xz, ui_ctx.world_dim);
-                            let screen_pos = egui::Pos2::new(
-                                rect.left() + uv.x * rect.width(),
-                                rect.top() + uv.y * rect.height(),
+                            let (panel_x, panel_y) = minimap::map_uv_to_panel(
+                                uv.x,
+                                uv.y,
+                                ui_ctx.camera_yaw,
+                                rect.width(),
+                                rect.height(),
                             );
-                            viewport_pts.push(screen_pos);
+                            viewport_pts.push(egui::Pos2::new(rect.left() + panel_x, rect.top() + panel_y));
                         }
                         // Draw veil outside the viewport quad (v1 parity)
                         if viewport_pts.len() == 4 {
@@ -368,15 +379,19 @@ impl Panel for MinimapPanel {
                             painter.add(egui::Shape::closed_line(viewport_pts, stroke));
                         }
 
-                        // Handle click to jump
+                        // U-8: Handle click to jump using the inverted screen-aligned projection
                         if response.clicked() {
                             if let Some(pos) = response.interact_pointer_pos() {
-                                let uv_x = (pos.x - rect.left()) / rect.width();
-                                let uv_y = (pos.y - rect.top()) / rect.height();
-                                let world_pos = minimap::minimap_uv_to_world(
-                                    glam::vec2(uv_x as f32, uv_y as f32),
-                                    ui_ctx.world_dim,
+                                let panel_x = pos.x - rect.left();
+                                let panel_y = pos.y - rect.top();
+                                let uv = minimap::panel_to_map_uv(
+                                    panel_x,
+                                    panel_y,
+                                    ui_ctx.camera_yaw,
+                                    rect.width(),
+                                    rect.height(),
                                 );
+                                let world_pos = minimap::minimap_uv_to_world(uv, ui_ctx.world_dim);
                                 ui_ctx.actions.push(UiAction::JumpCamera(world_pos));
                             }
                         }
