@@ -66,24 +66,6 @@ const TXT_32: Color32 = theme::straight(233, 236, 230, 82); // pending-step labe
 const TXT_28: Color32 = theme::straight(233, 236, 230, 71); // pending dash
 const TRACK: Color32 = theme::straight(255, 255, 255, 26); // progress track (white 0.10)
 
-/// English stage names for the step checklist (deprecated, use label_ru for display)
-const STAGES: &[&str] = &[
-    "Heightfield",
-    "Tectonics",
-    "Erosion",
-    "Ridges",
-    "Aeolian",
-    "Volcanic",
-    "Glacial",
-    "Coastal",
-    "Beaches",
-    "Talus",
-    "De-needle",
-    "Classify",
-    "Meshing",
-    "Done",
-];
-
 /// Draw the full-screen loader modal. Call only when in Loading phase.
 pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
     let progress = (load_state.get_progress() as f32) / 1000.0;
@@ -94,7 +76,8 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
     let col_w = 384.0;
 
     // Total block height to vertically centre it.
-    let n = STAGES.len() as f32;
+    // U-11: 14 stages (0-13) in the pipeline
+    let n = 14.0;
     let block_h = 16.0 + 34.0   // brand row + margin
         + 10.0 + 13.0           // phase caps + margin
         + 24.0 + 26.0           // step name + margin
@@ -205,34 +188,37 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             );
             y += 11.0 + 32.0;
 
-            // --- STEP CHECKLIST ---
+            // --- STEP CHECKLIST (Russian labels via Stage::label_ru) ---
             let label_font = theme::sans(13.0);
-            for (i, label) in STAGES.iter().enumerate() {
-                let glyph_c = Pos2::new(left + 7.0, y + 7.0);
-                let label_color = if i < step_index {
-                    paint_check(ui.painter(), glyph_c);
-                    TXT_55
-                } else if i == step_index {
-                    let (op2, sc2) = pulse(t, 1.4);
-                    ui.painter().circle_filled(
-                        glyph_c,
-                        4.0 * sc2,
-                        theme::ACCENT.gamma_multiply(op2),
+            for i in 0..14 {
+                if let Some(stage) = Stage::from_u8(i as u8) {
+                    let label = stage.label_ru();
+                    let glyph_c = Pos2::new(left + 7.0, y + 7.0);
+                    let label_color = if i < step_index {
+                        paint_check(ui.painter(), glyph_c);
+                        TXT_55
+                    } else if i == step_index {
+                        let (op2, sc2) = pulse(t, 1.4);
+                        ui.painter().circle_filled(
+                            glyph_c,
+                            4.0 * sc2,
+                            theme::ACCENT.gamma_multiply(op2),
+                        );
+                        theme::TEXT
+                    } else {
+                        let dash = egui::Rect::from_center_size(glyph_c, egui::vec2(8.0, 1.5));
+                        ui.painter().rect_filled(dash, 1.0, TXT_28);
+                        TXT_32
+                    };
+                    ui.painter().text(
+                        Pos2::new(left + 26.0, y),
+                        Align2::LEFT_TOP,
+                        label,
+                        label_font.clone(),
+                        label_color,
                     );
-                    theme::TEXT
-                } else {
-                    let dash = egui::Rect::from_center_size(glyph_c, egui::vec2(8.0, 1.5));
-                    ui.painter().rect_filled(dash, 1.0, TXT_28);
-                    TXT_32
-                };
-                ui.painter().text(
-                    Pos2::new(left + 26.0, y),
-                    Align2::LEFT_TOP,
-                    label,
-                    label_font.clone(),
-                    label_color,
-                );
-                y += 14.0 + 12.0;
+                    y += 14.0 + 12.0;
+                }
             }
         });
 
