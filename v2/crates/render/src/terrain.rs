@@ -8,7 +8,7 @@
 //!
 //! R-3: Each chunk carries a world-space AABB for frustum culling.
 
-use crate::biome_palette::{cell_color, cliff_shade, apply_directional_shading, ColorMode};
+use crate::biome_palette::{cell_color, cliff_shade, apply_directional_shading};
 use crate::hex::{edge_for_direction, hex_center, hex_corner, neighbors, HEIGHT_SCALE, HEX_SIZE};
 use macroquad::models::{Mesh, Vertex};
 use macroquad::prelude::*;
@@ -83,7 +83,6 @@ pub(crate) fn hypsometric_range(world_dim: i64, world: &dyn WorldView) -> (i64, 
 pub fn build_hex_terrain(
     world_dim: i64,
     world: &dyn WorldView,
-    mode: ColorMode,
     seed: u64,
     bare_mode: bool,
 ) -> Vec<TerrainChunk> {
@@ -93,7 +92,7 @@ pub fn build_hex_terrain(
     let mut row0 = 0i64;
     while row0 < world_dim {
         let row1 = (row0 + rpc).min(world_dim);
-        chunks.push(build_chunk(world_dim, world, row0, row1, mode, h_lo, h_hi, seed, bare_mode));
+        chunks.push(build_chunk(world_dim, world, row0, row1, h_lo, h_hi, seed, bare_mode));
         row0 = row1;
     }
     chunks
@@ -131,7 +130,6 @@ fn build_chunk(
     world: &dyn WorldView,
     row0: i64,
     row1: i64,
-    _mode: ColorMode,
     h_lo: i64,
     h_hi: i64,
     seed: u64,

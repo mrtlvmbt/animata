@@ -25,6 +25,70 @@ const MOUSE_DRAG_SENSITIVITY: f32 = 0.2;
 /// Yaw rotation step (radians) — Q/E keys rotate in fixed increments.
 const YAW_STEP: f32 = std::f32::consts::PI / 3.0; // 60°
 
+/// F2: Camera input snapshot for testable gating. Extracted from macroquad input state
+/// so unit tests can inject synthetic input without relying on macroquad state.
+#[derive(Clone, Copy, Debug)]
+pub struct CamInput {
+    /// Mouse wheel y delta (positive = zoom in, negative = zoom out).
+    pub wheel_y: f32,
+    /// Mouse movement delta in screen pixels (None if not dragging).
+    pub mouse_delta: Option<(f32, f32)>,
+    /// Keyboard pan direction: (x, z) components (normalized or raw).
+    pub pan_dir: (f32, f32),
+    /// Yaw rotation step: -1 (Q), 0 (no key), or +1 (E).
+    pub yaw_step: i8,
+    /// Current mouse position in screen pixels (for tracking drag state). Pure input to apply_cam_input.
+    pub current_mouse_pos: (f32, f32),
+}
+
+impl CamInput {
+    /// Collect current frame input from macroquad state.
+    pub fn collect() -> Self {
+        let dt = get_frame_time();
+        let wheel = mouse_wheel().1;
+
+        // Keyboard pan
+        let mut pan_x = 0.0f32;
+        let mut pan_z = 0.0f32;
+        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
+            pan_z -= PAN_SPEED * dt;
+        }
+        if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down) {
+            pan_z += PAN_SPEED * dt;
+        }
+        if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
+            pan_x -= PAN_SPEED * dt;
+        }
+        if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
+            pan_x += PAN_SPEED * dt;
+        }
+
+        // Mouse drag (middle or right button)
+        let current_mouse_pos = mouse_position();
+        let mouse_delta = if is_mouse_button_down(MouseButton::Middle) || is_mouse_button_down(MouseButton::Right) {
+            Some(current_mouse_pos)
+        } else {
+            None
+        };
+
+        // Yaw rotation
+        let mut yaw_step = 0i8;
+        if is_key_pressed(KeyCode::Q) || is_key_pressed(KeyCode::Comma) {
+            yaw_step = -1;
+        } else if is_key_pressed(KeyCode::E) || is_key_pressed(KeyCode::Period) {
+            yaw_step = 1;
+        }
+
+        CamInput {
+            wheel_y: wheel,
+            mouse_delta,
+            pan_dir: (pan_x, pan_z),
+            yaw_step,
+            current_mouse_pos,
+        }
+    }
+}
+
 /// Frustum plane: normal and distance from origin.
 #[derive(Clone, Copy, Debug)]
 pub struct FrustumPlane {
@@ -65,77 +129,72 @@ pub struct IsoCam {
 impl IsoCam {
     /// Create a camera with a given focus, yaw, and initial ortho span.
     pub fn new(focus: Vec3, yaw: f32, ortho_span: f32) -> Self {
-        IsoCam { focus, yaw, ortho_span: ortho_span.clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX), last_mouse_pos: mouse_position() }
+        IsoCam { focus, yaw, ortho_span: ortho_span.clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX), last_mouse_pos: (0.0, 0.0) }
     }
 
-    /// Update the camera state based on input this frame.
+    /// Update the camera state based on input this frame (no gating — for screenshot/bench paths).
+    /// F3: Consolidation — ungated update just delegates to gated with all input accepted.
     pub fn update(&mut self) {
-        self.update_pan();
-        self.update_zoom();
-        self.update_rotate();
+        self.update_gated(false, false);
     }
 
-    /// Update pan (WASD / arrows + mouse drag).
-    fn update_pan(&mut self) {
-        let dt = get_frame_time();
-
-        // Keyboard pan: WASD and arrow keys.
-        let mut pan_delta = Vec3::ZERO;
-        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
-            pan_delta.z -= PAN_SPEED * dt;
-        }
-        if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down) {
-            pan_delta.z += PAN_SPEED * dt;
-        }
-        if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
-            pan_delta.x -= PAN_SPEED * dt;
-        }
-        if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
-            pan_delta.x += PAN_SPEED * dt;
-        }
-
-        // Apply keyboard pan in the camera's local frame (rotated by yaw).
-        let cos_yaw = self.yaw.cos();
-        let sin_yaw = self.yaw.sin();
-        let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
-        let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
-        self.focus += local_x * pan_delta.x + local_z * pan_delta.z;
-
-        // Mouse drag pan (middle or right button).
-        let mouse_pos = mouse_position();
-        if is_mouse_button_down(MouseButton::Middle) || is_mouse_button_down(MouseButton::Right) {
-            let delta = (mouse_pos.0 - self.last_mouse_pos.0, mouse_pos.1 - self.last_mouse_pos.1);
-            let world_delta_x = -delta.0 * MOUSE_DRAG_SENSITIVITY * self.ortho_span / 200.0;
-            let world_delta_z = delta.1 * MOUSE_DRAG_SENSITIVITY * self.ortho_span / 200.0;
-            self.focus += local_x * world_delta_x + local_z * world_delta_z;
-        }
-        self.last_mouse_pos = mouse_pos;
+    /// Update the camera state with UI gating.
+    /// When UI wants pointer input, mouse-driven camera controls are skipped.
+    /// When UI wants keyboard input, keyboard-driven camera controls are skipped.
+    /// F2: Refactored to collect input and apply it testably.
+    pub fn update_gated(&mut self, wants_pointer: bool, wants_keyboard: bool) {
+        let input = CamInput::collect();
+        self.apply_cam_input(&input, wants_pointer, wants_keyboard);
     }
 
-    /// Update zoom (mouse wheel).
-    fn update_zoom(&mut self) {
-        let wheel = mouse_wheel().1;
-        if wheel != 0.0 {
-            // Positive wheel = zoom in (decrease span), negative = zoom out (increase span).
-            let zoom_factor = (1.0 - ZOOM_RATE * wheel).max(0.1);
+    /// Apply camera input with gating (F2: testable core).
+    /// Test can inject synthetic CamInput and verify that gating actually blocks changes.
+    pub fn apply_cam_input(&mut self, input: &CamInput, wants_pointer: bool, wants_keyboard: bool) {
+        // Keyboard pan
+        if !wants_keyboard && (input.pan_dir.0 != 0.0 || input.pan_dir.1 != 0.0) {
+            let cos_yaw = self.yaw.cos();
+            let sin_yaw = self.yaw.sin();
+            let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
+            let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
+            let pan_delta = Vec3::new(input.pan_dir.0, 0.0, input.pan_dir.1);
+            self.focus += local_x * pan_delta.x + local_z * pan_delta.z;
+        }
+
+        // Mouse drag pan
+        if !wants_pointer {
+            if let Some((curr_x, curr_y)) = input.mouse_delta {
+                let cos_yaw = self.yaw.cos();
+                let sin_yaw = self.yaw.sin();
+                let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
+                let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
+                let delta = (curr_x - self.last_mouse_pos.0, curr_y - self.last_mouse_pos.1);
+                let world_delta_x = -delta.0 * MOUSE_DRAG_SENSITIVITY * self.ortho_span / 200.0;
+                let world_delta_z = delta.1 * MOUSE_DRAG_SENSITIVITY * self.ortho_span / 200.0;
+                self.focus += local_x * world_delta_x + local_z * world_delta_z;
+            }
+        }
+        self.last_mouse_pos = input.current_mouse_pos;
+
+        // Zoom
+        if !wants_pointer && input.wheel_y != 0.0 {
+            let zoom_factor = (1.0 - ZOOM_RATE * input.wheel_y).max(0.1);
             self.ortho_span = (self.ortho_span * zoom_factor).clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX);
         }
-    }
 
-    /// Update rotation (Q/E keys or comma/period).
-    fn update_rotate(&mut self) {
-        if is_key_pressed(KeyCode::Q) || is_key_pressed(KeyCode::Comma) {
-            self.yaw -= YAW_STEP;
-        }
-        if is_key_pressed(KeyCode::E) || is_key_pressed(KeyCode::Period) {
-            self.yaw += YAW_STEP;
-        }
-        // Wrap yaw to [0, 2π).
-        while self.yaw < 0.0 {
-            self.yaw += std::f32::consts::TAU;
-        }
-        while self.yaw >= std::f32::consts::TAU {
-            self.yaw -= std::f32::consts::TAU;
+        // Yaw rotation
+        if !wants_keyboard && input.yaw_step != 0 {
+            if input.yaw_step < 0 {
+                self.yaw -= YAW_STEP;
+            } else if input.yaw_step > 0 {
+                self.yaw += YAW_STEP;
+            }
+            // Wrap yaw to [0, 2π).
+            while self.yaw < 0.0 {
+                self.yaw += std::f32::consts::TAU;
+            }
+            while self.yaw >= std::f32::consts::TAU {
+                self.yaw -= std::f32::consts::TAU;
+            }
         }
     }
 

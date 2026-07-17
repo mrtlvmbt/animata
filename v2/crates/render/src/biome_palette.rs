@@ -145,16 +145,6 @@ pub fn surface_color_v2(
     )
 }
 
-/// Terrain top-face coloring mode, runtime-toggleable ('C' key). `Material` = physical substrate
-/// palette ([`material_color`]); `Height` = hypsometric elevation ramp ([`height_color`]) so relief
-/// reads by height (a ceiling plateau shows as a uniform snow-white cap, troughs as green lowland,
-/// moraine ridges as brown bumps — the direct visual for the glacial relief fix).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ColorMode {
-    Material,
-    Height,
-}
-
 /// Hypsometric elevation ramp: raw `height` → a classic low-green→brown→snow-white gradient. Makes
 /// pure RELIEF legible independent of material — the tool for eyeballing plateau/needle/trough shape.
 ///
@@ -190,23 +180,6 @@ pub fn height_color(height: i64, h_lo: i64, h_hi: i64) -> Color {
     let f = ((t - lo.0) / span).clamp(0.0, 1.0);
     let lerp = |a: f32, b: f32| (a + (b - a) * f) / 255.0;
     Color::new(lerp(lo.1, hi.1), lerp(lo.2, hi.2), lerp(lo.3, hi.3), 1.0)
-}
-
-/// Dispatch a cell's top-face color by the active [`ColorMode`]. `material`/`height` are read from the
-/// `WorldView`; `[h_lo, h_hi]` is the map's observed relief band that scales the [`height_color`] ramp.
-/// **Note**: This function is now deprecated in favor of directly calling `surface_color_v2`,
-/// which provides palette v2 (two-factor coloring) that the renderer expects.
-pub fn surface_color(
-    mode: ColorMode,
-    material: u8,
-    height: i64,
-    h_lo: i64,
-    h_hi: i64,
-) -> Color {
-    match mode {
-        ColorMode::Material => material_color(material),
-        ColorMode::Height => height_color(height, h_lo, h_hi),
-    }
 }
 
 /// Cliff (side-quad) shade: a fixed darkening of the top-face color — a cheap "AO-ish" cue (RnD
