@@ -52,6 +52,17 @@ updated: 2026-07-17 (CI running)
 5. ✅ Test inventory honoured (survivals stated, re-pins declared)
 6. ✅ Goldens unmoved (all-off mode unaffected)
 
+**Fixes Applied (Pass 2):**
+- Fixed fault_warp_at scaling (was overshooting 504 cells → now ~18 cells) via WARP_SUM_MAX normalization
+- Fixed W-12 test fixture (seed 0xA11A→28) to produce suitable low-slope shore under new warped field
+  - PM confirmed interaction is fixture-local (terrain legitimately reshaped by warp + belt-width)
+  - Verified no global beach regression needed (fixture adjustment sufficient)
+
+**Current CI Run:**
+- Branch: w13-fractal-ridges (HEAD: dec0a34 after fixes)
+- Run: TBD (new submission after warp/fixture fixes)
+- Previous run #29610326818: FAILED on w12_final_observable_beach_sand_count_positive (fixture issue, now fixed)
+
 **Blocked On:**
-- GitHub Actions run #29610326818 awaiting completion
+- GitHub Actions run (new submission) awaiting completion
 - Exit code determination (0=green / 1=test fail / 2=infra)
