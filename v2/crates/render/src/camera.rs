@@ -4,6 +4,7 @@
 
 use glam::{Mat4, Vec2, Vec3};
 use macroquad::prelude::*;
+use crate::tuning::Tuning;
 
 /// Iso pitch angle (radians) — fixed at a canonical isometric angle (~35.26°).
 /// tan(pitch) = 0.8660 ≈ √3 / 2 → pitch ≈ 40.9° (or close isometric approximation).
@@ -112,27 +113,27 @@ pub struct CamInput {
 }
 
 impl CamInput {
-    /// Collect current frame input from macroquad state.
-    pub fn collect() -> Self {
+    /// Collect current frame input from macroquad state, reading key bindings and pan speed from tuning.
+    pub fn collect(tuning: &Tuning) -> Self {
         let dt = get_frame_time();
         let wheel = mouse_wheel().1;
         let mouse_pos = mouse_position();
         let screen_dims = (screen_width(), screen_height());
 
-        // Keyboard pan
+        // Keyboard pan — use key bindings and pan_speed from tuning
         let mut pan_x = 0.0f32;
         let mut pan_z = 0.0f32;
-        if is_key_down(KeyCode::W) || is_key_down(KeyCode::Up) {
-            pan_z -= PAN_SPEED * dt;
+        if is_key_down(tuning.key_pan_up) || is_key_down(KeyCode::Up) {
+            pan_z -= tuning.pan_speed * dt;
         }
-        if is_key_down(KeyCode::S) || is_key_down(KeyCode::Down) {
-            pan_z += PAN_SPEED * dt;
+        if is_key_down(tuning.key_pan_down) || is_key_down(KeyCode::Down) {
+            pan_z += tuning.pan_speed * dt;
         }
-        if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
-            pan_x -= PAN_SPEED * dt;
+        if is_key_down(tuning.key_pan_left) || is_key_down(KeyCode::Left) {
+            pan_x -= tuning.pan_speed * dt;
         }
-        if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
-            pan_x += PAN_SPEED * dt;
+        if is_key_down(tuning.key_pan_right) || is_key_down(KeyCode::Right) {
+            pan_x += tuning.pan_speed * dt;
         }
 
         // Mouse drag (middle or right button)
@@ -142,11 +143,11 @@ impl CamInput {
             None
         };
 
-        // Yaw rotation
+        // Yaw rotation — use key bindings from tuning
         let mut yaw_step = 0i8;
-        if is_key_pressed(KeyCode::Q) || is_key_pressed(KeyCode::Comma) {
+        if is_key_pressed(tuning.key_rotate_ccw) || is_key_pressed(KeyCode::Comma) {
             yaw_step = -1;
-        } else if is_key_pressed(KeyCode::E) || is_key_pressed(KeyCode::Period) {
+        } else if is_key_pressed(tuning.key_rotate_cw) || is_key_pressed(KeyCode::Period) {
             yaw_step = 1;
         }
 
@@ -216,22 +217,22 @@ impl IsoCam {
 
     /// Update the camera state based on input this frame (no gating — for screenshot/bench paths).
     /// F3: Consolidation — ungated update just delegates to gated with all input accepted.
-    pub fn update(&mut self) {
-        self.update_gated(false, false);
+    pub fn update(&mut self, tuning: &Tuning) {
+        self.update_gated(tuning, false, false);
     }
 
     /// Update the camera state with UI gating.
     /// When UI wants pointer input, mouse-driven camera controls are skipped.
     /// When UI wants keyboard input, keyboard-driven camera controls are skipped.
     /// F2: Refactored to collect input and apply it testably.
-    pub fn update_gated(&mut self, wants_pointer: bool, wants_keyboard: bool) {
-        let input = CamInput::collect();
-        self.apply_cam_input(&input, wants_pointer, wants_keyboard);
+    pub fn update_gated(&mut self, tuning: &Tuning, wants_pointer: bool, wants_keyboard: bool) {
+        let input = CamInput::collect(tuning);
+        self.apply_cam_input(&input, tuning, wants_pointer, wants_keyboard);
     }
 
     /// Apply camera input with gating (F2: testable core).
     /// Test can inject synthetic CamInput and verify that gating actually blocks changes.
-    pub fn apply_cam_input(&mut self, input: &CamInput, wants_pointer: bool, wants_keyboard: bool) {
+    pub fn apply_cam_input(&mut self, input: &CamInput, tuning: &Tuning, wants_pointer: bool, wants_keyboard: bool) {
         // Keyboard pan
         if !wants_keyboard && (input.pan_dir.0 != 0.0 || input.pan_dir.1 != 0.0) {
             let cos_yaw = self.yaw.cos();
@@ -251,7 +252,7 @@ impl IsoCam {
             let before = ground_under_cursor(cam_vp, input.mouse_pos, input.screen_dims);
 
             let old_span = self.ortho_span;
-            let zoom_factor = (1.0 - ZOOM_RATE * input.wheel_y).max(0.1);
+            let zoom_factor = (1.0 - tuning.zoom_rate * input.wheel_y).max(0.1);
             self.ortho_span = (self.ortho_span * zoom_factor).clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX);
 
             // CRITICAL (F4): the applied zoom is captured implicitly by recalculating the ground point
@@ -299,8 +300,8 @@ impl IsoCam {
                 let local_x = Vec3::new(cos_yaw, 0.0, sin_yaw);
                 let local_z = Vec3::new(-sin_yaw, 0.0, cos_yaw);
                 let delta = (curr_x - self.last_mouse_pos.0, curr_y - self.last_mouse_pos.1);
-                let world_delta_x = -delta.0 * MOUSE_DRAG_SENSITIVITY * self.ortho_span / 200.0;
-                let world_delta_z = delta.1 * MOUSE_DRAG_SENSITIVITY * self.ortho_span / 200.0;
+                let world_delta_x = -delta.0 * tuning.drag_sensitivity * self.ortho_span / 200.0;
+                let world_delta_z = delta.1 * tuning.drag_sensitivity * self.ortho_span / 200.0;
                 self.focus += local_x * world_delta_x + local_z * world_delta_z;
             }
         }
@@ -471,7 +472,7 @@ mod tests {
 
         // Zoom in (wheel_y > 0)
         let input = test_input(screen_pos, screen_dims, 1.0, false, false);
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         // Get ground point after zoom
         let cam_vp = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
@@ -495,7 +496,7 @@ mod tests {
 
         // Try to zoom in (wheel_y > 0) while already at min
         let input = test_input(screen_pos, screen_dims, 1.0, false, false);
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         // Focus must be EXACTLY unchanged (no sideways slide).
         assert_eq!(cam.focus, original_focus, "focus moved at zoom min limit");
@@ -514,7 +515,7 @@ mod tests {
 
         // Try to zoom out (wheel_y < 0) while already at max
         let input = test_input(screen_pos, screen_dims, -1.0, false, false);
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         // Focus must be EXACTLY unchanged (no sideways slide).
         assert_eq!(cam.focus, original_focus, "focus moved at zoom max limit");
@@ -531,12 +532,12 @@ mod tests {
 
         // Press on initial position (on press frame, both pressed and down are true in macroquad)
         let input_press = test_input(initial_pos, screen_dims, 0.0, true, true);
-        cam.apply_cam_input(&input_press, false, false);
+        cam.apply_cam_input(&input_press, &Tuning::default(), false, false);
 
         // Hold and move to a new position
         let moved_pos = (500.0, 250.0);
         let input_hold = test_input(moved_pos, screen_dims, 0.0, false, true);
-        cam.apply_cam_input(&input_hold, false, false);
+        cam.apply_cam_input(&input_hold, &Tuning::default(), false, false);
 
         // The ground point at the initial position should now be where the moved position's ground point was.
         // In other words: ground_at(initial_pos, after_move) ≈ ground_at(moved_pos, after_move)
@@ -548,7 +549,7 @@ mod tests {
 
         // Release
         let input_release = test_input(moved_pos, screen_dims, 0.0, false, false);
-        cam.apply_cam_input(&input_release, false, false);
+        cam.apply_cam_input(&input_release, &Tuning::default(), false, false);
 
         // After a drag, the focus should have moved such that the grabbed point (at initial_pos)
         // now appears under the moved position. The actual ground point at moved_pos should be
@@ -570,13 +571,13 @@ mod tests {
 
         // Press (on press frame, both pressed and down are true in macroquad)
         let input_press = test_input(pos1, screen_dims, 0.0, true, true);
-        cam.apply_cam_input(&input_press, false, false);
+        cam.apply_cam_input(&input_press, &Tuning::default(), false, false);
         let focus_after_press = cam.focus;
 
         // Hold and move
         let pos2 = (500.0, 250.0);
         let input_hold = test_input(pos2, screen_dims, 0.0, false, true);
-        cam.apply_cam_input(&input_hold, false, false);
+        cam.apply_cam_input(&input_hold, &Tuning::default(), false, false);
         let focus_after_hold = cam.focus;
 
         // Verify focus moved during hold
@@ -584,13 +585,13 @@ mod tests {
 
         // Release
         let input_release = test_input(pos2, screen_dims, 0.0, false, false);
-        cam.apply_cam_input(&input_release, false, false);
+        cam.apply_cam_input(&input_release, &Tuning::default(), false, false);
         let focus_after_release = cam.focus;
 
         // After release, anchor is cleared. Move to pos3 without pressing should NOT pan.
         let pos3 = (600.0, 200.0);
         let input_after_release = test_input(pos3, screen_dims, 0.0, false, false);
-        cam.apply_cam_input(&input_after_release, false, false);
+        cam.apply_cam_input(&input_after_release, &Tuning::default(), false, false);
         let focus_after_move = cam.focus;
 
         // Focus should NOT change after release and move.
@@ -607,7 +608,7 @@ mod tests {
 
         // Apply zoom with wants_pointer=true
         let input = test_input(screen_pos, screen_dims, 1.0, false, false);
-        cam.apply_cam_input(&input, true, false); // wants_pointer=true
+        cam.apply_cam_input(&input, &Tuning::default(), true, false); // wants_pointer=true
 
         // Span should NOT change
         assert_eq!(cam.ortho_span, original_span, "zoom changed when wants_pointer=true");
@@ -623,12 +624,12 @@ mod tests {
 
         // Press with wants_pointer=true
         let input_press = test_input(pos1, screen_dims, 0.0, true, false);
-        cam.apply_cam_input(&input_press, true, false); // wants_pointer=true
+        cam.apply_cam_input(&input_press, &Tuning::default(), true, false); // wants_pointer=true
 
         // Move and hold
         let pos2 = (500.0, 250.0);
         let input_hold = test_input(pos2, screen_dims, 0.0, false, true);
-        cam.apply_cam_input(&input_hold, true, false); // wants_pointer=true
+        cam.apply_cam_input(&input_hold, &Tuning::default(), true, false); // wants_pointer=true
 
         // Focus should NOT change
         assert_eq!(cam.focus, original_focus, "focus changed during left-drag when wants_pointer=true");
@@ -700,7 +701,7 @@ mod tests {
             yaw_step: 0,
             mouse_delta: None,
         };
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         // Get NDC projection of the same point after panning
         let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
@@ -740,7 +741,7 @@ mod tests {
             yaw_step: 0,
             mouse_delta: None,
         };
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         // Get NDC projection of the same point after panning
         let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
@@ -778,7 +779,7 @@ mod tests {
             yaw_step: 0,
             mouse_delta: None,
         };
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         // Get NDC projection after panning
         let cam_vp_after = view_proj_matrix(cam.focus, cam.yaw, cam.ortho_span, aspect);
@@ -808,7 +809,7 @@ mod tests {
             yaw_step: -1, // Q key
             mouse_delta: None,
         };
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         // Yaw should decrease (wrap to 2π - step if it goes negative)
         let expected_yaw = if original_yaw < YAW_STEP {
@@ -835,7 +836,7 @@ mod tests {
             yaw_step: 1, // E key
             mouse_delta: None,
         };
-        cam.apply_cam_input(&input, false, false);
+        cam.apply_cam_input(&input, &Tuning::default(), false, false);
 
         let expected_yaw = (original_yaw + YAW_STEP) % std::f32::consts::TAU;
         assert!((cam.yaw - expected_yaw).abs() < 1e-5, "E key should increase yaw, but got {}", cam.yaw);

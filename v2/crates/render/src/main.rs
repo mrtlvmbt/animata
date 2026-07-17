@@ -360,6 +360,9 @@ async fn main() {
     let cli_args = parse_args();
     let config = cli::default_config(cli_args.seed);
 
+    // U-7: Load tuning config (feel + key mapping) once at startup
+    let tuning = tuning::Tuning::load();
+
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
     let mut spec = WorldSpec {
         seed: cli_args.seed,
@@ -600,7 +603,7 @@ async fn main() {
                 }
 
                 clear_background(Color::from_rgba(18, 18, 22, 255));
-                camera.update();
+                camera.update(&tuning);
                 let cam3d = camera.to_camera3d();
                 set_camera(&cam3d);
 
@@ -680,7 +683,7 @@ async fn main() {
                     }
                 }
 
-                camera.update();
+                camera.update(&tuning);
                 let cam3d = camera.to_camera3d();
                 set_camera(&cam3d);
 
@@ -742,7 +745,7 @@ async fn main() {
             clear_background(Color::from_rgba(18, 18, 22, 255));
             let snap = handle.as_ref().and_then(|h| h.latest());
 
-            camera.update();
+            camera.update(&tuning);
             let cam3d = camera.to_camera3d();
             set_camera(&cam3d);
 
@@ -804,7 +807,7 @@ async fn main() {
 
             let cpu_start = Instant::now();
 
-            camera.update();
+            camera.update(&tuning);
             let cam3d = camera.to_camera3d();
             set_camera(&cam3d);
 
@@ -980,7 +983,7 @@ async fn main() {
 
                     // Apply camera update with gating.
                     // U-7: Gate camera input when regen loader modal is showing
-                    camera.update_gated(ui_out.wants_pointer || wants_pointer_regen, ui_out.wants_keyboard || wants_keyboard_regen);
+                    camera.update_gated(&tuning, ui_out.wants_pointer || wants_pointer_regen, ui_out.wants_keyboard || wants_keyboard_regen);
 
                     // Collect keyboard input events with gating.
                     // U-7: Skip input when regen loader modal is showing (gated by wants_keyboard_regen)
@@ -1042,6 +1045,13 @@ async fn main() {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
                                         load_clone.set_stage(stage);
+                                        // U-7: Wire progress permille based on stage
+                                        let progress = match stage {
+                                            Stage::GenerateWorld => 0,
+                                            Stage::BuildMeshes => 400,
+                                            Stage::Done => 1000,
+                                        };
+                                        load_clone.set_progress(progress);
                                         true
                                     };
                                     if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
@@ -1173,7 +1183,7 @@ mod tests {
         };
 
         // Test: pointer gating should block zoom, but keyboard should still work.
-        camera.apply_cam_input(&input, true, false); // wants_pointer=true, wants_keyboard=false
+        camera.apply_cam_input(&input, &tuning::Tuning::default(), true, false); // wants_pointer=true, wants_keyboard=false
         assert_eq!(
             camera.ortho_span, initial_ortho,
             "FAIL: zoom changed despite wants_pointer=true; pointer gate should block wheel"
@@ -1205,7 +1215,7 @@ mod tests {
             pan_dir: (20.0, 0.0),   // Keyboard pan in x
             yaw_step: 1,            // E key pressed (rotate +60°)
         };
-        camera.apply_cam_input(&input_keyboard_only, false, true); // wants_pointer=false, wants_keyboard=true
+        camera.apply_cam_input(&input_keyboard_only, &tuning::Tuning::default(), false, true); // wants_pointer=false, wants_keyboard=true
         assert_eq!(
             camera.focus, initial_focus,
             "FAIL: focus changed under keyboard gate + wheel_y=0; gate is not blocking keyboard pan"
@@ -1238,7 +1248,7 @@ mod tests {
             pan_dir: (20.0, 0.0),   // Keyboard pan in x (should be blocked)
             yaw_step: 1,            // E key (should be blocked)
         };
-        camera.apply_cam_input(&input_with_wheel, false, true); // wants_pointer=false, wants_keyboard=true
+        camera.apply_cam_input(&input_with_wheel, &tuning::Tuning::default(), false, true); // wants_pointer=false,wants_keyboard=true
         assert_eq!(
             camera.yaw, initial_yaw,
             "FAIL: yaw changed despite wants_keyboard=true; keyboard gate broken"
@@ -1269,7 +1279,7 @@ mod tests {
         camera.yaw = initial_yaw;
 
         // Test: no gating should allow all changes.
-        camera.apply_cam_input(&input, false, false); // wants_pointer=false, wants_keyboard=false
+        camera.apply_cam_input(&input, &tuning::Tuning::default(), false, false); // wants_pointer=false, wants_keyboard=false
         assert!(
             camera.focus.x != initial_focus.x,
             "pan should apply when gating is off"
