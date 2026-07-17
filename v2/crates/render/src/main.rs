@@ -339,6 +339,8 @@ fn parse_landform_flags(csv: &str) -> world_spec::LandformFlags {
         }
     }
 
+    // U-10: Apply both guard (forces tect if all five originals off) and clamps (ridges&=tect, beaches&=coastal).
+    // Guard runs first, then clamps, so guard's tect-enabling makes ridges/beaches permissible.
     world_spec::LandformFlags::new(tect, aeolian, volcanic, glacial, coastal, ridges, beaches).apply_guard()
 }
 
@@ -1489,13 +1491,15 @@ mod tests {
 
     #[test]
     fn parse_landform_flags_dependency_clamps() {
-        // ridges without tect should be clamped to false
+        // ridges without explicitly requesting tect triggers the guard, which forces tect,
+        // making ridges permissible via the clamp (ridges &= tect after guard runs).
         let flags = parse_landform_flags("ridges");
-        assert!(!flags.tect && !flags.ridges, "ridges should be false when tect is false");
+        assert!(flags.tect && flags.ridges, "guard should force tect; clamp should then permit ridges");
 
-        // beaches without coastal should be clamped to false
+        // beaches without explicitly requesting coastal: the guard only enables tect,
+        // so beaches remains clamped false (guard doesn't rescue non-tect dependents).
         let flags2 = parse_landform_flags("beaches");
-        assert!(!flags2.coastal && !flags2.beaches, "beaches should be false when coastal is false");
+        assert!(!flags2.coastal && !flags2.beaches, "guard only enables tect, so beaches stays false (coastal is still off)");
     }
 
     /// F2: Honest unit test for pointer/keyboard gating — fails if gate is deleted.

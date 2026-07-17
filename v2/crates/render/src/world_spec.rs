@@ -19,29 +19,32 @@ pub struct LandformFlags {
 }
 
 impl LandformFlags {
-    /// Create landform flags with dependency clamps applied (mirroring world crate logic).
-    /// Ridges require tectonic uplift; beaches require coastal datum.
+    /// Create landform flags without clamps (raw values).
+    /// Clamps are applied later in `apply_guard()` AFTER the guard potentially enables tect/coastal.
     pub fn new(
         tect: bool,
         aeolian: bool,
         volcanic: bool,
         glacial: bool,
         coastal: bool,
-        mut ridges: bool,
-        mut beaches: bool,
+        ridges: bool,
+        beaches: bool,
     ) -> Self {
-        // W-0 dependency clamps: ridges requires tect, beaches requires coastal
-        ridges = ridges && tect;
-        beaches = beaches && coastal;
         LandformFlags { tect, aeolian, volcanic, glacial, coastal, ridges, beaches }
     }
 
-    /// Apply guards to ensure a valid state (e.g., if all five original landforms are off, enable tectonic).
+    /// Apply guards and dependency clamps to ensure a valid state.
+    /// Order: (1) if all five original landforms are off, enable tectonic;
+    /// (2) then apply clamps so guard's tect-enabling makes ridges/beaches permissible.
     pub fn apply_guard(mut self) -> Self {
         // Guard: never all-off for the original five (avoid flat/boring maps)
         if !(self.tect || self.aeolian || self.volcanic || self.glacial || self.coastal) {
             self.tect = true;
         }
+        // W-0 dependency clamps: ridges requires tect, beaches requires coastal
+        // Applied AFTER guard so that guard's tect-enabling affects clamp results.
+        self.ridges = self.ridges && self.tect;
+        self.beaches = self.beaches && self.coastal;
         self
     }
 }
@@ -269,33 +272,36 @@ mod tests {
         assert!(!can_reseed, "Dump + sim_mode must NOT allow reseed (F15)");
     }
 
-    // U-10: Landform flag clamp tests
+    // U-10: Landform flag clamp tests (applied in apply_guard after guard runs)
     #[test]
     fn landform_clamps_ridges_requires_tect() {
-        let flags = LandformFlags::new(false, false, false, false, false, true, false);
-        assert!(!flags.ridges, "ridges must be false when tect is false (clamp)");
+        // Guard forces tect when all five originals are off, then clamp permits ridges.
+        let flags = LandformFlags::new(false, false, false, false, false, true, false).apply_guard();
+        assert!(flags.tect && flags.ridges, "guard forces tect, clamp then permits ridges");
     }
 
     #[test]
     fn landform_clamps_beaches_requires_coastal() {
-        let flags = LandformFlags::new(false, false, false, false, false, false, true);
-        assert!(!flags.beaches, "beaches must be false when coastal is false (clamp)");
+        // Guard only forces tect (not coastal), so beaches stays clamped false.
+        let flags = LandformFlags::new(false, false, false, false, false, false, true).apply_guard();
+        assert!(flags.tect && !flags.coastal && !flags.beaches, "guard forces tect but not coastal; beaches stays false");
     }
 
     #[test]
     fn landform_clamps_both_dependencies() {
-        let flags = LandformFlags::new(false, false, false, false, false, true, true);
-        assert!(!flags.ridges && !flags.beaches, "both ridges and beaches must be false when their prerequisites are off");
+        // Guard forces tect (rescues ridges), but not coastal (beaches stays false).
+        let flags = LandformFlags::new(false, false, false, false, false, true, true).apply_guard();
+        assert!(flags.tect && flags.ridges && !flags.coastal && !flags.beaches, "guard forces tect; ridges true, beaches false");
     }
 
     #[test]
     fn landform_preserves_valid_dependencies() {
         // ridges valid when tect=true
-        let flags1 = LandformFlags::new(true, false, false, false, false, true, false);
+        let flags1 = LandformFlags::new(true, false, false, false, false, true, false).apply_guard();
         assert!(flags1.ridges, "ridges should be true when tect=true");
 
         // beaches valid when coastal=true
-        let flags2 = LandformFlags::new(false, false, false, false, true, false, true);
+        let flags2 = LandformFlags::new(false, false, false, false, true, false, true).apply_guard();
         assert!(flags2.beaches, "beaches should be true when coastal=true");
     }
 
