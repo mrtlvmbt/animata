@@ -188,9 +188,18 @@ const ACTIVE_RIDGE_AMP_INDEX: usize = 1; // Default = index 1 (25/10)
 const RIDGE_AMP_NUM: i64 = RIDGE_AMP_CANDIDATES[ACTIVE_RIDGE_AMP_INDEX].0;
 const RIDGE_AMP_DEN: i64 = RIDGE_AMP_CANDIDATES[ACTIVE_RIDGE_AMP_INDEX].1;
 
-/// W-11: Divisor for ridge field scaling. Used to bring raw fbm values into a comparable range
-/// with height deltas.
-const RIDGE_SCALE: i64 = 16;
+/// W-11 FBM normalization: ridge_fbm_at sums 4 octaves with amplitudes 8,4,2,1 where each
+/// value_noise_octave ∈ [0, 65536), giving max=(8+4+2+1)*65536=983040. The ridged-field fold
+/// expects input in [0, MAX=32768]; exceeding this saturates the fold to zero (all ridges carved
+/// away). FBM_MAX rescales the raw field to [0, 32768] BEFORE the fold.
+const FBM_MAX: i64 = 15 * 65536;  // 983040: (8+4+2+1) * HASH_SCALE
+
+/// W-11: Ridge field scaling denominator. Derived to keep |ridge_delta| in tens of units, not hmax.
+/// Fold term (2*ridged - MAX) ranges [−32768, +32768]; with RIDGE_AMP * mountainness,
+/// max |delta| before RIDGE_SCALE division is approximately RIDGE_AMP_NUM/DEN * 32768 * mountainness.
+/// For mountainness~256 and candidate 25/10: ≈250*32768*256 / (10*RIDGE_SCALE) = tens when RIDGE_SCALE ≈ 200.
+/// Target: p99(|delta|) ≤ hmax/2 (tens of units for typical hmax=200); test validates this bound.
+const RIDGE_SCALE: i64 = 200;
 
 #[inline]
 const fn linear_index(x: usize, z: usize, dim: usize) -> usize {
@@ -667,6 +676,25 @@ fn ridge_fbm_at(x: i64, z: i64, seed: u64) -> i64 {
     total
 }
 
+/// W-11 ridge helper: compute ridge height delta with parameterizable amplitude.
+/// Takes raw FBM and amplitude candidates; returns unclamped height delta.
+/// Exposed for testing different amplitude values without recompilation.
+pub fn ridge_delta_compute(
+    raw_fbm: i64,
+    mountainness: i64,
+    ridge_amp_num: i64,
+    ridge_amp_den: i64,
+    hmax: i64,
+) -> i64 {
+    // Normalize raw_fbm to [0, 32768] BEFORE the fold to avoid saturation
+    let fbm_norm = (raw_fbm.max(0) * 32768) / FBM_MAX;
+    const MAX: i64 = 32768;
+    let ridged = (MAX - ((2 * fbm_norm - MAX).abs())).max(0);
+    // Apply ridge height: h += (RIDGE_AMP * mountainness * (2*r - MAX)) / SCALE
+    let ridge_delta = (ridge_amp_num * mountainness * (2 * ridged - MAX)) / (ridge_amp_den * RIDGE_SCALE);
+    ridge_delta.clamp(-(hmax), hmax) // Return unclamped delta for inspection
+}
+
 /// W-11 ridge helper: compute warp offsets using low-octave fbm.
 fn ridge_warp_at(x: i64, z: i64, seed: u64) -> (i64, i64) {
     use crate::gen::height::value_noise_octave;
@@ -817,11 +845,12 @@ pub fn erode_with_tectonics(
                     let sample_x = (x as i64) + warp_x;
                     let sample_z = (z as i64) + warp_z;
 
-                    // Ridged field: r = MAX - |2*f - MAX| where f is raw fbm in [0, MAX]
+                    // Ridged field: r = MAX - |2*f - MAX| where f is normalized fbm in [0, MAX]
                     let raw_fbm = ridge_fbm_at(sample_x, sample_z, seed);
-                    let fbm_clamped = raw_fbm.max(0).min(65536); // Clamp to reasonable range (HASH_SCALE*4)
+                    // Normalize raw_fbm to [0, 32768] BEFORE the fold to avoid saturation
+                    let fbm_norm = (raw_fbm.max(0) * 32768) / FBM_MAX;
                     const MAX: i64 = 32768;
-                    let ridged = (MAX - ((2 * fbm_clamped - MAX).abs())).max(0);
+                    let ridged = (MAX - ((2 * fbm_norm - MAX).abs())).max(0);
 
                     // Apply ridge height: h += (RIDGE_AMP * mountainness * (2*r - MAX)) / SCALE
                     let ridge_delta = (RIDGE_AMP_NUM * mountainness * (2 * ridged - MAX)) / (RIDGE_AMP_DEN * RIDGE_SCALE);
