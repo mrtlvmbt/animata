@@ -713,7 +713,6 @@ async fn main() {
 
     // U-3: Reseed state (in-progress world rebuild on worker thread)
     let mut rx_regen_in_flight: Option<mpsc::Receiver<BuiltWorld>> = None;
-    let mut regen_target_seed: Option<u64> = None;
 
     loop {
         // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
@@ -796,6 +795,8 @@ async fn main() {
                         standalone_mode: cli_args.standalone,
                         terrain_chunks_total: terrain_chunks.len(),
                         actions: &mut ui_actions,
+                        // U-3/F12: gate "New world" button visibility
+                        is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
                     };
                     let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
@@ -846,7 +847,6 @@ async fn main() {
                         // U-3: Reseed — spawn async world build on worker, keep rendering old world
                         ui::UiAction::RegenSeed(target_seed) => {
                             if rx_regen_in_flight.is_none() && matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone {
-                                regen_target_seed = Some(target_seed);
                                 let regen_spec = WorldSpec {
                                     seed: target_seed,
                                     standalone: spec.standalone,
@@ -855,7 +855,7 @@ async fn main() {
                                 };
                                 let (tx, rx) = mpsc::channel();
                                 let _ = std::thread::spawn(move || {
-                                    let mut on_stage = |_stage: Stage| true;  // No-op callback (TODO: progress chip)
+                                    let mut on_stage = |_stage: Stage| true;  // No-op callback (progress chip deferred to U-3b)
                                     if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
                                         let _ = tx.send(built);
                                     }
@@ -892,7 +892,6 @@ async fn main() {
                         }
 
                         rx_regen_in_flight = None;
-                        regen_target_seed = None;
                     }
                 }
 

@@ -51,6 +51,8 @@ pub struct UiCtx<'a> {
     pub standalone_mode: bool,
     pub terrain_chunks_total: usize,
     pub actions: &'a mut Vec<UiAction>,
+    /// U-3: true if source is Procgen (needed for reseed button gating per F12)
+    pub is_procgen: bool,
 }
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
@@ -198,13 +200,17 @@ impl Panel for DebugPanel {
 
                 // U-3: "New world" button — only shown in Procgen+standalone mode (F12/F15)
                 // When clicked, regenerate with next seed (current_seed + 1)
-                if ui.button("New world (N)").clicked() {
-                    ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1)));
+                if ui_ctx.is_procgen && ui_ctx.standalone_mode {
+                    if ui.button("New world (N)").clicked() {
+                        ui_ctx.actions.push(UiAction::RegenSeed(ui_ctx.seed.wrapping_add(1)));
+                    }
                 }
 
                 ui.label("Keyboard: WASD/drag pan · wheel zoom · Q/E rotate");
                 if !ui_ctx.standalone_mode {
-                    ui.label("Space: toggle pause · Right/N: step once");
+                    ui.label("Space: toggle pause · Right: step once");
+                } else if ui_ctx.is_procgen {
+                    ui.label("N: new world");
                 }
             });
     }
