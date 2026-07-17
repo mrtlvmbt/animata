@@ -157,11 +157,14 @@ pub fn fault_warp_at(x: i64, z: i64, seed: u64, dim: usize) -> (i64, i64) {
         amp >>= 1; // Halve amplitude each octave
     }
 
-    // Scale by WARP_AMP (selected candidate is applied by caller; this function returns raw octave sum)
-    // Normalize to [-WARP_AMP_BASE, WARP_AMP_BASE] first
+    // Scale by WARP_AMP. The sum of 3 octaves with halving amplitudes (1, 0.5, 0.25)
+    // produces values roughly in [0, 65536*1.75] ≈ [0, 114688]. To scale to cells:
+    // final_warp = (wx * WARP_AMP) / 114688 (so max warp ≈ WARP_AMP cells).
+    // Use divisor ≈ 65536 * 1.75 = 114688 (approximate as 116000 for clarity).
     let warp_scale = WARP_AMP_CANDIDATES[ACTIVE_WARP_AMP_INDEX];
-    wx = (wx * warp_scale) / 65536;
-    wz = (wz * warp_scale) / 65536;
+    const WARP_SUM_MAX: i64 = 65536 + 32768 + 16384; // 114688 from 3 octaves halving
+    wx = (wx * warp_scale) / WARP_SUM_MAX;
+    wz = (wz * warp_scale) / WARP_SUM_MAX;
 
     (wx, wz)
 }
