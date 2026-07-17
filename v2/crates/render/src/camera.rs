@@ -15,17 +15,11 @@ const ORTHO_SPAN_MIN: f32 = 5.0;
 /// Maximum ortho span (zoom limit — view too far).
 const ORTHO_SPAN_MAX: f32 = 200.0;
 
-/// Zoom rate per scroll tick (0.075 = 7.5% change).
-const ZOOM_RATE: f32 = 0.075;
-
-/// Pan speed (world units per second) — keyboard-driven.
-const PAN_SPEED: f32 = 20.0;
-
-/// Mouse drag sensitivity (world units per pixel).
-const MOUSE_DRAG_SENSITIVITY: f32 = 0.2;
-
 /// Yaw rotation step (radians) — Q/E keys rotate in fixed increments.
 const YAW_STEP: f32 = std::f32::consts::PI / 3.0; // 60°
+
+// U-7: Zoom rate, pan speed, and drag sensitivity are now read from Tuning config at runtime.
+// See tuning.rs for defaults: zoom_rate=0.075, pan_speed=20.0, drag_sensitivity=0.2
 
 /// Pure view-projection matrix for isometric camera — NO macroquad calls.
 /// Replicates to_camera3d().matrix() geometry without thread-local dependencies.
