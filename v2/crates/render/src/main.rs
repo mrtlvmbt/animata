@@ -184,6 +184,8 @@ struct CliArgs {
     screenshot_chip: Option<String>,
     /// U-3: `--regen-to <seed>`: after startup, immediately regenerate the world to this seed (dev harness).
     regen_to: Option<u64>,
+    /// U-5: `--jump-to <x>,<z>`: after startup, jump camera to world coords (x, z) for viewport-quad + click-to-jump verification.
+    jump_to: Option<(f32, f32)>,
 }
 
 fn parse_args() -> CliArgs {
@@ -202,6 +204,7 @@ fn parse_args() -> CliArgs {
     let mut screenshot_loader = None;
     let mut screenshot_chip = None;
     let mut regen_to = None;
+    let mut jump_to = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -262,10 +265,18 @@ fn parse_args() -> CliArgs {
                 regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
                 standalone = true; // reseed harness is standalone
             }
+            "--jump-to" => {
+                let coords_str = args.next().expect("--jump-to requires <x>,<z>");
+                let parts: Vec<&str> = coords_str.split(',').collect();
+                let x = parts.get(0).unwrap_or(&"0").parse::<f32>().unwrap_or_else(|_| panic!("--jump-to x must be f32, got {:?}", parts.get(0)));
+                let z = parts.get(1).unwrap_or(&"0").parse::<f32>().unwrap_or_else(|_| panic!("--jump-to z must be f32, got {:?}", parts.get(1)));
+                jump_to = Some((x, z));
+                standalone = true; // jump harness is standalone
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, screenshot_chip, regen_to, jump_to }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -429,6 +440,8 @@ async fn main() {
     let mut ui_root = ui::UiRoot::new();
     ui_root.push(Box::new(ui::DebugPanel));
     ui_root.push(Box::new(ui::RegenChipPanel));
+    // U-5: Add MinimapPanel
+    ui_root.push(Box::new(ui::MinimapPanel));
 
     // R-13: Apply camera preset to ensure deterministic view.
     let world_span = span_x.max(span_z).max(1.0);
@@ -532,6 +545,7 @@ async fn main() {
             rx_regen_blocking = None;  // Already consumed
         }
 
+        let mut jump_to_fired = false;
         for frame_num in 0..=cli_args.screenshot_warmup {
             // U-3: When --slow-load + regen in flight, render Running phase (old world + chip).
             // LoadState progress indicates if regen is still building (< 1000 permille = < 100%).
@@ -544,6 +558,14 @@ async fn main() {
                 let snap = handle.as_ref().and_then(|h| h.latest());
                 let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
                 let mut ui_actions: Vec<ui::UiAction> = Vec::new();
+
+                // U-5: Fire --jump-to action in harness on frame 0 (before any rendering)
+                if frame_num == 0 && !jump_to_fired {
+                    if let Some((x, z)) = cli_args.jump_to {
+                        ui_actions.push(ui::UiAction::JumpCamera(glam::vec2(x, z)));
+                        jump_to_fired = true;
+                    }
+                }
 
                 egui_macroquad::ui(|ctx| {
                     let mut ui_ctx = ui::UiCtx {
@@ -558,9 +580,28 @@ async fn main() {
                         actions: &mut ui_actions,
                         is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
                         regen_load_state: harness_regen_load_state.as_ref(),
+                        // U-5: pass world reference for minimap
+                        world: Some(world.as_ref()),
+                        bare_mode: spec.bare_mode,
+                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
+                        // U-5: pass camera state for minimap viewport quad
+                        camera_focus: camera.focus,
+                        camera_ortho_span: camera.ortho_span,
+                        camera_yaw: camera.yaw,
+                        screen_dims: (screen_width(), screen_height()),
                     };
                     let _ui_out = ui_root.draw(ctx, &mut ui_ctx);
                 });
+
+                // Apply UI actions (includes --jump-to)
+                for action in ui_actions {
+                    match action {
+                        ui::UiAction::JumpCamera(world_pos) => {
+                            camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
+                        }
+                        _ => {}  // Ignore other actions in harness
+                    }
+                }
 
                 clear_background(Color::from_rgba(18, 18, 22, 255));
                 camera.update();
@@ -634,6 +675,14 @@ async fn main() {
 
                 clear_background(Color::from_rgba(18, 18, 22, 255));
                 let snap = handle.as_ref().and_then(|h| h.latest());
+
+                // U-5: Fire --jump-to action in harness on frame 0 (normal screenshot path)
+                if frame_num == 0 && !jump_to_fired {
+                    if let Some((x, z)) = cli_args.jump_to {
+                        camera.focus = glam::vec3(x, camera.focus.y, z);
+                        jump_to_fired = true;
+                    }
+                }
 
                 camera.update();
                 let cam3d = camera.to_camera3d();
@@ -810,6 +859,8 @@ async fn main() {
     // U-3: Reseed state (in-progress world rebuild on worker thread)
     let mut rx_regen_in_flight: Option<mpsc::Receiver<BuiltWorld>> = None;
     let mut regen_load_state: Option<LoadState> = None;
+    // U-5: Track whether we've fired the --jump-to action (fire once per run)
+    let mut jump_to_fired = false;
 
     loop {
         // U-2/D4: AppPhase state machine — Loading renders only loader, Running renders world
@@ -879,6 +930,14 @@ async fn main() {
                 // F1: Collect all commands (UiActions + InputEvents) and apply them in one place
                 let mut ui_actions: Vec<ui::UiAction> = Vec::new();
 
+                // U-5: Fire --jump-to action once at start of Running phase
+                if !jump_to_fired {
+                    if let Some((x, z)) = cli_args.jump_to {
+                        ui_actions.push(ui::UiAction::JumpCamera(glam::vec2(x, z)));
+                        jump_to_fired = true;
+                    }
+                }
+
                 egui_macroquad::ui(|ctx| {
                     // Plan D3: UI draws BEFORE world input to read previous-frame egui state.
                     // This causes a 1-frame lag (acceptable, identical to v1 behavior).
@@ -896,6 +955,15 @@ async fn main() {
                         is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
                         // U-3: pass regen state for RegenChipPanel
                         regen_load_state: regen_load_state.as_ref(),
+                        // U-5: pass world reference for minimap rendering
+                        world: Some(world.as_ref()),
+                        bare_mode: spec.bare_mode,
+                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
+                        // U-5: pass camera state for minimap viewport quad
+                        camera_focus: camera.focus,
+                        camera_ortho_span: camera.ortho_span,
+                        camera_yaw: camera.yaw,
+                        screen_dims: (screen_width(), screen_height()),
                     };
                     let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
@@ -967,6 +1035,10 @@ async fn main() {
                                 });
                                 rx_regen_in_flight = Some(rx);
                             }
+                        }
+                        // U-5: Jump camera to a world position (from minimap click)
+                        ui::UiAction::JumpCamera(world_pos) => {
+                            camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
                         }
                     }
                 }

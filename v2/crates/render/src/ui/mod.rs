@@ -1,9 +1,11 @@
 pub mod loader;
 pub mod theme;
+pub mod minimap;
 
 use macroquad::prelude::*;
 use sim_core::RenderSnapshot;
 use std::collections::HashMap;
+use sim_core::WorldView;
 
 /// UiOut: egui's pointer/keyboard wants from this frame.
 /// Used to gate camera input so UI interaction doesn't drive camera pan/rotate.
@@ -55,6 +57,20 @@ pub struct UiCtx<'a> {
     pub is_procgen: bool,
     /// U-3: optional LoadState for in-flight reseed progress tracking
     pub regen_load_state: Option<&'a crate::loader_state::LoadState>,
+    /// U-5: reference to the world for minimap rendering
+    pub world: Option<&'a (dyn sim_core::WorldView + Sync)>,
+    /// U-5: bare_mode flag for minimap colouring
+    pub bare_mode: bool,
+    /// U-5: mutable reference to HudCache for texture management (raw pointer to work around borrow checker)
+    pub cache: *mut HudCache,
+    /// U-5: camera focus point (for viewport quad in minimap)
+    pub camera_focus: glam::Vec3,
+    /// U-5: camera ortho_span (for viewport quad in minimap)
+    pub camera_ortho_span: f32,
+    /// U-5: camera yaw (for viewport quad in minimap)
+    pub camera_yaw: f32,
+    /// U-5: screen dimensions for camera math
+    pub screen_dims: (f32, f32),
 }
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
@@ -66,17 +82,22 @@ pub enum UiAction {
     ToggleTerrainKind,
     /// U-3: Regenerate the world with a new seed (only valid in Procgen+standalone mode).
     RegenSeed(u64),
+    /// U-5: Jump camera to a world position (x, z).
+    JumpCamera(glam::Vec2),
 }
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
 pub struct HudCache {
     pub textures: HashMap<&'static str, egui::TextureHandle>,
+    /// Minimap texture cache: (seed, dim, bare_mode) → (key_tuple, texture_handle)
+    pub minimap: Option<((u64, i64, bool), egui::TextureHandle)>,
 }
 
 impl HudCache {
     pub fn new() -> Self {
         HudCache {
             textures: HashMap::new(),
+            minimap: None,
         }
     }
 }
@@ -107,7 +128,11 @@ impl UiRoot {
     }
 
     /// Draw all panels and return pointer/keyboard wants.
+    /// Sets the cache pointer in UiCtx to our cache before drawing.
     pub fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) -> UiOut {
+        // Set the cache pointer to point to our cache
+        ui_ctx.cache = &mut self.cache as *mut HudCache;
+
         for panel in &mut self.panels {
             let anchor = panel.anchor();
             let screen_size = ctx.screen_rect().size();
@@ -116,7 +141,7 @@ impl UiRoot {
             egui::Area::new(panel.id().into())
                 .fixed_pos(pivot)
                 .pivot(egui::Align2::LEFT_TOP)
-                .show(ctx, |ui| {
+                .show(ctx, |_| {
                     panel.draw(ctx, ui_ctx);
                 });
         }
@@ -295,6 +320,118 @@ impl Panel for RegenChipPanel {
                     theme::mono(9.0),
                     theme::TEXT_FAINT,
                 );
+            });
+    }
+}
+
+/// U-5: MinimapPanel — isometric minimap with viewport quad and click-to-jump.
+pub struct MinimapPanel;
+
+impl Panel for MinimapPanel {
+    fn id(&self) -> &'static str {
+        "minimap_panel"
+    }
+
+    fn anchor(&self) -> Anchor {
+        Anchor::RightTop(egui::vec2(16.0, 16.0))
+    }
+
+    fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
+        // Only draw if we have a world
+        let Some(world) = ui_ctx.world else {
+            return;
+        };
+
+        let cache_key = (ui_ctx.seed, ui_ctx.world_dim, ui_ctx.bare_mode);
+
+        // SAFETY: ui_root.draw() (ui/mod.rs:138) sets ui_ctx.cache to point to &mut self.cache
+        // before calling Panel::draw(). The raw pointer remains valid for the duration of the
+        // draw call (the entire Panel::draw frame) because:
+        // 1. ui_ctx.cache is set immediately before the loop over panels (no drop/mutation of self)
+        // 2. self (UiRoot) is borrowed mutably only during draw(), keeping the cache allocation stable
+        // 3. Panel::draw() is called synchronously within the same call stack, before draw() returns
+        // The invariant FAILS if: (a) draw() is called concurrently, (b) ui_ctx is reused across
+        // draw() calls without re-setting cache, or (c) self is moved/dropped during the call.
+        // All three are prevented by the calling convention (main.rs creates UiCtx, calls
+        // ui_root.draw(ctx, &mut ui_ctx) once per frame, ui_root is not shared).
+        let cache = unsafe { &mut *ui_ctx.cache };
+
+        // Check if we need to rebuild the minimap texture
+        let stale = cache.minimap.as_ref().map(|(k, _)| *k != cache_key).unwrap_or(true);
+        if stale {
+            // Build the minimap image from the world
+            let img = minimap::build_minimap_image(world, ui_ctx.world_dim, ui_ctx.seed, ui_ctx.bare_mode);
+            let tex = ctx.load_texture("minimap", img, egui::TextureOptions::NEAREST);
+            cache.minimap = Some((cache_key, tex));
+        }
+
+        // Get the texture from cache
+        let tex = &cache.minimap.as_ref().unwrap().1;
+
+        egui::Area::new(egui::Id::new("minimap"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+            .show(ctx, |ui| {
+                theme::themed_frame(theme::FrameKind::Vitals)
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        let size = egui::vec2(minimap::MINIMAP_WIDTH as f32, minimap::MINIMAP_HEIGHT as f32);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+                        // Draw the minimap texture as a quad
+                        let painter = ui.painter_at(rect);
+                        let mut mesh = egui::Mesh::with_texture(tex.id());
+                        for &(u, v) in &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                            mesh.vertices.push(egui::epaint::Vertex {
+                                pos: egui::Pos2::new(
+                                    rect.left() + u * rect.width(),
+                                    rect.top() + v * rect.height(),
+                                ),
+                                uv: egui::pos2(u, v),
+                                color: egui::Color32::WHITE,
+                            });
+                        }
+                        mesh.add_triangle(0, 1, 2);
+                        mesh.add_triangle(0, 2, 3);
+                        painter.add(egui::Shape::mesh(mesh));
+
+                        // Draw viewport quad: project 4 screen corners to world → minimap UV
+                        let aspect = ui_ctx.screen_dims.0 / ui_ctx.screen_dims.1;
+                        let cam_vp = minimap::minimap_view_proj_matrix(
+                            ui_ctx.camera_focus,
+                            ui_ctx.camera_yaw,
+                            ui_ctx.camera_ortho_span,
+                            aspect,
+                        );
+                        let corners = minimap::screen_quad_corners(ui_ctx.screen_dims);
+                        let mut viewport_pts: Vec<egui::Pos2> = Vec::new();
+                        for corner_screen in corners.iter() {
+                            let world_xz = minimap::minimap_ground_under_cursor(cam_vp, *corner_screen, ui_ctx.screen_dims);
+                            let uv = minimap::world_to_minimap_uv(world_xz, ui_ctx.world_dim);
+                            let screen_pos = egui::Pos2::new(
+                                rect.left() + uv.x * rect.width(),
+                                rect.top() + uv.y * rect.height(),
+                            );
+                            viewport_pts.push(screen_pos);
+                        }
+                        // Draw closed quad outline
+                        if viewport_pts.len() == 4 {
+                            let stroke = egui::Stroke::new(1.5, theme::ACCENT);
+                            painter.add(egui::Shape::closed_line(viewport_pts, stroke));
+                        }
+
+                        // Handle click to jump
+                        if response.clicked() {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let uv_x = (pos.x - rect.left()) / rect.width();
+                                let uv_y = (pos.y - rect.top()) / rect.height();
+                                let world_pos = minimap::minimap_uv_to_world(
+                                    glam::vec2(uv_x as f32, uv_y as f32),
+                                    ui_ctx.world_dim,
+                                );
+                                ui_ctx.actions.push(UiAction::JumpCamera(world_pos));
+                            }
+                        }
+                    });
             });
     }
 }
