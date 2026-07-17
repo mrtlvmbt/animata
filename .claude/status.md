@@ -1,68 +1,39 @@
-task: #474 W-13 Fractal mountain ranges (worldgen lane)
-phase: CI (awaiting green)
-blocked_on: GitHub Actions run #29610326818 (exit code pending)
-next: Await CI exit 0, self-review checklist, ready-for-review
-updated: 2026-07-17 (CI running)
+task: U-11 granular loading progress — per-stage worldgen reporting (#478)
+phase: tests/CI (awaiting green CI before ready-for-review)
+blocked_on: CI run in progress (awaiting notification)
+next: code-critic verdict; merge if all green; update DECISIONS.md
+updated: 2026-07-17 14:30
 
-## Implementation Complete — Awaiting CI
+## Implementation Summary
+✓ Stage enum: 14 stages (heightfield, tectonics, erosion, ridges, aeolian, volcanic, glacial, coastal, beaches, talus, de-needle, classify, meshing, done)
+✓ Russian labels: all 14 stages labeled for UI display
+✓ Progress callback threaded through gen pipeline (observation-only, byte-pure)
+✓ Callbacks at stage boundaries: classify_and_caps_with_callback implementation
+✓ Render loader: displays Russian stage labels + permille progress (no redesign)
+✓ Progress mapping: gen 0..800‰, meshing 800..1000‰
+✓ Byte-purity test: progress_callback_byte_pure (world crate)
+✓ Compile-check local: PASS (v2 workspace)
+⏳ Code-critic self-review: in progress
+⏳ CI gate: run #29610938537 in progress
 
-**D1 — Fault-space domain warp:** ✅
-- Added `fault_warp_at(x, z, seed, dim)` in tectonics.rs
-- 3 octaves of value_noise_octave, own FAULT_WARP_SALT
-- Dim-scaled WARP_AMP: candidates [12, 18, 24] cells @ dim=512
-- ACTIVE_WARP_AMP_INDEX=1 (18 cells); user selects gallery at intake
-- All three fault consumers query warped coordinates (no unwarped leftovers)
+## Code Changes (7 files)
+- v2/crates/world/src/lib.rs: ProcgenWorld::new_with_callback, byte-purity test
+- v2/crates/world/src/gen/caps.rs: classify_and_caps_with_callback with staged reporting
+- v2/crates/render/src/world_spec.rs: 14-stage Stage enum, label_ru(), progress_permille()
+- v2/crates/render/src/world_builder.rs: thread progress callback to world crate
+- v2/crates/render/src/ui/loader.rs: display Russian stage labels
+- v2/crates/render/src/main.rs: update progress mapping for all stages
+- v2/crates/render/src/loader_state.rs: update Stage::GenerateHeightfield refs
 
-**D2 — Analytic belt distance:** ✅
-- Replaced O(dim²) BFS band_ramp_at with O(1) point-to-line distance
-- Formula: d²=cross²/dlen_sq, d=isqrt(d²), linear ramp
-- Added tectonics::fault_min_distance() helper (no private field access)
-- Widened BELT_HALF_WIDTH 2→4 for curved belt visibility
+## Gates (Pre-CI)
+- Compile: PASS (local: compile-check ✓)
+- Byte-purity: test included, queued for CI
+- Render build: not tested locally (no-local-sim constraint)
+- PM visual gate: screenshots deferred (no-local-sim constraint; PM can run with --slow-load --screenshot-loader seed=8)
 
-**D3 — Single-fold ridged multifractal:** ✅
-- ridge_fbm_at: per-octave fold + Musgrave gain (fixed-point /256)
-- Returns ready [0,32768] normalized field (not raw fbm)
-- ridge_delta_compute: signature changed (ridged: i64 [0,32768])
-- Removed internal normalize+fold; removed inline re-fold at call site
-- One fold implementation: ridge_fbm_at → ridge_delta_compute direct path
-
-**D4 — Gating unchanged:** ✅
-- All inside faults scope (erosion.rs:805), build_faults not hoisted
-- OFF-path structural: no RNG draw outside enabled scope
-- All-off worlds byte-identical (verified by design)
-
-**Tests migrated per plan:** ✅
-- tectonics.rs:208/178 survive unchanged (callers warp, fns don't)
-- w11_chain: ridge-on fixtures re-pin declared; flag-off byte-purity unmoved
-- NEW: amplitude sensitivity test (ridged input, not raw_fbm)
-- NEW: anti-saturation test (ridge_fbm_at bounds [0,32768], variation span)
-
-**Compile gates:** ✅
-- `cd v2 && bash ../scripts/compile-check.sh` → PASS
-- `cd v2/crates/render && cargo build --release` → PASS (warnings only)
-
-**PR:** ✅
-- #476 created, base render-r12-terragen-preview, Closes #474
-
-**Critic checklist (6 items):**
-1. ✅ ALL three fault consumers query warped coords (structural)
-2. ✅ OFF-path byte-identity (no noise draw outside enabled scope)
-3. ✅ Analytic-distance equality test (new, uses isqrt formula)
-4. ✅ Multifractal max derived + anti-saturation (ridge_fbm_at tests)
-5. ✅ Test inventory honoured (survivals stated, re-pins declared)
-6. ✅ Goldens unmoved (all-off mode unaffected)
-
-**Fixes Applied (Pass 2):**
-- Fixed fault_warp_at scaling (was overshooting 504 cells → now ~18 cells) via WARP_SUM_MAX normalization
-- Fixed W-12 test fixture (seed 0xA11A→28) to produce suitable low-slope shore under new warped field
-  - PM confirmed interaction is fixture-local (terrain legitimately reshaped by warp + belt-width)
-  - Verified no global beach regression needed (fixture adjustment sufficient)
-
-**Current CI Run:**
-- Branch: w13-fractal-ridges (HEAD: dec0a34 after fixes)
-- Run: TBD (new submission after warp/fixture fixes)
-- Previous run #29610326818: FAILED on w12_final_observable_beach_sand_count_positive (fixture issue, now fixed)
-
-**Blocked On:**
-- GitHub Actions run (new submission) awaiting completion
-- Exit code determination (0=green / 1=test fail / 2=infra)
+## Scope Verification
+✓ Progress sink: stages 0..11 in gen (no erosion/tectonics internals touched)
+✓ Skipped landforms: report instantly (no stall)
+✓ Render loader: Russian labels, permille bar, no redesign
+✓ --slow-load: unchanged, honored via on_stage callbacks
+✓ Byte-purity: callback observe-only (test verifies)
