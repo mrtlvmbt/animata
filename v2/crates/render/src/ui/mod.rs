@@ -1,9 +1,11 @@
 pub mod loader;
 pub mod theme;
+pub mod minimap;
 
 use macroquad::prelude::*;
 use sim_core::RenderSnapshot;
 use std::collections::HashMap;
+use sim_core::WorldView;
 
 /// UiOut: egui's pointer/keyboard wants from this frame.
 /// Used to gate camera input so UI interaction doesn't drive camera pan/rotate.
@@ -55,6 +57,12 @@ pub struct UiCtx<'a> {
     pub is_procgen: bool,
     /// U-3: optional LoadState for in-flight reseed progress tracking
     pub regen_load_state: Option<&'a crate::loader_state::LoadState>,
+    /// U-5: reference to the world for minimap rendering
+    pub world: Option<&'a (dyn sim_core::WorldView + Sync)>,
+    /// U-5: bare_mode flag for minimap colouring
+    pub bare_mode: bool,
+    /// U-5: mutable reference to HudCache for texture management (raw pointer to work around borrow checker)
+    pub cache: *mut HudCache,
 }
 
 /// UiAction: commands from the UI that main.rs applies after the egui pass.
@@ -66,17 +74,22 @@ pub enum UiAction {
     ToggleTerrainKind,
     /// U-3: Regenerate the world with a new seed (only valid in Procgen+standalone mode).
     RegenSeed(u64),
+    /// U-5: Jump camera to a world position (x, z).
+    JumpCamera(glam::Vec2),
 }
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
 pub struct HudCache {
     pub textures: HashMap<&'static str, egui::TextureHandle>,
+    /// Minimap texture cache: (seed, dim, bare_mode) → (key_tuple, texture_handle)
+    pub minimap: Option<((u64, i64, bool), egui::TextureHandle)>,
 }
 
 impl HudCache {
     pub fn new() -> Self {
         HudCache {
             textures: HashMap::new(),
+            minimap: None,
         }
     }
 }
@@ -107,7 +120,11 @@ impl UiRoot {
     }
 
     /// Draw all panels and return pointer/keyboard wants.
+    /// Sets the cache pointer in UiCtx to our cache before drawing.
     pub fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) -> UiOut {
+        // Set the cache pointer to point to our cache
+        ui_ctx.cache = &mut self.cache as *mut HudCache;
+
         for panel in &mut self.panels {
             let anchor = panel.anchor();
             let screen_size = ctx.screen_rect().size();
@@ -116,7 +133,7 @@ impl UiRoot {
             egui::Area::new(panel.id().into())
                 .fixed_pos(pivot)
                 .pivot(egui::Align2::LEFT_TOP)
-                .show(ctx, |ui| {
+                .show(ctx, |_| {
                     panel.draw(ctx, ui_ctx);
                 });
         }
@@ -295,6 +312,84 @@ impl Panel for RegenChipPanel {
                     theme::mono(9.0),
                     theme::TEXT_FAINT,
                 );
+            });
+    }
+}
+
+/// U-5: MinimapPanel — isometric minimap with viewport quad and click-to-jump.
+pub struct MinimapPanel;
+
+impl Panel for MinimapPanel {
+    fn id(&self) -> &'static str {
+        "minimap_panel"
+    }
+
+    fn anchor(&self) -> Anchor {
+        Anchor::RightTop(egui::vec2(16.0, 16.0))
+    }
+
+    fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx) {
+        // Only draw if we have a world
+        let Some(world) = ui_ctx.world else {
+            return;
+        };
+
+        let cache_key = (ui_ctx.seed, ui_ctx.world_dim, ui_ctx.bare_mode);
+
+        // SAFETY: ui_root.draw() guarantees cache is valid before calling us
+        let cache = unsafe { &mut *ui_ctx.cache };
+
+        // Check if we need to rebuild the minimap texture
+        let stale = cache.minimap.as_ref().map(|(k, _)| *k != cache_key).unwrap_or(true);
+        if stale {
+            // Build the minimap image from the world
+            let img = minimap::build_minimap_image(world, ui_ctx.world_dim, ui_ctx.seed, ui_ctx.bare_mode);
+            let tex = ctx.load_texture("minimap", img, egui::TextureOptions::NEAREST);
+            cache.minimap = Some((cache_key, tex));
+        }
+
+        // Get the texture from cache
+        let tex = &cache.minimap.as_ref().unwrap().1;
+
+        egui::Area::new(egui::Id::new("minimap"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+            .show(ctx, |ui| {
+                theme::themed_frame(theme::FrameKind::Vitals)
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        let size = egui::vec2(minimap::MINIMAP_WIDTH as f32, minimap::MINIMAP_HEIGHT as f32);
+                        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+                        // Draw the minimap texture as a quad
+                        let painter = ui.painter_at(rect);
+                        let mut mesh = egui::Mesh::with_texture(tex.id());
+                        for &(u, v) in &[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)] {
+                            mesh.vertices.push(egui::epaint::Vertex {
+                                pos: egui::Pos2::new(
+                                    rect.left() + u * rect.width(),
+                                    rect.top() + v * rect.height(),
+                                ),
+                                uv: egui::pos2(u, v),
+                                color: egui::Color32::WHITE,
+                            });
+                        }
+                        mesh.add_triangle(0, 1, 2);
+                        mesh.add_triangle(0, 2, 3);
+                        painter.add(egui::Shape::mesh(mesh));
+
+                        // Handle click to jump
+                        if response.clicked() {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                let uv_x = (pos.x - rect.left()) / rect.width();
+                                let uv_y = (pos.y - rect.top()) / rect.height();
+                                let world_pos = minimap::minimap_uv_to_world(
+                                    glam::vec2(uv_x as f32, uv_y as f32),
+                                    ui_ctx.world_dim,
+                                );
+                                ui_ctx.actions.push(UiAction::JumpCamera(world_pos));
+                            }
+                        }
+                    });
             });
     }
 }

@@ -429,6 +429,8 @@ async fn main() {
     let mut ui_root = ui::UiRoot::new();
     ui_root.push(Box::new(ui::DebugPanel));
     ui_root.push(Box::new(ui::RegenChipPanel));
+    // U-5: Add MinimapPanel
+    ui_root.push(Box::new(ui::MinimapPanel));
 
     // R-13: Apply camera preset to ensure deterministic view.
     let world_span = span_x.max(span_z).max(1.0);
@@ -558,6 +560,10 @@ async fn main() {
                         actions: &mut ui_actions,
                         is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
                         regen_load_state: harness_regen_load_state.as_ref(),
+                        // U-5: pass world reference for minimap
+                        world: Some(world.as_ref()),
+                        bare_mode: spec.bare_mode,
+                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
                     };
                     let _ui_out = ui_root.draw(ctx, &mut ui_ctx);
                 });
@@ -896,6 +902,10 @@ async fn main() {
                         is_procgen: matches!(spec.source, WorldSource::Procgen { .. }),
                         // U-3: pass regen state for RegenChipPanel
                         regen_load_state: regen_load_state.as_ref(),
+                        // U-5: pass world reference for minimap rendering
+                        world: Some(world.as_ref()),
+                        bare_mode: spec.bare_mode,
+                        cache: std::ptr::null_mut(),  // Will be set by ui_root.draw()
                     };
                     let ui_out = ui_root.draw(ctx, &mut ui_ctx);
 
@@ -967,6 +977,10 @@ async fn main() {
                                 });
                                 rx_regen_in_flight = Some(rx);
                             }
+                        }
+                        // U-5: Jump camera to a world position (from minimap click)
+                        ui::UiAction::JumpCamera(world_pos) => {
+                            camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
                         }
                     }
                 }
