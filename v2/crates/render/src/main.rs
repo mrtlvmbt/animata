@@ -420,10 +420,10 @@ async fn main() {
     } else {
         // App path: world will be built on worker thread and received in Loading phase
         // Initialize with minimal dummy values (camera will reinit from built.dim after recv)
-        let (tect, aeol, volc, glac, coast) = landform_flags(spec.seed, spec.standalone);
+        let flags = landform_flags(spec.seed, spec.standalone);
         let temp_world: Box<dyn WorldView> = Box::new(world::ProcgenWorld::new(
             config.econ.world_dim, cli::HMAX, cli::RESOURCE_BASE, spec.seed ^ cli::WORLD_SALT, None,
-            tect, aeol, volc, glac, coast  // Use spec.seed (F4), landforms always match eventually
+            flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal, flags.ridges, flags.beaches  // Use spec.seed (F4), landforms always match eventually
         ));
         (Vec::new(), Vec::new(), config.econ.world_dim, temp_world)
     };
@@ -485,7 +485,6 @@ async fn main() {
     rail.open_panel = initial_flyout;
     ui_root.push(Box::new(rail));
     ui_root.push(Box::new(ui::toast::ToastPanel::new()));
-    ui_root.push(Box::new(ui::toast::HideHintPanel));
     ui_root.push(Box::new(ui::legend::LegendPanel));
     ui_root.push(Box::new(ui::MinimapPanel));
 
@@ -1330,8 +1329,8 @@ mod tests {
         }
         assert!(combos.len() >= 5, "variety gallery requires ≥5 distinct landform combos, got {}", combos.len());
         // Verify at least one mix (multiple landforms on same seed)
-        let has_mix = combos.iter().any(|(t, a, v, g, c)| {
-            let count = [*t, *a, *v, *g, *c].iter().filter(|&&x| x).count();
+        let has_mix = combos.iter().any(|flags| {
+            let count = [flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal].iter().filter(|&&x| x).count();
             count >= 2
         });
         assert!(has_mix, "variety gallery requires ≥1 mixed-landform seed (2+ landforms)");

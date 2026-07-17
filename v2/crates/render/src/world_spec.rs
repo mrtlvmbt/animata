@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 /// Landform configuration flags (deterministically derived from seed).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LandformFlags {
     pub tect: bool,
     pub aeolian: bool,
