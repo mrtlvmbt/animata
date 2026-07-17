@@ -742,6 +742,7 @@ mod tests {
             mouse_delta: None,      // No mouse drag
             pan_dir: (20.0, 0.0),   // Keyboard pan in x
             yaw_step: 1,            // E key pressed (rotate +60°)
+            current_mouse_pos: (0.0, 0.0), // Test synthetic input (not dragging, so unused)
         };
 
         // Test: pointer gating should block zoom.

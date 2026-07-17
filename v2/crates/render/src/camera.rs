@@ -37,6 +37,8 @@ pub struct CamInput {
     pub pan_dir: (f32, f32),
     /// Yaw rotation step: -1 (Q), 0 (no key), or +1 (E).
     pub yaw_step: i8,
+    /// Current mouse position in screen pixels (for tracking drag state). Pure input to apply_cam_input.
+    pub current_mouse_pos: (f32, f32),
 }
 
 impl CamInput {
@@ -62,9 +64,9 @@ impl CamInput {
         }
 
         // Mouse drag (middle or right button)
-        let mouse_pos = mouse_position();
+        let current_mouse_pos = mouse_position();
         let mouse_delta = if is_mouse_button_down(MouseButton::Middle) || is_mouse_button_down(MouseButton::Right) {
-            Some((mouse_pos.0, mouse_pos.1))
+            Some(current_mouse_pos)
         } else {
             None
         };
@@ -82,6 +84,7 @@ impl CamInput {
             mouse_delta,
             pan_dir: (pan_x, pan_z),
             yaw_step,
+            current_mouse_pos,
         }
     }
 }
@@ -126,7 +129,7 @@ pub struct IsoCam {
 impl IsoCam {
     /// Create a camera with a given focus, yaw, and initial ortho span.
     pub fn new(focus: Vec3, yaw: f32, ortho_span: f32) -> Self {
-        IsoCam { focus, yaw, ortho_span: ortho_span.clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX), last_mouse_pos: mouse_position() }
+        IsoCam { focus, yaw, ortho_span: ortho_span.clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX), last_mouse_pos: (0.0, 0.0) }
     }
 
     /// Update the camera state based on input this frame (no gating — for screenshot/bench paths).
@@ -170,7 +173,7 @@ impl IsoCam {
                 self.focus += local_x * world_delta_x + local_z * world_delta_z;
             }
         }
-        self.last_mouse_pos = input.mouse_delta.unwrap_or(mouse_position());
+        self.last_mouse_pos = input.current_mouse_pos;
 
         // Zoom
         if !wants_pointer && input.wheel_y != 0.0 {
