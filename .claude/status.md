@@ -1,5 +1,5 @@
-task: U-8 minimap screen-aligned iso-diamond projection + yaw rotation
-phase: harness plumbing fixes committed; ready for re-capture
+task: U-9 v1 UI remainder decontamination (PR #465)
+phase: decontamination complete, code-critic review posted
 blocked_on: none
-next: PM re-run full suite with screenshot captures (expect 256×256 world, terrain visible, veil bands at viewport quad)
-updated: 2026-07-17 15:00
+next: PM intake; note feature-gap: H toggle (§6 ТЗ) not implemented in previous coder's code
+updated: 2026-07-17 15:42
