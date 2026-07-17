@@ -545,6 +545,7 @@ async fn main() {
             rx_regen_blocking = None;  // Already consumed
         }
 
+        let mut jump_to_fired = false;
         for frame_num in 0..=cli_args.screenshot_warmup {
             // U-3: When --slow-load + regen in flight, render Running phase (old world + chip).
             // LoadState progress indicates if regen is still building (< 1000 permille = < 100%).
