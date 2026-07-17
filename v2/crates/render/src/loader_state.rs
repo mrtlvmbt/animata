@@ -57,7 +57,7 @@ impl LoadState {
     /// Get current stage.
     pub fn get_stage(&self) -> Stage {
         let v = self.step.load(Ordering::Acquire);
-        Stage::from_u8(v).unwrap_or(Stage::GenerateWorld)
+        Stage::from_u8(v).unwrap_or(Stage::GenerateHeightfield)
     }
 
     /// Check if build is complete.
@@ -87,7 +87,7 @@ mod tests {
     fn load_state_initial_state() {
         let ls = LoadState::new(0x1234_5678);
         assert_eq!(ls.get_progress(), 0);
-        assert_eq!(ls.get_stage(), Stage::GenerateWorld);
+        assert_eq!(ls.get_stage(), Stage::GenerateHeightfield);
         assert!(!ls.is_complete());
         assert_eq!(ls.seed, 0x1234_5678);
     }
@@ -107,8 +107,8 @@ mod tests {
     #[test]
     fn load_state_stage_updates() {
         let ls = LoadState::new(42);
-        ls.set_stage(Stage::GenerateWorld);
-        assert_eq!(ls.get_stage(), Stage::GenerateWorld);
+        ls.set_stage(Stage::GenerateHeightfield);
+        assert_eq!(ls.get_stage(), Stage::GenerateHeightfield);
         ls.set_stage(Stage::BuildMeshes);
         assert_eq!(ls.get_stage(), Stage::BuildMeshes);
         ls.set_stage(Stage::Done);

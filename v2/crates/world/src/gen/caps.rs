@@ -991,10 +991,34 @@ pub fn classify_and_caps_staged(
     enable_talus_final: bool,
     enable_w10_diversity: bool,
 ) -> (WorldFields, StagedHeights, LandformMasks) {
+    classify_and_caps_staged_with_callback(seed, hmax, dim, enable_patchiness, flags, enable_talus_final, enable_w10_diversity, None)
+}
+
+/// U-11: Staged pipeline with progress callback (observation-only).
+/// Reports stage ordinals: 0=heightfield, 1=tectonics, 2=erosion, 3=ridges, 4=aeolian,
+/// 5=volcanic, 6=glacial, 7=coastal, 8=beaches, 9=talus, 10=deneedle, 11=classify.
+/// Skipped stages (flags off) report instantly.
+pub fn classify_and_caps_staged_with_callback(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    enable_patchiness: bool,
+    flags: crate::gen::LandformFlags,
+    enable_talus_final: bool,
+    enable_w10_diversity: bool,
+    mut progress_callback: Option<&mut dyn FnMut(u8)>,
+) -> (WorldFields, StagedHeights, LandformMasks) {
+    // U-11: Report erosion stage (encompasses heightfield + tectonics + erosion + ridges)
+    if let Some(ref mut cb) = progress_callback {
+        cb(2); // ApplyErosion = 2
+    }
     let erosion = erode(seed, hmax, dim, flags.tect, flags.volcanic, flags.ridges);
     let n = dim * dim;
 
     let volcanic_mask: Vec<Option<MaterialId>> = if flags.volcanic {
+        if let Some(ref mut cb) = progress_callback {
+            cb(5); // ApplyVolcanic = 5
+        }
         let vents = crate::gen::volcanic::build_vents(seed, dim);
         crate::gen::volcanic::edifice_material_mask(dim, &vents)
     } else {
@@ -1002,6 +1026,9 @@ pub fn classify_and_caps_staged(
     };
 
     let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if flags.glacial {
+        if let Some(ref mut cb) = progress_callback {
+            cb(6); // ApplyGlacial = 6
+        }
         let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height);
         (g.height, g.material)
     } else {
@@ -1009,6 +1036,9 @@ pub fn classify_and_caps_staged(
     };
 
     let (post_aeolian_height, sand_depth) = if flags.aeolian {
+        if let Some(ref mut cb) = progress_callback {
+            cb(4); // ApplyAeolian = 4
+        }
         let initial_sand: Vec<i64> = (0..n)
             .map(|idx| {
                 let x = (idx % dim) as i64;
@@ -1026,6 +1056,9 @@ pub fn classify_and_caps_staged(
     };
 
     let (post_coastal_height, submerged, sea_level) = if flags.coastal {
+        if let Some(ref mut cb) = progress_callback {
+            cb(7); // ApplyCoastal = 7
+        }
         let c = run_coastal(seed, dim, hmax, &post_aeolian_height);
         (c.height, c.submerged, c.sea_level)
     } else {
@@ -1035,6 +1068,9 @@ pub fn classify_and_caps_staged(
     // W-12: Beach deposition — post-coastal, pre-talus step. Gated on flags.beaches (which is clamped
     // to `beaches &= coastal` at LandformFlags construction, so this gate is safe even when called).
     let (post_beach_height, beach_mask_candidate) = if flags.beaches {
+        if let Some(ref mut cb) = progress_callback {
+            cb(8); // ApplyBeaches = 8
+        }
         beach_deposit(dim, &post_coastal_height, sea_level, &submerged)
     } else {
         (post_coastal_height.clone(), vec![false; n])
@@ -1044,6 +1080,9 @@ pub fn classify_and_caps_staged(
     // residual spikes from landforms that ran after the erode loop's early talus pass.
     // When disabled, this is byte-identical to the old path.
     let post_talus_height = if enable_talus_final {
+        if let Some(ref mut cb) = progress_callback {
+            cb(9); // ApplyTalus = 9
+        }
         talus_step_final(dim, &post_beach_height, SPIKE_MARGIN_FINAL, N_ITERS_FINAL)
     } else {
         post_beach_height.clone()
@@ -1053,6 +1092,9 @@ pub fn classify_and_caps_staged(
     // BEFORE classify. Only runs when at least one landform is enabled (preserves byte-identical
     // all-OFF golden path). W-11/W-12: widened to include ridges and beaches.
     let post_deneedle_height = if flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal || flags.ridges || flags.beaches {
+        if let Some(ref mut cb) = progress_callback {
+            cb(10); // DeNeedle = 10
+        }
         de_needle_pass(dim, &post_talus_height)
     } else {
         post_talus_height.clone()
@@ -1099,6 +1141,11 @@ pub fn classify_and_caps_staged(
     let mut final_biome = Vec::with_capacity(n);
     let mut caps = vec![0i64; n];
     let mut surface_material = Vec::with_capacity(n);
+
+    // U-11: Report classification stage
+    if let Some(ref mut cb) = progress_callback {
+        cb(11); // Classify = 11
+    }
 
     for z in 0..dim {
         for x in 0..dim {
@@ -1186,12 +1233,30 @@ pub fn classify_and_caps(
     enable_patchiness: bool,
     flags: crate::gen::LandformFlags,
 ) -> WorldFields {
+    classify_and_caps_with_callback(seed, hmax, dim, enable_patchiness, flags, None)
+}
+
+/// U-11: Wrapper that threads a progress callback through the worldgen pipeline.
+/// The callback receives u8 stage ordinals (0..=13, matching Stage enum in render crate).
+/// Observation-only: zero effect on RNG, heights, or any generated byte.
+pub fn classify_and_caps_with_callback(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    enable_patchiness: bool,
+    flags: crate::gen::LandformFlags,
+    mut progress_callback: Option<Box<dyn FnMut(u8)>>,
+) -> WorldFields {
     // W-9: Thin wrapper — talus_step_final is gated the SAME as de_needle: any_landform_on
     // Production output CHANGES when landforms are enabled (exactly why two-pass golden re-pin is prescribed).
     // W-10: Material diversity is gated and enabled by default in production.
     let enable_talus_final = flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal || flags.ridges || flags.beaches;
-    let (world_fields, _, _) = classify_and_caps_staged(
+
+    // U-11: Convert Box to &mut dyn FnMut for staged callback
+    let callback_ref = progress_callback.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(u8));
+    let (world_fields, _, _) = classify_and_caps_staged_with_callback(
         seed, hmax, dim, enable_patchiness, flags, enable_talus_final, true, // enable_w10_diversity
+        callback_ref,
     );
     world_fields
 }

@@ -66,9 +66,22 @@ const TXT_32: Color32 = theme::straight(233, 236, 230, 82); // pending-step labe
 const TXT_28: Color32 = theme::straight(233, 236, 230, 71); // pending dash
 const TRACK: Color32 = theme::straight(255, 255, 255, 26); // progress track (white 0.10)
 
+/// English stage names for the step checklist (deprecated, use label_ru for display)
 const STAGES: &[&str] = &[
-    "Generating world",
-    "Building meshes",
+    "Heightfield",
+    "Tectonics",
+    "Erosion",
+    "Ridges",
+    "Aeolian",
+    "Volcanic",
+    "Glacial",
+    "Coastal",
+    "Beaches",
+    "Talus",
+    "De-needle",
+    "Classify",
+    "Meshing",
+    "Done",
 ];
 
 /// Draw the full-screen loader modal. Call only when in Loading phase.
@@ -150,16 +163,21 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             );
             y += 10.0 + 13.0;
 
-            // --- STEP NAME ---
-            if step_index < STAGES.len() {
-                ui.painter().text(
-                    Pos2::new(cx, y),
-                    Align2::CENTER_TOP,
-                    STAGES[step_index],
-                    theme::sans(20.0),
-                    theme::TEXT,
-                );
-            }
+            // --- STEP NAME (Russian label) ---
+            let stage_label = if step_index < STAGES.len() {
+                Stage::from_u8(step_index as u8)
+                    .map(|s| s.label_ru())
+                    .unwrap_or("Неизвестно")
+            } else {
+                "Готово"
+            };
+            ui.painter().text(
+                Pos2::new(cx, y),
+                Align2::CENTER_TOP,
+                stage_label,
+                theme::sans(20.0),
+                theme::TEXT,
+            );
             y += 24.0 + 26.0;
 
             // --- PROGRESS TRACK + FILL ---

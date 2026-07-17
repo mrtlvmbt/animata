@@ -31,8 +31,8 @@ pub fn build_world<F>(spec: &WorldSpec, mut on_stage: F) -> Result<BuiltWorld, B
 where
     F: FnMut(Stage) -> bool,
 {
-    // D4: Generate world
-    on_stage(Stage::GenerateWorld);
+    // U-11: Report heightfield generation start
+    on_stage(Stage::GenerateHeightfield);
 
     // Step 1: Create config from spec.seed (never from parse_args — F18)
     let config = cli::default_config(spec.seed);
@@ -45,7 +45,8 @@ where
         WorldSource::Procgen { dim_request: _ } => {
             // U-10: Use explicit flags if provided; otherwise derive from seed (D5)
             let flags = spec.explicit_landform_flags.unwrap_or_else(|| landform_flags(spec.seed, spec.standalone));
-            Box::new(ProcgenWorld::new(
+            // U-11: No-op callback for world crate (observation-only, byte-pure)
+            Box::new(ProcgenWorld::new_with_callback(
                 effective_dim,
                 cli::HMAX,
                 cli::RESOURCE_BASE,
@@ -58,6 +59,7 @@ where
                 flags.coastal,
                 flags.ridges,
                 flags.beaches,
+                None, // U-11: No callback — progress reported via on_stage() below
             ))
         }
         WorldSource::Dump(path) => {
@@ -67,7 +69,8 @@ where
             eprintln!("[build_world] Dump loading not yet implemented; falling back to Procgen (--v1-dump flag ignored)");
             // U-10: Use explicit flags if provided; otherwise derive from seed
             let flags = spec.explicit_landform_flags.unwrap_or_else(|| landform_flags(spec.seed, spec.standalone));
-            Box::new(ProcgenWorld::new(
+            // U-11: No-op callback for world crate (observation-only, byte-pure)
+            Box::new(ProcgenWorld::new_with_callback(
                 effective_dim,
                 cli::HMAX,
                 cli::RESOURCE_BASE,
@@ -80,6 +83,7 @@ where
                 flags.coastal,
                 flags.ridges,
                 flags.beaches,
+                None, // U-11: No callback — progress reported via on_stage() below
             ))
         }
     };

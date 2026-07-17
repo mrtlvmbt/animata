@@ -87,11 +87,25 @@ pub struct WorldSpec {
 }
 
 /// Stage of world building (used for progress reporting via callback).
+/// Stages map to worldgen pipeline boundaries: heightfield fbm → tectonics → erosion → ridges →
+/// aeolian → volcanic → glacial → coastal → beaches → talus → de-needle → classify → meshing → done.
+/// Skipped stages (flags off) report instantly — bar must not stall on disabled landforms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Stage {
-    GenerateWorld = 0,
-    BuildMeshes = 1,
-    Done = 2,
+    GenerateHeightfield = 0,
+    ApplyTectonics = 1,
+    ApplyErosion = 2,
+    ApplyRidges = 3,
+    ApplyAeolian = 4,
+    ApplyVolcanic = 5,
+    ApplyGlacial = 6,
+    ApplyCoastal = 7,
+    ApplyBeaches = 8,
+    ApplyTalus = 9,
+    DeNeedle = 10,
+    Classify = 11,
+    BuildMeshes = 12,
+    Done = 13,
 }
 
 impl Stage {
@@ -103,10 +117,62 @@ impl Stage {
     /// Convert from ordinal.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(Stage::GenerateWorld),
-            1 => Some(Stage::BuildMeshes),
-            2 => Some(Stage::Done),
+            0 => Some(Stage::GenerateHeightfield),
+            1 => Some(Stage::ApplyTectonics),
+            2 => Some(Stage::ApplyErosion),
+            3 => Some(Stage::ApplyRidges),
+            4 => Some(Stage::ApplyAeolian),
+            5 => Some(Stage::ApplyVolcanic),
+            6 => Some(Stage::ApplyGlacial),
+            7 => Some(Stage::ApplyCoastal),
+            8 => Some(Stage::ApplyBeaches),
+            9 => Some(Stage::ApplyTalus),
+            10 => Some(Stage::DeNeedle),
+            11 => Some(Stage::Classify),
+            12 => Some(Stage::BuildMeshes),
+            13 => Some(Stage::Done),
             _ => None,
+        }
+    }
+
+    /// Russian label for display in the loader UI.
+    pub fn label_ru(self) -> &'static str {
+        match self {
+            Stage::GenerateHeightfield => "Высотная карта",
+            Stage::ApplyTectonics => "Тектоника",
+            Stage::ApplyErosion => "Эрозия",
+            Stage::ApplyRidges => "Гребни",
+            Stage::ApplyAeolian => "Ветер",
+            Stage::ApplyVolcanic => "Вулканы",
+            Stage::ApplyGlacial => "Ледники",
+            Stage::ApplyCoastal => "Побережье",
+            Stage::ApplyBeaches => "Пляжи",
+            Stage::ApplyTalus => "Осыпи",
+            Stage::DeNeedle => "Сглаживание",
+            Stage::Classify => "Классификация",
+            Stage::BuildMeshes => "Меширование",
+            Stage::Done => "Готово",
+        }
+    }
+
+    /// Progress permille (0–1000) for this stage.
+    /// Gen pipeline occupies 0..800, meshing/upload 800..1000.
+    pub fn progress_permille(self) -> u32 {
+        match self {
+            Stage::GenerateHeightfield => 0,
+            Stage::ApplyTectonics => 67,
+            Stage::ApplyErosion => 133,
+            Stage::ApplyRidges => 200,
+            Stage::ApplyAeolian => 267,
+            Stage::ApplyVolcanic => 333,
+            Stage::ApplyGlacial => 400,
+            Stage::ApplyCoastal => 467,
+            Stage::ApplyBeaches => 533,
+            Stage::ApplyTalus => 600,
+            Stage::DeNeedle => 667,
+            Stage::Classify => 733,
+            Stage::BuildMeshes => 800,
+            Stage::Done => 1000,
         }
     }
 }
@@ -156,14 +222,18 @@ mod tests {
 
     #[test]
     fn stage_roundtrip_u8() {
-        assert_eq!(Stage::GenerateWorld.as_u8(), 0);
-        assert_eq!(Stage::BuildMeshes.as_u8(), 1);
-        assert_eq!(Stage::Done.as_u8(), 2);
+        assert_eq!(Stage::GenerateHeightfield.as_u8(), 0);
+        assert_eq!(Stage::ApplyTectonics.as_u8(), 1);
+        assert_eq!(Stage::ApplyErosion.as_u8(), 2);
+        assert_eq!(Stage::BuildMeshes.as_u8(), 12);
+        assert_eq!(Stage::Done.as_u8(), 13);
 
-        assert_eq!(Stage::from_u8(0), Some(Stage::GenerateWorld));
-        assert_eq!(Stage::from_u8(1), Some(Stage::BuildMeshes));
-        assert_eq!(Stage::from_u8(2), Some(Stage::Done));
-        assert_eq!(Stage::from_u8(3), None);
+        assert_eq!(Stage::from_u8(0), Some(Stage::GenerateHeightfield));
+        assert_eq!(Stage::from_u8(1), Some(Stage::ApplyTectonics));
+        assert_eq!(Stage::from_u8(2), Some(Stage::ApplyErosion));
+        assert_eq!(Stage::from_u8(12), Some(Stage::BuildMeshes));
+        assert_eq!(Stage::from_u8(13), Some(Stage::Done));
+        assert_eq!(Stage::from_u8(14), None);
     }
 
     #[test]
