@@ -1040,17 +1040,22 @@ async fn main() {
                                 let load_state = LoadState::new(target_seed);
                                 regen_load_state = Some(load_state.clone());
                                 let (tx, rx) = mpsc::channel();
+                                let slow_load_flag = cli_args.slow_load;  // Capture for thread
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
                                         load_clone.set_stage(stage);
-                                        // U-7: Wire progress permille based on stage
+                                        // U-7: Wire progress permille based on stage (matches harness worker)
                                         let progress = match stage {
                                             Stage::GenerateWorld => 0,
                                             Stage::BuildMeshes => 400,
                                             Stage::Done => 1000,
                                         };
                                         load_clone.set_progress(progress);
+                                        // Honor --slow-load flag to stretch build stages (matches harness worker)
+                                        if slow_load_flag {
+                                            std::thread::sleep(std::time::Duration::from_millis(600));
+                                        }
                                         true
                                     };
                                     if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
