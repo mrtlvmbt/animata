@@ -1148,6 +1148,13 @@ async fn main() {
                     // CRITICAL: when modal is up, skip ui_root entirely (modal XOR panels, never both).
                     let mut wants_pointer_regen = false;
                     let mut wants_keyboard_regen = false;
+                    // U-10/F2: Store landform state for N key regen in manual mode
+                    let mut lf_manual_mode = false;
+                    let mut lf_manual_flags = world_spec::LandformFlags {
+                        tect: true, aeolian: false, volcanic: false, glacial: false,
+                        coastal: false, ridges: false, beaches: false,
+                    };
+
                     let ui_out = if let Some(ref load_state) = regen_load_state {
                         ui::loader::draw(ctx, load_state);
                         wants_pointer_regen = true;
@@ -1189,7 +1196,11 @@ async fn main() {
                                 coastal: false, ridges: false, beaches: false,
                             },
                         };
-                        ui_root.draw(ctx, &mut ui_ctx)
+                        let ui_out_inner = ui_root.draw(ctx, &mut ui_ctx);
+                        // U-10/F2: Extract landform state for N key regen
+                        lf_manual_mode = ui_ctx.landform_manual_mode;
+                        lf_manual_flags = ui_ctx.landform_manual_flags;
+                        ui_out_inner
                     };
 
                     // Apply camera update with gating.
@@ -1219,11 +1230,16 @@ async fn main() {
                                         ui_actions.push(ui::UiAction::ToggleTerrainKind);
                                     }
                                     // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
+                                    // U-10/F2: Use manual flags if in manual mode
                                     input::InputEvent::RegenSeed => {
                                         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
                                         if can_reseed {
-                                            // Trigger reseed with next seed (current+1)
-                                            ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                                            let target_seed = spec.seed.wrapping_add(1);
+                                            if lf_manual_mode {
+                                                ui_actions.push(ui::UiAction::RegenWithLandforms(target_seed, lf_manual_flags));
+                                            } else {
+                                                ui_actions.push(ui::UiAction::RegenSeed(target_seed));
+                                            }
                                         }
                                     }
                                     _ => {}
