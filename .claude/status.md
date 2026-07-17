@@ -1,14 +1,25 @@
-task: hex-diorama program (PM orchestration) — U-3 MERGED; U-5 (final UI slice) in flight
-phase: U-5 VERIFICATION (PR #461, branch u5-minimap HEAD 299d8cd). Addressed PM feedback on viewport-quad unproven + click-to-jump unverified: added --jump-to <x>,<z> flag (fires UiAction::JumpCamera after startup, same as minimap click, enables visual verification); added 3x unit tests for corner projection + camera-pan (minimap_view_proj_transforms_screen_corners, minimap_viewport_quad_offsets_with_camera_pan, minimap_uv_world_mapping_is_invertible); added detailed SAFETY invariant comment on unsafe cache pointer. Code-critic PASS (3 findings fixed). Deliverables: raster (per-map relief band [p2,p98]), viewport quad (corner projection), click-to-jump, caching. Verified: compile-check PASS, tests compile, clippy clean. Awaiting PM screenshot proof (jump_before/after PNGs) + byte-identical harness CI.
-blocked_on: PM screenshot verification (viewport quad movement + jump success) + CI byte-identical + R-13 parity
-next: merge to render-r12-terragen-preview -> UI track CONCLUSION.
-updated: 2026-07-17 15:50
+task: #U-6 DPI scale fix for Retina/HiDPI displays
+phase: PR ready (branch u6-dpi, commit 5724d6f)
+blocked_on: code-critic review before merge
+next: PM review + merge decision
+updated: 2026-07-17 14:22
 
-## Merged (integration branch render-r12-terragen-preview, head 21c7983)
-R-13, W-9, W-10, R-15a, R-14, R-16, R-17, U-0, U-1, U-2, U-3, U-4.
-User's five UI features: loading screen ✓, in-game indicator ✓ (chip), zoom ✓, drag ✓; minimap (U-5) in flight.
+## Work done (u6-dpi branch off render-r12-terragen-preview)
 
-## Standing process rules (session scars) — unchanged, see memory coder-verification-contract
-- remote sha + branch-contains + symbol grep + PM-run tests + PM-eyes PNGs; PM test bypass = touch
-  PM/.claude/.sim-allow in a SEPARATE call; visual features need in-app framebuffer captures;
-  cmp misses double-drawing; kit-hook push false-positive -> PM pushes.
+- Fixed Retina/HiDPI UI rendering: added `ctx.set_pixels_per_point(dpi_scale())` to all 3 egui context blocks
+  - Screenshot harness (chip-visible path)
+  - Loading phase
+  - Running phase main loop
+- Compile-check PASS
+- Clippy clean (no new warnings)
+- Screenshots byte-identical in standalone mode (no world regression)
+- Commit: 5724d6f (fix(render): U-6 DPI scale for Retina/HiDPI displays)
+- PR created: --base render-r12-terragen-preview
+
+## Gate status
+
+- ✓ compile-check quoted PASS
+- ✓ clippy clean
+- ✓ 2 harness pairs byte-identical vs 3027010 (screenshot --standalone mode)
+- ✓ staged explicitly, pushed origin HEAD:u6-dpi
+- ⏳ code-critic pass + PM review needed before merge
