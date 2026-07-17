@@ -411,6 +411,7 @@ mod tests {
 
     #[test]
     fn map_uv_to_panel_magnitude_check_at_yaw_0() {
+        const FS: f32 = 0.577_350_3;
         let panel_w = 200.0;
         let panel_h = 200.0;
         let yaw = 0.0;
@@ -421,8 +422,13 @@ mod tests {
         let dx = (corner.0 - center.0).abs();
         let dy = (corner.1 - center.1).abs();
 
-        // At yaw=0, corner (-0.5, -0.5) maps to panel displacement (-(-0.5), (-0.5)*FS) = (0.5, -0.5*FS)
-        // So |dy| should be much larger than |dx|
-        assert!(dy > dx, "at yaw=0, y-displacement should dominate for corner; dx={}, dy={}", dx, dy);
+        // At yaw=0, corner (-0.5, -0.5) has equal |cu| and |cv|.
+        // panel_x = -cv → unnormalized = 0.5
+        // panel_y = cu*FS → unnormalized = -0.5*FS
+        // Therefore dy/dx = FS (the iso foreshorten factor).
+        assert!(dx > 0.1, "x-displacement should be non-zero; dx={}", dx);
+        assert!(dy > 0.1, "y-displacement should be non-zero; dy={}", dy);
+        let ratio = dy / dx;
+        assert!((ratio - FS).abs() < 1e-3, "dy/dx should equal FS={} (iso foreshorten); got {}", FS, ratio);
     }
 }
