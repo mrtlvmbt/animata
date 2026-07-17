@@ -190,6 +190,9 @@ struct CliArgs {
     screenshot_ui: Option<String>,
     /// U-8: `--yaw <degrees>`: set initial camera yaw (default 0); works in both interactive and screenshot modes.
     yaw_degrees: Option<f32>,
+    /// U-9: `--ui-state visible|hidden|world|view|perf|pop`: initial panel visibility and flyout state.
+    /// visible/hidden: control panel visibility; world/view/perf/pop: open that flyout on startup.
+    ui_state_value: String,  // "visible" | "hidden" | "world" | "view" | "perf" | "pop"
 }
 
 fn parse_args() -> CliArgs {
@@ -210,6 +213,7 @@ fn parse_args() -> CliArgs {
     let mut jump_to = None;
     let mut screenshot_ui = None;
     let mut yaw_degrees = None;
+    let mut ui_state_value = "visible".to_string();  // Default: panels visible
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -282,10 +286,20 @@ fn parse_args() -> CliArgs {
                 let v = args.next().expect("--yaw requires a value");
                 yaw_degrees = Some(v.parse().unwrap_or_else(|_| panic!("--yaw expects f32 degrees, got {v:?}")));
             }
+            "--ui-state" => {
+                let v = args.next().expect("--ui-state requires a value");
+                ui_state_value = match v.as_str() {
+                    "visible" | "hidden" | "world" | "view" | "perf" | "pop" => v,
+                    other => {
+                        eprintln!("render: --ui-state '{}' not recognized (use 'visible', 'hidden', 'world', 'view', 'perf', or 'pop'), defaulting to visible", other);
+                        "visible".to_string()
+                    }
+                };
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, bare_mode, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -448,10 +462,29 @@ async fn main() {
     // never leaves that state). Terrain/camera/culling/LOD are unaffected — they never read `handle`.
     let handle = if cli_args.standalone { None } else { Some(driver::spawn(cli_args.seed)) };
 
-    // U-1: Initialize UI root with DebugPanel and MinimapPanel.
+    // U-9: Initialize UI root with v1-style panels and apply --ui-state
     let mut ui_root = ui::UiRoot::new();
-    ui_root.push(Box::new(ui::DebugPanel));
-    // U-5: Add MinimapPanel
+
+    // Parse --ui-state: "visible"/"hidden" control panel visibility; flyout values open that panel
+    let panels_visible = match cli_args.ui_state_value.as_str() {
+        "hidden" => false,
+        _ => true,  // visible, world, view, perf, pop all show panels
+    };
+    let initial_flyout = match cli_args.ui_state_value.as_str() {
+        "world" => Some(ui::rail::RailPanel::World),
+        "view" => Some(ui::rail::RailPanel::View),
+        "perf" => Some(ui::rail::RailPanel::Perf),
+        "pop" => Some(ui::rail::RailPanel::Pop),
+        _ => None,  // visible/hidden: no flyout
+    };
+
+    ui_root.panels_visible = panels_visible;
+    ui_root.push(Box::new(ui::vitals::VitalsPanel));
+    ui_root.push(Box::new(ui::transport::TransportPanel));
+    let mut rail = ui::rail::ControlRail::new();
+    rail.open_panel = initial_flyout;
+    ui_root.push(Box::new(rail));
+    ui_root.push(Box::new(ui::legend::LegendPanel));
     ui_root.push(Box::new(ui::MinimapPanel));
 
     // R-13: Apply camera preset to ensure deterministic view.
@@ -682,6 +715,7 @@ async fn main() {
                         }
                         input::InputEvent::ToggleTerrainKind => {}
                         input::InputEvent::RegenSeed => {}
+                        input::InputEvent::ToggleUiVisibility => {}
                     }
                 }
 
@@ -840,6 +874,9 @@ async fn main() {
                     input::InputEvent::RegenSeed => {
                         // Not used in benchmark mode
                     }
+                    input::InputEvent::ToggleUiVisibility => {
+                        // Not used in benchmark mode
+                    }
                 }
             }
 
@@ -898,6 +935,9 @@ async fn main() {
                         // Not used in benchmark mode
                     }
                     input::InputEvent::RegenSeed => {
+                        // Not used in benchmark mode
+                    }
+                    input::InputEvent::ToggleUiVisibility => {
                         // Not used in benchmark mode
                     }
                 }
@@ -997,6 +1037,11 @@ async fn main() {
                     world_dim = built.dim;
                     world = built.world;
 
+                    // U-9: Show "World ready" toast on regen completion
+                    let toast_msg = format!("World ready — seed 0x{:x}", spec.seed);
+                    ui_root.toast_message = Some(toast_msg);
+                    ui_root.toast_elapsed_ms = 0.0;
+
                     // U-2/D5: Camera init from built.dim (output, not input)
                     let (span_x, _) = hex::hex_center(world_dim, 0);
                     let (_, span_z) = hex::hex_center(0, world_dim);
@@ -1093,28 +1138,38 @@ async fn main() {
 
                     // Collect keyboard input events with gating.
                     // U-7: Skip input when regen loader modal is showing (gated by wants_keyboard_regen)
-                    if !wants_keyboard_regen && !ui_out.wants_keyboard {
-                        for ev in input::collect(&ui_out) {
-                            // Convert InputEvent to UiAction and collect for unified handling
-                            match ev {
-                                input::InputEvent::TogglePause => {
-                                    ui_actions.push(ui::UiAction::TogglePause);
-                                }
-                                input::InputEvent::StepOnce => {
-                                    ui_actions.push(ui::UiAction::StepOnce);
-                                }
-                                input::InputEvent::ToggleTerrainKind => {
-                                    ui_actions.push(ui::UiAction::ToggleTerrainKind);
-                                }
-                                // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
-                                input::InputEvent::RegenSeed => {
-                                    let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
-                                    if can_reseed {
-                                        // Trigger reseed with next seed (current+1)
-                                        ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                    // U-9: H key is NOT gated — it controls UI visibility
+                    let events = input::collect(&ui_out);
+                    for ev in events {
+                        match ev {
+                            // U-9: H key is never gated
+                            input::InputEvent::ToggleUiVisibility => {
+                                ui_actions.push(ui::UiAction::ToggleUiVisibility);
+                            }
+                            // Other inputs are gated by regen modal and UI focus
+                            _ if !wants_keyboard_regen && !ui_out.wants_keyboard => {
+                                match ev {
+                                    input::InputEvent::TogglePause => {
+                                        ui_actions.push(ui::UiAction::TogglePause);
                                     }
+                                    input::InputEvent::StepOnce => {
+                                        ui_actions.push(ui::UiAction::StepOnce);
+                                    }
+                                    input::InputEvent::ToggleTerrainKind => {
+                                        ui_actions.push(ui::UiAction::ToggleTerrainKind);
+                                    }
+                                    // U-3: N key triggers reseed (only valid in Procgen+standalone; gating here)
+                                    input::InputEvent::RegenSeed => {
+                                        let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone && rx_regen_in_flight.is_none();
+                                        if can_reseed {
+                                            // Trigger reseed with next seed (current+1)
+                                            ui_actions.push(ui::UiAction::RegenSeed(spec.seed.wrapping_add(1)));
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
+                            _ => {}
                         }
                     }
                 });
@@ -1134,6 +1189,15 @@ async fn main() {
                         }
                         ui::UiAction::ToggleTerrainKind => {
                             use_cube_terrain = !use_cube_terrain;
+                        }
+                        // U-9: H key toggle panels visibility
+                        ui::UiAction::ToggleUiVisibility => {
+                            ui_root.toggle_visibility();
+                        }
+                        // U-9: Display a toast message
+                        ui::UiAction::PushToast(msg) => {
+                            ui_root.toast_message = Some(msg);
+                            ui_root.toast_elapsed_ms = 0.0;
                         }
                         // U-3: Reseed — spawn async world build on worker, keep rendering old world
                         ui::UiAction::RegenSeed(target_seed) => {

@@ -15,13 +15,21 @@ pub enum InputEvent {
     ToggleTerrainKind,
     /// U-3: N key — regenerate the world with a new seed (only valid in Procgen+standalone mode)
     RegenSeed,
+    /// U-9: H key — toggle panel visibility (NOT gated by UI keyboard focus)
+    ToggleUiVisibility,
 }
 
 /// Collect all input events this frame, respecting UI gating.
 /// Returns a vec of input events detected from keyboard state.
 /// When UI wants keyboard input, sim controls (Space/Right/N/T) are gated off.
+/// H key (toggle UI visibility) is NEVER gated, even when UI has keyboard focus.
 pub fn collect(ui_out: &UiOut) -> Vec<InputEvent> {
     let mut events = Vec::new();
+
+    // U-9: H key is not gated — controls UI visibility itself
+    if is_key_pressed(KeyCode::H) {
+        events.push(InputEvent::ToggleUiVisibility);
+    }
 
     // Gate sim/terrain controls when UI has keyboard focus
     if !ui_out.wants_keyboard {
