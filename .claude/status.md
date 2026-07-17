@@ -1,5 +1,5 @@
 task: U-8 minimap screen-aligned iso-diamond projection + yaw rotation
-phase: PR submitted + code-critic PASS
+phase: harness plumbing fixes committed; ready for re-capture
 blocked_on: none
-next: PM intake (compile-check PASS, critic PASS, evidence PNG capture)
-updated: 2026-07-17 14:30
+next: PM re-run full suite with screenshot captures (expect 256×256 world, terrain visible, veil bands at viewport quad)
+updated: 2026-07-17 15:00
