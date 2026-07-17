@@ -130,3 +130,12 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   hide the bug by coincidence. → What to do: one Area per panel, unique ids; don't wrap self-anchoring
   panels in positioning Areas (U-9 root cause, PR #465 b69b534 — two coder rounds were burned on
   offset-sign flips before the collision was found).
+
+- **Slice touches BOTH lanes (world + render) but every gate is green — and the render bin is
+  broken on the merged head** → Cause: the render crate is NOT in the v2 workspace, so `cd v2 &&
+  compile-check.sh` never builds it, and the render bin is deliberately OUT of CI; a two-lane slice
+  verified only with the v2-workspace form ships a broken render build invisibly (W-11/PR #467:
+  re-applied pre-U-9 patch hunks in main.rs compiled nowhere). → What to do: for ANY slice touching
+  `v2/crates/render/**`, run BOTH compile-check forms (v2 workspace AND `cd v2/crates/render`) and
+  `cargo build --release` of the render bin before claiming green; PM intake of a two-lane slice
+  must rebuild the render bin even when CI is 4/4 — CI proves the world lane only.
