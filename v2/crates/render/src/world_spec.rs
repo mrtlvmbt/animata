@@ -337,6 +337,20 @@ mod tests {
         }
     }
 
+    /// W-18: Default flags (base=true, erosion=true) must produce byte-identical salt to pre-W-18
+    /// (when bits 47 and 29 were not extracted). CRITICAL for golden byte-identity.
+    #[test]
+    fn w18_default_flags_match_legacy_salt() {
+        // W-18: base and erosion bits are INVERTED in the salt, so default state (true, true)
+        // produces 0 at both positions 29 and 47, matching the pre-W-18 salt.
+        for seed in [0u64, 1, 42, 0xFFFF_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE] {
+            let flags = landform_flags(seed, true);
+            // Default state must have base=true and erosion=true
+            assert!(flags.base, "seed {seed:016x}: default base must be true");
+            assert!(flags.erosion, "seed {seed:016x}: default erosion must be true");
+        }
+    }
+
     /// U-3: Reseed guard conditions — verify which combinations allow reseed.
     /// Reseed is enabled ONLY when source == Procgen && standalone (F12/F15).
     #[test]

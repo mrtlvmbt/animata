@@ -2482,4 +2482,34 @@ mod tests {
         assert_eq!(without_cb.caps, with_cb.caps, "caps must be byte-identical");
         assert_eq!(without_cb.surface_material, with_cb.surface_material, "materials must be byte-identical");
     }
+
+    /// W-18: Flat invariant — all sources off with all transforms off ⇒ height ≡ FLAT_DATUM everywhere.
+    #[test]
+    fn w18_flat_invariant_sources_off() {
+        use crate::gen::erosion::flat_datum;
+        const DIM: usize = 16;
+        // All SOURCES off: base=false, tect=false, volcanic=false
+        // All TRANSFORMS off: erosion=false, aeolian=false, glacial=false, coastal=false
+        let flags = LandformFlags::new(false, false, false, false, false, false, false, false, false);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false, flags);
+        let expected_height = flat_datum(HMAX);
+        for &h in &fields.height {
+            assert_eq!(h, expected_height, "flat invariant: height must be FLAT_DATUM when all sources off");
+        }
+    }
+
+    /// W-18: Flat invariant — all transforms noop on constant height field (sources off, transforms on).
+    /// With no source height variation, transforms cannot create height variation.
+    #[test]
+    fn w18_flat_invariant_transforms_noop_on_constant() {
+        use crate::gen::erosion::flat_datum;
+        const DIM: usize = 16;
+        // All sources off, all transforms on
+        let flags = LandformFlags::new(false, false, false, false, false, false, true, false, false);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false, flags);
+        let expected_height = flat_datum(HMAX);
+        for &h in &fields.height {
+            assert_eq!(h, expected_height, "flat invariant: transforms must noop on constant field");
+        }
+    }
 }
