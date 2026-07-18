@@ -98,6 +98,8 @@ impl SlopeClass {
 pub struct EdificeGeom {
     /// Peak height delta added to the base field (never absolute).
     pub peak: i64,
+    /// Shield peak height (peak / 2) — single source for slope calculations.
+    pub peak_shield: i64,
     /// Shield (low-viscosity) edifice outer footprint radius in cells.
     pub shield_radius: i64,
     /// Cone (high-viscosity) edifice outer footprint radius in cells.
@@ -121,6 +123,7 @@ impl EdificeGeom {
         let dim_i64 = dim as i64;
 
         let peak = (hmax * 3) / 5;
+        let peak_shield = peak / 2;
         // Shield aspect (peak_shield/radius) ≈ 2.4 at hmax=200: radius = peak*5/24
         let shield_radius = ((peak * 5) / 24).clamp(8, (dim_i64 / 6).max(8));
         // Cone aspect (peak/radius) ≈ 6 at hmax=200: radius = peak/6
@@ -136,6 +139,7 @@ impl EdificeGeom {
 
         EdificeGeom {
             peak,
+            peak_shield,
             shield_radius,
             cone_radius,
             caldera_r,
@@ -211,12 +215,11 @@ fn vent_height_at(vent: &Vent, dx: i64, dz: i64, geom: &EdificeGeom) -> i64 {
                 return 0;
             }
             // Shield quadratic profile: delta(r) = peak_shield * (R^2 - r^2) / R^2
-            // where peak_shield = peak / 2, and R = shield_radius
+            // where peak_shield (from geom.peak_shield) = peak / 2, and R = shield_radius
             let shield_r = geom.shield_radius;
-            let peak_shield = geom.peak / 2;
             let r_sq = r * r;
             let shield_r_sq = shield_r * shield_r;
-            let delta = (peak_shield * (shield_r_sq - r_sq)) / shield_r_sq;
+            let delta = (geom.peak_shield * (shield_r_sq - r_sq)) / shield_r_sq;
             delta.max(0)
         }
     }
@@ -352,11 +355,12 @@ mod tests {
 
     /// Viscosity selects the SLOPE CLASS: Shield's wider footprint means gentler slope than Cone.
     /// Test with two different (dim, hmax) pairs to verify the property holds.
+    /// Uses correct numerators: peak_shield for shields, peak for cones.
     #[test]
     fn shield_mean_radial_slope_is_gentler_than_cone() {
         for (test_dim, test_hmax) in [(64, 200), (512, 200)] {
             let geom = EdificeGeom::derive(test_dim, test_hmax);
-            let shield_mean_slope = geom.peak / geom.shield_radius;
+            let shield_mean_slope = geom.peak_shield / geom.shield_radius;
             let cone_mean_slope = geom.peak / geom.cone_radius;
             assert!(
                 shield_mean_slope < cone_mean_slope,
