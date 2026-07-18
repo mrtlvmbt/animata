@@ -622,7 +622,7 @@ async fn main() {
     let (mut hex_terrain_chunks, mut cube_terrain_chunks, mut world_dim, mut world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
         // Harnesses: build_world inline (synchronous, no loader)
         let mut on_stage = |_stage: Stage| true;  // No-op callback for harnesses
-        let built = world_builder::build_world(&spec, on_stage).expect("build_world failed");
+        let built = world_builder::build_world(&spec, on_stage, cli_args.height_scale_override).expect("build_world failed");
         let world_dim = built.dim;
         let world = built.world;
         let hex_chunks = convert_raw_chunks(built.hex);
@@ -721,6 +721,7 @@ async fn main() {
         let load_state = LoadState::new(cli_args.seed);
         let spec_worker = spec.clone();
         let slow_load_flag = cli_args.slow_load;
+        let height_scale = cli_args.height_scale_override;
 
         let (tx, rx) = mpsc::channel();
 
@@ -734,7 +735,7 @@ async fn main() {
                 }
                 true
             };
-            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage) {
+            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage, height_scale) {
                 load_clone.mark_done();
                 let _ = tx.send(built);
             }
@@ -764,6 +765,7 @@ async fn main() {
             harness_regen_load_state = Some(load_state.clone());
             let (tx, rx) = mpsc::channel();
             let slow_load_flag = cli_args.slow_load;  // Capture for thread
+            let height_scale = cli_args.height_scale_override;  // Capture for thread
             let _ = std::thread::spawn(move || {
                 let load_clone = load_state.clone();
                 let mut on_stage = |stage: Stage| {
@@ -777,7 +779,7 @@ async fn main() {
                     }
                     true
                 };
-                if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
                     let _ = tx.send(built);
                 }
             });
@@ -1458,6 +1460,7 @@ async fn main() {
                                 regen_load_state = Some(load_state.clone());
                                 let (tx, rx) = mpsc::channel();
                                 let slow_load_flag = cli_args.slow_load;  // Capture for thread
+                                let height_scale = cli_args.height_scale_override;  // Capture for thread
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
@@ -1471,7 +1474,7 @@ async fn main() {
                                         }
                                         true
                                     };
-                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
                                         let _ = tx.send(built);
                                     }
                                 });
@@ -1492,6 +1495,7 @@ async fn main() {
                                 regen_load_state = Some(load_state.clone());
                                 let (tx, rx) = mpsc::channel();
                                 let slow_load_flag = cli_args.slow_load;
+                                let height_scale = cli_args.height_scale_override;
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
@@ -1504,7 +1508,7 @@ async fn main() {
                                         }
                                         true
                                     };
-                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
                                         let _ = tx.send(built);
                                     }
                                 });

@@ -141,7 +141,7 @@ fn build_chunk(
 
     for row in row0..row1 {
         for col in 0..world_dim {
-            let h = world.height(col, row) as f32 * HEIGHT_SCALE;
+            let h = world.height(col, row) as f32 * height_scale;
             let (cx, cz) = hex_center(col, row);
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
@@ -218,7 +218,7 @@ fn build_chunk(
             let cliff_color = cliff_shade(top_color_bare);
             for (dir_i, &(ncol, nrow)) in neighbors(col, row).iter().enumerate() {
                 let nh = if (0..world_dim).contains(&ncol) && (0..world_dim).contains(&nrow) {
-                    world.height(ncol, nrow) as f32 * HEIGHT_SCALE
+                    world.height(ncol, nrow) as f32 * height_scale
                 } else {
                     0.0
                 };
@@ -309,14 +309,16 @@ pub fn build_raw_hex_terrain(
     world: &dyn WorldView,
     seed: u64,
     bare_mode: bool,
+    height_scale_override: Option<f32>,
 ) -> Result<Vec<RawChunk>, BuildError> {
     let mut chunks = Vec::new();
     let (h_lo, h_hi) = hypsometric_range(world_dim, world);
     let rpc = rows_per_chunk_hex(world_dim).clamp(1, 8);
+    let effective_height_scale = height_scale_override.unwrap_or(HEIGHT_SCALE);
     let mut row0 = 0i64;
     while row0 < world_dim {
         let row1 = (row0 + rpc).min(world_dim);
-        chunks.push(build_raw_chunk(world_dim, world, row0, row1, h_lo, h_hi, seed, bare_mode)?);
+        chunks.push(build_raw_chunk(world_dim, world, row0, row1, h_lo, h_hi, seed, bare_mode, effective_height_scale)?);
         row0 = row1;
     }
     Ok(chunks)
@@ -332,13 +334,14 @@ fn build_raw_chunk(
     h_hi: i64,
     seed: u64,
     bare_mode: bool,
+    height_scale: f32,
 ) -> Result<RawChunk, BuildError> {
     let mut vertices: Vec<Vertex> = Vec::new();
     let mut indices: Vec<u16> = Vec::new();
 
     for row in row0..row1 {
         for col in 0..world_dim {
-            let h = world.height(col, row) as f32 * HEIGHT_SCALE;
+            let h = world.height(col, row) as f32 * height_scale;
             let (cx, cz) = hex_center(col, row);
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
@@ -415,7 +418,7 @@ fn build_raw_chunk(
             let cliff_color = cliff_shade(top_color_bare);
             for (dir_i, &(ncol, nrow)) in neighbors(col, row).iter().enumerate() {
                 let nh = if (0..world_dim).contains(&ncol) && (0..world_dim).contains(&nrow) {
-                    world.height(ncol, nrow) as f32 * HEIGHT_SCALE
+                    world.height(ncol, nrow) as f32 * height_scale
                 } else {
                     0.0
                 };

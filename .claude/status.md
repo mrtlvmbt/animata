@@ -1,5 +1,5 @@
 task: #498 U-13 minimap fixes
-phase: CI GREEN + fresh critic review
-blocked_on: code-critic verdict (agent ab79c292493d3b9ca)
-next: post critic PASS to PR; finalize
-updated: 2026-07-18 22:22
+phase: FINAL FIX + CI verification
+blocked_on: CI run #29660877760 + code-critic verdict (agent adea59431c35248ad)
+next: CI PASS + critic PASS → final report done
+updated: 2026-07-18 23:04

@@ -406,6 +406,10 @@ mod tests {
         let yaw = std::f32::consts::PI / 6.0;  // 30°
 
         // Test roundtrip for various points on a grid
+        // NOTE: minimap projection (map_uv_to_panel / panel_to_map_uv) is based on UV/map coordinates
+        // and does NOT depend on height-scale. The height_scale parameter is a render-side multiplier
+        // on the 3D height→prism mapping (camera view); minimap viewport is independent.
+        // Testing with ×1.5 height-scale as a guard against future changes.
         for u_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
             for v_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
                 let panel_pos = map_uv_to_panel(u_test, v_test, yaw, panel_w, panel_h);
