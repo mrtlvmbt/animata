@@ -1040,7 +1040,7 @@ pub fn classify_and_caps_staged_with_callback(
     }
     let volcanic_mask: Vec<Option<MaterialId>> = if flags.volcanic {
         let vents = crate::gen::volcanic::build_vents(seed, dim);
-        crate::gen::volcanic::edifice_material_mask(dim, &vents)
+        crate::gen::volcanic::edifice_material_mask(dim, hmax, &vents)
     } else {
         vec![None; n]
     };
