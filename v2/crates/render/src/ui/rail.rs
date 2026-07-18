@@ -30,6 +30,8 @@ impl ControlRail {
                 erosion: true,     // W-18: default on
                 ridges: false,
                 beaches: false,
+                erosion_strength: 100,    // W-19: default 100%
+                glacial_strength: 100,    // W-19: default 100%
             },
         }
     }

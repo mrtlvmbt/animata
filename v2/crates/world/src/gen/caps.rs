@@ -1026,7 +1026,7 @@ pub fn classify_and_caps_staged_with_callback(
     if let Some(ref mut cb) = progress_callback {
         cb(2); // ApplyErosion = 2
     }
-    let erosion = erode(seed, hmax, dim, flags.base, flags.tect, flags.volcanic, flags.ridges, flags.erosion);
+    let erosion = erode(seed, hmax, dim, flags.base, flags.tect, flags.volcanic, flags.ridges, flags.erosion, flags.erosion_strength);
     let n = dim * dim;
 
     // Stage 3: ApplyRidges (optional, injected into erode; report completion after erode)
@@ -1050,7 +1050,7 @@ pub fn classify_and_caps_staged_with_callback(
         cb(6); // ApplyGlacial = 6 (reported whether enabled or not)
     }
     let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if flags.glacial {
-        let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height);
+        let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height, flags.glacial_strength);
         (g.height, g.material)
     } else {
         (erosion.height.clone(), vec![None; n])
@@ -1859,7 +1859,7 @@ mod tests {
                 for volcanic in [false, true] {
                     for glacial in [false, true] {
                         for coastal in [false, true] {
-                            let fields = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::new(true, tectonics, aeolian, volcanic, glacial, coastal, true, false, false));
+                            let fields = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::new(true, tectonics, aeolian, volcanic, glacial, coastal, true, false, false, 100, 100));
                             assert_eq!(fields.height.len(), DIM * DIM);
                             assert_eq!(fields.final_biome.len(), DIM * DIM);
                             assert_eq!(fields.caps.len(), DIM * DIM);
@@ -2238,11 +2238,11 @@ mod tests {
         const BEACH_TEST_SEED: u64 = 113;
         // WITH beaches ON (coastal+tectonic: beach_deposit can run)
         let (world_beaches_on, _, _) = classify_and_caps_staged(
-            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true, 100, 100), true, true
         );
         // WITH beaches OFF (same landforms but beaches gate prevents beach_deposit)
         let (world_beaches_off, _, _) = classify_and_caps_staged(
-            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100), true, true
         );
         // When beaches=true with suitable coastal geography, beach_deposit modifies height.
         // When beaches=false, it doesn't. So we expect DIFFERENT output.
@@ -2264,11 +2264,11 @@ mod tests {
         const DIM: usize = 64;
         // Run 1: coastal=true, beaches=false
         let (world1, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100), true, true
         );
         // Run 2: same fixture, should be byte-identical
         let (world2, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100), true, true
         );
         assert_eq!(world1.height, world2.height,
             "beaches=false must be deterministic (same fixture, same seed → identical height)");
@@ -2290,7 +2290,7 @@ mod tests {
         // Fixture seed picked by PM 64²-scan on W-13 field (beach11=5); beaches occupy ~0.02% of cells so pin is seed-sensitive.
         const BEACH_TEST_SEED: u64 = 113;
         let (world, _, _) = classify_and_caps_staged(
-            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true, 100, 100), true, true
         );
         let beach_count = world.surface_material.iter().filter(|&&b| b == 11).count();
         assert!(
@@ -2310,7 +2310,7 @@ mod tests {
     fn w12_beach_sand_cells_are_never_submerged() {
         const DIM: usize = 64;
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true, 100, 100), true, true
         );
         // Verify: every BeachSand cell must be LAND (not submerged). We check this by re-deriving
         // submerged_final using the same logic as the pipeline (is_submerged at sea_level).
@@ -2336,7 +2336,7 @@ mod tests {
     fn w12_beach_deposit_clamp_invariant() {
         const DIM: usize = 64;
         // Construct a fixture with coastal+beaches ON to trigger beach_deposit.
-        let erosion = erode(SEED, HMAX, DIM, true, false, false, false, true);
+        let erosion = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
         let coastal_datum = run_coastal(SEED, DIM, HMAX, &erosion.height);
 
         // Re-run beach_deposit on the post-coastal height (before talus/de_needle).
@@ -2364,7 +2364,7 @@ mod tests {
     #[test]
     fn w12_cliff_cells_untouched_by_deposition() {
         const DIM: usize = 64;
-        let erosion = erode(SEED, HMAX, DIM, true, false, false, false, true);
+        let erosion = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
         let coastal_datum = run_coastal(SEED, DIM, HMAX, &erosion.height);
 
         let (post_deposit, _) = beach_deposit(DIM, &coastal_datum.height, coastal_datum.sea_level, &coastal_datum.submerged);
@@ -2421,7 +2421,7 @@ mod tests {
     fn w12_beach_deposition_never_saturates() {
         const DIM: usize = 64;
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true, 100, 100), true, true
         );
         let n = DIM * DIM;
         for idx in 0..n {
@@ -2467,7 +2467,7 @@ mod tests {
         const DIM: usize = 32;
 
         // Generate world WITHOUT callback
-        let flags = LandformFlags::new(true, true, true, true, true, true, true, true, true);
+        let flags = LandformFlags::new(true, true, true, true, true, true, true, true, true, 100, 100);
         let without_cb = classify_and_caps(SEED, HMAX, DIM, false, flags);
 
         // Generate world WITH a no-op callback
@@ -2490,7 +2490,7 @@ mod tests {
         const DIM: usize = 16;
         // All SOURCES off: base=false, tect=false, volcanic=false
         // All TRANSFORMS off: erosion=false, aeolian=false, glacial=false, coastal=false
-        let flags = LandformFlags::new(false, false, false, false, false, false, false, false, false);
+        let flags = LandformFlags::new(false, false, false, false, false, false, false, false, false, 100, 100);
         let fields = classify_and_caps(SEED, HMAX, DIM, false, flags);
         let expected_height = flat_datum(HMAX);
         for &h in &fields.height {
@@ -2505,7 +2505,7 @@ mod tests {
         use crate::gen::erosion::flat_datum;
         const DIM: usize = 16;
         // All sources off, all transforms on
-        let flags = LandformFlags::new(false, false, false, false, false, false, true, false, false);
+        let flags = LandformFlags::new(false, false, false, false, false, false, true, false, false, 100, 100);
         let fields = classify_and_caps(SEED, HMAX, DIM, false, flags);
         let expected_height = flat_datum(HMAX);
         for &h in &fields.height {

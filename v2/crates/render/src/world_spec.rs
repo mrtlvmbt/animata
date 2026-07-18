@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 /// Landform configuration flags (deterministically derived from seed or set manually).
 /// W-18: additive worldgen — SOURCES (base, tect/ridges, volcanic) vs TRANSFORMS (erosion, aeolian, glacial, coastal/beaches).
+/// W-19: strength parameters for erosion and glacial, default 100 (percent, byte-identical to no-strength baseline).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LandformFlags {
     pub base: bool,       // W-18: seed height from fBm (true) or FLAT_DATUM (false)
@@ -19,12 +20,15 @@ pub struct LandformFlags {
     pub erosion: bool,    // W-18: run erosion chain (talus/fluvial/deposition)
     pub ridges: bool,
     pub beaches: bool,
+    pub erosion_strength: i64,  // W-19: erosion intensity percent, default 100, range [0, 400]
+    pub glacial_strength: i64,  // W-19: glacial intensity percent, default 100, range [0, 400]
 }
 
 impl LandformFlags {
     /// Create landform flags without clamps (raw values).
     /// Clamps are applied later in `apply_guard()` AFTER the guard potentially enables tect/coastal.
     /// W-18: base and erosion must be specified explicitly.
+    /// W-19: strength defaults to 100 (byte-identical baseline).
     pub fn new(
         base: bool,
         tect: bool,
@@ -36,7 +40,19 @@ impl LandformFlags {
         ridges: bool,
         beaches: bool,
     ) -> Self {
-        LandformFlags { base, tect, aeolian, volcanic, glacial, coastal, erosion, ridges, beaches }
+        LandformFlags {
+            base,
+            tect,
+            aeolian,
+            volcanic,
+            glacial,
+            coastal,
+            erosion,
+            ridges,
+            beaches,
+            erosion_strength: 100,
+            glacial_strength: 100,
+        }
     }
 
     /// Apply guards and dependency clamps to ensure a valid state.
@@ -291,6 +307,8 @@ pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
             erosion: true,
             ridges: false,
             beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
         };
     }
 
@@ -506,6 +524,8 @@ mod tests {
             erosion: true,
             ridges: false,
             beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
         };
         let guarded = flags.apply_guard();
         assert!(guarded.tect, "guard must force tectonic if all five landforms are off");
@@ -523,6 +543,8 @@ mod tests {
             erosion: true,
             ridges: false,
             beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
         };
         let guarded = flags.apply_guard();
         assert!(guarded.tect, "guard should preserve existing tectonic state");

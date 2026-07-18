@@ -616,7 +616,7 @@ pub struct ErosionState {
     pub export_total: i64,
 }
 
-/// Run the fixed `MACRO_ITERATIONS` erosion macro-loop (recompute drainage → stream-power incision
+/// Run the scaled erosion macro-loop (recompute drainage → stream-power incision
 /// → thermal talus, each iteration) over an ALREADY-BUILT initial `height`/`resistance` pair. Shared
 /// by [`erode_with_tectonics`]'s tectonics-on and tectonics-off paths so the macro-loop itself is
 /// never duplicated: the tectonic scarp/lineament overlay (if any) has already been folded into
@@ -624,15 +624,18 @@ pub struct ErosionState {
 /// tectonics-awareness of its own.
 /// W-18: added enable_erosion parameter. When false, skips the erosion macro-loop but still
 /// computes drainage and surface materials, preserving the accumulated source field (base+tect+volcanic).
-fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, resistance: Vec<i64>, enable_erosion: bool) -> ErosionState {
+/// W-19: erosion_strength (percent, default 100) scales the iteration count via: effective_iters = (MACRO_ITERATIONS * strength) / 100.
+fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, resistance: Vec<i64>, enable_erosion: bool, erosion_strength: i64) -> ErosionState {
     let n = dim * dim;
     let initial_height = height.clone();
 
     let mut export_total: i64 = 0;
 
     // W-18: when enable_erosion=false, skip the erosion macro-loop entirely (pass-through mode)
+    // W-19: erosion_strength scales the macro loop iteration count (default 100 = MACRO_ITERATIONS)
     if enable_erosion {
-        for _ in 0..MACRO_ITERATIONS {
+        let n_iters = ((MACRO_ITERATIONS as i64 * erosion_strength) / 100) as usize;
+        for _ in 0..n_iters {
         // 1. Recompute drainage on the CURRENT eroding surface (reused verbatim from gen::drainage).
         let filled = priority_flood_fill(dim, &height);
         let downstream = d8_directions(dim, &filled);
@@ -807,6 +810,7 @@ pub fn erode_with_tectonics(
     enable_volcanic: bool,
     enable_ridges: bool,
     enable_erosion: bool,
+    erosion_strength: i64,
 ) -> ErosionState {
     let n = dim * dim;
     let mut height = vec![0i64; n];
@@ -925,7 +929,7 @@ pub fn erode_with_tectonics(
         }
     }
 
-    erode_from_fields(seed, hmax, dim, height, resistance, enable_erosion)
+    erode_from_fields(seed, hmax, dim, height, resistance, enable_erosion, erosion_strength)
 }
 
 /// Sample `height_at` + `resistance_field` over a `dim × dim` grid and run the fixed
@@ -945,8 +949,11 @@ pub fn erode_with_tectonics(
 /// orthogonal to other gates. Ridge logic is gated by `enable_fault_scarp` (both uplift and ridges
 /// require fault bands; no ridges without tectonic uplift).
 /// W-18: added enable_base and enable_erosion parameters (SOURCES vs TRANSFORMS).
-pub fn erode(seed: u64, hmax: i64, dim: usize, enable_base: bool, enable_tectonics: bool, enable_volcanic: bool, enable_ridges: bool, enable_erosion: bool) -> ErosionState {
-    erode_with_tectonics(seed, hmax, dim, enable_base, enable_tectonics, enable_tectonics, enable_volcanic, enable_ridges, enable_erosion)
+/// W-19: added erosion_strength parameter (percent, default 100, clamped to [0, 400]).
+pub fn erode(seed: u64, hmax: i64, dim: usize, enable_base: bool, enable_tectonics: bool, enable_volcanic: bool, enable_ridges: bool, enable_erosion: bool, erosion_strength: i64) -> ErosionState {
+    // Clamp strength to valid range [0, 400]
+    let clamped_strength = erosion_strength.clamp(0, 400);
+    erode_with_tectonics(seed, hmax, dim, enable_base, enable_tectonics, enable_tectonics, enable_volcanic, enable_ridges, enable_erosion, clamped_strength)
 }
 
 #[cfg(test)]
@@ -1221,7 +1228,7 @@ mod tests {
     #[test]
     fn erode_conserves_rock_plus_export_exactly() {
         const DIM: usize = 16;
-        let state = erode(SEED, HMAX, DIM, true, false, false, false, true);
+        let state = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -1241,8 +1248,8 @@ mod tests {
 
     #[test]
     fn erode_is_deterministic_across_repeated_calls() {
-        let a = erode(SEED, HMAX, 16, true, false, false, false, true);
-        let b = erode(SEED, HMAX, 16, true, false, false, false, true);
+        let a = erode(SEED, HMAX, 16, true, false, false, false, true, 100);
+        let b = erode(SEED, HMAX, 16, true, false, false, false, true, 100);
         assert_eq!(a, b, "erode must be byte-identical across repeated calls");
     }
 
@@ -1253,7 +1260,7 @@ mod tests {
         // material diversity (Soil vs Bedrock) needs enough drainage-area range to cross
         // INCISION_EXPOSURE_THRESHOLD somewhere — a smaller probe grid (e.g. 32) may not reach it.
         const DIM: usize = 64;
-        let state = erode(SEED, HMAX, DIM, true, false, false, false, true);
+        let state = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
         let mut initial_height = vec![0i64; DIM * DIM];
         for z in 0..DIM {
             for x in 0..DIM {
@@ -1275,7 +1282,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, false, false, true);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, false, false, true, 100);
 
         const CASES: &[(usize, i64, MaterialId)] = &[
             (0, 129, MaterialId::Soil),
@@ -1294,8 +1301,8 @@ mod tests {
 
     #[test]
     fn erode_with_tectonics_is_deterministic_across_repeated_calls() {
-        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true);
-        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true);
+        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100);
+        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100);
         assert_eq!(a, b, "erode_with_tectonics must be byte-identical across repeated calls");
     }
 
@@ -1303,8 +1310,8 @@ mod tests {
     fn erode_tectonics_gate_reproduces_pre_396_erode_byte_for_byte() {
         // Both flags false must be IDENTICAL to erode()'s pre-#396 body (this is a pure structural
         // refactor into erode_from_fields/erode_with_tectonics — no behavior change when off).
-        let via_erode = erode(SEED, HMAX, 16, true, false, false, false, true);
-        let via_flags = erode_with_tectonics(SEED, HMAX, 16, true, false, false, false, false, true);
+        let via_erode = erode(SEED, HMAX, 16, true, false, false, false, true, 100);
+        let via_flags = erode_with_tectonics(SEED, HMAX, 16, true, false, false, false, false, true, 100);
         assert_eq!(via_erode, via_flags, "erode(..,false) must equal erode_with_tectonics(..,false,false)");
     }
 
@@ -1383,9 +1390,9 @@ mod tests {
         // `K_INCISE_DEN`'s doc) — mirrors `caps.rs`'s `ROCK_SLOPE_THRESHOLD`.
         const STEEP_THRESHOLD: i64 = 4;
 
-        let a = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false, false, true);
-        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, false, false, false, true);
-        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true);
+        let a = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false, false, true, 100);
+        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, false, false, false, true, 100);
+        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100);
 
         let a_count = steep_edge_count(&a.height, DIM, STEEP_THRESHOLD);
         let c_count = steep_edge_count(&c.height, DIM, STEEP_THRESHOLD);
@@ -1422,7 +1429,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, true, false, false, true);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, true, false, false, true, 100);
 
         // W-13 re-pin: warp + BELT_HALF_WIDTH 2→4 + single-fold multifractal (enable_tectonics=true path).
         // Warp applies to fault-scarp, resistance-band, and ridge-belt distance when tectonics ON.
@@ -1443,8 +1450,8 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let off = erode(SEED, HMAX, DIM, true, false, false, false, true);
-        let on = erode(SEED, HMAX, DIM, true, false, true, false, true);
+        let off = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
+        let on = erode(SEED, HMAX, DIM, true, false, true, false, true, 100);
         assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
     }
 
@@ -1463,8 +1470,8 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 16;
-        let a = erode(SEED, HMAX, DIM, true, false, false, false, true);
-        let b = erode(SEED, HMAX, DIM, true, false, false, false, true);
+        let a = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
+        let b = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
         assert_eq!(a, b, "erode(..,enable_volcanic=false) must be byte-identical across repeated calls");
     }
 
@@ -1478,7 +1485,7 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let state = erode(SEED, HMAX, DIM, true, false, true, false, true);
+        let state = erode(SEED, HMAX, DIM, true, false, true, false, true, 100);
         let vents = crate::gen::volcanic::build_vents(SEED, DIM);
         let geom = crate::gen::volcanic::EdificeGeom::derive(DIM, HMAX);
 
@@ -1579,7 +1586,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, true, false, true);
+        let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, true, false, true, 100);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
         const EXPECTED: [i64; 4] = [152, 137, 133, 157]; // W-16b amendment: shield radius fix (peak*5/24), pinned from CI run 29652655892 (x86 debug and arm64 release IDENTICAL)
