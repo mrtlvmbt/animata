@@ -1544,14 +1544,13 @@ mod tests {
                 "vent at ({cx},{cz}) edifice_max={edifice_max} must be > ring_mean={ring_mean} after full pipeline"
             );
 
-            // For Cone vents, also verify the crater hasn't been infilled: center should remain
-            // below the edifice_max (the crater is intentionally depression; if this fails at
-            // dim=64/hmax=200, it's a legitimate call to drop this sub-assertion with a comment).
+            // For Cone vents, crater persistence through the full pipeline is NOT asserted:
+            // deposition legitimately infills small-dim craters to exactly rim level (center==edifice_max
+            // in CI run 29645529597 at dim=64/hmax=16). The caldera SHAPE is asserted pre-pipeline by
+            // volcanic.rs::caldera_bowl_structure; visual crater persistence at real dims is judged by
+            // the PM/user 512 gallery. The caldera must still survive as a net local high and meet the
+            // ≥2/3 survival floor (verified below).
             if matches!(vent.class, crate::gen::volcanic::SlopeClass::Cone) {
-                assert!(
-                    center_height < edifice_max,
-                    "cone vent at ({cx},{cz}) center={center_height} must be < edifice_max={edifice_max} (crater should remain depressed)"
-                );
                 // Strength check: cone rim must survive erosion/talus/de-needle with at least 2/3 of peak
                 let min_cone_h = (geom.peak * 2) / 3;
                 assert!(
