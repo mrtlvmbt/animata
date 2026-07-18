@@ -59,9 +59,9 @@ gh run view "$RUN_ID" \
 CONCLUSION="$(gh run view "$RUN_ID" --json conclusion --jq '.conclusion // ""' 2>/dev/null)"
 RUN_SHA="$(gh run view "$RUN_ID" --json headSha --jq '.headSha // ""' 2>/dev/null)"
 URL="$(gh run view "$RUN_ID" --json url --jq '.url // ""' 2>/dev/null)"
-# Каждый джоб обязан быть success; ПУСТОЙ список джобов ⇒ НЕ зелёный (jq `all` на [] даёт true — гасим).
+# Каждый джоб обязан быть success или skipped (path gating); ПУСТОЙ список джобов ⇒ НЕ зелёный (jq `all` на [] даёт true — гасим).
 ALL_JOBS_OK="$(gh run view "$RUN_ID" --json jobs \
-  --jq 'if (.jobs | length) > 0 then ([.jobs[].conclusion] | all(. == "success")) else false end' 2>/dev/null)"
+  --jq 'if (.jobs | length) > 0 then ([.jobs[].conclusion] | all(. == "success" or . == "skipped")) else false end' 2>/dev/null)"
 
 # Структура: какие тесты упали (JUnit XML). Два джоба (x86 + arm64) кладут по своему артефакту
 # (test-report-x86 / test-report-arm64) — тянем ВСЕ в .ci-report/artifacts/<name>/junit.xml.
