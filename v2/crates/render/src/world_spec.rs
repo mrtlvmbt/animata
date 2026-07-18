@@ -223,17 +223,21 @@ impl Stage {
 /// Landform flags: derived deterministically from seed + standalone mode.
 /// Returns LandformFlags with base, tectonic, aeolian, volcanic, glacial, coastal, erosion, ridges, beaches.
 ///
-/// W-18: Each landform toggles independently (well-spaced bit positions in splitmix64).
+/// W-18: Absent explicit flags (§10 ТЗ #483) use auto mode with base=true, erosion=true ALWAYS.
+/// The seven dynamic landforms (tect, aeolian, volcanic, glacial, coastal, ridges, beaches) toggle
+/// independently via splitmix64 bits at shifts 3/13/23/33/43/53/59.
 /// SOURCES (base, tect/ridges, volcanic) vs TRANSFORMS (erosion, aeolian, glacial, coastal/beaches).
-/// Splitmix64 bit layout: base at shift 47, erosion at shift 29, tect/aeolian/volcanic/glacial/coastal at shifts 3/13/23/33/43,
-/// ridges at shift 53, beaches at shift 59.
-/// **CRITICAL:** base and erosion bits are INVERTED so that the DEFAULT state (base=true, erosion=true)
-/// contributes salt IDENTICAL to today (0 at both positions), preserving byte-identity of default flags.
+///
+/// **CRITICAL:** base and erosion are NOT part of the seed-derived bit extraction.
+/// Auto mode (standalone=true, no explicit CLI flags) HARDCODES base=true, erosion=true.
+/// Only explicit CLI flags (--landforms / --transform) can override base/erosion; sim mode
+/// hardcodes both true as well. This ensures the default state is byte-identical to pre-W-18.
+///
 /// Dependency clamps: ridges &= tect (needs uplift), beaches &= coastal (needs sea datum).
 /// Guard: never all-off for the original five (ensures maps never become flat/featureless).
 pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     if !standalone {
-        // Sim mode: all landforms off (unchanged from original contract)
+        // Sim mode: all landforms off except base/erosion which are always on (unchanged from original contract)
         return LandformFlags {
             base: true,
             tect: false,
@@ -253,20 +257,19 @@ pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^= x >> 31;
 
-    // Extract independent bits for each landform (well-spaced bit positions).
-    // W-18: base and erosion bits are INVERTED so default state matches pre-slice salt.
-    let base = !((x >> 47) & 1 == 1);  // Inverted: false when bit is 1 (salt=1), true when bit is 0 (salt=0)
+    // Extract independent bits for the seven dynamic landforms (well-spaced bit positions).
+    // W-18: base=true and erosion=true are hardcoded in auto mode (no bit extraction).
     let tect = (x >> 3) & 1 == 1;
     let aeol = (x >> 13) & 1 == 1;
     let volc = (x >> 23) & 1 == 1;
     let glac = (x >> 33) & 1 == 1;
     let coast = (x >> 43) & 1 == 1;
-    let erosion = !((x >> 29) & 1 == 1);  // Inverted: false when bit is 1 (salt=1), true when bit is 0 (salt=0)
     let ridg = (x >> 53) & 1 == 1;
     let beach = (x >> 59) & 1 == 1;
 
+    // Auto mode: base and erosion always true; only the seven landforms vary by seed
     // Apply clamps and guard
-    LandformFlags::new(base, tect, aeol, volc, glac, coast, erosion, ridg, beach).apply_guard()
+    LandformFlags::new(true, tect, aeol, volc, glac, coast, true, ridg, beach).apply_guard()
 }
 
 #[cfg(test)]
@@ -337,17 +340,23 @@ mod tests {
         }
     }
 
-    /// W-18: Default flags (base=true, erosion=true) must produce byte-identical salt to pre-W-18
-    /// (when bits 47 and 29 were not extracted). CRITICAL for golden byte-identity.
+    /// W-18: Auto-mode MUST always have base=true, erosion=true (§10 ТЗ #483).
+    /// The seven dynamic landforms derive from splitmix64 bits 3/13/23/33/43/53/59 (byte-compatible).
+    /// This test covers 256 seeds to guarantee the contract holds across the seed space.
     #[test]
-    fn w18_default_flags_match_legacy_salt() {
-        // W-18: base and erosion bits are INVERTED in the salt, so default state (true, true)
-        // produces 0 at both positions 29 and 47, matching the pre-W-18 salt.
-        for seed in [0u64, 1, 42, 0xFFFF_FFFF, 0xDEAD_BEEF, 0xCAFE_BABE] {
+    fn w18_auto_mode_always_enables_base_and_erosion() {
+        // Auto mode (standalone=true) must ALWAYS enable base and erosion,
+        // regardless of seed value. Only explicit CLI flags can override.
+        for seed in 0u64..256 {
             let flags = landform_flags(seed, true);
-            // Default state must have base=true and erosion=true
-            assert!(flags.base, "seed {seed:016x}: default base must be true");
-            assert!(flags.erosion, "seed {seed:016x}: default erosion must be true");
+            assert!(flags.base, "seed {seed:016x}: auto-mode base must always be true (§10 ТЗ #483)");
+            assert!(flags.erosion, "seed {seed:016x}: auto-mode erosion must always be true (§10 ТЗ #483)");
+
+            // Verify the seven dynamic landforms exist and are byte-compatible with pre-W-18.
+            // (tect, aeolian, volcanic, glacial, coastal, ridges, beaches all extract normally)
+            // At least one of the five main landforms should be on (guard ensures this).
+            assert!(flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal,
+                    "seed {seed:016x}: guard must force at least one of the five main landforms");
         }
     }
 
