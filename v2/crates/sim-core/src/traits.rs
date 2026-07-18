@@ -50,14 +50,6 @@ pub trait WorldView: Send + Sync {
     /// Range: [−3000, +5000] (−30°C to +50°C).
     /// Out-of-bounds (x,z) → clamped to nearest valid cell (or panic debug_assert).
     fn temp_at(&self, pos: Vec2Fixed) -> i32;
-
-    /// Primary surface `MaterialId` byte at the cell (W-4 `ErosionState.surface_material`, plus the
-    /// landform overrides — sand/till/basalt/tuff/water). PRESENTATION-ONLY read (the renderer colours
-    /// terrain by physical material, not by biome — biome misses Ocean/landform substrates). Not in
-    /// the tick loop, not in any golden. Default `0` (Air) so non-`ProcgenWorld` stubs need no impl.
-    fn surface_material(&self, _pos: Vec2Fixed) -> u8 {
-        0
-    }
 }
 
 /// The field backend — one CONSERVED resource field (fixed-point integer) and one SIGNAL field (f32)

@@ -65,7 +65,7 @@ fn p5_0_nitrate_inverse_to_oxygen_live_world() {
     let mut high_o2_no3 = Vec::new();
 
     for &seed in BIOME_RICH_SEEDS {
-        let world = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, seed ^ WORLD_SALT, None, true, false, false, false, false, false, true, false, false, 100, 100);
+        let world = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, seed ^ WORLD_SALT, None, false, false, false, false, false);
 
         let mut o2_caps = Vec::new();
         let mut no3_caps = Vec::new();
@@ -122,8 +122,8 @@ fn p5_0_nitrate_inverse_to_oxygen_live_world() {
 fn p5_0_nitrate_determinism_same_seed() {
     const TEST_SEED: u64 = 0xBEEF_CAFE;
 
-    let world1 = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, TEST_SEED ^ WORLD_SALT, None, true, false, false, false, false, false, true, false, false, 100, 100);
-    let world2 = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, TEST_SEED ^ WORLD_SALT, None, true, false, false, false, false, false, true, false, false, 100, 100);
+    let world1 = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, TEST_SEED ^ WORLD_SALT, None, false, false, false, false, false);
+    let world2 = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, TEST_SEED ^ WORLD_SALT, None, false, false, false, false, false);
 
     for x in 0..64 {
         for z in 0..64 {
@@ -151,7 +151,7 @@ fn p5_0_nitrate_generated_unconditionally() {
     // and populated, regardless of whether `enable_nitrate` is true. The test just calls it and
     // gets a value. A future version that tries to access it when enable_nitrate=false would need
     // to explicitly disable it, which would violate P5-0's golden-neutral isolation gate.
-    let world = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, 0xC0DE_CAFE ^ WORLD_SALT, None, true, false, false, false, false, false, true, false, false, 100, 100);
+    let world = ProcgenWorld::new(64, HMAX, RESOURCE_BASE, 0xC0DE_CAFE ^ WORLD_SALT, None, false, false, false, false, false);
     let pos = Vec2Fixed(0, 0);
     let no3 = world.nitrate_resource(pos);
     assert!(

@@ -74,8 +74,7 @@ fn hash_corner(cx: i64, cz: i64, seed: u64, o: u32) -> i64 {
 }
 
 /// One fBm octave's interpolated value noise at `(x, z)`, in `[0, HASH_SCALE)`.
-/// (W-11: made `pub` so ridge field can use it with a different seed salt.)
-pub fn value_noise_octave(x: i64, z: i64, period: i64, seed: u64, o: u32) -> i64 {
+fn value_noise_octave(x: i64, z: i64, period: i64, seed: u64, o: u32) -> i64 {
     let period = period.max(1);
     let cx0 = x.div_euclid(period);
     let cz0 = z.div_euclid(period);

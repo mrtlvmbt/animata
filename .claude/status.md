@@ -1,5 +1,5 @@
-task: #502 W-15b wire --height-scale
-phase: F1 critical fix applied + FINAL review in progress
-blocked_on: code-critic FINAL (agent ad447307e8701451f) + ci-report.sh (run #29661467332)
-next: critic PASS → post to PR; CI green → STATUS done
-updated: 2026-07-19 00:03
+task: #394 ext-0b STEP 0: c_coord knob + measured income(N) observable
+phase: CI
+blocked_on: CI-green on HEAD (v2-golden-arm64 + v2-sim-x86 + golden-arm64 + test-x86 jobs)
+next: Check CI status (gh run view 29165987975); merge PR #395 when CI passes
+updated: 2026-07-11 19:58

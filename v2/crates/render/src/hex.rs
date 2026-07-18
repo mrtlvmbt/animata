@@ -10,10 +10,8 @@ use std::f32::consts::PI;
 /// Hex circumradius (center → corner) in world units. One `WorldView` cell ↦ one hex column.
 pub const HEX_SIZE: f32 = 1.0;
 /// World-Y units per unit of `WorldView::height` — keeps columns proportionate to [`HEX_SIZE`].
-/// A tuned display constant, not load-bearing (render-space only). At 0.3 a full-HMAX (200) column
-/// is 60 world-Y tall vs a hex circumradius of 1 — high relief reads clearly without the 80:1
-/// "picket-fence" towers 0.4 produced on the diverse-relief terragen (tectonic/volcanic peaks).
-pub const HEIGHT_SCALE: f32 = 0.3;
+/// A tuned display constant, not load-bearing (render-space only).
+pub const HEIGHT_SCALE: f32 = 0.4;
 
 /// Canonical flat-top axial neighbour directions, `(dq, dr)` (Red Blob Games, RnD 01 R1). Order is
 /// arbitrary but FIXED — [`edge_for_direction`] is derived against THIS order.

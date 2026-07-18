@@ -14,18 +14,25 @@
 use std::io::Write;
 use world::gen::caps::classify_and_caps;
 use world::gen::material::MaterialId;
-use world::gen::LandformFlags;
-use world::palette::MATERIAL_COLORS;
 
 /// Matches the production world height ceiling (`cli::HMAX`), so erosion / glacial ELA / all
 /// height-relative thresholds fire exactly as the real generator sees them.
 const HMAX: i64 = 200;
 
 /// Primary-material → RGB palette (top-down surface colour).
-/// Reads the canonical palette from `world::palette::MATERIAL_COLORS` (single source of truth,
-/// shared with render). Out-of-range materials default to magenta.
 fn colour(m: u8) -> [u8; 3] {
-    MATERIAL_COLORS.get(m as usize).copied().unwrap_or([255, 0, 255])
+    match m {
+        x if x == MaterialId::Air as u8 => [180, 180, 190], // air (above-surface empty) — pale grey
+        x if x == MaterialId::Sand as u8 => [222, 200, 120], // aeolian sand — tan
+        x if x == MaterialId::Permafrost as u8 => [205, 232, 240], // permafrost — pale ice
+        x if x == MaterialId::Soil as u8 => [96, 132, 66], // soil — green
+        x if x == MaterialId::Bedrock as u8 => [128, 128, 132], // bedrock — grey
+        x if x == MaterialId::Basalt as u8 => [58, 52, 62], // volcanic basalt — near-black
+        x if x == MaterialId::Tuff as u8 => [172, 150, 138], // volcanic tuff — light brown
+        x if x == MaterialId::Till as u8 => [184, 194, 206], // glacial till — grey-blue
+        x if x == MaterialId::Water as u8 => [40, 70, 130], // coastal water — blue (W-SIM-7, #423)
+        _ => [255, 0, 255],                                  // unknown — magenta
+    }
 }
 
 fn parse_seed(s: &str) -> u64 {
@@ -45,7 +52,7 @@ fn main() {
     let out = args.get(3).cloned().unwrap_or_else(|| format!("map_{dim}_{seed:#x}.ppm"));
 
     // patchiness=false, then all five landforms ON.
-    let fields = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true));
+    let fields = classify_and_caps(seed, HMAX, dim, false, true, true, true, true, true);
     assert_eq!(fields.surface_material.len(), dim * dim, "surface_material must be dim*dim");
 
     // P6 binary PPM: header then RGB triples, row-major (idx = z*dim + x).
@@ -57,15 +64,14 @@ fn main() {
     std::fs::File::create(&out).and_then(|mut f| f.write_all(&buf)).expect("write ppm");
 
     // Material histogram to stderr — a quick sanity read without opening the image.
-    // Covers all discriminants: 0-8 (MaterialId), 9-10 (W-10 presentation-only).
-    let mut hist = [0u32; 11];
+    let mut hist = [0u32; 8];
     for &m in &fields.surface_material {
-        if (m as usize) < 11 {
+        if (m as usize) < 8 {
             hist[m as usize] += 1;
         }
     }
-    let names = ["Air", "Sand", "Permafrost", "Soil", "Bedrock", "Basalt", "Tuff", "Till", "Water", "SoilDry", "SoilWet"];
-    eprintln!("wrote {out}  ({dim}x{dim}, seed={seed:#x}, all landforms ON, W-10 enabled)");
+    let names = ["Air", "Sand", "Permafrost", "Soil", "Bedrock", "Basalt", "Tuff", "Till"];
+    eprintln!("wrote {out}  ({dim}x{dim}, seed={seed:#x}, all landforms ON)");
     for (i, n) in names.iter().enumerate() {
         if hist[i] > 0 {
             eprintln!("  {n:<10} {:>8}  ({:.1}%)", hist[i], 100.0 * hist[i] as f64 / (dim * dim) as f64);
