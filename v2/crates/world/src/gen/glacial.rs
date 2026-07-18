@@ -277,6 +277,9 @@ fn ice_incision_iteration(dim: usize, height: &[i64], ice_mask: &[bool]) -> Vec<
 /// (the till deposition pass's exact integer budget).
 /// W-19: glacial_strength (percent, default 100) scales iteration count via:
 /// effective_iters = (N_GLACIAL_ITERATIONS * strength) / 100.
+/// When strength=0 (n_iters=0), the cirque-flatten pass is SKIPPED entirely — this ensures
+/// strength=0 disables ALL glacial carving (incision + cirque flatten), distinct from enabling the
+/// iteration loop only. Till deposition is budget-driven and automatically zeroes.
 fn ice_incision_pass(dim: usize, mut height: Vec<i64>, ice_mask: &[bool], interior: &[bool], glacial_strength: i64) -> (Vec<i64>, i64) {
     let n = dim * dim;
     let mut excavated_total = 0i64;
@@ -288,7 +291,10 @@ fn ice_incision_pass(dim: usize, mut height: Vec<i64>, ice_mask: &[bool], interi
             excavated_total += delta[v];
         }
     }
-    excavated_total += flatten_interior_components(dim, &mut height, interior);
+    // W-19: Gate cirque-flatten under n_iters > 0; when strength=0, skip all carving
+    if n_iters > 0 {
+        excavated_total += flatten_interior_components(dim, &mut height, interior);
+    }
     (height, excavated_total)
 }
 
