@@ -439,6 +439,9 @@ mod tests {
     /// - Vent centers (guaranteed inside each edifice footprint)
     /// - One mid-flank cell per vent (halfway between center and boundary, clamped in-bounds)
     /// - Far-away cell as zero-control (outside all edifices)
+    ///
+    /// CI-sourced from pass 3 (run 29643308569, `.ci-report/failed.log`); identical on x86 debug
+    /// and arm64 release (integer, arch-stable).
     #[test]
     fn golden_vector_matches_pinned_volcanic_fixture() {
         let dim = 16usize;
@@ -476,8 +479,8 @@ mod tests {
         indices.truncate(4);
 
         let actual: [i64; 4] = [delta[indices[0]], delta[indices[1]], delta[indices[2]], delta[indices[3]]];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // Placeholder — re-pinned via CI pass 3
-        assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices; placeholder awaiting CI pin");
+        const EXPECTED: [i64; 4] = [20, 30, 40, 24]; // CI pass 3 run 29643308569 (x86/arm64 agree)
+        assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices");
     }
 
     /// Acceptance criterion W-16: cone profile monotone non-increasing and δ(R) == 0.
