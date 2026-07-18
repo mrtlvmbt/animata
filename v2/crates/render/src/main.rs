@@ -309,50 +309,127 @@ fn parse_args() -> CliArgs {
                 };
             }
             "--landforms" => {
-                landforms = Some(args.next().expect("--landforms requires a CSV value"));
+                match args.next() {
+                    Some(v) => landforms = Some(v),
+                    None => {
+                        eprintln!("render: --landforms requires a CSV value (use --landforms \"\" for none)");
+                        std::process::exit(2);
+                    }
+                }
             }
             "--transform" => {
-                transforms = Some(args.next().expect("--transform requires a CSV value"));
+                match args.next() {
+                    Some(v) => transforms = Some(v),
+                    None => {
+                        eprintln!("render: --transform requires a CSV value (use --transform \"\" for none)");
+                        std::process::exit(2);
+                    }
+                }
             }
-            other => eprintln!("render: ignoring unknown arg {other:?}"),
+            other => {
+                eprintln!("render: unknown argument {other:?}");
+                std::process::exit(2);
+            }
         }
     }
     CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms, transforms }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
-// ── U-10: Parse landform flags from CSV string ──────────────────────────────────────────────────
-/// Parse explicit landform flags from a CSV string (e.g., "tect,coastal,beaches").
-/// Valid field names: tect, aeolian, volcanic, glacial, coastal, ridges, beaches.
-/// Invalid names are logged via eprintln but do not cause a panic (GL-loop safety).
-/// Returns LandformFlags with clamps applied.
-fn parse_landform_flags(csv: &str) -> world_spec::LandformFlags {
+// ── W-18: Parse sources vs transforms from CSV strings ──────────────────────────────────────────────
+/// Parse SOURCES from CSV string (e.g., "base,tect,volcanic").
+/// Valid sources: base, tect, ridges, volcanic.
+/// Empty string means all sources off (explicitly NONE).
+/// Unknown tokens trigger fail-fast exit(2).
+fn parse_sources_flags(csv: &str) -> world_spec::LandformFlags {
+    // Empty CSV means explicitly NONE — all sources off
+    if csv.trim().is_empty() {
+        return world_spec::LandformFlags::new(false, false, false, false, false, false, true, false, false);
+    }
+
+    let mut base = false;
     let mut tect = false;
-    let mut aeolian = false;
     let mut volcanic = false;
+    let mut ridges = false;
+
+    for token in csv.split(',') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;  // Skip empty tokens
+        }
+        match token {
+            "base" => base = true,
+            "tect" => tect = true,
+            "volcanic" => volcanic = true,
+            "ridges" => ridges = true,
+            other => {
+                eprintln!("render: --landforms: unrecognized source '{other}' (valid: base, tect, ridges, volcanic)");
+                std::process::exit(2);
+            }
+        }
+    }
+
+    // Don't apply guard here — sources are additive, guard only applies to final combined flags
+    world_spec::LandformFlags::new(base, tect, false, volcanic, false, false, true, ridges, false)
+}
+
+/// Parse TRANSFORMS from CSV string (e.g., "erosion,aeolian,coastal").
+/// Valid transforms: erosion, aeolian, glacial, coastal, beaches.
+/// Empty string means all transforms off (explicitly NONE).
+/// Unknown tokens trigger fail-fast exit(2).
+fn parse_transforms_flags(csv: &str) -> world_spec::LandformFlags {
+    // Empty CSV means explicitly NONE — all transforms off
+    if csv.trim().is_empty() {
+        return world_spec::LandformFlags::new(true, false, false, false, false, false, false, false, false);
+    }
+
+    let mut erosion = false;
+    let mut aeolian = false;
     let mut glacial = false;
     let mut coastal = false;
-    let mut ridges = false;
     let mut beaches = false;
 
     for token in csv.split(',') {
         let token = token.trim();
+        if token.is_empty() {
+            continue;  // Skip empty tokens
+        }
         match token {
-            "tect" => tect = true,
+            "erosion" => erosion = true,
             "aeolian" => aeolian = true,
-            "volcanic" => volcanic = true,
             "glacial" => glacial = true,
             "coastal" => coastal = true,
-            "ridges" => ridges = true,
             "beaches" => beaches = true,
-            "" => {}  // Skip empty tokens (e.g., trailing comma)
-            other => eprintln!("render: --landforms: unrecognized flag '{other}' (valid: tect, aeolian, volcanic, glacial, coastal, ridges, beaches)"),
+            other => {
+                eprintln!("render: --transform: unrecognized transform '{other}' (valid: erosion, aeolian, glacial, coastal, beaches)");
+                std::process::exit(2);
+            }
         }
     }
 
-    // U-10: Apply both guard (forces tect if all five originals off) and clamps (ridges&=tect, beaches&=coastal).
-    // Guard runs first, then clamps, so guard's tect-enabling makes ridges/beaches permissible.
-    world_spec::LandformFlags::new(tect, aeolian, volcanic, glacial, coastal, ridges, beaches).apply_guard()
+    // Don't apply guard here — transforms are additive
+    world_spec::LandformFlags::new(true, false, aeolian, false, glacial, coastal, erosion, false, beaches)
+}
+
+/// Merge sources and transforms into final LandformFlags (explicit flags bypass guard).
+/// Sources provide base/tect/volcanic/ridges, transforms provide erosion/aeolian/glacial/coastal/beaches.
+/// W-18: Explicit flags (even empty) bypass the "auto-variety guard" per issue §10.
+/// Dependency clamps (ridges&=tect, beaches&=coastal) are NOT applied here — user is explicit.
+fn merge_sources_and_transforms(sources: world_spec::LandformFlags, transforms: world_spec::LandformFlags) -> world_spec::LandformFlags {
+    world_spec::LandformFlags::new(
+        sources.base,           // From sources
+        sources.tect,           // From sources
+        transforms.aeolian,     // From transforms
+        sources.volcanic,       // From sources
+        transforms.glacial,     // From transforms
+        transforms.coastal,     // From transforms
+        transforms.erosion,     // From transforms
+        sources.ridges,         // From sources
+        transforms.beaches,     // From transforms
+    )
+    // W-18: Do NOT call apply_guard() — explicit flags bypass the auto-variety guard (issue §10).
+    // User is explicit; if they provide invalid combos (e.g., ridges without tect),
+    // that's intentional and will result in the clamps disabling them client-side (world_builder).
 }
 
 /// Load a shader source from file. Tries multiple paths to find assets/shaders/ relative to the repo root.
@@ -444,8 +521,27 @@ async fn main() {
     let tuning = tuning::Tuning::load();
 
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
-    // U-10: Parse --landforms CLI flag if provided
-    let explicit_flags = cli_args.landforms.as_ref().map(|csv| parse_landform_flags(csv));
+    // W-18: Parse --landforms (sources) and --transform (transforms) CLI flags if provided
+    let explicit_flags = match (&cli_args.landforms, &cli_args.transforms) {
+        (Some(sources_csv), Some(transforms_csv)) => {
+            let sources = parse_sources_flags(sources_csv);
+            let transforms = parse_transforms_flags(transforms_csv);
+            Some(merge_sources_and_transforms(sources, transforms))
+        }
+        (Some(sources_csv), None) => {
+            let sources = parse_sources_flags(sources_csv);
+            // No transforms specified: use defaults (erosion=true, others=false)
+            let transforms = world_spec::LandformFlags::new(true, false, false, false, false, false, true, false, false);
+            Some(merge_sources_and_transforms(sources, transforms))
+        }
+        (None, Some(transforms_csv)) => {
+            let transforms = parse_transforms_flags(transforms_csv);
+            // No sources specified: use defaults (base=true, tect=false, volcanic=false, ridges=false)
+            let sources = world_spec::LandformFlags::new(true, false, false, false, false, false, true, false, false);
+            Some(merge_sources_and_transforms(sources, transforms))
+        }
+        (None, None) => None,  // No explicit flags: use seed-derived defaults
+    };
 
     let mut spec = WorldSpec {
         seed: cli_args.seed,
@@ -879,8 +975,8 @@ async fn main() {
                 screen_dims: (screen_width(), screen_height()),
                 landform_manual_mode: false,
                 landform_manual_flags: world_spec::LandformFlags {
-                    tect: true, aeolian: false, volcanic: false, glacial: false,
-                    coastal: false, ridges: false, beaches: false,
+                    base: true, tect: true, aeolian: false, volcanic: false, glacial: false,
+                    coastal: false, erosion: true, ridges: false, beaches: false,
                 },
             };
 
@@ -1160,8 +1256,8 @@ async fn main() {
                     // U-10/F2: Store landform state for N key regen in manual mode
                     let mut lf_manual_mode = false;
                     let mut lf_manual_flags = world_spec::LandformFlags {
-                        tect: true, aeolian: false, volcanic: false, glacial: false,
-                        coastal: false, ridges: false, beaches: false,
+                        base: true, tect: true, aeolian: false, volcanic: false, glacial: false,
+                        coastal: false, erosion: true, ridges: false, beaches: false,
                     };
 
                     let ui_out = if let Some(ref load_state) = regen_load_state {
@@ -1201,8 +1297,8 @@ async fn main() {
                             screen_dims: (screen_width(), screen_height()),
                             landform_manual_mode: false,
                             landform_manual_flags: world_spec::LandformFlags {
-                                tect: true, aeolian: false, volcanic: false, glacial: false,
-                                coastal: false, ridges: false, beaches: false,
+                                base: true, tect: true, aeolian: false, volcanic: false, glacial: false,
+                                coastal: false, erosion: true, ridges: false, beaches: false,
                             },
                         };
                         let ui_out_inner = ui_root.draw(ctx, &mut ui_ctx);
@@ -1451,55 +1547,77 @@ mod tests {
         assert!(has_mix, "variety gallery requires ≥1 mixed-landform seed (2+ landforms)");
     }
 
-    // U-10: CSV parser tests for --landforms flag
+    // W-18: CSV parser tests for --landforms (sources) and --transform (transforms) flags
     #[test]
-    fn parse_landform_flags_single() {
-        let flags = parse_landform_flags("tect");
-        assert!(flags.tect);
-        assert!(!flags.aeolian && !flags.volcanic && !flags.glacial && !flags.coastal);
+    fn parse_sources_single() {
+        let flags = parse_sources_flags("tect");
+        assert!(flags.tect && !flags.base && !flags.volcanic && !flags.ridges);
     }
 
     #[test]
-    fn parse_landform_flags_multiple() {
-        let flags = parse_landform_flags("tect,coastal,beaches");
-        assert!(flags.tect);
-        assert!(flags.coastal);
-        assert!(flags.beaches);
-        assert!(!flags.aeolian && !flags.volcanic && !flags.glacial);
+    fn parse_sources_multiple() {
+        let flags = parse_sources_flags("base,tect,volcanic");
+        assert!(flags.base && flags.tect && flags.volcanic);
+        assert!(!flags.ridges);  // Not in sources
     }
 
     #[test]
-    fn parse_landform_flags_with_spaces() {
-        let flags = parse_landform_flags("tect , aeolian , volcanic");
-        assert!(flags.tect && flags.aeolian && flags.volcanic);
+    fn parse_sources_with_spaces() {
+        let flags = parse_sources_flags("base , tect , ridges");
+        assert!(flags.base && flags.tect && flags.ridges);
     }
 
     #[test]
-    fn parse_landform_flags_empty_string() {
-        let flags = parse_landform_flags("");
-        // Should apply guard and force tect since all are off
-        assert!(flags.tect, "empty CSV should force tectonic via guard");
+    fn parse_sources_empty_string() {
+        let flags = parse_sources_flags("");
+        // Empty sources: all sources off (base=false, tect=false, volcanic=false, ridges=false)
+        assert!(!flags.base && !flags.tect && !flags.volcanic && !flags.ridges);
     }
 
     #[test]
-    fn parse_landform_flags_invalid_ignored() {
-        // Invalid tokens should be ignored (logged via eprintln, but no panic)
-        let flags = parse_landform_flags("tect,invalid_flag,coastal");
-        assert!(flags.tect && flags.coastal);
-        assert!(!flags.aeolian);
+    fn parse_transforms_single() {
+        let flags = parse_transforms_flags("erosion");
+        assert!(flags.erosion && !flags.aeolian && !flags.glacial && !flags.coastal && !flags.beaches);
     }
 
     #[test]
-    fn parse_landform_flags_dependency_clamps() {
-        // ridges without explicitly requesting tect triggers the guard, which forces tect,
-        // making ridges permissible via the clamp (ridges &= tect after guard runs).
-        let flags = parse_landform_flags("ridges");
-        assert!(flags.tect && flags.ridges, "guard should force tect; clamp should then permit ridges");
+    fn parse_transforms_multiple() {
+        let flags = parse_transforms_flags("erosion,aeolian,coastal,beaches");
+        assert!(flags.erosion && flags.aeolian && flags.coastal && flags.beaches);
+        assert!(!flags.glacial);
+    }
 
-        // beaches without explicitly requesting coastal: the guard only enables tect,
-        // so beaches remains clamped false (guard doesn't rescue non-tect dependents).
-        let flags2 = parse_landform_flags("beaches");
-        assert!(!flags2.coastal && !flags2.beaches, "guard only enables tect, so beaches stays false (coastal is still off)");
+    #[test]
+    fn parse_transforms_with_spaces() {
+        let flags = parse_transforms_flags("erosion , glacial , coastal");
+        assert!(flags.erosion && flags.glacial && flags.coastal);
+    }
+
+    #[test]
+    fn parse_transforms_empty_string() {
+        let flags = parse_transforms_flags("");
+        // Empty transforms: all transforms off
+        assert!(!flags.erosion && !flags.aeolian && !flags.glacial && !flags.coastal && !flags.beaches);
+    }
+
+    #[test]
+    fn merge_sources_and_transforms_basic() {
+        let sources = parse_sources_flags("base,tect");
+        let transforms = parse_transforms_flags("erosion,aeolian");
+        let merged = merge_sources_and_transforms(sources, transforms);
+        assert!(merged.base && merged.tect && merged.erosion && merged.aeolian);
+        assert!(!merged.volcanic && !merged.glacial && !merged.coastal);
+    }
+
+    #[test]
+    fn merge_empty_flags_no_guard() {
+        // Empty sources + empty transforms = flat map (no guard applied)
+        let sources = parse_sources_flags("");
+        let transforms = parse_transforms_flags("");
+        let merged = merge_sources_and_transforms(sources, transforms);
+        // All should be off (guard is NOT applied for explicit flags)
+        assert!(!merged.base && !merged.tect && !merged.aeolian && !merged.volcanic
+                && !merged.glacial && !merged.coastal && !merged.erosion);
     }
 
     /// F2: Honest unit test for pointer/keyboard gating — fails if gate is deleted.

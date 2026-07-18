@@ -21,11 +21,13 @@ impl ControlRail {
             open_panel: None,
             landform_manual_mode: false,
             landform_manual_flags: super::super::world_spec::LandformFlags {
+                base: true,        // W-18: default on
                 tect: true,
                 aeolian: false,
                 volcanic: false,
                 glacial: false,
                 coastal: false,
+                erosion: true,     // W-18: default on
                 ridges: false,
                 beaches: false,
             },
@@ -156,7 +158,9 @@ fn draw_world_panel(ui: &mut egui::Ui, ui_ctx: &mut UiCtx, rail: &mut ControlRai
             crate::world_spec::landform_flags(ui_ctx.seed, true)
         };
 
-        // Checkbox rows (with clamp logic)
+        // W-18: Checkbox rows (with clamp logic)
+        let mut base_check = flags.base;       // W-18: sources
+        let mut erosion_check = flags.erosion; // W-18: transforms
         let mut tect_check = flags.tect;
         let mut aeol_check = flags.aeolian;
         let mut volc_check = flags.volcanic;
@@ -164,6 +168,16 @@ fn draw_world_panel(ui: &mut egui::Ui, ui_ctx: &mut UiCtx, rail: &mut ControlRai
         let mut coast_check = flags.coastal;
         let mut ridg_check = flags.ridges;
         let mut beach_check = flags.beaches;
+
+        // W-18: Row 0: base (source), erosion (transform)
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(rail.landform_manual_mode, |ui| {
+                ui.checkbox(&mut base_check, "основа");
+            });
+            ui.add_enabled_ui(rail.landform_manual_mode, |ui| {
+                ui.checkbox(&mut erosion_check, "эрозия");
+            });
+        });
 
         // Row 1: тектоника, эоловые, вулканы
         ui.horizontal(|ui| {
@@ -216,7 +230,7 @@ fn draw_world_panel(ui: &mut egui::Ui, ui_ctx: &mut UiCtx, rail: &mut ControlRai
         // Apply clamps and update stored state
         if rail.landform_manual_mode {
             flags = crate::world_spec::LandformFlags::new(
-                tect_check, aeol_check, volc_check, glac_check, coast_check, ridg_check, beach_check
+                base_check, tect_check, aeol_check, volc_check, glac_check, coast_check, erosion_check, ridg_check, beach_check
             ).apply_guard();  // U-10/F3: Apply guard to ensure valid state
             rail.landform_manual_flags = flags;
         }
