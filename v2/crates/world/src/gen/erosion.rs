@@ -818,15 +818,16 @@ pub fn fault_projection_parameter(x: i64, z: i64, fault: &crate::gen::tectonics:
 }
 
 /// W-15a: Compute crest modulation factor from 2-octave value_noise over along-fault arclength.
-/// Returns value in [51, 166] (/128 fixed-point, i.e., 40%..130% range).
-/// Input t: along-fault arclength parameter; base_period: dim/8 at production dim=512.
-/// Uses 2 octaves with period dim/8 and dim/16 for broad and fine modulation.
+/// Returns value in [115, 141] (/128 fixed-point, i.e., 90%..110% range).
+/// W-15a fix: narrowed from [51,166] to reduce per-cell delta step to stay under W-9 bound (4 units).
+/// Input t: along-fault arclength parameter; base_period: dim/4 at production dim=512 (doubled from dim/8).
+/// Uses 2 octaves with half-period for fine modulation; doubled base period lowers spatial frequency.
 pub fn crest_modulation(t: i64, fault_index: u32, base_period: i64, seed: u64) -> i64 {
     use crate::gen::height::value_noise_octave;
     let salted_seed = seed ^ RIDGE_CREST_SALT;
 
     // 2-octave value_noise over t (along-fault coordinate)
-    // Octave 0: period = base_period (broad modulation)
+    // Octave 0: period = base_period (broad modulation, lengthened to smooth envelope)
     let octave0 = value_noise_octave(t, fault_index as i64, base_period, salted_seed, 0);
     // Octave 1: period = base_period/2 (fine detail)
     let octave1 = value_noise_octave(t, fault_index as i64, base_period / 2, salted_seed, 1);
@@ -835,11 +836,12 @@ pub fn crest_modulation(t: i64, fault_index: u32, base_period: i64, seed: u64) -
     // max = 2*65536 + 1*65536 = 196608, so we need to scale down
     let combined = (2 * octave0 + octave1) / 3; // Average to [0, 65536)
 
-    // Map to [51, 166]: linear rescale from [0, 65536) to [51, 166]
-    // result = 51 + (combined / 65536) * (166 - 51) = 51 + (combined / 65536) * 115
-    let range = 166 - 51;
-    let modulation = 51 + (combined * range) / 65536;
-    modulation.min(166).max(51)
+    // Map to [115, 141]: linear rescale from [0, 65536) to [115, 141]
+    // Narrowed range keeps modulation ±10% around 128 (baseline), reducing per-cell step to <4 units
+    // result = 115 + (combined / 65536) * (141 - 115) = 115 + (combined / 65536) * 26
+    let range = 141 - 115;
+    let modulation = 115 + (combined * range) / 65536;
+    modulation.min(141).max(115)
 }
 
 /// W-15a: Find the nearest fault to a point and return (fault_index, projection parameter t).
@@ -967,8 +969,9 @@ pub fn erode_with_tectonics(
             let h_p50 = if p50_idx < height_sorted.len() { height_sorted[p50_idx] } else { hmax / 2 };
             let h_p80 = if p80_idx < height_sorted.len() { height_sorted[p80_idx] } else { hmax };
 
-            // W-15a: Compute base period for crest modulation (dim/8 at dim=512)
-            let crest_mod_period = (dim as i64) / 8;
+            // W-15a: Compute base period for crest modulation (dim/4 at dim=512, increased from dim/8
+            // to lower spatial frequency — smoother envelope reduces per-cell step under W-9 bound)
+            let crest_mod_period = (dim as i64) / 4;
 
             // W-15a: Skirt parameters
             const SKIRT_HALF_WIDTH: i64 = 8; // S = 2*W = 2*4 = 8
