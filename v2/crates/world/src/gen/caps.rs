@@ -2142,13 +2142,16 @@ mod tests {
     #[test]
     fn w12_flag_off_byte_purity() {
         const DIM: usize = 64;
+        // W-13: warp + BELT_HALF_WIDTH + single-fold changed terrain. Need seed with suitable beach sites.
+        // Seed 113 picked by PM: produces beach11=5 at 64² on W-13 field (beach-sparse: ~0.02% of cells).
+        const BEACH_TEST_SEED: u64 = 113;
         // WITH beaches ON (coastal+tectonic: beach_deposit can run)
         let (world_beaches_on, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, true), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, true), true, true
         );
         // WITH beaches OFF (same landforms but beaches gate prevents beach_deposit)
         let (world_beaches_off, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, false), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, false), true, true
         );
         // When beaches=true with suitable coastal geography, beach_deposit modifies height.
         // When beaches=false, it doesn't. So we expect DIFFERENT output.
@@ -2192,8 +2195,11 @@ mod tests {
     fn w12_final_observable_beach_sand_count_positive() {
         const DIM: usize = 64;
         // Tectonic+coastal+beaches: creates fault-scarp relief with interesting shores for deposition.
+        // W-13 note: warp + BELT_HALF_WIDTH 2→4 + single-fold multifractal changed terrain shape.
+        // Fixture seed picked by PM 64²-scan on W-13 field (beach11=5); beaches occupy ~0.02% of cells so pin is seed-sensitive.
+        const BEACH_TEST_SEED: u64 = 113;
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, true), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, true, false, true), true, true
         );
         let beach_count = world.surface_material.iter().filter(|&&b| b == 11).count();
         assert!(

@@ -123,21 +123,20 @@ fn w11_ridge_field_has_effect_via_salt() {
     );
 }
 
-/// **NEW: Amplitude sensitivity test**
+/// **NEW: Amplitude sensitivity test (D3 migration)**
 /// Ridge amplitude knob must actually change the delta values.
-/// This test catches saturation: if FBM overshoots the fold's domain, all candidates produce
-/// identical output (zero deltas). With proper FBM normalization, different amplitudes
-/// produce different ridge_delta values.
+/// Now tests with an already-ridged field value (ridge_fbm_at returns [0, 32768]).
+/// Different amplitudes must produce different ridge_delta values.
 #[test]
 fn w11_ridge_amplitude_sensitivity_candidates_differ() {
     // Test ridge delta computation with different amplitudes
-    // Using a representative raw_fbm value in the middle of the range (half-saturated)
-    let raw_fbm = 500_000i64; // In [0, 983040)
+    // Using a representative already-ridged value (mid-crest, normalized to [0, 32768])
+    let ridged = 24_000i64; // Mid-range ridged field value
     let mountainness = 128i64;
 
     // Candidate 0 (conservative: 15/10)
     let delta0 = world::gen::erosion::ridge_delta_compute(
-        raw_fbm,
+        ridged,
         mountainness,
         15, // RIDGE_AMP_NUM for candidate 0
         10, // RIDGE_AMP_DEN for candidate 0
@@ -146,15 +145,15 @@ fn w11_ridge_amplitude_sensitivity_candidates_differ() {
 
     // Candidate 2 (aggressive: 40/10)
     let delta2 = world::gen::erosion::ridge_delta_compute(
-        raw_fbm,
+        ridged,
         mountainness,
         40, // RIDGE_AMP_NUM for candidate 2
         10, // RIDGE_AMP_DEN for candidate 2
         W11_HMAX,
     );
 
-    // With proper FBM normalization, different amplitudes MUST produce different deltas
-    // If they're identical, the amplitude knob is dead (saturation bug not fixed)
+    // With the already-ridged input, different amplitudes MUST produce different deltas
+    // If they're identical, the amplitude knob is dead
     assert_ne!(
         delta0, delta2,
         "ridge delta with amp=15/10 ({}) must differ from amp=40/10 ({}); amplitude knob is dead",
@@ -162,50 +161,76 @@ fn w11_ridge_amplitude_sensitivity_candidates_differ() {
     );
 }
 
-/// **NEW: Anti-saturation test**
-/// Ridge delta should stay within reasonable bounds across the FBM input range.
-/// With RIDGE_SCALE properly chosen, |ridge_delta| should not blow up to hmax,
-/// indicating that the fold is not saturated (not producing all zeros or all ones).
+/// **NEW: Single-fold golden vector for ridge_fbm_at (D3 fold-count tripwire)**
+/// Pin exact output values at K probe coordinates to detect if the fold logic changes.
+/// Any accidental extra fold or dropped fold inside the multifractal shifts these values.
 #[test]
-fn w11_ridge_field_avoids_saturation_to_extremes() {
-    // Test ridge delta across the full FBM range with the default amplitude (25/10)
-    // If FBM saturates, ridged values collapse and deltas should be near-zero everywhere
-    let mut max_delta_abs = 0i64;
-    let mut zero_delta_count = 0;
-    let test_count = 100;
+fn w11_ridge_fbm_at_single_fold_golden_vector() {
+    let seed = W11_SEED;
+    const GOLDEN_PROBES: &[(i64, i64, i64)] = &[
+        // (x, z, expected_ridge_value)
+        // Pinned from fixed Musgrave ridged formula: fold = (65536 - |2n - 65536|) / 2
+        (0, 0, 15307),
+        (7, 11, 23374),
+        (14, 22, 26118),
+        (21, 33, 25859),
+        (28, 44, 25021),
+        (35, 55, 21542),
+    ];
 
-    for fbm_idx in 0..test_count {
-        // Sample FBM range: [0, FBM_MAX)
-        let raw_fbm = (fbm_idx as i64) * (983040i64 / test_count as i64);
-        let mountainness = 256i64; // Max mountainness value
-
-        let delta = world::gen::erosion::ridge_delta_compute(
-            raw_fbm,
-            mountainness,
-            25, // RIDGE_AMP_NUM for candidate 1 (mid)
-            10, // RIDGE_AMP_DEN for candidate 1 (mid)
-            W11_HMAX,
+    for &(x, z, expected) in GOLDEN_PROBES {
+        let actual = world::gen::erosion::ridge_fbm_at(x, z, seed);
+        assert_eq!(
+            actual, expected,
+            "ridge_fbm_at({}, {}) = {} but expected {} — fold count or arithmetic changed",
+            x, z, actual, expected
         );
+    }
+}
 
-        max_delta_abs = max_delta_abs.max(delta.abs());
-        if delta == 0 {
-            zero_delta_count += 1;
-        }
+/// **NEW: Anti-saturation test for ridge_fbm_at (D3 migration)**
+/// The ridged multifractal must normalize to [0, 32768] and show real variation.
+/// Anti-saturation: verify (a) bounds [0, 32768], (b) variation span ≥ VARIATION_SPAN
+/// (two-sided bounds prevent collapse to a constant value).
+#[test]
+fn w11_ridge_fbm_at_avoids_saturation_to_extremes() {
+    let seed = W11_SEED;
+    let dim = W11_DIM;
+
+    // Probe grid ≥64 coordinates to verify normalization and variation
+    let mut min_ridge = i64::MAX;
+    let mut max_ridge = i64::MIN;
+    const VARIATION_SPAN: i64 = 8192; // Expected span: MAX/4 or so
+
+    for probe_idx in 0..64 {
+        // Spread probe coordinates across the map
+        let x = (probe_idx as i64 * 7) % (dim as i64); // ~7-cell stride, wraps
+        let z = (probe_idx as i64 * 11) % (dim as i64);
+        let ridged = world::gen::erosion::ridge_fbm_at(x, z, seed);
+
+        // Track bounds
+        min_ridge = min_ridge.min(ridged);
+        max_ridge = max_ridge.max(ridged);
     }
 
-    // Verify: max|delta| should be much less than hmax (we set it to tens of units, not hundreds)
+    // Verify (a): normalization bounds [0, 32768]
     assert!(
-        max_delta_abs <= W11_HMAX / 2,
-        "max ridge delta {} exceeds hmax/2 ({}); saturation or scale error",
-        max_delta_abs,
-        W11_HMAX / 2
+        min_ridge >= 0,
+        "ridge_fbm_at min {} is below 0 (should be [0, 32768])",
+        min_ridge
+    );
+    assert!(
+        max_ridge <= 32768,
+        "ridge_fbm_at max {} exceeds 32768 (should be [0, 32768])",
+        max_ridge
     );
 
-    // Verify: not all deltas should be zero (fold is working, not saturated to all-zeros)
+    // Verify (b): real variation (two-sided bounds prevent collapse to constant)
+    let span = max_ridge - min_ridge;
     assert!(
-        zero_delta_count < test_count / 2,
-        "too many zero deltas ({}/{}); fold may be saturated",
-        zero_delta_count,
-        test_count
+        span >= VARIATION_SPAN,
+        "ridge_fbm_at span {} is below {}, field may be collapsed to constant",
+        span,
+        VARIATION_SPAN
     );
 }
