@@ -1015,7 +1015,7 @@ async fn main() {
                 cli_args.retained,
             );
 
-            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
             set_default_camera();
 
             // Draw UI panels (including minimap)
@@ -1124,7 +1124,7 @@ async fn main() {
                 cli_args.retained,
             );
 
-            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
             set_default_camera();
 
             next_frame().await;
@@ -1191,7 +1191,7 @@ async fn main() {
             chunk_count = draw_stats.chunks_drawn;
             vert_count = draw_stats.verts_drawn;
 
-            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
             set_default_camera();
 
             let cpu_elapsed = cpu_start.elapsed().as_secs_f32() * 1000.0;
