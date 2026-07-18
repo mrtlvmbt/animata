@@ -919,7 +919,7 @@ pub fn erode_with_tectonics(
 
     if enable_volcanic {
         let vents = crate::gen::volcanic::build_vents(seed, dim);
-        let delta = crate::gen::volcanic::emplace_edifices(dim, &vents);
+        let delta = crate::gen::volcanic::emplace_edifices(dim, hmax, &vents);
         for idx in 0..n {
             height[idx] = (height[idx] + delta[idx]).clamp(0, hmax);
         }
@@ -1480,6 +1480,7 @@ mod tests {
         const DIM: usize = 64;
         let state = erode(SEED, HMAX, DIM, true, false, true, false, true);
         let vents = crate::gen::volcanic::build_vents(SEED, DIM);
+        let geom = crate::gen::volcanic::EdificeGeom::derive(DIM, HMAX);
 
         for vent in &vents {
             let cx = vent.x;
@@ -1487,13 +1488,39 @@ mod tests {
             if cx < 0 || cz < 0 || cx as usize >= DIM || cz as usize >= DIM {
                 continue; // vent center off-grid for this DIM — nothing to sample
             }
-            let summit = state.height[linear_index(cx as usize, cz as usize, DIM)];
 
-            let radius = vent.class.max_radius();
+            // Get radius from geom based on slope class
+            let radius = match vent.class {
+                crate::gen::volcanic::SlopeClass::Shield => geom.shield_radius,
+                crate::gen::volcanic::SlopeClass::Cone => geom.cone_radius,
+            };
+
+            // Find edifice_max: the highest point over the entire edifice disk (r ≤ radius).
+            // For cones with calderas, this finds the rim; for shields, the summit.
+            let mut edifice_max = 0i64;
+            let mut center_height = 0i64;
+            for dz in -(radius)..=radius {
+                for dx in -(radius)..=radius {
+                    let r_sq = dx * dx + dz * dz;
+                    if r_sq > radius * radius {
+                        continue; // outside the disk
+                    }
+                    let px = cx + dx;
+                    let pz = cz + dz;
+                    if px < 0 || pz < 0 || px as usize >= DIM || pz as usize >= DIM {
+                        continue; // off-grid
+                    }
+                    let h = state.height[linear_index(px as usize, pz as usize, DIM)];
+                    if dx == 0 && dz == 0 {
+                        center_height = h; // Track crater for Cone vents
+                    }
+                    edifice_max = edifice_max.max(h);
+                }
+            }
+
+            // Sample the ring at 8 compass points on the outer radius (cheap, deterministic).
             let mut ring_sum = 0i64;
             let mut ring_count = 0i64;
-            // Sample the ring at 8 compass points on the outer radius (cheap, deterministic, no
-            // need for a full circle scan — this is a coarse survival check, not a precise metric).
             const DIRS: [(i64, i64); 8] =
                 [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
             for &(dx, dz) in &DIRS {
@@ -1509,19 +1536,44 @@ mod tests {
                 continue; // entire ring off-grid for this DIM — nothing to compare against
             }
             let ring_mean = ring_sum / ring_count;
+
+            // The edifice's highest point (rim for cones, summit for shields) must remain a net
+            // local high after erosion: strictly higher than the mean of the surrounding ring.
             assert!(
-                summit > ring_mean,
-                "vent at ({cx},{cz}) must remain a net local high after the full pipeline: summit={summit} ring_mean={ring_mean}"
+                edifice_max > ring_mean,
+                "vent at ({cx},{cz}) edifice_max={edifice_max} must be > ring_mean={ring_mean} after full pipeline"
             );
+
+            // For Cone vents, crater persistence through the full pipeline is NOT asserted:
+            // deposition legitimately infills small-dim craters to exactly rim level (center==edifice_max
+            // in CI run 29645529597 at dim=64/hmax=16). The caldera SHAPE is asserted pre-pipeline by
+            // volcanic.rs::caldera_bowl_structure; visual crater persistence at real dims is judged by
+            // the PM/user 512 gallery. The caldera must still survive as a net local high and meet the
+            // ≥2/3 survival floor (verified below).
+            if matches!(vent.class, crate::gen::volcanic::SlopeClass::Cone) {
+                // Strength check: cone rim must survive erosion/talus/de-needle with at least 2/3 of peak
+                let min_cone_h = (geom.peak * 2) / 3;
+                assert!(
+                    edifice_max >= min_cone_h,
+                    "cone vent at ({cx},{cz}) edifice_max={edifice_max} must be >= {min_cone_h} after pipeline"
+                );
+            } else if matches!(vent.class, crate::gen::volcanic::SlopeClass::Shield) {
+                // Strength check: shield summit must survive erosion with at least 2/3 of peak_shield
+                let peak_shield = geom.peak / 2;
+                let min_shield_h = (peak_shield * 2) / 3;
+                assert!(
+                    edifice_max >= min_shield_h,
+                    "shield vent at ({cx},{cz}) edifice_max={edifice_max} must be >= {min_shield_h} after pipeline"
+                );
+            }
         }
     }
 
-    /// Golden vector (ON path): the volcanic-ON `erode` output is pinned at fixed grid indices —
-    /// mirrors `golden_vector_matches_pinned_tectonic_on_erosion_fixture` above.
+    /// Golden vector (ON path): the volcanic-ON `erode` output is pinned at fixed grid indices.
     ///
-    /// Re-pinned for #410 pass 2: CI-sourced — `left:` from both x86 debug (`v2 sim` job) and
-    /// arm64 release (`v2 golden` job), run #29186449162, commit 6eeacf4; both arches agree
-    /// (integer, arch-stable).
+    /// W-16: Re-pinned after profile rework (linear → quadratic cone, new shield formula,
+    /// caldera addition). CI-sourced from pass 1 (`.ci-report/failed.log`, golden-arm64 job);
+    /// identical on arm64 (v2-golden) and x86 (v2-sim), arch-independent.
     #[test]
     fn golden_vector_matches_pinned_volcanic_on_erosion_fixture() {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
@@ -1530,7 +1582,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, true, false, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [132, 127, 126, 122];
+        const EXPECTED: [i64; 4] = [155, 141, 133, 157]; // W-16 amendment: pinned from CI run 29644687192 (x86 debug and arm64 release IDENTICAL)
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }

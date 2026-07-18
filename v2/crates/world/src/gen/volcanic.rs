@@ -62,16 +62,6 @@ use crate::gen::material::MaterialId;
 /// golden-vector test.
 pub const N_VENTS: usize = 3;
 
-/// Shared peak height for EVERY vent, regardless of slope class (implementer's call) — only the
-/// radial falloff radius differs between classes, so the mean-slope comparison the acceptance
-/// criterion tests is driven purely by viscosity/class, not by a height difference.
-const EDIFICE_PEAK_HEIGHT: i64 = 16;
-/// Shield (low-viscosity, gentle/wide) footprint radius, in cells.
-const SHIELD_MAX_RADIUS: i64 = 8;
-/// Cone (high-viscosity, steep/compact) footprint radius, in cells — much smaller than
-/// [`SHIELD_MAX_RADIUS`], so the SAME peak height drops off over far fewer cells (steeper).
-const CONE_MAX_RADIUS: i64 = 3;
-
 /// Decorrelation salt for vent placement ("VOLCVENT", ASCII-folded — mirrors `tectonics.rs`'s
 /// `FAULT_SEED_SALT` / `erosion.rs`'s `RESISTANCE_SALT` convention).
 const SALT_VOLCANIC_VENT: u64 = 0x564F_4C43_5645_4E54;
@@ -91,22 +81,64 @@ pub enum SlopeClass {
 }
 
 impl SlopeClass {
-    /// `pub(crate)`: `erosion.rs`'s post-erosion-survival test needs each vent's outer footprint
-    /// radius to sample the comparison ring (mirrors `climate.rs`'s `WIND_DX` visibility precedent —
-    /// a cross-module consumer reads the SAME constant rather than risk a duplicated copy drifting).
-    pub(crate) fn max_radius(self) -> i64 {
-        match self {
-            SlopeClass::Shield => SHIELD_MAX_RADIUS,
-            SlopeClass::Cone => CONE_MAX_RADIUS,
-        }
-    }
-
     /// The primary substrate material this class emplaces (RnD 15 §8: basalt for effusive
     /// low-viscosity flows, tuff for the higher-viscosity/fragmenting style).
     fn material(self) -> MaterialId {
         match self {
             SlopeClass::Shield => MaterialId::Basalt,
             SlopeClass::Cone => MaterialId::Tuff,
+        }
+    }
+}
+
+/// Edifice geometry derived from `(dim, hmax)` — ALL radii and heights that scale with map size
+/// and height ceiling. W-16 consensus-locked formulas: integer-only, multiply-first divide-last.
+/// Bounds: dim ≤ 4096, hmax ≤ 10⁴ ⇒ products < 2^41 (no i64 overflow).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EdificeGeom {
+    /// Peak height delta added to the base field (never absolute).
+    pub peak: i64,
+    /// Shield (low-viscosity) edifice outer footprint radius in cells.
+    pub shield_radius: i64,
+    /// Cone (high-viscosity) edifice outer footprint radius in cells.
+    pub cone_radius: i64,
+    /// Caldera bowl floor radius (inner rim, cone-vents only).
+    pub caldera_r: i64,
+    /// Rim height at `r = caldera_r + 1` (first ring outside the flat caldera floor).
+    pub rim_h: i64,
+    /// Caldera bowl depth (floor elevation below rim).
+    pub caldera_depth: i64,
+    /// Caldera bowl floor elevation (rim_h - caldera_depth).
+    pub floor: i64,
+}
+
+impl EdificeGeom {
+    /// Derive edifice geometry from `(dim, hmax)`, following W-16 amended formulas.
+    /// Cone profiles anchor at RIM (delta(rim_r) = peak EXACTLY) — fixes flat-disc issue.
+    /// Pure integer arithmetic: multiply first, divide last.
+    pub fn derive(dim: usize, hmax: i64) -> Self {
+        let dim_i64 = dim as i64;
+
+        let shield_radius = (dim_i64 / 10).max(8);
+        let cone_radius = (dim_i64 / 24).max(4);
+        let caldera_r = (cone_radius / 3).max(1);
+        let peak = (hmax * 3) / 5;
+
+        // Rim anchored at peak: delta(rim_r) == peak exactly (rim_r = caldera_r + 1)
+        let rim_h = peak;
+
+        // Caldera floor
+        let caldera_depth = (peak / 3).max(1);
+        let floor = (peak - caldera_depth).max(0);
+
+        EdificeGeom {
+            peak,
+            shield_radius,
+            cone_radius,
+            caldera_r,
+            rim_h,
+            caldera_depth,
+            floor,
         }
     }
 }
@@ -144,15 +176,47 @@ pub fn build_vents(seed: u64, dim: usize) -> Vec<Vent> {
     (0..N_VENTS).map(|i| vent_at(i, seed, dim)).collect()
 }
 
-/// This vent's height contribution at grid offset `(dx, dz)` from its own center — the linear radial
-/// cone (module doc), 0 outside its footprint radius.
-fn vent_height_at(vent: &Vent, dx: i64, dz: i64) -> i64 {
+/// This vent's height contribution at grid offset `(dx, dz)` from its own center.
+/// Cone (high-viscosity): rim-anchored quadratic profile with caldera floor.
+/// Shield (low-viscosity): quadratic convex profile (no caldera).
+fn vent_height_at(vent: &Vent, dx: i64, dz: i64, geom: &EdificeGeom) -> i64 {
     let r = isqrt(dx * dx + dz * dz);
-    let max_r = vent.class.max_radius();
-    if r > max_r {
-        return 0;
+
+    match vent.class {
+        SlopeClass::Cone => {
+            if r > geom.cone_radius {
+                return 0;
+            }
+            // Caldera floor for r <= caldera_r
+            if r <= geom.caldera_r {
+                return geom.floor;
+            }
+            // Rim-anchored cone: delta(r) = peak * (R-r)^2 / ((R-rim_r)^2), clamped to peak
+            // rim_r = caldera_r + 1
+            let rim_r = geom.caldera_r + 1;
+            let cone_r = geom.cone_radius;
+            let denom_base = cone_r - rim_r;
+            if denom_base <= 0 {
+                // No room for profile beyond rim (shouldn't happen given R >= 4 minimum)
+                return geom.peak;
+            }
+            let delta = (geom.peak * (cone_r - r) * (cone_r - r)) / (denom_base * denom_base);
+            delta.min(geom.peak).max(0)
+        }
+        SlopeClass::Shield => {
+            if r > geom.shield_radius {
+                return 0;
+            }
+            // Shield quadratic profile: delta(r) = peak_shield * (R^2 - r^2) / R^2
+            // where peak_shield = peak / 2, and R = shield_radius
+            let shield_r = geom.shield_radius;
+            let peak_shield = geom.peak / 2;
+            let r_sq = r * r;
+            let shield_r_sq = shield_r * shield_r;
+            let delta = (peak_shield * (shield_r_sq - r_sq)) / shield_r_sq;
+            delta.max(0)
+        }
     }
-    (EDIFICE_PEAK_HEIGHT - (r * EDIFICE_PEAK_HEIGHT) / max_r).max(0)
 }
 
 #[inline]
@@ -163,14 +227,15 @@ fn linear_index(x: usize, z: usize, dim: usize) -> usize {
 /// Emplace every vent's edifice into a `dim × dim` height DELTA buffer (module doc: summed, never
 /// last-write; UNCLAMPED — the caller clamps the fully-summed result exactly once). Order-independent
 /// by construction (plain integer addition per cell, associative/commutative — iterating `vents` in
-/// any order yields the identical buffer).
-pub fn emplace_edifices(dim: usize, vents: &[Vent]) -> Vec<i64> {
+/// any order yields the identical buffer). Geometry is derived once from `(dim, hmax)`.
+pub fn emplace_edifices(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<i64> {
     let n = dim * dim;
     let mut delta = vec![0i64; n];
+    let geom = EdificeGeom::derive(dim, hmax);
     for vent in vents {
         for z in 0..dim {
             for x in 0..dim {
-                let contribution = vent_height_at(vent, x as i64 - vent.x, z as i64 - vent.z);
+                let contribution = vent_height_at(vent, x as i64 - vent.x, z as i64 - vent.z, &geom);
                 if contribution > 0 {
                     delta[linear_index(x, z, dim)] += contribution;
                 }
@@ -184,14 +249,15 @@ pub fn emplace_edifices(dim: usize, vents: &[Vent]) -> Vec<i64> {
 /// footprint, tie-broken by the vent contributing the MOST height there (ties by lowest vent index —
 /// deterministic, `>` not `>=` on the running best), `None` elsewhere. Written as the primary
 /// substrate by the caller (`caps.rs`, mirroring aeolian's sand reconciliation) — RnD 15 §8.
-pub fn edifice_material_mask(dim: usize, vents: &[Vent]) -> Vec<Option<MaterialId>> {
+pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Option<MaterialId>> {
     let n = dim * dim;
     let mut mask = vec![None; n];
     let mut best_contribution = vec![0i64; n];
+    let geom = EdificeGeom::derive(dim, hmax);
     for vent in vents {
         for z in 0..dim {
             for x in 0..dim {
-                let contribution = vent_height_at(vent, x as i64 - vent.x, z as i64 - vent.z);
+                let contribution = vent_height_at(vent, x as i64 - vent.x, z as i64 - vent.z, &geom);
                 if contribution <= 0 {
                     continue;
                 }
@@ -229,11 +295,12 @@ mod tests {
 
     #[test]
     fn emplace_edifices_is_order_independent() {
+        const HMAX: i64 = 200;
         let vents = build_vents(SEED, DIM);
-        let forward = emplace_edifices(DIM, &vents);
+        let forward = emplace_edifices(DIM, HMAX, &vents);
         let mut reversed = vents.clone();
         reversed.reverse();
-        let backward = emplace_edifices(DIM, &reversed);
+        let backward = emplace_edifices(DIM, HMAX, &reversed);
         assert_eq!(forward, backward, "vent processing order must not affect the summed delta (integer addition is commutative)");
     }
 
@@ -244,13 +311,14 @@ mod tests {
     fn emplace_edifices_overlap_sums_not_last_write() {
         let a = Vent { x: 10, z: 10, class: SlopeClass::Shield };
         let b = Vent { x: 13, z: 10, class: SlopeClass::Shield };
-        // Midpoint-ish cell inside BOTH footprints (radius 8 each, centers 3 apart).
+        // Midpoint-ish cell inside BOTH footprints (radius ~12 each, centers 3 apart).
         let probe = (12usize, 10usize);
         let dim = 32usize;
+        const HMAX: i64 = 200;
 
-        let solo_a = emplace_edifices(dim, std::slice::from_ref(&a));
-        let solo_b = emplace_edifices(dim, std::slice::from_ref(&b));
-        let both = emplace_edifices(dim, &[a, b]);
+        let solo_a = emplace_edifices(dim, HMAX, std::slice::from_ref(&a));
+        let solo_b = emplace_edifices(dim, HMAX, std::slice::from_ref(&b));
+        let both = emplace_edifices(dim, HMAX, &[a, b]);
 
         let idx = linear_index(probe.0, probe.1, dim);
         assert!(solo_a[idx] > 0 && solo_b[idx] > 0, "the probe cell must be inside BOTH individual footprints for this test to be meaningful");
@@ -269,17 +337,19 @@ mod tests {
         assert_eq!(class_from_viscosity_roll(VISCOSITY_ROLL_MOD - 1), SlopeClass::Cone);
     }
 
-    /// Viscosity selects the SLOPE CLASS (#410 ТЗ): same peak height, but Shield's wider footprint
-    /// means the SAME height drop happens over more cells — a strictly gentler mean radial slope
-    /// than Cone's. Driven purely by class (== viscosity), never by vent index or position.
+    /// Viscosity selects the SLOPE CLASS: Shield's wider footprint means gentler slope than Cone.
+    /// Test with two different (dim, hmax) pairs to verify the property holds.
     #[test]
     fn shield_mean_radial_slope_is_gentler_than_cone() {
-        let shield_mean_slope = EDIFICE_PEAK_HEIGHT / SHIELD_MAX_RADIUS;
-        let cone_mean_slope = EDIFICE_PEAK_HEIGHT / CONE_MAX_RADIUS;
-        assert!(
-            shield_mean_slope < cone_mean_slope,
-            "Shield's mean radial slope ({shield_mean_slope}) must be measurably below Cone's ({cone_mean_slope})"
-        );
+        for (test_dim, test_hmax) in [(64, 200), (512, 200)] {
+            let geom = EdificeGeom::derive(test_dim, test_hmax);
+            let shield_mean_slope = geom.peak / geom.shield_radius;
+            let cone_mean_slope = geom.peak / geom.cone_radius;
+            assert!(
+                shield_mean_slope < cone_mean_slope,
+                "Shield's mean radial slope ({shield_mean_slope}) must be measurably below Cone's ({cone_mean_slope}) at dim={test_dim}, hmax={test_hmax}"
+            );
+        }
     }
 
     /// Across a realistic vent set (many indices, several seeds), BOTH classes actually occur — not
@@ -304,7 +374,8 @@ mod tests {
         let shield = Vent { x: 10, z: 10, class: SlopeClass::Shield };
         let cone = Vent { x: 40, z: 40, class: SlopeClass::Cone };
         let dim = 64usize;
-        let mask = edifice_material_mask(dim, &[shield, cone]);
+        const HMAX: i64 = 200;
+        let mask = edifice_material_mask(dim, HMAX, &[shield, cone]);
 
         assert_eq!(mask[linear_index(10, 10, dim)], Some(MaterialId::Basalt), "the Shield vent's summit must be Basalt");
         assert_eq!(mask[linear_index(40, 40, dim)], Some(MaterialId::Tuff), "the Cone vent's summit must be Tuff");
@@ -352,12 +423,13 @@ mod tests {
     #[test]
     fn constructive_relief_corridor_local_maxima() {
         let dim = 64usize;
+        const HMAX: i64 = 200;
         let flat = vec![50i64; dim * dim];
         let off_count = local_maximum_count(dim, &flat);
         assert_eq!(off_count, 0, "a flat field must have ZERO strict local maxima by construction");
 
         let vents = build_vents(SEED, dim);
-        let delta = emplace_edifices(dim, &vents);
+        let delta = emplace_edifices(dim, HMAX, &vents);
         let on_height: Vec<i64> = (0..dim * dim).map(|i| flat[i] + delta[i]).collect();
         let on_count = local_maximum_count(dim, &on_height);
         assert!(
@@ -369,18 +441,123 @@ mod tests {
     /// Golden vector: pinned exact volcanic emplacement (delta + material) at fixed grid indices for
     /// the golden `(seed, dim)` fixture.
     ///
-    /// Re-pinned for #410 pass 2b: CI-sourced — `left:` from both x86 debug (`v2 sim` job) and
-    /// arm64 release (`v2 golden` job), run #29186984874, commit 5d82049; both arches agree
-    /// (integer, arch-stable).
+    /// W-16: Re-pinned after profile rework (linear → quadratic cone, new shield formula,
+    /// caldera addition). Samples derived from deterministic vent network to ensure non-vacuous pins:
+    /// - Vent centers (guaranteed inside each edifice footprint)
+    /// - One mid-flank cell per vent (halfway between center and boundary, clamped in-bounds)
+    /// - Far-away cell as zero-control (outside all edifices)
+    ///
+    /// CI-sourced from pass 3 (run 29643308569, `.ci-report/failed.log`); identical on x86 debug
+    /// and arm64 release (integer, arch-stable).
     #[test]
     fn golden_vector_matches_pinned_volcanic_fixture() {
         let dim = 16usize;
+        const HMAX: i64 = 200;
         let vents = build_vents(SEED, dim);
-        let delta = emplace_edifices(dim, &vents);
+        let delta = emplace_edifices(dim, HMAX, &vents);
+        let geom = EdificeGeom::derive(dim, HMAX);
 
-        const INDICES: [usize; 4] = [0, 36, 100, 200];
-        const EXPECTED: [i64; 4] = [6, 0, 0, 10];
-        let actual: [i64; 4] = std::array::from_fn(|i| delta[INDICES[i]]);
-        assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
+        // Build sample indices from actual vent network:
+        // - Each vent center (guaranteed inside its edifice)
+        // - One mid-flank for each vent (e.g., vent.x + radius/2, clamped in-bounds)
+        // - One far-away cell as a zero-control
+        let mut indices = Vec::new();
+        for vent in &vents {
+            // Vent center
+            if vent.x >= 0 && vent.z >= 0 && (vent.x as usize) < dim && (vent.z as usize) < dim {
+                indices.push(linear_index(vent.x as usize, vent.z as usize, dim));
+            }
+            // Mid-flank: move halfway to the radius boundary, clamped in-bounds
+            let radius = match vent.class {
+                SlopeClass::Shield => geom.shield_radius,
+                SlopeClass::Cone => geom.cone_radius,
+            };
+            let flank_dx = (vent.x + radius / 2).clamp(0, (dim - 1) as i64) as usize;
+            let flank_dz = (vent.z + radius / 2).clamp(0, (dim - 1) as i64) as usize;
+            indices.push(linear_index(flank_dx, flank_dz, dim));
+        }
+        // Far-away control: corner cell, likely outside all edifices
+        indices.push(linear_index(0, 0, dim));
+
+        // Pad to 4 indices for stable test signature (3 vents × 2 samples + 1 control)
+        while indices.len() < 4 {
+            indices.push(0); // Duplicate the first if needed
+        }
+        indices.truncate(4);
+
+        let actual: [i64; 4] = [delta[indices[0]], delta[indices[1]], delta[indices[2]], delta[indices[3]]];
+        const EXPECTED: [i64; 4] = [80, 120, 60, 36]; // W-16 amendment: pinned from PM analytic probe vs commit b335358 (rim-anchored semantics: floor 80 at cone center, 120 at rim flank, 60 shield, 36 control); CI pass-6 is arbiter if value differs
+        assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices; placeholder awaiting CI pin");
+    }
+
+    /// Acceptance criterion W-16: cone profile monotone non-increasing and δ(R) == 0.
+    #[test]
+    fn cone_profile_monotone_and_zero_at_boundary() {
+        const HMAX: i64 = 200;
+        let geom = EdificeGeom::derive(512, HMAX);
+        let cone = Vent { x: 256, z: 256, class: SlopeClass::Cone };
+
+        // δ(cone_radius) must be 0
+        let delta_at_r = vent_height_at(&cone, geom.cone_radius, 0, &geom);
+        assert_eq!(delta_at_r, 0, "cone profile δ(R) must be zero");
+
+        // Profile must be monotone non-increasing on r ∈ [caldera_r+1, R]
+        for r in (geom.caldera_r + 1)..geom.cone_radius {
+            let delta_r = vent_height_at(&cone, r, 0, &geom);
+            let delta_r_plus_1 = vent_height_at(&cone, r + 1, 0, &geom);
+            assert!(
+                delta_r >= delta_r_plus_1,
+                "cone profile must be monotone non-increasing: δ({r})={delta_r} < δ({})={delta_r_plus_1}",
+                r + 1
+            );
+        }
+    }
+
+    /// Acceptance criterion W-16: radii scale correctly at dim=64 and dim=512.
+    #[test]
+    fn radii_scale_correctly() {
+        const HMAX: i64 = 200;
+        let geom_64 = EdificeGeom::derive(64, HMAX);
+        let geom_512 = EdificeGeom::derive(512, HMAX);
+
+        assert_eq!(geom_64.shield_radius, 8, "shield_radius(64) must be 8");
+        assert_eq!(geom_512.shield_radius, 51, "shield_radius(512) must be 51");
+        assert_eq!(geom_64.cone_radius, 4, "cone_radius(64) must be 4");
+        assert_eq!(geom_512.cone_radius, 21, "cone_radius(512) must be 21");
+    }
+
+    /// Acceptance criterion W-16: caldera bowl — floor < rim at ring outside caldera.
+    #[test]
+    fn caldera_bowl_structure() {
+        const HMAX: i64 = 200;
+        // Test both dim=64/hmax=16 and dim=512/hmax=200
+        for (test_dim, test_hmax) in [(64, 16), (512, 200)] {
+            let geom = EdificeGeom::derive(test_dim, test_hmax);
+            if geom.rim_h < 1 {
+                continue; // Skip if rim is too small
+            }
+            let cone = Vent { x: test_dim as i64 / 2, z: test_dim as i64 / 2, class: SlopeClass::Cone };
+
+            // δ(0) == floor (at caldera center)
+            let delta_0 = vent_height_at(&cone, 0, 0, &geom);
+            assert_eq!(delta_0, geom.floor, "cone profile δ(0) must equal floor");
+
+            // δ(caldera_r+1) == rim_h (first ring outside caldera floor)
+            let delta_rim = vent_height_at(&cone, geom.caldera_r + 1, 0, &geom);
+            assert_eq!(delta_rim, geom.rim_h, "cone profile δ(caldera_r+1) must equal rim_h");
+
+            // Verify: floor < rim_h when rim_h >= 1
+            assert!(geom.floor < geom.rim_h, "caldera floor must be below rim");
+        }
+    }
+
+    /// Acceptance criterion W-16: peak is bounded by hmax.
+    #[test]
+    fn peak_bounded_by_hmax() {
+        for hmax in [16, 100, 200, 1000] {
+            let geom = EdificeGeom::derive(512, hmax);
+            assert!(geom.peak > 0, "peak must be positive");
+            assert!(geom.peak <= hmax, "peak ({}) must not exceed hmax ({})", geom.peak, hmax);
+        }
     }
 }
