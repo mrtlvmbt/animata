@@ -51,7 +51,7 @@ jobs:
             [ -z "$FILE" ] && continue
             # Use case for robust pattern matching
             case "$FILE" in
-              v2/crates/render/*|*.md|.claude/*|pm/*|.claude-dev-kit)
+              v2/crates/render/*|*.md|.claude/*|pm/*|.claude-dev-kit*)
                 # This file is render-only, continue checking
                 ;;
               *)
