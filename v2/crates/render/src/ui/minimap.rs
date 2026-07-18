@@ -207,8 +207,8 @@ pub fn map_uv_to_panel(u: f32, v: f32, yaw: f32, panel_w: f32, panel_h: f32) -> 
     // panel_y ∝ −dot((cu, cv), screen_up_xz)·FS = −(−cu·cosY − cv·sinY)·FS = (cu·cosY + cv·sinY)·FS
     let panel_y_unnormalized = (cu * cos_yaw + cv * sin_yaw) * FS;
 
-    // Scale to fit the panel with margin
-    let s = ((panel_w * 0.5 - 6.0) / 1.0).min((panel_h * 0.5 - 6.0) / FS);
+    // U-13: Scale to FILL the panel (no margin) — isometric diamond covers the rect edge-to-edge
+    let s = (panel_w * 0.5).min(panel_h * 0.5 / FS);
     let center_x = panel_w * 0.5;
     let center_y = panel_h * 0.5;
 
