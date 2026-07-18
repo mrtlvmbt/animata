@@ -86,12 +86,49 @@ pub struct WorldSpec {
     pub explicit_landform_flags: Option<LandformFlags>,
 }
 
+/// Real execution order of stages in the worldgen pipeline.
+/// The Stage enum is numbered in DISPLAY order (intuitive for UI layout),
+/// but the pipeline runs in this order: heightfield → tectonics → erosion → ridges →
+/// volcanic → glacial → aeolian → coastal → beaches → talus → de-needle → classify.
+/// See [`crate::gen::caps`] for actual stage callbacks.
+/// Used by loader.rs to compare stages by execution position, not raw ordinal.
+pub const EXEC_ORDER: &[u8] = &[
+    0,  // GenerateHeightfield (exec_pos 0)
+    1,  // ApplyTectonics (exec_pos 1)
+    2,  // ApplyErosion (exec_pos 2)
+    3,  // ApplyRidges (exec_pos 3)
+    5,  // ApplyVolcanic (exec_pos 4) — runs before glacial and aeolian
+    6,  // ApplyGlacial (exec_pos 5)
+    4,  // ApplyAeolian (exec_pos 6) — runs after glacial
+    7,  // ApplyCoastal (exec_pos 7)
+    8,  // ApplyBeaches (exec_pos 8)
+    9,  // ApplyTalus (exec_pos 9)
+    10, // DeNeedle (exec_pos 10)
+    11, // Classify (exec_pos 11)
+    12, // BuildMeshes (exec_pos 12)
+    13, // Done (exec_pos 13)
+];
+
 /// Stage of world building (used for progress reporting via callback).
+/// Stages map to worldgen pipeline boundaries: heightfield fbm → tectonics → erosion → ridges →
+/// volcanic → glacial → aeolian → coastal → beaches → talus → de-needle → classify → meshing → done.
+/// Skipped stages (flags off) report instantly — bar must not stall on disabled landforms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Stage {
-    GenerateWorld = 0,
-    BuildMeshes = 1,
-    Done = 2,
+    GenerateHeightfield = 0,
+    ApplyTectonics = 1,
+    ApplyErosion = 2,
+    ApplyRidges = 3,
+    ApplyAeolian = 4,
+    ApplyVolcanic = 5,
+    ApplyGlacial = 6,
+    ApplyCoastal = 7,
+    ApplyBeaches = 8,
+    ApplyTalus = 9,
+    DeNeedle = 10,
+    Classify = 11,
+    BuildMeshes = 12,
+    Done = 13,
 }
 
 impl Stage {
@@ -103,11 +140,76 @@ impl Stage {
     /// Convert from ordinal.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
-            0 => Some(Stage::GenerateWorld),
-            1 => Some(Stage::BuildMeshes),
-            2 => Some(Stage::Done),
+            0 => Some(Stage::GenerateHeightfield),
+            1 => Some(Stage::ApplyTectonics),
+            2 => Some(Stage::ApplyErosion),
+            3 => Some(Stage::ApplyRidges),
+            4 => Some(Stage::ApplyAeolian),
+            5 => Some(Stage::ApplyVolcanic),
+            6 => Some(Stage::ApplyGlacial),
+            7 => Some(Stage::ApplyCoastal),
+            8 => Some(Stage::ApplyBeaches),
+            9 => Some(Stage::ApplyTalus),
+            10 => Some(Stage::DeNeedle),
+            11 => Some(Stage::Classify),
+            12 => Some(Stage::BuildMeshes),
+            13 => Some(Stage::Done),
             _ => None,
         }
+    }
+
+    /// Russian label for display in the loader UI.
+    pub fn label_ru(self) -> &'static str {
+        match self {
+            Stage::GenerateHeightfield => "Высотная карта",
+            Stage::ApplyTectonics => "Тектоника",
+            Stage::ApplyErosion => "Эрозия",
+            Stage::ApplyRidges => "Гребни",
+            Stage::ApplyAeolian => "Ветер",
+            Stage::ApplyVolcanic => "Вулканы",
+            Stage::ApplyGlacial => "Ледники",
+            Stage::ApplyCoastal => "Побережье",
+            Stage::ApplyBeaches => "Пляжи",
+            Stage::ApplyTalus => "Осыпи",
+            Stage::DeNeedle => "Сглаживание",
+            Stage::Classify => "Классификация",
+            Stage::BuildMeshes => "Меширование",
+            Stage::Done => "Готово",
+        }
+    }
+
+    /// Progress permille (0–1000) for this stage.
+    /// Gen pipeline occupies 0..800, meshing/upload 800..1000.
+    /// Order follows EXECUTION sequence: heightfield → tectonics → erosion → ridges → volcanic →
+    /// glacial → aeolian → coastal → beaches → talus → de-needle → classify.
+    pub fn progress_permille(self) -> u32 {
+        match self {
+            Stage::GenerateHeightfield => 0,      // First: heightfield FBM
+            Stage::ApplyTectonics => 57,          // Tectonics (injected into erode)
+            Stage::ApplyErosion => 114,           // Erosion + ridges injected
+            Stage::ApplyRidges => 171,            // Ridges reported after erode
+            Stage::ApplyVolcanic => 228,          // Volcanic mask post-erosion
+            Stage::ApplyGlacial => 343,           // Glacial post-erosion (takes time)
+            Stage::ApplyAeolian => 457,           // Aeolian post-glacial
+            Stage::ApplyCoastal => 514,           // Coastal post-aeolian
+            Stage::ApplyBeaches => 571,           // Beaches post-coastal
+            Stage::ApplyTalus => 628,             // Talus/thermal relaxation
+            Stage::DeNeedle => 685,               // De-needle pass
+            Stage::Classify => 743,               // Biome + caps classification
+            Stage::BuildMeshes => 850,            // Meshing + GPU upload (400‰ for mesh phase)
+            Stage::Done => 1000,
+        }
+    }
+
+    /// Get execution position of this stage in EXEC_ORDER (0..13).
+    /// Used by loader.rs to compare stages by execution order, not display order.
+    /// For example, ApplyVolcanic (ordinal 5) comes BEFORE ApplyAeolian (ordinal 4)
+    /// in execution, so this returns exec_pos(5)=4 < exec_pos(4)=6.
+    pub fn exec_pos(self) -> u8 {
+        let ord = self.as_u8();
+        EXEC_ORDER.iter()
+            .position(|&x| x == ord)
+            .unwrap_or(14) as u8
     }
 }
 
@@ -156,14 +258,18 @@ mod tests {
 
     #[test]
     fn stage_roundtrip_u8() {
-        assert_eq!(Stage::GenerateWorld.as_u8(), 0);
-        assert_eq!(Stage::BuildMeshes.as_u8(), 1);
-        assert_eq!(Stage::Done.as_u8(), 2);
+        assert_eq!(Stage::GenerateHeightfield.as_u8(), 0);
+        assert_eq!(Stage::ApplyTectonics.as_u8(), 1);
+        assert_eq!(Stage::ApplyErosion.as_u8(), 2);
+        assert_eq!(Stage::BuildMeshes.as_u8(), 12);
+        assert_eq!(Stage::Done.as_u8(), 13);
 
-        assert_eq!(Stage::from_u8(0), Some(Stage::GenerateWorld));
-        assert_eq!(Stage::from_u8(1), Some(Stage::BuildMeshes));
-        assert_eq!(Stage::from_u8(2), Some(Stage::Done));
-        assert_eq!(Stage::from_u8(3), None);
+        assert_eq!(Stage::from_u8(0), Some(Stage::GenerateHeightfield));
+        assert_eq!(Stage::from_u8(1), Some(Stage::ApplyTectonics));
+        assert_eq!(Stage::from_u8(2), Some(Stage::ApplyErosion));
+        assert_eq!(Stage::from_u8(12), Some(Stage::BuildMeshes));
+        assert_eq!(Stage::from_u8(13), Some(Stage::Done));
+        assert_eq!(Stage::from_u8(14), None);
     }
 
     #[test]

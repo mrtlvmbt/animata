@@ -991,9 +991,53 @@ pub fn classify_and_caps_staged(
     enable_talus_final: bool,
     enable_w10_diversity: bool,
 ) -> (WorldFields, StagedHeights, LandformMasks) {
+    classify_and_caps_staged_with_callback(seed, hmax, dim, enable_patchiness, flags, enable_talus_final, enable_w10_diversity, None)
+}
+
+/// U-11: Staged pipeline with progress callback (observation-only).
+/// Reports stage ordinals: 0=heightfield, 1=tectonics, 2=erosion, 3=ridges, 4=aeolian,
+/// 5=volcanic, 6=glacial, 7=coastal, 8=beaches, 9=talus, 10=deneedle, 11=classify.
+/// Skipped stages (flags off) report instantly.
+pub fn classify_and_caps_staged_with_callback(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    enable_patchiness: bool,
+    flags: crate::gen::LandformFlags,
+    enable_talus_final: bool,
+    enable_w10_diversity: bool,
+    mut progress_callback: Option<&mut dyn FnMut(u8)>,
+) -> (WorldFields, StagedHeights, LandformMasks) {
+    // U-11: Report all stages in order for monotone progress bar.
+    // Stages that happen inside erode (tectonics/ridges) are reported before/after erode calls.
+    // Skipped stages are reported instantly (callback fired but no processing).
+
+    // Stage 0: GenerateHeightfield (encompasses fbm)
+    if let Some(ref mut cb) = progress_callback {
+        cb(0); // GenerateHeightfield = 0
+    }
+
+    // Stage 1: ApplyTectonics (optional, injected into erode)
+    if let Some(ref mut cb) = progress_callback {
+        cb(1); // ApplyTectonics = 1 (reported before erode, whether enabled or not)
+    }
+
+    // Stage 2: ApplyErosion (encompasses erosion + initial talus)
+    if let Some(ref mut cb) = progress_callback {
+        cb(2); // ApplyErosion = 2
+    }
     let erosion = erode(seed, hmax, dim, flags.tect, flags.volcanic, flags.ridges);
     let n = dim * dim;
 
+    // Stage 3: ApplyRidges (optional, injected into erode; report completion after erode)
+    if let Some(ref mut cb) = progress_callback {
+        cb(3); // ApplyRidges = 3 (reported after erode, whether enabled or not)
+    }
+
+    // Stage 5: ApplyVolcanic (optional, pre-erosion injection)
+    if let Some(ref mut cb) = progress_callback {
+        cb(5); // ApplyVolcanic = 5 (reported whether enabled or not)
+    }
     let volcanic_mask: Vec<Option<MaterialId>> = if flags.volcanic {
         let vents = crate::gen::volcanic::build_vents(seed, dim);
         crate::gen::volcanic::edifice_material_mask(dim, &vents)
@@ -1001,6 +1045,10 @@ pub fn classify_and_caps_staged(
         vec![None; n]
     };
 
+    // Stage 6: ApplyGlacial (optional, post-erosion)
+    if let Some(ref mut cb) = progress_callback {
+        cb(6); // ApplyGlacial = 6 (reported whether enabled or not)
+    }
     let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if flags.glacial {
         let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height);
         (g.height, g.material)
@@ -1008,6 +1056,10 @@ pub fn classify_and_caps_staged(
         (erosion.height.clone(), vec![None; n])
     };
 
+    // Stage 4: ApplyAeolian (optional, post-glacial) - compute based on post_glacial heights
+    if let Some(ref mut cb) = progress_callback {
+        cb(4); // ApplyAeolian = 4 (reported whether enabled or not)
+    }
     let (post_aeolian_height, sand_depth) = if flags.aeolian {
         let initial_sand: Vec<i64> = (0..n)
             .map(|idx| {
@@ -1025,6 +1077,10 @@ pub fn classify_and_caps_staged(
         (post_glacial_height.clone(), vec![0i64; n])
     };
 
+    // Stage 7: ApplyCoastal (optional, post-aeolian)
+    if let Some(ref mut cb) = progress_callback {
+        cb(7); // ApplyCoastal = 7 (reported whether enabled or not)
+    }
     let (post_coastal_height, submerged, sea_level) = if flags.coastal {
         let c = run_coastal(seed, dim, hmax, &post_aeolian_height);
         (c.height, c.submerged, c.sea_level)
@@ -1032,6 +1088,10 @@ pub fn classify_and_caps_staged(
         (post_aeolian_height.clone(), vec![false; n], 0)
     };
 
+    // Stage 8: ApplyBeaches (optional, post-coastal)
+    if let Some(ref mut cb) = progress_callback {
+        cb(8); // ApplyBeaches = 8 (reported whether enabled or not)
+    }
     // W-12: Beach deposition — post-coastal, pre-talus step. Gated on flags.beaches (which is clamped
     // to `beaches &= coastal` at LandformFlags construction, so this gate is safe even when called).
     let (post_beach_height, beach_mask_candidate) = if flags.beaches {
@@ -1040,6 +1100,10 @@ pub fn classify_and_caps_staged(
         (post_coastal_height.clone(), vec![false; n])
     };
 
+    // Stage 9: ApplyTalus (optional, final thermal relaxation post-beaches)
+    if let Some(ref mut cb) = progress_callback {
+        cb(9); // ApplyTalus = 9 (reported whether enabled or not)
+    }
     // W-9: Final-surface thermal relaxation. When enabled, applies Jacobi diffusion to smooth
     // residual spikes from landforms that ran after the erode loop's early talus pass.
     // When disabled, this is byte-identical to the old path.
@@ -1049,6 +1113,10 @@ pub fn classify_and_caps_staged(
         post_beach_height.clone()
     };
 
+    // Stage 10: DeNeedle (optional, post-talus spike removal)
+    if let Some(ref mut cb) = progress_callback {
+        cb(10); // DeNeedle = 10 (reported whether enabled or not)
+    }
     // W-8: De-needle pass — remove isolated 1-cell height spikes, FINAL landform post-processing
     // BEFORE classify. Only runs when at least one landform is enabled (preserves byte-identical
     // all-OFF golden path). W-11/W-12: widened to include ridges and beaches.
@@ -1099,6 +1167,11 @@ pub fn classify_and_caps_staged(
     let mut final_biome = Vec::with_capacity(n);
     let mut caps = vec![0i64; n];
     let mut surface_material = Vec::with_capacity(n);
+
+    // Stage 11: Classify (final biome classification + resource caps)
+    if let Some(ref mut cb) = progress_callback {
+        cb(11); // Classify = 11
+    }
 
     for z in 0..dim {
         for x in 0..dim {
@@ -1186,12 +1259,30 @@ pub fn classify_and_caps(
     enable_patchiness: bool,
     flags: crate::gen::LandformFlags,
 ) -> WorldFields {
+    classify_and_caps_with_callback(seed, hmax, dim, enable_patchiness, flags, None)
+}
+
+/// U-11: Wrapper that threads a progress callback through the worldgen pipeline.
+/// The callback receives u8 stage ordinals (0..=13, matching Stage enum in render crate).
+/// Observation-only: zero effect on RNG, heights, or any generated byte.
+pub fn classify_and_caps_with_callback(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    enable_patchiness: bool,
+    flags: crate::gen::LandformFlags,
+    mut progress_callback: Option<Box<dyn FnMut(u8)>>,
+) -> WorldFields {
     // W-9: Thin wrapper — talus_step_final is gated the SAME as de_needle: any_landform_on
     // Production output CHANGES when landforms are enabled (exactly why two-pass golden re-pin is prescribed).
     // W-10: Material diversity is gated and enabled by default in production.
     let enable_talus_final = flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal || flags.ridges || flags.beaches;
-    let (world_fields, _, _) = classify_and_caps_staged(
+
+    // U-11: Convert Box to &mut dyn FnMut for staged callback
+    let callback_ref = progress_callback.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(u8));
+    let (world_fields, _, _) = classify_and_caps_staged_with_callback(
         seed, hmax, dim, enable_patchiness, flags, enable_talus_final, true, // enable_w10_diversity
+        callback_ref,
     );
     world_fields
 }
@@ -2362,5 +2453,33 @@ mod tests {
         assert!(BEACH_RAMP_SLOPE >= 1, "BEACH_RAMP_SLOPE must be >= 1 (F22 invariant)");
         assert!(BEACH_DISTANCE_TO_WATER > 0, "BEACH_DISTANCE_TO_WATER must be positive");
         assert!(BEACH_BUDGET_NUMERATOR > 0 && BEACH_BUDGET_DENOMINATOR > 0, "budget must be positive");
+    }
+
+    /// U-11: Byte-purity test — progress callback is observation-only.
+    /// Calling classify_and_caps_with_callback with a no-op callback must produce
+    /// byte-identical output (height, biome, caps, material) to calling without one.
+    /// This verifies the determinism contract: RNG state, heights, and all generated
+    /// bytes remain unchanged when a callback is present.
+    #[test]
+    fn progress_callback_byte_pure() {
+        const SEED: u64 = 0xDEAD_BEEF;
+        const HMAX: i64 = 200;
+        const DIM: usize = 32;
+
+        // Generate world WITHOUT callback
+        let flags = LandformFlags::new(true, true, true, true, true, true, true);
+        let without_cb = classify_and_caps(SEED, HMAX, DIM, false, flags);
+
+        // Generate world WITH a no-op callback
+        let with_cb = classify_and_caps_with_callback(
+            SEED, HMAX, DIM, false, flags,
+            Some(Box::new(|_stage: u8| { /* no-op callback */ }))
+        );
+
+        // Verify byte-identical output
+        assert_eq!(without_cb.height, with_cb.height, "heights must be byte-identical");
+        assert_eq!(without_cb.final_biome, with_cb.final_biome, "biomes must be byte-identical");
+        assert_eq!(without_cb.caps, with_cb.caps, "caps must be byte-identical");
+        assert_eq!(without_cb.surface_material, with_cb.surface_material, "materials must be byte-identical");
     }
 }

@@ -11,9 +11,11 @@ use crate::world_spec::Stage;
 ///
 /// All fields are Arc-wrapped atomic types: lock-free, wait-free updates.
 /// Main thread polls these to drive the loading UI; no synchronous locks.
+/// Progress is clamped to be monotone: never decreases within a single load.
 #[derive(Clone)]
 pub struct LoadState {
     /// Progress as permille (0–1000). Updated by worker via on_stage callback.
+    /// Clamped to be monotone (never decreases) within one load.
     pub progress: Arc<AtomicU32>,
     /// Current stage (0=GenerateWorld, 1=BuildMeshes, 2=Done). Drives UI checklist.
     pub step: Arc<AtomicU8>,
@@ -35,8 +37,13 @@ impl LoadState {
     }
 
     /// Set progress (permille: 0–1000). Safe to call from any thread.
+    /// Progress is clamped to be monotone: never decreases within one load.
     pub fn set_progress(&self, permille: u32) {
-        self.progress.store(permille.clamp(0, 1000), Ordering::Release);
+        let clamped = permille.clamp(0, 1000);
+        let current = self.progress.load(Ordering::Acquire);
+        // Ensure monotonicity: progress never decreases
+        let next = clamped.max(current);
+        self.progress.store(next, Ordering::Release);
     }
 
     /// Set current stage. Safe to call from any thread.
@@ -57,7 +64,7 @@ impl LoadState {
     /// Get current stage.
     pub fn get_stage(&self) -> Stage {
         let v = self.step.load(Ordering::Acquire);
-        Stage::from_u8(v).unwrap_or(Stage::GenerateWorld)
+        Stage::from_u8(v).unwrap_or(Stage::GenerateHeightfield)
     }
 
     /// Check if build is complete.
@@ -87,7 +94,7 @@ mod tests {
     fn load_state_initial_state() {
         let ls = LoadState::new(0x1234_5678);
         assert_eq!(ls.get_progress(), 0);
-        assert_eq!(ls.get_stage(), Stage::GenerateWorld);
+        assert_eq!(ls.get_stage(), Stage::GenerateHeightfield);
         assert!(!ls.is_complete());
         assert_eq!(ls.seed, 0x1234_5678);
     }
@@ -107,8 +114,8 @@ mod tests {
     #[test]
     fn load_state_stage_updates() {
         let ls = LoadState::new(42);
-        ls.set_stage(Stage::GenerateWorld);
-        assert_eq!(ls.get_stage(), Stage::GenerateWorld);
+        ls.set_stage(Stage::GenerateHeightfield);
+        assert_eq!(ls.get_stage(), Stage::GenerateHeightfield);
         ls.set_stage(Stage::BuildMeshes);
         assert_eq!(ls.get_stage(), Stage::BuildMeshes);
         ls.set_stage(Stage::Done);

@@ -605,12 +605,8 @@ async fn main() {
                 let load_clone = load_state.clone();
                 let mut on_stage = |stage: Stage| {
                     load_clone.set_stage(stage);
-                    // U-7: Wire progress permille based on stage (matches interactive RegenSeed worker)
-                    let progress = match stage {
-                        Stage::GenerateWorld => 0,
-                        Stage::BuildMeshes => 400,
-                        Stage::Done => 1000,
-                    };
+                    // U-11: Wire progress permille based on stage (gen 0..800‰, meshing 800..1000‰)
+                    let progress = stage.progress_permille();
                     load_clone.set_progress(progress);
                     // Honor --slow-load flag to stretch build stages (allow mid-build captures)
                     if slow_load_flag {
@@ -1300,12 +1296,8 @@ async fn main() {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
                                         load_clone.set_stage(stage);
-                                        // U-7: Wire progress permille based on stage (matches harness worker)
-                                        let progress = match stage {
-                                            Stage::GenerateWorld => 0,
-                                            Stage::BuildMeshes => 400,
-                                            Stage::Done => 1000,
-                                        };
+                                        // U-11: Wire progress permille based on stage (gen 0..800‰, meshing 800..1000‰)
+                                        let progress = stage.progress_permille();
                                         load_clone.set_progress(progress);
                                         // Honor --slow-load flag to stretch build stages (matches harness worker)
                                         if slow_load_flag {
@@ -1338,11 +1330,8 @@ async fn main() {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
                                         load_clone.set_stage(stage);
-                                        let progress = match stage {
-                                            Stage::GenerateWorld => 0,
-                                            Stage::BuildMeshes => 400,
-                                            Stage::Done => 1000,
-                                        };
+                                        // U-11: Wire progress permille based on stage (gen 0..800‰, meshing 800..1000‰)
+                                        let progress = stage.progress_permille();
                                         load_clone.set_progress(progress);
                                         if slow_load_flag {
                                             std::thread::sleep(std::time::Duration::from_millis(600));

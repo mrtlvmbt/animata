@@ -10,7 +10,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Shape, Stroke};
 use super::theme;
 use crate::loader_state::LoadState;
-use crate::world_spec::Stage;
+use crate::world_spec::{Stage, EXEC_ORDER};
 
 /// Pulse keyframe for active step (triangle wave, peak at half-period).
 /// Returns (opacity, scale) ramping 0.55→1.0 and 1.0→1.25.
@@ -66,11 +66,6 @@ const TXT_32: Color32 = theme::straight(233, 236, 230, 82); // pending-step labe
 const TXT_28: Color32 = theme::straight(233, 236, 230, 71); // pending dash
 const TRACK: Color32 = theme::straight(255, 255, 255, 26); // progress track (white 0.10)
 
-const STAGES: &[&str] = &[
-    "Generating world",
-    "Building meshes",
-];
-
 /// Draw the full-screen loader modal. Call only when in Loading phase.
 pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
     let progress = (load_state.get_progress() as f32) / 1000.0;
@@ -81,7 +76,8 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
     let col_w = 384.0;
 
     // Total block height to vertically centre it.
-    let n = STAGES.len() as f32;
+    // U-11: 14 stages (0-13) in the pipeline
+    let n = 14.0;
     let block_h = 16.0 + 34.0   // brand row + margin
         + 10.0 + 13.0           // phase caps + margin
         + 24.0 + 26.0           // step name + margin
@@ -150,16 +146,21 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             );
             y += 10.0 + 13.0;
 
-            // --- STEP NAME ---
-            if step_index < STAGES.len() {
-                ui.painter().text(
-                    Pos2::new(cx, y),
-                    Align2::CENTER_TOP,
-                    STAGES[step_index],
-                    theme::sans(20.0),
-                    theme::TEXT,
-                );
-            }
+            // --- STEP NAME (Russian label) ---
+            let stage_label = if step_index < 14 {
+                Stage::from_u8(step_index as u8)
+                    .map(|s| s.label_ru())
+                    .unwrap_or("Неизвестно")
+            } else {
+                "Готово"
+            };
+            ui.painter().text(
+                Pos2::new(cx, y),
+                Align2::CENTER_TOP,
+                stage_label,
+                theme::sans(20.0),
+                theme::TEXT,
+            );
             y += 24.0 + 26.0;
 
             // --- PROGRESS TRACK + FILL ---
@@ -187,34 +188,46 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             );
             y += 11.0 + 32.0;
 
-            // --- STEP CHECKLIST ---
+            // --- STEP CHECKLIST (in EXEC_ORDER) ---
+            // Compare stages by execution position, not raw ordinal.
+            // This prevents checkmark regressions when volcanic/glacial/aeolian execute out of display order.
             let label_font = theme::sans(13.0);
-            for (i, label) in STAGES.iter().enumerate() {
-                let glyph_c = Pos2::new(left + 7.0, y + 7.0);
-                let label_color = if i < step_index {
-                    paint_check(ui.painter(), glyph_c);
-                    TXT_55
-                } else if i == step_index {
-                    let (op2, sc2) = pulse(t, 1.4);
-                    ui.painter().circle_filled(
-                        glyph_c,
-                        4.0 * sc2,
-                        theme::ACCENT.gamma_multiply(op2),
+            let current_stage = Stage::from_u8(step_index as u8);
+            let current_exec_pos = current_stage.map(|s| s.exec_pos()).unwrap_or(14);
+
+            for &stage_ordinal in EXEC_ORDER {
+                if let Some(stage) = Stage::from_u8(stage_ordinal) {
+                    let label = stage.label_ru();
+                    let stage_exec_pos = stage.exec_pos();
+                    let glyph_c = Pos2::new(left + 7.0, y + 7.0);
+                    let label_color = if stage_exec_pos < current_exec_pos {
+                        // This stage finished before current stage began (in execution order)
+                        paint_check(ui.painter(), glyph_c);
+                        TXT_55
+                    } else if stage_exec_pos == current_exec_pos {
+                        // This is the active stage
+                        let (op2, sc2) = pulse(t, 1.4);
+                        ui.painter().circle_filled(
+                            glyph_c,
+                            4.0 * sc2,
+                            theme::ACCENT.gamma_multiply(op2),
+                        );
+                        theme::TEXT
+                    } else {
+                        // This stage hasn't run yet (in execution order)
+                        let dash = egui::Rect::from_center_size(glyph_c, egui::vec2(8.0, 1.5));
+                        ui.painter().rect_filled(dash, 1.0, TXT_28);
+                        TXT_32
+                    };
+                    ui.painter().text(
+                        Pos2::new(left + 26.0, y),
+                        Align2::LEFT_TOP,
+                        label,
+                        label_font.clone(),
+                        label_color,
                     );
-                    theme::TEXT
-                } else {
-                    let dash = egui::Rect::from_center_size(glyph_c, egui::vec2(8.0, 1.5));
-                    ui.painter().rect_filled(dash, 1.0, TXT_28);
-                    TXT_32
-                };
-                ui.painter().text(
-                    Pos2::new(left + 26.0, y),
-                    Align2::LEFT_TOP,
-                    label,
-                    label_font.clone(),
-                    label_color,
-                );
-                y += 14.0 + 12.0;
+                    y += 14.0 + 12.0;
+                }
             }
         });
 
