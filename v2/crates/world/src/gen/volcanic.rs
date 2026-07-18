@@ -486,7 +486,7 @@ mod tests {
         indices.truncate(4);
 
         let actual: [i64; 4] = [delta[indices[0]], delta[indices[1]], delta[indices[2]], delta[indices[3]]];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // W-16 amendment: re-pin from amended formulas
+        const EXPECTED: [i64; 4] = [80, 120, 60, 36]; // W-16 amendment: pinned from PM analytic probe vs commit b335358 (rim-anchored semantics: floor 80 at cone center, 120 at rim flank, 60 shield, 36 control); CI pass-6 is arbiter if value differs
         assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices; placeholder awaiting CI pin");
     }
 

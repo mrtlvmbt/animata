@@ -1583,7 +1583,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, true, false, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // W-16 amendment: re-pin from amended formulas
+        const EXPECTED: [i64; 4] = [155, 141, 133, 157]; // W-16 amendment: pinned from CI run 29644687192 (x86 debug and arm64 release IDENTICAL)
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
