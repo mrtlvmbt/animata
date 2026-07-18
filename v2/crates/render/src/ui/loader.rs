@@ -10,7 +10,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Shape, Stroke};
 use super::theme;
 use crate::loader_state::LoadState;
-use crate::world_spec::{Stage, EXEC_ORDER};
+use crate::world_spec::{Stage, Phase, EXEC_ORDER};
 
 /// Pulse keyframe for active step (triangle wave, peak at half-period).
 /// Returns (opacity, scale) ramping 0.55→1.0 and 1.0→1.25.
@@ -76,14 +76,14 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
     let col_w = 384.0;
 
     // Total block height to vertically centre it.
-    // U-11: 14 stages (0-13) in the pipeline
-    let n = 14.0;
+    // U-12: 3 coarse phases (GenerateWorld, BuildMesh, Done)
+    let n = 3.0;
     let block_h = 16.0 + 34.0   // brand row + margin
         + 10.0 + 13.0           // phase caps + margin
-        + 24.0 + 26.0           // step name + margin
+        + 24.0 + 26.0           // detail line + margin
         + 4.0 + 11.0            // progress track + margin
         + 11.0 + 32.0           // meta row + margin
-        + n * 14.0 + (n - 1.0) * 12.0; // checklist rows + gaps
+        + n * 14.0 + (n - 1.0) * 12.0; // phase checklist rows + gaps
 
     egui::Area::new(egui::Id::new("loader"))
         .order(egui::Order::Foreground)
@@ -146,7 +146,7 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             );
             y += 10.0 + 13.0;
 
-            // --- STEP NAME (Russian label) ---
+            // --- DETAIL LINE: current stage label (mutating in place) ---
             let stage_label = if step_index < 14 {
                 Stage::from_u8(step_index as u8)
                     .map(|s| s.label_ru())
@@ -188,46 +188,54 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             );
             y += 11.0 + 32.0;
 
-            // --- STEP CHECKLIST (in EXEC_ORDER) ---
-            // Compare stages by execution position, not raw ordinal.
-            // This prevents checkmark regressions when volcanic/glacial/aeolian execute out of display order.
+            // --- PHASE CHECKLIST (coarse phases only) ---
+            // U-12: Show 3 coarse phases (GenerateWorld, BuildMesh, Done).
+            // Map current stage to its phase and compare by execution position for monotone ticking.
             let label_font = theme::sans(13.0);
             let current_stage = Stage::from_u8(step_index as u8);
+            let current_phase = current_stage.map(|s| s.phase());
             let current_exec_pos = current_stage.map(|s| s.exec_pos()).unwrap_or(14);
 
-            for &stage_ordinal in EXEC_ORDER {
-                if let Some(stage) = Stage::from_u8(stage_ordinal) {
-                    let label = stage.label_ru();
-                    let stage_exec_pos = stage.exec_pos();
-                    let glyph_c = Pos2::new(left + 7.0, y + 7.0);
-                    let label_color = if stage_exec_pos < current_exec_pos {
-                        // This stage finished before current stage began (in execution order)
-                        paint_check(ui.painter(), glyph_c);
-                        TXT_55
-                    } else if stage_exec_pos == current_exec_pos {
-                        // This is the active stage
-                        let (op2, sc2) = pulse(t, 1.4);
-                        ui.painter().circle_filled(
-                            glyph_c,
-                            4.0 * sc2,
-                            theme::ACCENT.gamma_multiply(op2),
-                        );
-                        theme::TEXT
-                    } else {
-                        // This stage hasn't run yet (in execution order)
+            // Display all 3 phases in order
+            for phase in [Phase::GenerateWorld, Phase::BuildMesh, Phase::Done].iter() {
+                let phase_label = phase.label_ru();
+                let glyph_c = Pos2::new(left + 7.0, y + 7.0);
+
+                // Determine phase state based on current stage's phase and execution position.
+                // Phases tick monotonically: GenerateWorld → BuildMesh → Done.
+                let label_color = match (current_phase, phase) {
+                    // Current stage's phase is this phase or beyond it (in execution order)
+                    (Some(curr_p), _) if curr_p >= *phase => {
+                        if curr_p == *phase {
+                            // This is the active phase
+                            let (op2, sc2) = pulse(t, 1.4);
+                            ui.painter().circle_filled(
+                                glyph_c,
+                                4.0 * sc2,
+                                theme::ACCENT.gamma_multiply(op2),
+                            );
+                            theme::TEXT
+                        } else {
+                            // This phase is done (current phase is after this one)
+                            paint_check(ui.painter(), glyph_c);
+                            TXT_55
+                        }
+                    }
+                    _ => {
+                        // This phase hasn't started yet
                         let dash = egui::Rect::from_center_size(glyph_c, egui::vec2(8.0, 1.5));
                         ui.painter().rect_filled(dash, 1.0, TXT_28);
                         TXT_32
-                    };
-                    ui.painter().text(
-                        Pos2::new(left + 26.0, y),
-                        Align2::LEFT_TOP,
-                        label,
-                        label_font.clone(),
-                        label_color,
-                    );
-                    y += 14.0 + 12.0;
-                }
+                    }
+                };
+                ui.painter().text(
+                    Pos2::new(left + 26.0, y),
+                    Align2::LEFT_TOP,
+                    phase_label,
+                    label_font.clone(),
+                    label_color,
+                );
+                y += 14.0 + 12.0;
             }
         });
 

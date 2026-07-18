@@ -116,6 +116,29 @@ pub const EXEC_ORDER: &[u8] = &[
     13, // Done (exec_pos 13)
 ];
 
+/// U-12: Coarse loading phases (for compact loader UI).
+/// Maps fine stages onto 3 coarse phases for the checklist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Phase {
+    /// World generation: heightfield + all landforms + classification (stages 0-11)
+    GenerateWorld = 0,
+    /// Mesh construction: building GPU meshes (stage 12)
+    BuildMesh = 1,
+    /// Complete: done (stage 13)
+    Done = 2,
+}
+
+impl Phase {
+    /// Russian label for the loader UI.
+    pub fn label_ru(self) -> &'static str {
+        match self {
+            Phase::GenerateWorld => "Генерация мира",
+            Phase::BuildMesh => "Построение сетки",
+            Phase::Done => "Готово",
+        }
+    }
+}
+
 /// Stage of world building (used for progress reporting via callback).
 /// Stages map to worldgen pipeline boundaries: heightfield fbm → tectonics → erosion → ridges →
 /// volcanic → glacial → aeolian → coastal → beaches → talus → de-needle → classify → meshing → done.
@@ -217,6 +240,26 @@ impl Stage {
         EXEC_ORDER.iter()
             .position(|&x| x == ord)
             .unwrap_or(14) as u8
+    }
+
+    /// U-12: Map this stage to its coarse loading phase for the compact loader.
+    pub fn phase(self) -> Phase {
+        match self {
+            Stage::GenerateHeightfield
+            | Stage::ApplyTectonics
+            | Stage::ApplyErosion
+            | Stage::ApplyRidges
+            | Stage::ApplyAeolian
+            | Stage::ApplyVolcanic
+            | Stage::ApplyGlacial
+            | Stage::ApplyCoastal
+            | Stage::ApplyBeaches
+            | Stage::ApplyTalus
+            | Stage::DeNeedle
+            | Stage::Classify => Phase::GenerateWorld,
+            Stage::BuildMeshes => Phase::BuildMesh,
+            Stage::Done => Phase::Done,
+        }
     }
 }
 
