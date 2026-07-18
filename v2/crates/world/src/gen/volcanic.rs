@@ -128,8 +128,8 @@ impl EdificeGeom {
         // Rim anchored at peak: delta(rim_r) == peak exactly (rim_r = caldera_r + 1)
         let rim_h = peak;
 
-        // Caldera floor
-        let caldera_depth = (peak / 3).max(1);
+        // Caldera floor: deeper bowl (peak/2 depth) survives erosion smearing
+        let caldera_depth = (peak / 2).max(1);
         let floor = (peak - caldera_depth).max(0);
 
         EdificeGeom {
@@ -250,6 +250,7 @@ pub fn emplace_edifices(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<i64> {
 /// footprint, tie-broken by the vent contributing the MOST height there (ties by lowest vent index —
 /// deterministic, `>` not `>=` on the running best), `None` elsewhere. Written as the primary
 /// substrate by the caller (`caps.rs`, mirroring aeolian's sand reconciliation) — RnD 15 §8.
+/// W-16b amendment: cone crater floors (r <= caldera_r) get Basalt; cone flanks get Tuff.
 pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Option<MaterialId>> {
     let n = dim * dim;
     let mut mask = vec![None; n];
@@ -258,14 +259,23 @@ pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Optio
     for vent in vents {
         for z in 0..dim {
             for x in 0..dim {
-                let contribution = vent_height_at(vent, x as i64 - vent.x, z as i64 - vent.z, &geom);
+                let dx = x as i64 - vent.x;
+                let dz = z as i64 - vent.z;
+                let contribution = vent_height_at(vent, dx, dz, &geom);
                 if contribution <= 0 {
                     continue;
                 }
                 let idx = linear_index(x, z, dim);
                 if contribution > best_contribution[idx] {
                     best_contribution[idx] = contribution;
-                    mask[idx] = Some(vent.class.material());
+                    // Cone crater floors are Basalt (dark pit); flanks are Tuff. Shields all Basalt.
+                    let r = isqrt(dx * dx + dz * dz);
+                    let material = match vent.class {
+                        SlopeClass::Cone if r <= geom.caldera_r => MaterialId::Basalt,
+                        SlopeClass::Cone => MaterialId::Tuff,
+                        SlopeClass::Shield => MaterialId::Basalt,
+                    };
+                    mask[idx] = Some(material);
                 }
             }
         }
@@ -370,17 +380,47 @@ mod tests {
         assert!(saw_shield && saw_cone, "both Shield and Cone classes must be realized across a real vent set");
     }
 
+    /// W-16b amendment: cone crater floors are Basalt (dark pit); flanks are Tuff.
     #[test]
-    fn edifice_material_mask_writes_basalt_for_shield_and_tuff_for_cone() {
+    fn edifice_material_mask_cone_crater_basalt_flanks_tuff() {
         let shield = Vent { x: 10, z: 10, class: SlopeClass::Shield };
         let cone = Vent { x: 40, z: 40, class: SlopeClass::Cone };
         let dim = 64usize;
         const HMAX: i64 = 200;
         let mask = edifice_material_mask(dim, HMAX, &[shield, cone]);
+        let geom = EdificeGeom::derive(dim, HMAX);
 
-        assert_eq!(mask[linear_index(10, 10, dim)], Some(MaterialId::Basalt), "the Shield vent's summit must be Basalt");
-        assert_eq!(mask[linear_index(40, 40, dim)], Some(MaterialId::Tuff), "the Cone vent's summit must be Tuff");
-        assert_eq!(mask[linear_index(0, 0, dim)], None, "a cell outside every vent's footprint must be unmarked");
+        // Shield summit: always Basalt
+        assert_eq!(
+            mask[linear_index(10, 10, dim)],
+            Some(MaterialId::Basalt),
+            "Shield vent's summit must be Basalt"
+        );
+
+        // Cone center (r=0, within caldera): Basalt (dark crater floor)
+        assert_eq!(
+            mask[linear_index(40, 40, dim)],
+            Some(MaterialId::Basalt),
+            "Cone crater floor (r <= caldera_r) must be Basalt"
+        );
+
+        // Cone mid-flank (r > caldera_r): Tuff (light flanks)
+        let flank_radius = geom.caldera_r + (geom.cone_radius - geom.caldera_r) / 2;
+        if flank_radius > geom.caldera_r && flank_radius < geom.cone_radius {
+            let flank_x = (40 + flank_radius).min((dim - 1) as i64) as usize;
+            assert_eq!(
+                mask[linear_index(flank_x, 40usize, dim)],
+                Some(MaterialId::Tuff),
+                "Cone flanks (r > caldera_r) must be Tuff"
+            );
+        }
+
+        // Outside all edifices: None
+        assert_eq!(
+            mask[linear_index(0, 0, dim)],
+            None,
+            "cells outside every vent's footprint must be unmarked"
+        );
     }
 
     /// Count of cells that are a STRICT local D8 maximum (height strictly greater than all 8
@@ -557,6 +597,19 @@ mod tests {
         assert_eq!(geom_512.shield_radius, 15, "shield_radius(512) must be 15 (peak/8)");
         assert_eq!(geom_64.cone_radius, 10, "cone_radius(64) must be 10 (peak/6 clamped to dim/6)");
         assert_eq!(geom_512.cone_radius, 20, "cone_radius(512) must be 20 (peak/6)");
+    }
+
+    /// Acceptance criterion W-16b amendment: caldera floor formula — floor = peak - peak/2 = peak/2.
+    #[test]
+    fn caldera_floor_formula() {
+        const HMAX: i64 = 200;
+        let geom = EdificeGeom::derive(512, HMAX);
+        // peak = (200 * 3) / 5 = 120
+        // caldera_depth = 120 / 2 = 60
+        // floor = 120 - 60 = 60
+        assert_eq!(geom.peak, 120, "peak at hmax=200 must be 120");
+        assert_eq!(geom.caldera_depth, 60, "caldera_depth must be peak/2 = 60");
+        assert_eq!(geom.floor, 60, "floor must be peak/2 = 60");
     }
 
     /// Acceptance criterion W-16: caldera bowl — floor < rim at ring outside caldera.
