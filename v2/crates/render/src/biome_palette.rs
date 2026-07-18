@@ -13,6 +13,7 @@
 
 use macroquad::color::Color;
 use macroquad::prelude::Vec3;
+use world::palette::MATERIAL_COLORS;
 
 /// A loud, unmistakable "unmapped biome id" marker (never a plausible terrain hue) — visible at a
 /// glance if `WorldView::biome` ever returns an id beyond the documented `0..=12` range, rather than
@@ -24,10 +25,12 @@ const UNKNOWN: Color = Color::new(1.0, 0.0, 1.0, 1.0);
 const LIGHT_DIR: Vec3 = Vec3::new(0.577, 0.577, 0.577); // (1,1,1) normalized ≈ 60° elevation, sidelit
 
 /// Ambient light contribution (always present, no shadow).
-const AMBIENT: f32 = 0.3;
+/// Softened from 0.3 → 0.55 to lighten shadows toward pastel toy-diorama look.
+const AMBIENT: f32 = 0.55;
 
 /// Diffuse light strength (modulated by normal·light_dir).
-const DIFFUSE: f32 = 0.7;
+/// Softened from 0.7 → 0.45 to reduce harsh shadow contrast.
+const DIFFUSE: f32 = 0.45;
 
 /// `id` → top-face color. `_ => UNKNOWN` is the "no panic" fallback the acceptance criterion asks for.
 pub fn biome_color(id: u8) -> Color {
@@ -49,6 +52,136 @@ pub fn biome_color(id: u8) -> Color {
     }
 }
 
+/// `MaterialId` byte (`world::gen::material::MaterialId`, `0..=10`) → hue for palette v2 (two-factor
+/// color = material HUE × height VALUE + per-column jitter). This is the PRIMARY terrain palette:
+/// the renderer colours by physical surface material, not biome, because biome misses the landform
+/// substrates the diverse-relief terragen produces — Ocean water, aeolian sand, glacial till,
+/// volcanic basalt/tuff (biome=13 Ocean alone already fell off `biome_color`'s `0..=12` table → magenta sea).
+/// Reads the canonical palette from `world::palette::MATERIAL_COLORS` (single source of truth,
+/// shared with map_dump). `_ => UNKNOWN` keeps the no-panic contract for out-of-range ids.
+pub fn material_color(m: u8) -> Color {
+    if let Some(&[r, g, b]) = MATERIAL_COLORS.get(m as usize) {
+        Color::from_rgba(r, g, b, 255)
+    } else {
+        UNKNOWN
+    }
+}
+
+/// Simple integer hash for deterministic per-column jitter: `hash(col, row, seed) -> [0, 1]`.
+/// Used for palette v2's per-column value variation without float RNG.
+fn color_jitter_hash(col: i64, row: i64, seed: u64) -> f32 {
+    let mut h: u64 = seed;
+    h = h.wrapping_mul(0x9e3779b97f4a7c15);
+    h ^= (col as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = h.wrapping_mul(0x9e3779b97f4a7c15);
+    h ^= (row as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+    h = h.wrapping_mul(0x9e3779b97f4a7c15);
+    // Normalize to [0.0, 1.0]
+    ((h >> 33) as f32) / 18446744073709551615.0
+}
+
+/// Palette v2 — two-factor color: material HUE × height VALUE + per-column jitter.
+/// Takes the material hue from [`material_color`], interpolates it through the height value ramp
+/// (green→brown→snow), and applies ±4% jitter per column via integer hash.
+/// Parameters:
+/// - `material`: surface material byte (0..=10)
+/// - `height`: cell height value (raw, pre-hypsometric normalization)
+/// - `h_lo`, `h_hi`: the map's observed [p2, p98] relief band for hypsometric scaling
+/// - `col`, `row`: world grid coordinates (for deterministic per-column jitter)
+/// - `seed`: random seed component (for deterministic per-map variation)
+pub fn surface_color_v2(
+    material: u8,
+    height: i64,
+    h_lo: i64,
+    h_hi: i64,
+    col: i64,
+    row: i64,
+    seed: u64,
+) -> Color {
+    // Get material hue base color
+    let hue_color = material_color(material);
+
+    // Compute height-based value tier (same stretch as hypsometric_range)
+    let span = (h_hi - h_lo).max(1) as f32;
+    let t = ((height - h_lo) as f32 / span).clamp(0.0, 1.0);
+
+    // Height value ramp: interpolate through the same stops as height_color
+    // but we multiply the base hue_color by the VALUE to darken/lighten
+    // Lifted floor to brighten lowlands (was 0.4, now 0.78) to prevent dark/muddy render
+    const VALUE_STOPS: [(f32, f32); 7] = [
+        (0.00, 0.78),  // lowland — brightened (was 0.4)
+        (0.25, 0.82),  // (was 0.5)
+        (0.45, 0.88),  // (was 0.7)
+        (0.60, 0.92),  // (was 0.8)
+        (0.78, 0.85),  // brown (moraine/upland) (was 0.6)
+        (0.90, 0.92),  // bare rock (was 0.8)
+        (1.00, 1.0),   // peaks — bright (was 0.95)
+    ];
+
+    let mut lo = &VALUE_STOPS[0];
+    let mut hi = &VALUE_STOPS[VALUE_STOPS.len() - 1];
+    for w in VALUE_STOPS.windows(2) {
+        if t >= w[0].0 && t <= w[1].0 {
+            lo = &w[0];
+            hi = &w[1];
+            break;
+        }
+    }
+
+    let value_span = (hi.0 - lo.0).max(1e-6);
+    let f = ((t - lo.0) / value_span).clamp(0.0, 1.0);
+    let value = (lo.1 + (hi.1 - lo.1) * f).clamp(0.0, 1.0);
+
+    // Apply per-column jitter: ±4%
+    let jitter_factor = (color_jitter_hash(col, row, seed) - 0.5) * 0.08 + 1.0; // [0.96, 1.04]
+    let jittered_value = (value * jitter_factor).clamp(0.0, 1.0);
+
+    // Multiply hue by the value to darken/lighten
+    Color::new(
+        hue_color.r * jittered_value,
+        hue_color.g * jittered_value,
+        hue_color.b * jittered_value,
+        hue_color.a,
+    )
+}
+
+/// Hypsometric elevation ramp: raw `height` → a classic low-green→brown→snow-white gradient. Makes
+/// pure RELIEF legible independent of material — the tool for eyeballing plateau/needle/trough shape.
+///
+/// Normalized by the map's *observed* relief band `[h_lo, h_hi]` (a per-map percentile stretch, not
+/// the fixed `[0, hmax]` datum). Real terrain is bottom-heavy (half the cells sit near sea level, the
+/// relief lives in the top decile), so stretching against `hmax=200` crams every landform into the
+/// ramp's low green third — one uniform hue. Stretching against `[p2, p98]` spreads the full
+/// green→brown→snow band over the relief that actually exists; the sparse >p98 peaks clamp to the
+/// snow-white top rather than wasting the upper 40% of the ramp on cells that never occur.
+pub fn height_color(height: i64, h_lo: i64, h_hi: i64) -> Color {
+    let span = (h_hi - h_lo).max(1) as f32;
+    let t = ((height - h_lo) as f32 / span).clamp(0.0, 1.0);
+    // (stop_t, r, g, b) — ascending; classic hypsometric tint band.
+    const STOPS: [(f32, f32, f32, f32); 7] = [
+        (0.00, 34.0, 74.0, 44.0),    // lowland — dark green
+        (0.25, 82.0, 138.0, 60.0),   // green
+        (0.45, 158.0, 168.0, 82.0),  // yellow-green
+        (0.60, 178.0, 146.0, 86.0),  // tan
+        (0.78, 138.0, 100.0, 64.0),  // brown (moraine/upland)
+        (0.90, 156.0, 156.0, 162.0), // bare rock — grey
+        (1.00, 246.0, 246.0, 250.0), // peaks — snow white
+    ];
+    let mut lo = &STOPS[0];
+    let mut hi = &STOPS[STOPS.len() - 1];
+    for w in STOPS.windows(2) {
+        if t >= w[0].0 && t <= w[1].0 {
+            lo = &w[0];
+            hi = &w[1];
+            break;
+        }
+    }
+    let span = (hi.0 - lo.0).max(1e-6);
+    let f = ((t - lo.0) / span).clamp(0.0, 1.0);
+    let lerp = |a: f32, b: f32| (a + (b - a) * f) / 255.0;
+    Color::new(lerp(lo.1, hi.1), lerp(lo.2, hi.2), lerp(lo.3, hi.3), 1.0)
+}
+
 /// Cliff (side-quad) shade: a fixed darkening of the top-face color — a cheap "AO-ish" cue (RnD
 /// `rendering/02` §3's baked-shading idea, without an actual light/AO bake) so columns read as
 /// stepped 3D prisms rather than flat-shaded slabs of one hue.
@@ -63,6 +196,38 @@ pub fn apply_directional_shading(c: Color, normal: Vec3) -> Color {
     let dot_nl = (normal.x * LIGHT_DIR.x + normal.y * LIGHT_DIR.y + normal.z * LIGHT_DIR.z).max(0.0);
     let shade = (AMBIENT + DIFFUSE * dot_nl).min(1.0);
     Color::new(c.r * shade, c.g * shade, c.b * shade, c.a)
+}
+
+/// Compute a cell's top-face color using palette v2 with optional bare-mode water substitution.
+///
+/// This is the canonical cell coloring logic shared by terrain.rs, terrain_cube.rs, and minimap.
+/// Takes the material and height, applies hypsometric normalization, and optionally substitutes
+/// water with sand in bare_mode (for dry-bed visualization).
+///
+/// Parameters:
+/// - `material`: surface material byte (0..=10)
+/// - `height`: cell height value (raw, pre-hypsometric normalization)
+/// - `h_lo`, `h_hi`: the map's observed [p2, p98] relief band for hypsometric scaling
+/// - `col`, `row`: world grid coordinates (for deterministic per-column jitter)
+/// - `seed`: random seed component (for deterministic per-map variation)
+/// - `bare_mode`: if true and material == 8 (water), render as sand (material 1) instead
+pub fn cell_color(
+    material: u8,
+    height: i64,
+    h_lo: i64,
+    h_hi: i64,
+    col: i64,
+    row: i64,
+    seed: u64,
+    bare_mode: bool,
+) -> Color {
+    let top_color = surface_color_v2(material, height, h_lo, h_hi, col, row, seed);
+    if bare_mode && material == 8 {
+        // Water in bare mode: desaturated sand
+        surface_color_v2(1, height, h_lo, h_hi, col, row, seed)
+    } else {
+        top_color
+    }
 }
 
 #[cfg(test)]

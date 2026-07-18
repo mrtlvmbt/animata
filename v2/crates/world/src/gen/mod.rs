@@ -50,3 +50,86 @@ pub mod material;
 pub mod moisture;
 pub mod tectonics;
 pub mod volcanic;
+
+/// W-0 landform flags struct — refactored from 5-bool tuple to named fields.
+/// W-18: additive worldgen — SOURCES (base, tect/ridges, volcanic) vs TRANSFORMS (erosion, aeolian, glacial, coastal/beaches).
+/// Splitmix64 bit layout: base at shift 47, erosion at shift 29, tect/aeolian/volcanic/glacial/coastal at shifts 3/13/23/33/43 (unchanged);
+/// ridges at shift 53, beaches at shift 59. Dependency clamps: `ridges &= tect`, `beaches &= coastal`.
+/// Empty-set guard ORs only the original five (new bits are dependent riders).
+/// W-19: strength parameters for erosion and glacial, default 100 (percent, byte-identical to no-strength baseline).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LandformFlags {
+    pub base: bool,       // W-18: seed height from fBm (true) or FLAT_DATUM (false)
+    pub tect: bool,
+    pub aeolian: bool,
+    pub volcanic: bool,
+    pub glacial: bool,
+    pub coastal: bool,
+    pub erosion: bool,    // W-18: run erosion chain (talus/fluvial/deposition)
+    pub ridges: bool,
+    pub beaches: bool,
+    pub erosion_strength: i64,  // W-19: erosion intensity percent, default 100, range [0, 400]
+    pub glacial_strength: i64,  // W-19: glacial intensity percent, default 100, range [0, 400]
+}
+
+impl Default for LandformFlags {
+    fn default() -> Self {
+        LandformFlags {
+            base: true,
+            tect: false,
+            aeolian: false,
+            volcanic: false,
+            glacial: false,
+            coastal: false,
+            erosion: true,
+            ridges: false,
+            beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
+        }
+    }
+}
+
+impl LandformFlags {
+    /// Convenience constructor: all flags from the original five booleans, ridges and beaches default false.
+    /// **Dependency clamps applied:** ridges only valid if tect is true; beaches only if coastal is true.
+    /// W-18: base and erosion default to true (preserves pre-slice behavior).
+    /// W-19: strength defaults to 100 (byte-identical baseline).
+    pub fn from_five(tect: bool, aeolian: bool, volcanic: bool, glacial: bool, coastal: bool) -> Self {
+        LandformFlags {
+            base: true,
+            tect,
+            aeolian,
+            volcanic,
+            glacial,
+            coastal,
+            erosion: true,
+            ridges: false,
+            beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
+        }
+    }
+
+    /// Construct with explicit ridges/beaches, applying dependency clamps per W-0 contract.
+    /// W-18: base and erosion must be set explicitly; no defaults applied here.
+    /// W-19: strength parameters (default 100 for byte-identity; range [0, 400]).
+    pub fn new(base: bool, tect: bool, aeolian: bool, volcanic: bool, glacial: bool, coastal: bool, erosion: bool, mut ridges: bool, mut beaches: bool, erosion_strength: i64, glacial_strength: i64) -> Self {
+        // W-0 dependency clamps: ridges requires tect, beaches requires coastal.
+        ridges = ridges && tect;
+        beaches = beaches && coastal;
+        LandformFlags {
+            base,
+            tect,
+            aeolian,
+            volcanic,
+            glacial,
+            coastal,
+            erosion,
+            ridges,
+            beaches,
+            erosion_strength,
+            glacial_strength,
+        }
+    }
+}

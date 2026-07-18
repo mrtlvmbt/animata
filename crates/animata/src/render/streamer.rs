@@ -310,9 +310,29 @@ pub fn spawn_gen(seed: u64) -> GenJob {
     let (tx, rx) = std::sync::mpsc::channel();
     let p = progress.clone();
     std::thread::spawn(move || {
-        let t = VoxelTerrain::generate(seed, &|f| {
-            p.store((f.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
-        });
+        // `ANIMATA_TERRAIN_DUMP=<file>` → draw a v2-generated world dump through the v1 renderer
+        // instead of running v1 worldgen. On any load error, fall back to v1 worldgen.
+        let gen = |p: &std::sync::Arc<std::sync::atomic::AtomicU32>| {
+            VoxelTerrain::generate(seed, &|f| {
+                p.store((f.clamp(0.0, 1.0) * 1000.0) as u32, Ordering::Relaxed);
+            })
+        };
+        let t = match std::env::var("ANIMATA_TERRAIN_DUMP") {
+            Ok(path) if !path.is_empty() => {
+                p.store(500, Ordering::Relaxed);
+                match crate::terrain_dump::load(&path, seed) {
+                    Ok(t) => {
+                        p.store(1000, Ordering::Relaxed);
+                        t
+                    }
+                    Err(e) => {
+                        eprintln!("[terrain-dump] {e}; falling back to v1 worldgen");
+                        gen(&p)
+                    }
+                }
+            }
+            _ => gen(&p),
+        };
         let _ = tx.send(t); // receiver may be gone if the app exited mid-gen — ignore
     });
     GenJob { rx, progress }

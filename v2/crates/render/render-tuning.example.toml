@@ -1,0 +1,68 @@
+# render-tuning.toml — feel and key mapping configuration (U-7)
+#
+# This file allows customizing camera feel and key bindings without recompiling.
+# Place it in the working directory where you run the render binary.
+# If the file is absent, the render uses compiled-in defaults.
+# Malformed lines log warnings and fall back to defaults for that field.
+#
+# Format: key = value (no sections, no quoting required unless noted)
+# Comments: lines starting with # are ignored
+# Blank lines are ignored
+
+# ─── Zoom sensitivity (0.01 = 1% per scroll tick, 0.1 = 10%) ───
+# Default: 0.075 (7.5% per tick — -25% from v1's 0.1)
+# Lower = less sensitive (slower zoom)
+# Higher = more sensitive (faster zoom)
+zoom_rate = 0.075
+
+# ─── Pan speed (world units per second of keyboard input) ───
+# Default: 20.0
+# Controls how fast WASD pans the view when held down
+pan_speed = 20.0
+
+# ─── Mouse drag sensitivity (world units per pixel) ───
+# Default: 0.2
+# Controls how far the view pans when you drag with middle/right mouse
+drag_sensitivity = 0.2
+
+# ─── Key bindings (pan and rotate) ───
+# All use the key name: W, A, S, D, Q, E, Up, Down, Left, Right, Comma, Period, etc.
+# These match v1's behavior (screen-relative pan, 60° rotation steps)
+
+# Pan up-screen (default W)
+key_pan_up = W
+
+# Pan down-screen (default S)
+key_pan_down = S
+
+# Pan left-screen (default A)
+key_pan_left = A
+
+# Pan right-screen (default D)
+key_pan_right = D
+
+# Rotate counter-clockwise in 60° steps (default Q)
+key_rotate_ccw = Q
+
+# Rotate clockwise in 60° steps (default E)
+key_rotate_cw = E
+
+# ─── Common alternatives (uncomment to use) ───
+# Use arrow keys for panning instead of WASD:
+# key_pan_up = Up
+# key_pan_down = Down
+# key_pan_left = Left
+# key_pan_right = Right
+
+# Use Comma/Period for rotation (v1 fallback):
+# key_rotate_ccw = Comma
+# key_rotate_cw = Period
+
+# ─── Example: Dvorak or alternate layout ───
+# If your keyboard layout differs, you can remap here:
+# key_pan_up = K
+# key_pan_down = J
+# key_pan_left = H
+# key_pan_right = L
+# key_rotate_ccw = Q
+# key_rotate_cw = W
