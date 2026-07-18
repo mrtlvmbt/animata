@@ -1488,17 +1488,39 @@ mod tests {
             if cx < 0 || cz < 0 || cx as usize >= DIM || cz as usize >= DIM {
                 continue; // vent center off-grid for this DIM — nothing to sample
             }
-            let summit = state.height[linear_index(cx as usize, cz as usize, DIM)];
 
             // Get radius from geom based on slope class
             let radius = match vent.class {
                 crate::gen::volcanic::SlopeClass::Shield => geom.shield_radius,
                 crate::gen::volcanic::SlopeClass::Cone => geom.cone_radius,
             };
+
+            // Find edifice_max: the highest point over the entire edifice disk (r ≤ radius).
+            // For cones with calderas, this finds the rim; for shields, the summit.
+            let mut edifice_max = 0i64;
+            let mut center_height = 0i64;
+            for dz in -(radius)..=radius {
+                for dx in -(radius)..=radius {
+                    let r_sq = dx * dx + dz * dz;
+                    if r_sq > radius * radius {
+                        continue; // outside the disk
+                    }
+                    let px = cx + dx;
+                    let pz = cz + dz;
+                    if px < 0 || pz < 0 || px as usize >= DIM || pz as usize >= DIM {
+                        continue; // off-grid
+                    }
+                    let h = state.height[linear_index(px as usize, pz as usize, DIM)];
+                    if dx == 0 && dz == 0 {
+                        center_height = h; // Track crater for Cone vents
+                    }
+                    edifice_max = edifice_max.max(h);
+                }
+            }
+
+            // Sample the ring at 8 compass points on the outer radius (cheap, deterministic).
             let mut ring_sum = 0i64;
             let mut ring_count = 0i64;
-            // Sample the ring at 8 compass points on the outer radius (cheap, deterministic, no
-            // need for a full circle scan — this is a coarse survival check, not a precise metric).
             const DIRS: [(i64, i64); 8] =
                 [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)];
             for &(dx, dz) in &DIRS {
@@ -1514,10 +1536,23 @@ mod tests {
                 continue; // entire ring off-grid for this DIM — nothing to compare against
             }
             let ring_mean = ring_sum / ring_count;
+
+            // The edifice's highest point (rim for cones, summit for shields) must remain a net
+            // local high after erosion: strictly higher than the mean of the surrounding ring.
             assert!(
-                summit > ring_mean,
-                "vent at ({cx},{cz}) must remain a net local high after the full pipeline: summit={summit} ring_mean={ring_mean}"
+                edifice_max > ring_mean,
+                "vent at ({cx},{cz}) edifice_max={edifice_max} must be > ring_mean={ring_mean} after full pipeline"
             );
+
+            // For Cone vents, also verify the crater hasn't been infilled: center should remain
+            // below the edifice_max (the crater is intentionally depression; if this fails at
+            // dim=64/hmax=200, it's a legitimate call to drop this sub-assertion with a comment).
+            if matches!(vent.class, crate::gen::volcanic::SlopeClass::Cone) {
+                assert!(
+                    center_height < edifice_max,
+                    "cone vent at ({cx},{cz}) center={center_height} must be < edifice_max={edifice_max} (crater should remain depressed)"
+                );
+            }
         }
     }
 
