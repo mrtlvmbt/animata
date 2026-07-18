@@ -177,6 +177,11 @@ const RIDGE_SEED_SALT: u64 = 0x5249_4447_4553_5F30; // "RIDGES_0" (ASCII, folded
 /// coordinates, kept independent from ridge field itself.
 const RIDGE_WARP_SALT: u64 = 0x5741_5250_5F52_4944; // "WARP_RID" (ASCII, folded)
 
+/// W-15a: Decorrelation salt for ridge crest modulation field — the 2-octave value_noise over
+/// along-fault arclength that modulates ridge amplitude along the crest, kept independent from
+/// ridge field and warp field.
+const RIDGE_CREST_SALT: u64 = 0x4352_4553_544D_4F44; // "CRESTMOD" (ASCII, folded)
+
 /// W-13: Fault-band belt half-width (integer D8 distance ramp in cells). Widened from 2 to 4
 /// to support curved warped belt traces (straight belt was too thin to read visually as a ridge lineament).
 /// Determines the perpendicular distance over which the `band_ramp` decays from 1 to 0 when moving away from a fault band.
@@ -742,6 +747,30 @@ pub fn ridge_delta_compute(
     ridge_delta.clamp(-(hmax), hmax)
 }
 
+/// W-15a: Compute ridge height delta with along-crest amplitude modulation (crest_mod).
+/// Extends ridge_delta_compute with a modulation factor in the numerator.
+/// `delta = (RIDGE_AMP_NUM * mountainness * fold * crest_mod) / (RIDGE_AMP_DEN * RIDGE_SCALE * 128)`
+/// where crest_mod ∈ [51, 166] represents 40%..130% modulation in /128 fixed-point.
+/// Single last division for safety.
+pub fn ridge_delta_compute_modulated(
+    ridged: i64,
+    mountainness: i64,
+    crest_mod: i64,
+    ridge_amp_num: i64,
+    ridge_amp_den: i64,
+    hmax: i64,
+) -> i64 {
+    const MAX: i64 = 32768;
+    // Apply ridge height with crest modulation:
+    // delta = (RIDGE_AMP * mountainness * (2*r - MAX) * crest_mod) / (SCALE * 128)
+    // ridged is already in [0, 32768], so (2*ridged - MAX) ranges [-32768, +32768]
+    // crest_mod ∈ [51, 166], representing 40%..130% modulation
+    // Single last division: (num * fold * crest_mod) / (den * SCALE * 128)
+    let fold = 2 * ridged - MAX;
+    let ridge_delta = (ridge_amp_num * mountainness * fold * crest_mod) / (ridge_amp_den * RIDGE_SCALE * 128);
+    ridge_delta.clamp(-(hmax), hmax)
+}
+
 /// W-11 ridge helper: compute warp offsets using low-octave fbm.
 fn ridge_warp_at(x: i64, z: i64, seed: u64) -> (i64, i64) {
     use crate::gen::height::value_noise_octave;
@@ -770,6 +799,73 @@ fn band_ramp_at(x: i64, z: i64, faults: &[crate::gen::tectonics::Fault]) -> i64 
         // Linear ramp: 256 at dist=0, 0 at dist=BELT_HALF_WIDTH
         (256 * (BELT_HALF_WIDTH - min_dist)) / BELT_HALF_WIDTH
     }
+}
+
+/// W-15a: Compute the along-fault arclength parameter t for a point's perpendicular foot on a fault.
+/// The foot is the point on the infinite fault line closest to (x, z).
+/// Parameter t: the foot point is at (px + t*dx, pz + t*dz).
+/// Uses the projection formula: t = ((x - px)*dx + (z - pz)*dz) / (dx² + dz²).
+pub fn fault_projection_parameter(x: i64, z: i64, fault: &crate::gen::tectonics::Fault) -> i64 {
+    let dx_from_base = x - fault.px;
+    let dz_from_base = z - fault.pz;
+    let dot = dx_from_base * fault.dx + dz_from_base * fault.dz;
+    // dlen_sq = dx² + dz²
+    if fault.dlen_sq == 0 {
+        0
+    } else {
+        dot / fault.dlen_sq
+    }
+}
+
+/// W-15a: Compute crest modulation factor from 2-octave value_noise over along-fault arclength.
+/// Returns value in [51, 166] (/128 fixed-point, i.e., 40%..130% range).
+/// Input t: along-fault arclength parameter; base_period: dim/8 at production dim=512.
+/// Uses 2 octaves with period dim/8 and dim/16 for broad and fine modulation.
+pub fn crest_modulation(t: i64, fault_index: u32, base_period: i64, seed: u64) -> i64 {
+    use crate::gen::height::value_noise_octave;
+    let salted_seed = seed ^ RIDGE_CREST_SALT;
+
+    // 2-octave value_noise over t (along-fault coordinate)
+    // Octave 0: period = base_period (broad modulation)
+    let octave0 = value_noise_octave(t, fault_index as i64, base_period, salted_seed, 0);
+    // Octave 1: period = base_period/2 (fine detail)
+    let octave1 = value_noise_octave(t, fault_index as i64, base_period / 2, salted_seed, 1);
+
+    // Combine: 2 octaves, amplitudes 2:1, then normalize to [0, 65536]
+    // max = 2*65536 + 1*65536 = 196608, so we need to scale down
+    let combined = (2 * octave0 + octave1) / 3; // Average to [0, 65536)
+
+    // Map to [51, 166]: linear rescale from [0, 65536) to [51, 166]
+    // result = 51 + (combined / 65536) * (166 - 51) = 51 + (combined / 65536) * 115
+    let range = 166 - 51;
+    let modulation = 51 + (combined * range) / 65536;
+    modulation.min(166).max(51)
+}
+
+/// W-15a: Find the nearest fault to a point and return (fault_index, projection parameter t).
+/// Returns (fault_index, t) for the closest fault, or (0, 0) if no faults.
+fn nearest_fault_and_parameter(x: i64, z: i64, faults: &[crate::gen::tectonics::Fault]) -> (usize, i64) {
+    use sim_core::isqrt;
+
+    let mut min_dist_sq = i64::MAX;
+    let mut nearest_idx = 0;
+    let mut nearest_t = 0i64;
+
+    for (idx, fault) in faults.iter().enumerate() {
+        let dx_from_base = x - fault.px;
+        let dz_from_base = z - fault.pz;
+        let cross = fault.dx * dz_from_base - fault.dz * dx_from_base;
+        let dist_sq = (cross * cross) / fault.dlen_sq;
+
+        if dist_sq < min_dist_sq {
+            min_dist_sq = dist_sq;
+            nearest_idx = idx;
+            let t = fault_projection_parameter(x, z, fault);
+            nearest_t = t;
+        }
+    }
+
+    (nearest_idx, nearest_t)
 }
 
 /// W-SIM-4a (#396): build the initial `height`/`resistance` fields, OPTIONALLY overlaid with the
@@ -860,7 +956,8 @@ pub fn erode_with_tectonics(
             }
         }
 
-        // W-13: Ridge stage (applied inside the fault scope to preserve byte-identity when faults are off)
+        // W-13/W-15a: Ridge stage with M1 (along-crest modulation) + M2 (foothill skirt)
+        // (applied inside the fault scope to preserve byte-identity when faults are off)
         if enable_ridges {
             // Compute histogram percentiles (p50, p80) on post-uplift height
             let mut height_sorted = height.clone();
@@ -870,52 +967,136 @@ pub fn erode_with_tectonics(
             let h_p50 = if p50_idx < height_sorted.len() { height_sorted[p50_idx] } else { hmax / 2 };
             let h_p80 = if p80_idx < height_sorted.len() { height_sorted[p80_idx] } else { hmax };
 
+            // W-15a: Compute base period for crest modulation (dim/8 at dim=512)
+            let crest_mod_period = (dim as i64) / 8;
+
+            // W-15a: Skirt parameters
+            const SKIRT_HALF_WIDTH: i64 = 8; // S = 2*W = 2*4 = 8
+            const SKIRT_WIDTH: i64 = SKIRT_HALF_WIDTH;
+            let skirt_inner = BELT_HALF_WIDTH;
+            let skirt_outer = BELT_HALF_WIDTH + SKIRT_WIDTH;
+
             for z in 0..dim {
                 for x in 0..dim {
                     let idx = linear_index(x, z, dim);
 
-                    // W-13: Band ramp with analytic distance (O(1) per cell, kills O(dim⁴) defect).
+                    // W-13/W-15a: Band distance with analytic distance (O(1) per cell).
                     // Query at warped coordinates — belt distance warped too, following the curved fault trace.
                     let (fault_wx, fault_wz) = crate::gen::tectonics::fault_warp_at(x as i64, z as i64, seed, dim);
                     let warped_fault_x = (x as i64) + fault_wx;
                     let warped_fault_z = (z as i64) + fault_wz;
-                    let band_r = band_ramp_at(warped_fault_x, warped_fault_z, &faults);
-                    if band_r == 0 {
-                        continue; // Skip cells completely outside belt
+
+                    // W-15a: Get actual perpendicular distance and nearest fault
+                    let min_dist = crate::gen::tectonics::fault_min_distance(warped_fault_x, warped_fault_z, &faults);
+                    if min_dist > skirt_outer {
+                        continue; // Skip cells completely outside belt + skirt
                     }
 
-                    // Height ramp: 0 below p50, 1 at p80, linear between
-                    let h = height[idx];
-                    let height_r = if h < h_p50 {
-                        0
-                    } else if h >= h_p80 {
-                        256
-                    } else {
-                        (256 * (h - h_p50)) / (h_p80 - h_p50).max(1)
-                    };
-                    if height_r == 0 {
-                        continue;
+                    // W-15a: Find nearest fault and compute along-fault parameter t
+                    let (nearest_idx, foot_t) = nearest_fault_and_parameter(warped_fault_x, warped_fault_z, &faults);
+                    let nearest_fault = &faults[nearest_idx];
+
+                    // W-15a: Compute crest modulation
+                    let crest_mod = crest_modulation(foot_t, nearest_idx as u32, crest_mod_period, seed);
+
+                    if min_dist <= skirt_inner {
+                        // CORE: apply modulated ridge delta
+
+                        // Band ramp: linear from 256 at dist=0 to 0 at dist=BELT_HALF_WIDTH
+                        let band_r = if min_dist == 0 {
+                            256
+                        } else {
+                            (256 * (BELT_HALF_WIDTH - min_dist)) / BELT_HALF_WIDTH
+                        };
+
+                        // Height ramp: 0 below p50, 1 at p80, linear between
+                        let h = height[idx];
+                        let height_r = if h < h_p50 {
+                            0
+                        } else if h >= h_p80 {
+                            256
+                        } else {
+                            (256 * (h - h_p50)) / (h_p80 - h_p50).max(1)
+                        };
+                        if height_r == 0 {
+                            continue;
+                        }
+
+                        // Combine masks: mountainness = band_ramp × height_ramp
+                        let mountainness = (band_r * height_r) / 256;
+                        if mountainness == 0 {
+                            continue;
+                        }
+
+                        // Apply warp to sample coordinates for ridge texture
+                        let (warp_x, warp_z) = ridge_warp_at(x as i64, z as i64, seed);
+                        let sample_x = (x as i64) + warp_x;
+                        let sample_z = (z as i64) + warp_z;
+
+                        // W-13: `ridge_fbm_at` returns READY ridged field [0, 32768] (already folded).
+                        let ridged = ridge_fbm_at(sample_x, sample_z, seed);
+
+                        // W-15a: Apply modulated ridge delta
+                        let ridge_delta = ridge_delta_compute_modulated(
+                            ridged, mountainness, crest_mod, RIDGE_AMP_NUM, RIDGE_AMP_DEN, hmax
+                        );
+                        height[idx] = (height[idx] + ridge_delta).clamp(0, hmax);
+                    } else if min_dist <= skirt_outer {
+                        // SKIRT: apply foothill skirt formula
+
+                        // Compute belt_delta_local: the modulated core delta at the foot point
+                        // Height at foot point (on the nearest fault)
+                        let foot_x = nearest_fault.px + nearest_fault.dx * foot_t;
+                        let foot_z = nearest_fault.pz + nearest_fault.dz * foot_t;
+
+                        // Clamp foot to grid bounds for height lookup
+                        // (foot is on infinite line, may be outside grid, so we use closest grid point)
+                        let foot_x_clamped = foot_x.max(0).min((dim as i64) - 1);
+                        let foot_z_clamped = foot_z.max(0).min((dim as i64) - 1);
+                        let foot_idx = linear_index(foot_x_clamped as usize, foot_z_clamped as usize, dim);
+                        let h_foot = height[foot_idx];
+
+                        // Height ramp for foot point
+                        let height_r_foot = if h_foot < h_p50 {
+                            0
+                        } else if h_foot >= h_p80 {
+                            256
+                        } else {
+                            (256 * (h_foot - h_p50)) / (h_p80 - h_p50).max(1)
+                        };
+
+                        if height_r_foot > 0 {
+                            // Band ramp for foot point (at the fault, distance = 0)
+                            let band_r_foot = 256;
+
+                            // Mountainness for foot point
+                            let mountainness_foot = (band_r_foot * height_r_foot) / 256;
+
+                            // Get ridge texture at foot
+                            let (warp_x, warp_z) = ridge_warp_at(foot_x_clamped, foot_z_clamped, seed);
+                            let sample_x = foot_x_clamped + warp_x;
+                            let sample_z = foot_z_clamped + warp_z;
+                            let ridged_foot = ridge_fbm_at(sample_x, sample_z, seed);
+
+                            // Compute belt_delta_local with modulation
+                            let belt_delta_local = ridge_delta_compute_modulated(
+                                ridged_foot, mountainness_foot, crest_mod, RIDGE_AMP_NUM, RIDGE_AMP_DEN, hmax
+                            );
+
+                            // Apply skirt formula: skirt = belt_delta_local * (S - (r - W))² / (S² * 4)
+                            // where r ∈ (W, W+S], S = 8
+                            let r = min_dist;
+                            let r_minus_w = r - skirt_inner; // Distance into skirt, in (0, S]
+                            let s_minus_r_minus_w = SKIRT_WIDTH - r_minus_w; // Decreasing from S to 0
+                            let skirt_factor = (s_minus_r_minus_w * s_minus_r_minus_w) / (SKIRT_WIDTH * SKIRT_WIDTH);
+                            // Note: skirt_factor ranges [0, 1] in fixed-point (scaled by S²)
+                            // Full formula: skirt = belt_delta_local * (S - (r - W))² / (S² * 4)
+                            // We compute: skirt = (belt_delta_local * skirt_factor) / 4
+                            let skirt_delta = (belt_delta_local * skirt_factor) / 4;
+
+                            height[idx] = (height[idx] + skirt_delta).clamp(0, hmax);
+                        }
                     }
-
-                    // Combine masks: mountainness = band_ramp × height_ramp
-                    let mountainness = (band_r * height_r) / 256;
-                    if mountainness == 0 {
-                        continue;
-                    }
-
-                    // Apply warp to sample coordinates for ridge texture
-                    let (warp_x, warp_z) = ridge_warp_at(x as i64, z as i64, seed);
-                    let sample_x = (x as i64) + warp_x;
-                    let sample_z = (z as i64) + warp_z;
-
-                    // W-13: `ridge_fbm_at` returns READY ridged field [0, 32768] (already folded).
-                    // Single fold implementation: fold is IN ridge_fbm_at, not here.
-                    // Route directly to ridge_delta_compute (no inline normalize+fold).
-                    let ridged = ridge_fbm_at(sample_x, sample_z, seed);
-
-                    // Apply ridge height: h += (RIDGE_AMP * mountainness * (2*r - MAX)) / SCALE
-                    let ridge_delta = ridge_delta_compute(ridged, mountainness, RIDGE_AMP_NUM, RIDGE_AMP_DEN, hmax);
-                    height[idx] = (height[idx] + ridge_delta).clamp(0, hmax);
                 }
             }
         }

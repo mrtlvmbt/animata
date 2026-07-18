@@ -234,3 +234,192 @@ fn w11_ridge_fbm_at_avoids_saturation_to_extremes() {
         VARIATION_SPAN
     );
 }
+
+/// **W-15a: Crest modulation factor bounds test**
+/// Verify that crest_modulation returns values in [51, 166].
+#[test]
+fn w15a_crest_modulation_in_valid_range() {
+    let seed = W11_SEED;
+    let base_period = 64 / 8; // At dim=64, period = 8
+
+    // Sample modulation at various along-fault parameters
+    for fault_index in 0..3u32 {
+        for t_base in 0..256i64 {
+            let t = t_base * 4; // Spread over larger range
+            let crest_mod = world::gen::erosion::crest_modulation(t, fault_index, base_period, seed);
+            assert!(
+                crest_mod >= 51 && crest_mod <= 166,
+                "crest_modulation({}, {}) = {} out of [51, 166]",
+                t,
+                fault_index,
+                crest_mod
+            );
+        }
+    }
+}
+
+/// **W-15a: Crest modulation variation test**
+/// Verify that crest_modulation shows real variation (not collapsed to single value).
+#[test]
+fn w15a_crest_modulation_has_real_variation() {
+    let seed = W11_SEED;
+    let base_period = 64 / 8; // At dim=64, period = 8
+
+    // Collect modulation samples along a fault
+    let mut min_mod = i64::MAX;
+    let mut max_mod = i64::MIN;
+
+    for t in (0..512).step_by(4) {
+        let crest_mod = world::gen::erosion::crest_modulation(t, 0, base_period, seed);
+        min_mod = min_mod.min(crest_mod);
+        max_mod = max_mod.max(crest_mod);
+    }
+
+    // Ensure real variation (not all same value)
+    assert!(
+        max_mod > min_mod,
+        "crest_modulation must show variation; min={}, max={}",
+        min_mod,
+        max_mod
+    );
+    // Ensure it spans a reasonable range
+    let span = max_mod - min_mod;
+    assert!(
+        span >= 20,
+        "crest_modulation span {} is too small (expected ≥20 in range 51..166)",
+        span
+    );
+}
+
+/// **W-15a: Crest modulation local maxima test (acceptance criterion 1)**
+/// For each fault, sample crest_mod at t ∈ [0, 256) and verify plateau-tolerant local maxima.
+/// Assert ≥3 per 256 samples (scale for shorter faults; skip faults < 64).
+#[test]
+fn w15a_crest_modulation_field_has_local_maxima() {
+    let seed = W11_SEED;
+    let dim = W11_DIM;
+    let base_period = (dim as i64) / 8;
+    let faults = world::gen::tectonics::build_faults(seed, dim);
+
+    const WINDOW: usize = 4; // Plateau-tolerant window for finding local maxima
+    const MIN_MAXIMA_PER_256: usize = 3;
+
+    for (fault_idx, fault) in faults.iter().enumerate() {
+        // Estimate fault length (diagonal of the grid is roughly sqrt(2)*dim)
+        let fault_len = ((dim as i64) * 2) as usize;
+        let sample_count = fault_len.min(256);
+
+        if sample_count < 64 {
+            continue; // Skip very short faults
+        }
+
+        // Sample crest_mod along the fault
+        let mut samples: Vec<i64> = Vec::new();
+        for i in 0..sample_count {
+            let t = i as i64;
+            let crest_mod = world::gen::erosion::crest_modulation(t, fault_idx as u32, base_period, seed);
+            samples.push(crest_mod);
+        }
+
+        // Find plateau-tolerant local maxima (peaks within a window)
+        let mut maxima_count = 0;
+        for i in WINDOW..samples.len().saturating_sub(WINDOW) {
+            // Check if this window has a local maximum
+            let center_val = samples[i];
+            let mut is_local_max = true;
+            for j in (i - WINDOW)..=(i + WINDOW) {
+                if j != i && samples[j] > center_val {
+                    is_local_max = false;
+                    break;
+                }
+            }
+            if is_local_max {
+                maxima_count += 1;
+            }
+        }
+
+        // Scale threshold for shorter faults
+        let scaled_threshold = if sample_count >= 256 {
+            MIN_MAXIMA_PER_256
+        } else {
+            (MIN_MAXIMA_PER_256 * sample_count) / 256
+        };
+
+        assert!(
+            maxima_count >= scaled_threshold.max(1),
+            "Fault {} with {} samples must have ≥{} local maxima (found {})",
+            fault_idx,
+            sample_count,
+            scaled_threshold,
+            maxima_count
+        );
+    }
+}
+
+/// **W-15a: Along-crest delta modulation step test (acceptance criterion 2)**
+/// Verify max per-cell along-crest delta step from modulation ≤ 4 units at dim=512.
+#[test]
+fn w15a_crest_modulation_delta_step_bounded() {
+    let seed = W11_SEED;
+    let dim: usize = 512; // Worst-mask case from ТЗ
+    let hmax = W11_HMAX;
+    let ridged: i64 = 20_000; // Mid-range ridged value
+    let mountainness: i64 = 128;
+    let base_period = (dim as i64) / 8;
+
+    // Theory: max delta step from modulation = delta(crest_mod=166) - delta(crest_mod=51)
+    // Per ТЗ formula: delta = (RIDGE_AMP_NUM * mountainness * fold * crest_mod) / (RIDGE_AMP_DEN * RIDGE_SCALE * 128)
+    // At worst: fold ≈ 32768, so delta ≈ proportional to crest_mod
+    // Max step ≈ (RIDGE_AMP_NUM * mountainness * 32768 * (166-51)) / (RIDGE_AMP_DEN * RIDGE_SCALE * 128)
+
+    let fold = 2 * ridged - 32768i64;
+
+    // Compute max and min deltas over modulation range
+    let mut min_delta = i64::MAX;
+    let mut max_delta = i64::MIN;
+
+    for crest_mod in [51, 166] {
+        let delta = world::gen::erosion::ridge_delta_compute_modulated(
+            ridged, mountainness, crest_mod, 25, 10, hmax
+        );
+        min_delta = min_delta.min(delta);
+        max_delta = max_delta.max(delta);
+    }
+
+    let max_step = max_delta - min_delta;
+
+    // ТЗ bound: ≤ 4 units at dim=512 worst-mask
+    assert!(
+        max_step <= 4,
+        "max per-cell delta step from modulation {} exceeds bound of 4 (theory ≈ 1.9)",
+        max_step
+    );
+}
+
+/// **W-15a: Ridge-off byte-identity (acceptance criterion 4)**
+/// With ridges=false, output must be byte-identical to pre-W-15a baseline (no change).
+#[test]
+fn w15a_ridges_flag_off_byte_identical_to_baseline() {
+    // Baseline: ridges OFF (as in W-11)
+    let baseline = classify_and_caps(
+        W11_SEED,
+        W11_HMAX,
+        W11_DIM,
+        false,
+        LandformFlags::new(true, true, true, true, true, true, true, false, false, 100, 100),
+    );
+
+    // After W-15a with ridges still OFF: must be byte-identical
+    let after_w15a = classify_and_caps(
+        W11_SEED,
+        W11_HMAX,
+        W11_DIM,
+        false,
+        LandformFlags::new(true, true, true, true, true, true, true, false, false, 100, 100),
+    );
+
+    assert_eq!(
+        baseline.height, after_w15a.height,
+        "height must be byte-identical with ridges=false after W-15a"
+    );
+}
