@@ -16,21 +16,76 @@ on:
 #   Both jobs emit JUnit + upload under a UNIQUE artifact name; the overall run is green iff both pass.
 
 jobs:
+  changes:
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      sim_relevant: ${{ steps.filter.outputs.sim_relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check if sim-relevant files changed
+        id: filter
+        run: |
+          # Get the base for comparison. On PR, use base ref; on push to a branch, use previous commit.
+          if [ -n "${{ github.base_ref }}" ]; then
+            BASE="origin/${{ github.base_ref }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+
+          # If BASE is missing/empty (initial commit), treat as sim-relevant
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Get list of changed files; fail-closed on git error (treat as sim-relevant)
+          if ! CHANGED=$(git diff --name-only "$BASE"..HEAD 2>/dev/null); then
+            echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # If diff is empty, conservative: assume sim-relevant to run tests
+          if [ -z "$CHANGED" ]; then
+            echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Check each file: if ALL files match render-only patterns, sim_relevant=false; else true
+          # Render-only patterns: v2/crates/render/**, **.md, .claude/**, pm/**, .claude-dev-kit (exact + contents), .github/workflows/sim-run.yml
+          SIM_RELEVANT=false
+          while IFS= read -r FILE; do
+            [ -z "$FILE" ] && continue
+            # Use case for robust pattern matching
+            case "$FILE" in
+              v2/crates/render/*|*.md|.claude/*|pm/*|.claude-dev-kit|.claude-dev-kit/*|.github/workflows/sim-run.yml)
+                # This file is render-only, continue checking
+                ;;
+              *)
+                # Found a sim-relevant file
+                SIM_RELEVANT=true
+                break
+                ;;
+            esac
+          done <<< "$CHANGED"
+
+          echo "sim_relevant=$SIM_RELEVANT" >> "$GITHUB_OUTPUT"
+
   test-x86:
     name: tests (corridors, x86)
+    needs: changes
+    if: needs.changes.outputs.sim_relevant == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: taiki-e/install-action@nextest
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: test-x86
+          workspaces: .
 
       # Everything except the 3 arch-bound golden-constant tests (those run on golden-arm64).
       - name: Run tests
@@ -61,14 +116,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: taiki-e/install-action@nextest
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
+          shared-key: golden-arm64
+          workspaces: .
 
       # ONLY the 3 exact-golden locks — they reproduce bit-for-bit only on the dev's arch (arm64).
       - name: Run golden locks
@@ -106,6 +157,8 @@ jobs:
   #     thread pool (the sim builds its own pool; the test runner is orthogonal).
   v2-sim-x86:
     name: v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)
+    needs: changes
+    if: needs.changes.outputs.sim_relevant == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -114,14 +167,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: taiki-e/install-action@nextest
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            v2/target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('v2/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-v2-
+          shared-key: v2-sim-x86
+          workspaces: v2
 
       # Everything EXCEPT the arch-bound golden — the integer invariants (R14 1-vs-N conserved + its
       # negative teeth test, two-run-same-seed, exact energy conservation, NaN/Inf, bounded
@@ -139,6 +188,8 @@ jobs:
 
   v2-golden-arm64:
     name: v2 golden (M2, arm64 matched arch)
+    needs: changes
+    if: needs.changes.outputs.sim_relevant == 'true'
     runs-on: macos-latest
     defaults:
       run:
@@ -147,14 +198,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: taiki-e/install-action@nextest
-      - uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            v2/target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('v2/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-v2-
+          shared-key: v2-golden-arm64
+          workspaces: v2
 
       # Full suite in RELEASE on the matched arch: the `v2_golden_*` bit-for-bit lock reproduces here
       # (pinned on this arch+profile), and the integer invariants run again — so two-run-same-seed +
