@@ -41,17 +41,26 @@ jobs:
             exit 0
           fi
 
-          # Get list of changed files
-          CHANGED=$(git diff --name-only "$BASE"..HEAD 2>/dev/null || echo "")
+          # Get list of changed files; fail-closed on git error (treat as sim-relevant)
+          if ! CHANGED=$(git diff --name-only "$BASE"..HEAD 2>/dev/null); then
+            echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # If diff is empty, conservative: assume sim-relevant to run tests
+          if [ -z "$CHANGED" ]; then
+            echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           # Check each file: if ALL files match render-only patterns, sim_relevant=false; else true
-          # Render-only patterns: v2/crates/render/**, **.md, .claude/**, pm/**, .claude-dev-kit
+          # Render-only patterns: v2/crates/render/**, **.md, .claude/**, pm/**, .claude-dev-kit (exact + contents), .github/workflows/sim-run.yml
           SIM_RELEVANT=false
           while IFS= read -r FILE; do
             [ -z "$FILE" ] && continue
             # Use case for robust pattern matching
             case "$FILE" in
-              v2/crates/render/*|*.md|.claude/*|pm/*|.claude-dev-kit*)
+              v2/crates/render/*|*.md|.claude/*|pm/*|.claude-dev-kit|.claude-dev-kit/*|.github/workflows/sim-run.yml)
                 # This file is render-only, continue checking
                 ;;
               *)
