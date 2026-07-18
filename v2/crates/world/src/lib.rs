@@ -307,12 +307,25 @@ impl ProcgenWorld {
         } else {
             (0.15, 0.50, "all-off sim (15–50%)")
         };
-        assert!(
-            (band_min..=band_max).contains(&solid_frac_final),
-            "PROCGEN SOLID FRACTION CHECK: solid cells {:.1}% (threshold: {}) — movement/space balance may be off (critic F3); if drift is legitimate, re-pin after recalibrating solid_level",
-            solid_frac_final * 100.0,
-            band_desc
-        );
+
+        // W-18-HF: Gate the solid-fraction assert on flags.base. The check guards SIM movement/space
+        // economy of fBm worlds; the sim lane always runs base=true, so the guard stays fully intact
+        // where it matters. When base == false (explicit dev/presentation config like flat maps),
+        // skip the assert and log instead (flat worlds are 100% solid by construction).
+        if enable_base {
+            assert!(
+                (band_min..=band_max).contains(&solid_frac_final),
+                "PROCGEN SOLID FRACTION CHECK: solid cells {:.1}% (threshold: {}) — movement/space balance may be off (critic F3); if drift is legitimate, re-pin after recalibrating solid_level",
+                solid_frac_final * 100.0,
+                band_desc
+            );
+        } else {
+            eprintln!(
+                "PROCGEN SOLID FRACTION CHECK (base=false, skipped): solid cells {:.1}% (config: {})",
+                solid_frac_final * 100.0,
+                band_desc
+            );
+        }
 
         ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, nitrate_resource, surface_material: fields.surface_material, temp_grid }
     }
@@ -584,6 +597,98 @@ mod tests {
             invocations >= 2,
             "Callback must be invoked at least for erosion + classify stages, got {} invocations",
             invocations
+        );
+    }
+
+    /// W-18-HF regression test: flat map (base=false, all-off flags) must NOT panic.
+    /// Reproduces the bug: ProcgenWorld::new with base=false panicked on PROCGEN SOLID FRACTION CHECK
+    /// because flat worlds are 100% solid by construction.
+    #[test]
+    fn flat_map_does_not_panic_base_false_all_off() {
+        use gen::erosion::flat_datum;
+
+        let dim = 32i64; // Small dim for quick test
+        let hmax = 200i64;
+        let resource_base = 120i64;
+        let seed = 0x9999_9999u64;
+
+        // All-off flags with base=false — this should NOT panic (the bug being fixed).
+        let w = ProcgenWorld::new(
+            dim, hmax, resource_base, seed, None,
+            false, // enable_base = false (FLAT_DATUM instead of fBm)
+            false, // enable_tectonics
+            false, // enable_aeolian
+            false, // enable_volcanic
+            false, // enable_glacial
+            false, // enable_coastal
+            false, // enable_erosion (redundant with base=false, but explicit)
+            false, // enable_ridges
+            false, // enable_beaches
+        );
+
+        // Verify: all heights must be FLAT_DATUM (hmax/2)
+        let expected_height = flat_datum(hmax);
+        for x in 0..dim {
+            for z in 0..dim {
+                let h = w.height(x, z);
+                assert_eq!(
+                    h, expected_height,
+                    "flat invariant: height at ({x},{z}) must be FLAT_DATUM={}, got {h}",
+                    expected_height
+                );
+            }
+        }
+    }
+
+    /// W-18-HF regression test: pedestal + volcanic (base=false) must NOT panic.
+    /// Second config PM hit: base=false with volcanic edifices.
+    #[test]
+    fn pedestal_with_volcanic_does_not_panic_base_false() {
+        use gen::erosion::flat_datum;
+
+        let dim = 32i64; // Small dim for quick test
+        let hmax = 200i64;
+        let resource_base = 120i64;
+        let seed = 0x8888_8888u64;
+
+        // base=false (pedestal) with volcanic edifices
+        let w = ProcgenWorld::new(
+            dim, hmax, resource_base, seed, None,
+            false, // enable_base = false (FLAT_DATUM pedestal)
+            false, // enable_tectonics
+            false, // enable_aeolian
+            true,  // enable_volcanic (edifices atop pedestal)
+            false, // enable_glacial
+            false, // enable_coastal
+            false, // enable_erosion
+            false, // enable_ridges
+            false, // enable_beaches
+        );
+
+        // Verify: base is FLAT_DATUM, with volcanic features added
+        let base_height = flat_datum(hmax);
+        let mut saw_height_variation = false;
+
+        for x in 0..dim {
+            for z in 0..dim {
+                let h = w.height(x, z);
+                // Heights should be >= base_height (volcanic adds edifices on top)
+                assert!(
+                    h >= base_height,
+                    "flat invariant: height at ({x},{z}) must be >= FLAT_DATUM={}, got {h}",
+                    base_height
+                );
+                if h > base_height {
+                    saw_height_variation = true;
+                }
+            }
+        }
+
+        // With volcanic enabled, we should see some heights above FLAT_DATUM
+        // (though this is not guaranteed by the algorithm, it's a sanity check)
+        assert!(
+            saw_height_variation,
+            "Expected some height variation above FLAT_DATUM with volcanic enabled; all cells are at base_height"
         );
     }
 }
