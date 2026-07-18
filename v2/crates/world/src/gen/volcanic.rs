@@ -98,6 +98,8 @@ impl SlopeClass {
 pub struct EdificeGeom {
     /// Peak height delta added to the base field (never absolute).
     pub peak: i64,
+    /// Shield peak height (peak / 2) — single source for slope calculations.
+    pub peak_shield: i64,
     /// Shield (low-viscosity) edifice outer footprint radius in cells.
     pub shield_radius: i64,
     /// Cone (high-viscosity) edifice outer footprint radius in cells.
@@ -113,26 +115,31 @@ pub struct EdificeGeom {
 }
 
 impl EdificeGeom {
-    /// Derive edifice geometry from `(dim, hmax)`, following W-16 amended formulas.
+    /// Derive edifice geometry from `(dim, hmax)`, following W-16b amended formulas.
+    /// Both cone and shield radii are now tied to peak (not dim) for dim-invariant aspect ratios.
     /// Cone profiles anchor at RIM (delta(rim_r) = peak EXACTLY) — fixes flat-disc issue.
     /// Pure integer arithmetic: multiply first, divide last.
     pub fn derive(dim: usize, hmax: i64) -> Self {
         let dim_i64 = dim as i64;
 
-        let shield_radius = (dim_i64 / 10).max(8);
-        let cone_radius = (dim_i64 / 24).max(4);
-        let caldera_r = (cone_radius / 3).max(1);
         let peak = (hmax * 3) / 5;
+        let peak_shield = peak / 2;
+        // Shield aspect (peak_shield/radius) ≈ 2.4 at hmax=200: radius = peak*5/24
+        let shield_radius = ((peak * 5) / 24).clamp(8, (dim_i64 / 6).max(8));
+        // Cone aspect (peak/radius) ≈ 6 at hmax=200: radius = peak/6
+        let cone_radius = (peak / 6).clamp(4, (dim_i64 / 6).max(4));
+        let caldera_r = (cone_radius / 3).max(1);
 
         // Rim anchored at peak: delta(rim_r) == peak exactly (rim_r = caldera_r + 1)
         let rim_h = peak;
 
-        // Caldera floor
-        let caldera_depth = (peak / 3).max(1);
+        // Caldera floor: deeper bowl (peak/2 depth) survives erosion smearing
+        let caldera_depth = (peak / 2).max(1);
         let floor = (peak - caldera_depth).max(0);
 
         EdificeGeom {
             peak,
+            peak_shield,
             shield_radius,
             cone_radius,
             caldera_r,
@@ -208,12 +215,11 @@ fn vent_height_at(vent: &Vent, dx: i64, dz: i64, geom: &EdificeGeom) -> i64 {
                 return 0;
             }
             // Shield quadratic profile: delta(r) = peak_shield * (R^2 - r^2) / R^2
-            // where peak_shield = peak / 2, and R = shield_radius
+            // where peak_shield (from geom.peak_shield) = peak / 2, and R = shield_radius
             let shield_r = geom.shield_radius;
-            let peak_shield = geom.peak / 2;
             let r_sq = r * r;
             let shield_r_sq = shield_r * shield_r;
-            let delta = (peak_shield * (shield_r_sq - r_sq)) / shield_r_sq;
+            let delta = (geom.peak_shield * (shield_r_sq - r_sq)) / shield_r_sq;
             delta.max(0)
         }
     }
@@ -249,6 +255,7 @@ pub fn emplace_edifices(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<i64> {
 /// footprint, tie-broken by the vent contributing the MOST height there (ties by lowest vent index —
 /// deterministic, `>` not `>=` on the running best), `None` elsewhere. Written as the primary
 /// substrate by the caller (`caps.rs`, mirroring aeolian's sand reconciliation) — RnD 15 §8.
+/// W-16b amendment: cone crater floors (r <= caldera_r) get Basalt; cone flanks get Tuff.
 pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Option<MaterialId>> {
     let n = dim * dim;
     let mut mask = vec![None; n];
@@ -257,14 +264,23 @@ pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Optio
     for vent in vents {
         for z in 0..dim {
             for x in 0..dim {
-                let contribution = vent_height_at(vent, x as i64 - vent.x, z as i64 - vent.z, &geom);
+                let dx = x as i64 - vent.x;
+                let dz = z as i64 - vent.z;
+                let contribution = vent_height_at(vent, dx, dz, &geom);
                 if contribution <= 0 {
                     continue;
                 }
                 let idx = linear_index(x, z, dim);
                 if contribution > best_contribution[idx] {
                     best_contribution[idx] = contribution;
-                    mask[idx] = Some(vent.class.material());
+                    // Cone crater floors are Basalt (dark pit); flanks are Tuff. Shields all Basalt.
+                    let r = isqrt(dx * dx + dz * dz);
+                    let material = match vent.class {
+                        SlopeClass::Cone if r <= geom.caldera_r => MaterialId::Basalt,
+                        SlopeClass::Cone => MaterialId::Tuff,
+                        SlopeClass::Shield => MaterialId::Basalt,
+                    };
+                    mask[idx] = Some(material);
                 }
             }
         }
@@ -339,11 +355,12 @@ mod tests {
 
     /// Viscosity selects the SLOPE CLASS: Shield's wider footprint means gentler slope than Cone.
     /// Test with two different (dim, hmax) pairs to verify the property holds.
+    /// Uses correct numerators: peak_shield for shields, peak for cones.
     #[test]
     fn shield_mean_radial_slope_is_gentler_than_cone() {
         for (test_dim, test_hmax) in [(64, 200), (512, 200)] {
             let geom = EdificeGeom::derive(test_dim, test_hmax);
-            let shield_mean_slope = geom.peak / geom.shield_radius;
+            let shield_mean_slope = geom.peak_shield / geom.shield_radius;
             let cone_mean_slope = geom.peak / geom.cone_radius;
             assert!(
                 shield_mean_slope < cone_mean_slope,
@@ -369,22 +386,53 @@ mod tests {
         assert!(saw_shield && saw_cone, "both Shield and Cone classes must be realized across a real vent set");
     }
 
+    /// W-16b amendment: cone crater floors are Basalt (dark pit); flanks are Tuff.
     #[test]
-    fn edifice_material_mask_writes_basalt_for_shield_and_tuff_for_cone() {
+    fn edifice_material_mask_cone_crater_basalt_flanks_tuff() {
         let shield = Vent { x: 10, z: 10, class: SlopeClass::Shield };
         let cone = Vent { x: 40, z: 40, class: SlopeClass::Cone };
         let dim = 64usize;
         const HMAX: i64 = 200;
         let mask = edifice_material_mask(dim, HMAX, &[shield, cone]);
+        let geom = EdificeGeom::derive(dim, HMAX);
 
-        assert_eq!(mask[linear_index(10, 10, dim)], Some(MaterialId::Basalt), "the Shield vent's summit must be Basalt");
-        assert_eq!(mask[linear_index(40, 40, dim)], Some(MaterialId::Tuff), "the Cone vent's summit must be Tuff");
-        assert_eq!(mask[linear_index(0, 0, dim)], None, "a cell outside every vent's footprint must be unmarked");
+        // Shield summit: always Basalt
+        assert_eq!(
+            mask[linear_index(10, 10, dim)],
+            Some(MaterialId::Basalt),
+            "Shield vent's summit must be Basalt"
+        );
+
+        // Cone center (r=0, within caldera): Basalt (dark crater floor)
+        assert_eq!(
+            mask[linear_index(40, 40, dim)],
+            Some(MaterialId::Basalt),
+            "Cone crater floor (r <= caldera_r) must be Basalt"
+        );
+
+        // Cone mid-flank (r > caldera_r): Tuff (light flanks)
+        let flank_radius = geom.caldera_r + (geom.cone_radius - geom.caldera_r) / 2;
+        if flank_radius > geom.caldera_r && flank_radius < geom.cone_radius {
+            let flank_x = (40 + flank_radius).min((dim - 1) as i64) as usize;
+            assert_eq!(
+                mask[linear_index(flank_x, 40usize, dim)],
+                Some(MaterialId::Tuff),
+                "Cone flanks (r > caldera_r) must be Tuff"
+            );
+        }
+
+        // Outside all edifices: None
+        assert_eq!(
+            mask[linear_index(0, 0, dim)],
+            None,
+            "cells outside every vent's footprint must be unmarked"
+        );
     }
 
-    /// Count of cells that are a STRICT local D8 maximum (height strictly greater than all 8
-    /// neighbors — undefined/false at the grid edge where a neighbor is missing, per the `continue`
-    /// below, matching this module's other edge-handling convention).
+    /// Count of cells that are plateau-aware local D8 maxima: h >= all 8 neighbors AND h > at
+    /// least one neighbor. Accommodates caldera rim plateaus (W-16b): rim cells form equal-height
+    /// rings but are strictly above the crater floor and outer skirt, so they qualify. Undefined/
+    /// false at the grid edge where a neighbor is missing (per the `continue` below).
     fn local_maximum_count(dim: usize, height: &[i64]) -> usize {
         const D8_OFFSETS: [(i64, i64); 8] =
             [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
@@ -392,19 +440,26 @@ mod tests {
         for z in 0..dim {
             for x in 0..dim {
                 let idx = linear_index(x, z, dim);
+                let h = height[idx];
                 let mut is_max = true;
+                let mut is_greater_than_any = false;
                 for &(dx, dz) in &D8_OFFSETS {
                     let nx = x as i64 + dx;
                     let nz = z as i64 + dz;
                     if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
                         continue;
                     }
-                    if height[linear_index(nx as usize, nz as usize, dim)] >= height[idx] {
+                    let n_h = height[linear_index(nx as usize, nz as usize, dim)];
+                    if n_h > h {
                         is_max = false;
                         break;
                     }
+                    if n_h < h {
+                        is_greater_than_any = true;
+                    }
                 }
-                if is_max {
+                // Plateau-aware: must be >= all neighbors AND > at least one neighbor
+                if is_max && is_greater_than_any {
                     count += 1;
                 }
             }
@@ -417,9 +472,15 @@ mod tests {
     /// right after the additive edifice stamp (this module's own output — exactly the "PRE-erosion
     /// volcanic field" the ТЗ specifies). The OFF baseline here is FLAT (not fBm noise) — an even
     /// STRONGER anti-forcing choice than fBm (which could incidentally produce a few local maxima of
-    /// its own): a flat field has ZERO strict local maxima by construction (every neighbor is
-    /// exactly equal, never `<`), so any local maximum observed ON is unambiguously the edifice
-    /// stamp's doing, not baseline noise.
+    /// its own): a flat field has ZERO plateau-aware local maxima by construction (every neighbor is
+    /// exactly equal, never strictly less).
+    ///
+    /// W-16b ALGORITHM CHANGE (declared): the local maximum detector switched to plateau-aware
+    /// criterion (h >= all neighbors AND h > at least one) to accommodate caldera rim plateaus. Cone
+    /// rims at r=caldera_r+1 form equal-height rings (neighbors on the ring are equal; floor below
+    /// is strictly lower) — they qualify as maxima under the new criterion but not the old strict
+    /// (h > all) test. This is a detection fix, not a threshold change: edifices still produce
+    /// distinct reliefs; the criterion captures plateau peaks as well as pointy ones.
     #[test]
     fn constructive_relief_corridor_local_maxima() {
         let dim = 64usize;
@@ -486,7 +547,7 @@ mod tests {
         indices.truncate(4);
 
         let actual: [i64; 4] = [delta[indices[0]], delta[indices[1]], delta[indices[2]], delta[indices[3]]];
-        const EXPECTED: [i64; 4] = [80, 120, 60, 36]; // W-16 amendment: pinned from PM analytic probe vs commit b335358 (rim-anchored semantics: floor 80 at cone center, 120 at rim flank, 60 shield, 36 control); CI pass-6 is arbiter if value differs
+        const EXPECTED: [i64; 4] = [60, 120, 60, 36]; // W-16b amendment: pinned from CI run 29654483580 (x86 debug and arm64 release IDENTICAL). Matches deeper caldera (floor 80→60) + basalt crater material + peak-tied radii + plateau-aware corridors.
         assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices; placeholder awaiting CI pin");
     }
 
@@ -513,17 +574,62 @@ mod tests {
         }
     }
 
-    /// Acceptance criterion W-16: radii scale correctly at dim=64 and dim=512.
+    /// Acceptance criterion W-16b: cone_radius tied to peak, not dim — maintains aspect ratio.
+    /// Formula: clamp(peak/6, 4, (dim/6).max(4)).
+    #[test]
+    fn cone_radius_peak_tied() {
+        const HMAX: i64 = 200;
+        let geom_256 = EdificeGeom::derive(256, HMAX);
+        let geom_512 = EdificeGeom::derive(512, HMAX);
+        let geom_64 = EdificeGeom::derive(64, HMAX);
+        let geom_16 = EdificeGeom::derive(16, HMAX);
+
+        assert_eq!(geom_256.cone_radius, 20, "cone_radius(256, 200) must be 20");
+        assert_eq!(geom_512.cone_radius, 20, "cone_radius(512, 200) must be 20");
+        assert_eq!(geom_64.cone_radius, 10, "cone_radius(64, 200) must be 10");
+        assert_eq!(geom_16.cone_radius, 4, "cone_radius(16, 200) must be 4");
+    }
+
+    /// Acceptance criterion W-16b amendment: shield_radius tied to peak, not dim — maintains
+    /// aspect ratio (peak_shield / radius ≈ 2.4 at hmax=200).
+    /// Formula: clamp(peak*5/24, 8, (dim/6).max(8)).
+    #[test]
+    fn shield_radius_peak_tied() {
+        const HMAX: i64 = 200;
+        let geom_256 = EdificeGeom::derive(256, HMAX);
+        let geom_512 = EdificeGeom::derive(512, HMAX);
+        let geom_64 = EdificeGeom::derive(64, HMAX);
+
+        assert_eq!(geom_512.shield_radius, 25, "shield_radius(512, 200) must be 25");
+        assert_eq!(geom_256.shield_radius, 25, "shield_radius(256, 200) must be 25");
+        assert_eq!(geom_64.shield_radius, 10, "shield_radius(64, 200) must be 10 (clamped by dim/6)");
+    }
+
+    /// Acceptance criterion W-16b amendment: radii scale correctly at dim=64 and dim=512.
+    /// Both cone and shield now peak-tied instead of dim-tied.
     #[test]
     fn radii_scale_correctly() {
         const HMAX: i64 = 200;
         let geom_64 = EdificeGeom::derive(64, HMAX);
         let geom_512 = EdificeGeom::derive(512, HMAX);
 
-        assert_eq!(geom_64.shield_radius, 8, "shield_radius(64) must be 8");
-        assert_eq!(geom_512.shield_radius, 51, "shield_radius(512) must be 51");
-        assert_eq!(geom_64.cone_radius, 4, "cone_radius(64) must be 4");
-        assert_eq!(geom_512.cone_radius, 21, "cone_radius(512) must be 21");
+        assert_eq!(geom_64.shield_radius, 10, "shield_radius(64) must be 10 (peak*5/24 clamped to dim/6)");
+        assert_eq!(geom_512.shield_radius, 25, "shield_radius(512) must be 25 (peak*5/24)");
+        assert_eq!(geom_64.cone_radius, 10, "cone_radius(64) must be 10 (peak/6 clamped to dim/6)");
+        assert_eq!(geom_512.cone_radius, 20, "cone_radius(512) must be 20 (peak/6)");
+    }
+
+    /// Acceptance criterion W-16b amendment: caldera floor formula — floor = peak - peak/2 = peak/2.
+    #[test]
+    fn caldera_floor_formula() {
+        const HMAX: i64 = 200;
+        let geom = EdificeGeom::derive(512, HMAX);
+        // peak = (200 * 3) / 5 = 120
+        // caldera_depth = 120 / 2 = 60
+        // floor = 120 - 60 = 60
+        assert_eq!(geom.peak, 120, "peak at hmax=200 must be 120");
+        assert_eq!(geom.caldera_depth, 60, "caldera_depth must be peak/2 = 60");
+        assert_eq!(geom.floor, 60, "floor must be peak/2 = 60");
     }
 
     /// Acceptance criterion W-16: caldera bowl — floor < rim at ring outside caldera.
