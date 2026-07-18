@@ -543,7 +543,7 @@ mod tests {
         indices.truncate(4);
 
         let actual: [i64; 4] = [delta[indices[0]], delta[indices[1]], delta[indices[2]], delta[indices[3]]];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // W-16b amendment: deep caldera (peak/2) + basalt crater + radii fixes; PLACEHOLDER — awaiting CI pin from pass-2
+        const EXPECTED: [i64; 4] = [60, 120, 60, 36]; // W-16b amendment: pinned from CI run 29654483580 (x86 debug and arm64 release IDENTICAL). Matches deeper caldera (floor 80→60) + basalt crater material + peak-tied radii + plateau-aware corridors.
         assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices; placeholder awaiting CI pin");
     }
 
