@@ -246,6 +246,85 @@ impl Default for UiRoot {
 }
 
 
+/// U-13: Clip a viewport quad (or any polygon) to panel bounds to keep it rectangular.
+/// Uses simple line-clipping against the rectangle edges.
+fn clip_quad_to_rect(quad: &[egui::Pos2], bounds: egui::Rect) -> Vec<egui::Pos2> {
+    if quad.len() < 3 {
+        return Vec::new();
+    }
+
+    let mut result = quad.to_vec();
+
+    // Clip against each edge of the bounds rectangle
+    for edge in 0..4 {
+        if result.len() < 3 {
+            break;  // Degenerate polygon
+        }
+
+        let mut clipped = Vec::new();
+
+        // Determine which edge we're clipping against
+        let (edge_fn, edge_name): (fn(egui::Pos2, egui::Rect) -> bool, &str) = match edge {
+            0 => (|p, r| p.x >= r.left(), "left"),     // left edge
+            1 => (|p, r| p.x <= r.right(), "right"),   // right edge
+            2 => (|p, r| p.y >= r.top(), "top"),       // top edge
+            _ => (|p, r| p.y <= r.bottom(), "bottom"), // bottom edge
+        };
+
+        let n = result.len();
+        for i in 0..n {
+            let curr = result[i];
+            let next = result[(i + 1) % n];
+
+            let curr_inside = edge_fn(curr, bounds);
+            let next_inside = edge_fn(next, bounds);
+
+            if next_inside {
+                if !curr_inside {
+                    // Entering the inside: add intersection
+                    if let Some(intersection) = line_rect_intersection(curr, next, bounds, edge) {
+                        clipped.push(intersection);
+                    }
+                }
+                clipped.push(next);
+            } else if curr_inside {
+                // Leaving the inside: add intersection
+                if let Some(intersection) = line_rect_intersection(curr, next, bounds, edge) {
+                    clipped.push(intersection);
+                }
+            }
+        }
+
+        result = clipped;
+    }
+
+    result
+}
+
+/// Helper: Find intersection of line segment (p1, p2) with a specific edge of the rectangle
+fn line_rect_intersection(p1: egui::Pos2, p2: egui::Pos2, bounds: egui::Rect, edge: usize) -> Option<egui::Pos2> {
+    let t = match edge {
+        0 => {  // left edge
+            let t = (bounds.left() - p1.x) / (p2.x - p1.x);
+            if t >= 0.0 && t <= 1.0 { Some(t) } else { None }
+        }
+        1 => {  // right edge
+            let t = (bounds.right() - p1.x) / (p2.x - p1.x);
+            if t >= 0.0 && t <= 1.0 { Some(t) } else { None }
+        }
+        2 => {  // top edge
+            let t = (bounds.top() - p1.y) / (p2.y - p1.y);
+            if t >= 0.0 && t <= 1.0 { Some(t) } else { None }
+        }
+        _ => {  // bottom edge
+            let t = (bounds.bottom() - p1.y) / (p2.y - p1.y);
+            if t >= 0.0 && t <= 1.0 { Some(t) } else { None }
+        }
+    };
+
+    t.map(|t| egui::Pos2::new(p1.x + t * (p2.x - p1.x), p1.y + t * (p2.y - p1.y)))
+}
+
 /// Dim the panel OUTSIDE the viewport rectangle (four bands around the frame's bounding box, clamped
 /// to the panel). Bands collapse to nothing once the view encloses the whole map.
 /// U-8: Veil alpha adjusted to 130 (.51) for darker appearance per user request.
@@ -318,7 +397,11 @@ impl Panel for MinimapPanel {
                 theme::themed_frame(theme::FrameKind::Vitals)
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        let size = egui::vec2(minimap::MINIMAP_WIDTH as f32, minimap::MINIMAP_HEIGHT as f32);
+                        // U-13: Use available space to fill the panel, respecting aspect ratio
+                        // The minimap is always square (world is square), so pick the smaller dimension
+                        let available = ui.available_size();
+                        let size_scalar = available.x.min(available.y).max(100.0);  // Minimum 100×100
+                        let size = egui::vec2(size_scalar, size_scalar);
                         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
 
                         // U-8: Draw the minimap texture as a screen-aligned iso diamond through the new projection
@@ -345,7 +428,9 @@ impl Panel for MinimapPanel {
                         mesh.add_triangle(0, 2, 3);
                         painter.add(egui::Shape::mesh(mesh));
 
-                        // U-8: Draw viewport quad through the same screen-aligned projection
+                        // U-8/U-13: Draw viewport quad through the same screen-aligned projection,
+                        // clipped against PANEL bounds (not world bounds) so the quad stays rectangular
+                        // even when the camera view extends beyond the map edges.
                         let aspect = ui_ctx.screen_dims.0 / ui_ctx.screen_dims.1;
                         let cam_vp = minimap::minimap_view_proj_matrix(
                             ui_ctx.camera_focus,
@@ -357,7 +442,8 @@ impl Panel for MinimapPanel {
                         let mut viewport_pts: Vec<egui::Pos2> = Vec::new();
                         for corner_screen in corners.iter() {
                             let world_xz = minimap::minimap_ground_under_cursor(cam_vp, *corner_screen, ui_ctx.screen_dims);
-                            let uv = minimap::world_to_minimap_uv(world_xz, ui_ctx.world_dim);
+                            // U-13: Don't clamp UV to [0, 1] here — let the panel clipping handle out-of-bounds
+                            let uv = minimap::world_to_minimap_uv_unclamped(world_xz, ui_ctx.world_dim);
                             let (panel_x, panel_y) = minimap::map_uv_to_panel(
                                 uv.x,
                                 uv.y,
@@ -367,15 +453,19 @@ impl Panel for MinimapPanel {
                             );
                             viewport_pts.push(egui::Pos2::new(rect.left() + panel_x, rect.top() + panel_y));
                         }
+
+                        // U-13: Clip the viewport quad to panel bounds to keep it rectangular
+                        let clipped_quad = clip_quad_to_rect(&viewport_pts, rect);
+
                         // Draw veil outside the viewport quad (v1 parity)
-                        if viewport_pts.len() == 4 {
-                            veil_outside(&painter, rect, &viewport_pts);
+                        if !clipped_quad.is_empty() {
+                            veil_outside(&painter, rect, &clipped_quad);
                         }
 
                         // Draw closed quad outline
-                        if viewport_pts.len() == 4 {
+                        if !clipped_quad.is_empty() && clipped_quad.len() >= 3 {
                             let stroke = egui::Stroke::new(1.5, theme::ACCENT);
-                            painter.add(egui::Shape::closed_line(viewport_pts, stroke));
+                            painter.add(egui::Shape::closed_line(clipped_quad, stroke));
                         }
 
                         // U-8: Handle click to jump using the inverted screen-aligned projection

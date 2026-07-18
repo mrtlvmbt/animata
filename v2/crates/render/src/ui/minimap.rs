@@ -145,6 +145,15 @@ pub fn world_to_minimap_uv(world_pos: glam::Vec2, dim: i64) -> glam::Vec2 {
     )
 }
 
+/// Project a world point to minimap UV coordinates, WITHOUT clamping to [0, 1].
+/// Used for viewport quad projection so out-of-bounds corners can extend beyond the panel.
+pub fn world_to_minimap_uv_unclamped(world_pos: glam::Vec2, dim: i64) -> glam::Vec2 {
+    glam::vec2(
+        world_pos.x / dim as f32,
+        world_pos.y / dim as f32,
+    )
+}
+
 /// Compute screen-space quad corners that map to world coordinates (for camera frustum).
 /// Returns 4 (screen_x, screen_y) positions for corners at near plane.
 pub fn screen_quad_corners(screen_dims: (f32, f32)) -> [(f32, f32); 4] {
