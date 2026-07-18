@@ -27,6 +27,7 @@ pub fn render_creatures_lod(
     camera: &crate::camera::IsoCam,
     world: &dyn WorldView,
     use_cube_terrain: bool,
+    height_scale: f32,
 ) {
     if let Some(s) = snap.as_ref() {
         let px_per_m = camera.px_per_m();
@@ -40,7 +41,7 @@ pub fn render_creatures_lod(
                 // Hex mode: hex center (R-2/R-4 behavior)
                 hex::hex_center(c.pos.0, c.pos.1)
             };
-            let h = world.height(c.pos.0, c.pos.1) as f32 * hex::HEIGHT_SCALE;
+            let h = world.height(c.pos.0, c.pos.1) as f32 * height_scale;
             let creature_pos = vec3(cx, h + 0.15, cz);
 
             // R-3 frustum cull: skip creatures outside the view frustum.

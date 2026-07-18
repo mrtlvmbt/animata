@@ -141,7 +141,7 @@ fn build_chunk(
 
     for row in row0..row1 {
         for col in 0..world_dim {
-            let h = world.height(col, row) as f32 * height_scale;
+            let h = world.height(col, row) as f32 * HEIGHT_SCALE;
             let (cx, cz) = hex_center(col, row);
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
@@ -218,7 +218,7 @@ fn build_chunk(
             let cliff_color = cliff_shade(top_color_bare);
             for (dir_i, &(ncol, nrow)) in neighbors(col, row).iter().enumerate() {
                 let nh = if (0..world_dim).contains(&ncol) && (0..world_dim).contains(&nrow) {
-                    world.height(ncol, nrow) as f32 * height_scale
+                    world.height(ncol, nrow) as f32 * HEIGHT_SCALE
                 } else {
                     0.0
                 };

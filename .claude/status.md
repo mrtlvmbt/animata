@@ -1,5 +1,5 @@
-task: #498 U-13 minimap fixes
-phase: FINAL FIX + CI verification
-blocked_on: CI run #29660877760 + code-critic verdict (agent adea59431c35248ad)
-next: CI PASS + critic PASS → final report done
-updated: 2026-07-18 23:04
+task: #502 W-15b wire --height-scale
+phase: PR + code-critic + CI verification
+blocked_on: code-critic verdict (agent aff83753943bba95b) + ci-report.sh
+next: critic PASS + CI 4/4 green → finalize
+updated: 2026-07-18 23:10

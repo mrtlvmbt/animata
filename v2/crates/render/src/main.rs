@@ -615,6 +615,9 @@ async fn main() {
         explicit_landform_flags: explicit_flags,
     };
 
+    // W-15b: Compute effective height scale for terrain and creatures (default ×1.0)
+    let effective_height_scale = cli_args.height_scale_override.unwrap_or(hex::HEIGHT_SCALE);
+
     // U-2: For harnesses (screenshot/bench/screenshot-ui), build world inline before their loops
     // For app path, we'll spawn a worker thread and initialize from recv
     let is_harness = cli_args.screenshot.is_some() || cli_args.bench || cli_args.screenshot_ui.is_some();
@@ -666,7 +669,7 @@ async fn main() {
     let (span_x, _) = hex::hex_center(world_dim, 0);
     let (_, span_z) = hex::hex_center(0, world_dim);
     let world_span = span_x.max(span_z).max(1.0);
-    let center = Vec3::new(span_x * 0.5, hex::HEIGHT_SCALE * cli::HMAX as f32 * 0.5, span_z * 0.5);
+    let center = Vec3::new(span_x * 0.5, effective_height_scale * cli::HMAX as f32 * 0.5, span_z * 0.5);
     let mut camera = IsoCam::new(center, 0.0, world_span * 1.5);
 
     // R-8: standalone mode spawns NO sim worker — `handle` stays `None` for the run, so `snap` below
@@ -881,7 +884,7 @@ async fn main() {
                     cli_args.retained,
                 );
 
-                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
                 set_default_camera();
                 ui::draw();  // Render the chip UI
 
@@ -962,7 +965,7 @@ async fn main() {
                     cli_args.retained,
                 );
 
-                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
                 set_default_camera();
 
                 // R-13 F-B5: Capture on final frame
@@ -1269,7 +1272,7 @@ async fn main() {
                     let (span_x, _) = hex::hex_center(world_dim, 0);
                     let (_, span_z) = hex::hex_center(0, world_dim);
                     let world_span = span_x.max(span_z).max(1.0);
-                    let center = Vec3::new(span_x * 0.5, hex::HEIGHT_SCALE * cli::HMAX as f32 * 0.5, span_z * 0.5);
+                    let center = Vec3::new(span_x * 0.5, effective_height_scale * cli::HMAX as f32 * 0.5, span_z * 0.5);
                     camera = IsoCam::new(center, 0.0, world_span * 1.5);
 
                     // U-2/D5: GPU upload if --retained (GL-thread-only work)
@@ -1567,7 +1570,7 @@ async fn main() {
                     cli_args.retained,
                 );
 
-                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
                 set_default_camera();
 
                 ui::draw();
