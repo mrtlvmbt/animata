@@ -193,9 +193,12 @@ struct CliArgs {
     /// U-9: `--ui-state visible|hidden|world|view|perf|pop`: initial panel visibility and flyout state.
     /// visible/hidden: control panel visibility; world/view/perf/pop: open that flyout on startup.
     ui_state_value: String,  // "visible" | "hidden" | "world" | "view" | "perf" | "pop"
-    /// U-10: `--landforms <csv>`: explicit landform flags (e.g., "tect,coastal,beaches").
+    /// W-18: `--landforms <csv>`: SOURCES only (base, tect, ridges, volcanic).
     /// If set, overrides seed-derived flags for determinism testing.
     landforms: Option<String>,
+    /// W-18: `--transform <csv>`: TRANSFORMS only (erosion, aeolian, glacial, coastal, beaches).
+    /// If set, overrides seed-derived flags for determinism testing.
+    transforms: Option<String>,
 }
 
 fn parse_args() -> CliArgs {
@@ -217,7 +220,8 @@ fn parse_args() -> CliArgs {
     let mut screenshot_ui = None;
     let mut yaw_degrees = None;
     let mut ui_state_value = "visible".to_string();  // Default: panels visible
-    let mut landforms: Option<String> = None;  // U-10: explicit landform flags
+    let mut landforms: Option<String> = None;  // W-18: explicit SOURCES flags
+    let mut transforms: Option<String> = None;  // W-18: explicit TRANSFORMS flags
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -307,10 +311,13 @@ fn parse_args() -> CliArgs {
             "--landforms" => {
                 landforms = Some(args.next().expect("--landforms requires a CSV value"));
             }
+            "--transform" => {
+                transforms = Some(args.next().expect("--transform requires a CSV value"));
+            }
             other => eprintln!("render: ignoring unknown arg {other:?}"),
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms, transforms }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
