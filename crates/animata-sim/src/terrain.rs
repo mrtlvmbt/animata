@@ -911,42 +911,6 @@ impl VoxelTerrain {
         Self::generate(seed, &|_| {})
     }
 
-    /// Build a world from externally-supplied per-column fields (e.g. a dump of the **v2** worldgen),
-    /// bypassing v1 worldgen entirely — so the mature v1 hex-voxel renderer can draw a v2-generated
-    /// map. Purely additive and OFF the sim/worldgen path (nothing else calls it), so it moves no
-    /// determinism golden. `surf` / `biome_ids` / `water` are row-major `COLS*ROWS` (`idx = z*COLS + x`):
-    /// `surf` = surface height in voxel levels, `biome_ids` = `BiomeKind::id` per column, `water` =
-    /// water-surface voxel level (`0` = dry). Climate axes an injected map has no source for
-    /// (temp / moist / toxicity) default to neutral mid/zero; `water_dist` is derived from `water`.
-    pub fn from_external(seed: u64, surf: Vec<f32>, biome_ids: Vec<u8>, water: Vec<u8>) -> Self {
-        let n = COLS * ROWS;
-        assert_eq!(surf.len(), n, "from_external: surf must be COLS*ROWS ({n})");
-        assert_eq!(biome_ids.len(), n, "from_external: biome_ids must be COLS*ROWS ({n})");
-        assert_eq!(water.len(), n, "from_external: water must be COLS*ROWS ({n})");
-        let water_dist = compute_water_dist(&water);
-        let bio_geo = biome_ids.iter().map(|&biome| GeoCell { biome, moist: 128 }).collect();
-        VoxelTerrain {
-            seed,
-            chunks_x: COLS.div_ceil(CHUNK),
-            chunks_y: ROWS.div_ceil(CHUNK),
-            geo: Arc::new(TerrainGeo {
-                surf,
-                flags: vec![0u8; n],
-                water,
-                temp: vec![128u8; n],
-                bio_geo,
-                toxicity: vec![0u8; n],
-                water_dist,
-            }),
-            state: TerrainState {
-                bio: vec![BioCell::default(); n],
-                nutrient_update: vec![0u32; n],
-                oxygen: vec![0.0; n],
-                oxygen_update: vec![0u32; n],
-            },
-        }
-    }
-
     /// Water surface level (voxel) at signed coords, `0` if dry or out of world. The
     /// renderer floats a translucent plane here where it stands above the terrain.
     pub fn water_level(&self, x: i32, y: i32) -> u8 {

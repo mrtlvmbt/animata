@@ -1,7 +1,7 @@
 #version 100
 attribute vec3 position;
 attribute vec2 texcoord;
-attribute vec4 color0;  // Note: if gl_pass_as_float=false, this is really uvec4 but cast to vec4
+attribute vec4 color0;
 uniform mat4 mvp;
 varying lowp vec4 color;
 varying highp float vy;
@@ -17,6 +17,6 @@ void main() {
     // depth precision); a tree's BOTTOM edge is nudged forward (-1) so the trunk wins the
     // tie against the ground it stands on. The nudge is far below one voxel.
     gl_Position.z += texcoord.x * 0.00012 * gl_Position.w;
-    color = color0 / 255.0;  // Convert [0-255] to [0-1]
+    color = color0 / 255.0;
     vy = position.y;
 }

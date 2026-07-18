@@ -1,7 +1,0 @@
-commit:     a90e57eb57b3441a7b161daa9137567dc4bc8771
-run:        #28383303068
-run_sha:    a90e57eb57b3441a7b161daa9137567dc4bc8771
-conclusion: success
-all_jobs:   true
-url:        https://github.com/mrtlvmbt/animata/actions/runs/28383303068
-VERDICT: GREEN — все джобы success (run #28383303068, a90e57eb)
