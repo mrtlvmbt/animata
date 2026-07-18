@@ -425,9 +425,10 @@ mod tests {
         );
     }
 
-    /// Count of cells that are a STRICT local D8 maximum (height strictly greater than all 8
-    /// neighbors — undefined/false at the grid edge where a neighbor is missing, per the `continue`
-    /// below, matching this module's other edge-handling convention).
+    /// Count of cells that are plateau-aware local D8 maxima: h >= all 8 neighbors AND h > at
+    /// least one neighbor. Accommodates caldera rim plateaus (W-16b): rim cells form equal-height
+    /// rings but are strictly above the crater floor and outer skirt, so they qualify. Undefined/
+    /// false at the grid edge where a neighbor is missing (per the `continue` below).
     fn local_maximum_count(dim: usize, height: &[i64]) -> usize {
         const D8_OFFSETS: [(i64, i64); 8] =
             [(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)];
@@ -435,19 +436,26 @@ mod tests {
         for z in 0..dim {
             for x in 0..dim {
                 let idx = linear_index(x, z, dim);
+                let h = height[idx];
                 let mut is_max = true;
+                let mut is_greater_than_any = false;
                 for &(dx, dz) in &D8_OFFSETS {
                     let nx = x as i64 + dx;
                     let nz = z as i64 + dz;
                     if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
                         continue;
                     }
-                    if height[linear_index(nx as usize, nz as usize, dim)] >= height[idx] {
+                    let n_h = height[linear_index(nx as usize, nz as usize, dim)];
+                    if n_h > h {
                         is_max = false;
                         break;
                     }
+                    if n_h < h {
+                        is_greater_than_any = true;
+                    }
                 }
-                if is_max {
+                // Plateau-aware: must be >= all neighbors AND > at least one neighbor
+                if is_max && is_greater_than_any {
                     count += 1;
                 }
             }
@@ -460,9 +468,15 @@ mod tests {
     /// right after the additive edifice stamp (this module's own output — exactly the "PRE-erosion
     /// volcanic field" the ТЗ specifies). The OFF baseline here is FLAT (not fBm noise) — an even
     /// STRONGER anti-forcing choice than fBm (which could incidentally produce a few local maxima of
-    /// its own): a flat field has ZERO strict local maxima by construction (every neighbor is
-    /// exactly equal, never `<`), so any local maximum observed ON is unambiguously the edifice
-    /// stamp's doing, not baseline noise.
+    /// its own): a flat field has ZERO plateau-aware local maxima by construction (every neighbor is
+    /// exactly equal, never strictly less).
+    ///
+    /// W-16b ALGORITHM CHANGE (declared): the local maximum detector switched to plateau-aware
+    /// criterion (h >= all neighbors AND h > at least one) to accommodate caldera rim plateaus. Cone
+    /// rims at r=caldera_r+1 form equal-height rings (neighbors on the ring are equal; floor below
+    /// is strictly lower) — they qualify as maxima under the new criterion but not the old strict
+    /// (h > all) test. This is a detection fix, not a threshold change: edifices still produce
+    /// distinct reliefs; the criterion captures plateau peaks as well as pointy ones.
     #[test]
     fn constructive_relief_corridor_local_maxima() {
         let dim = 64usize;
