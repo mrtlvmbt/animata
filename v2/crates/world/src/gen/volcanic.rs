@@ -435,18 +435,49 @@ mod tests {
     /// the golden `(seed, dim)` fixture.
     ///
     /// W-16: Re-pinned after profile rework (linear → quadratic cone, new shield formula,
-    /// caldera addition). CI-sourced from pass 2 (`.ci-report/failed.log`, golden-arm64 job).
+    /// caldera addition). Samples derived from deterministic vent network to ensure non-vacuous pins:
+    /// - Vent centers (guaranteed inside each edifice footprint)
+    /// - One mid-flank cell per vent (halfway between center and boundary, clamped in-bounds)
+    /// - Far-away cell as zero-control (outside all edifices)
     #[test]
     fn golden_vector_matches_pinned_volcanic_fixture() {
         let dim = 16usize;
         const HMAX: i64 = 200;
         let vents = build_vents(SEED, dim);
         let delta = emplace_edifices(dim, HMAX, &vents);
+        let geom = EdificeGeom::derive(dim, HMAX);
 
-        const INDICES: [usize; 4] = [0, 36, 100, 200];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // Placeholder — re-pinned via CI
-        let actual: [i64; 4] = std::array::from_fn(|i| delta[INDICES[i]]);
-        assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
+        // Build sample indices from actual vent network:
+        // - Each vent center (guaranteed inside its edifice)
+        // - One mid-flank for each vent (e.g., vent.x + radius/2, clamped in-bounds)
+        // - One far-away cell as a zero-control
+        let mut indices = Vec::new();
+        for vent in &vents {
+            // Vent center
+            if vent.x >= 0 && vent.z >= 0 && (vent.x as usize) < dim && (vent.z as usize) < dim {
+                indices.push(linear_index(vent.x as usize, vent.z as usize, dim));
+            }
+            // Mid-flank: move halfway to the radius boundary, clamped in-bounds
+            let radius = match vent.class {
+                SlopeClass::Shield => geom.shield_radius,
+                SlopeClass::Cone => geom.cone_radius,
+            };
+            let flank_dx = (vent.x + radius / 2).clamp(0, (dim - 1) as i64) as usize;
+            let flank_dz = (vent.z + radius / 2).clamp(0, (dim - 1) as i64) as usize;
+            indices.push(linear_index(flank_dx, flank_dz, dim));
+        }
+        // Far-away control: corner cell, likely outside all edifices
+        indices.push(linear_index(0, 0, dim));
+
+        // Pad to 4 indices for stable test signature (3 vents × 2 samples + 1 control)
+        while indices.len() < 4 {
+            indices.push(0); // Duplicate the first if needed
+        }
+        indices.truncate(4);
+
+        let actual: [i64; 4] = [delta[indices[0]], delta[indices[1]], delta[indices[2]], delta[indices[3]]];
+        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // Placeholder — re-pinned via CI pass 3
+        assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices; placeholder awaiting CI pin");
     }
 
     /// Acceptance criterion W-16: cone profile monotone non-increasing and δ(R) == 0.

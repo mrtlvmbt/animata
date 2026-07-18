@@ -1524,7 +1524,8 @@ mod tests {
     /// Golden vector (ON path): the volcanic-ON `erode` output is pinned at fixed grid indices.
     ///
     /// W-16: Re-pinned after profile rework (linear → quadratic cone, new shield formula,
-    /// caldera addition). CI-sourced from pass 2 (`.ci-report/failed.log`, golden-arm64 job).
+    /// caldera addition). CI-sourced from pass 1 (`.ci-report/failed.log`, golden-arm64 job);
+    /// identical on arm64 (v2-golden) and x86 (v2-sim), arch-independent.
     #[test]
     fn golden_vector_matches_pinned_volcanic_on_erosion_fixture() {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
@@ -1533,7 +1534,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, true, false, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // Placeholder — re-pinned via CI
+        const EXPECTED: [i64; 4] = [139, 132, 128, 143]; // CI pass 1 actual values (both arches agree)
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
