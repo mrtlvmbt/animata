@@ -145,6 +145,15 @@ pub fn world_to_minimap_uv(world_pos: glam::Vec2, dim: i64) -> glam::Vec2 {
     )
 }
 
+/// Project a world point to minimap UV coordinates, WITHOUT clamping to [0, 1].
+/// Used for viewport quad projection so out-of-bounds corners can extend beyond the panel.
+pub fn world_to_minimap_uv_unclamped(world_pos: glam::Vec2, dim: i64) -> glam::Vec2 {
+    glam::vec2(
+        world_pos.x / dim as f32,
+        world_pos.y / dim as f32,
+    )
+}
+
 /// Compute screen-space quad corners that map to world coordinates (for camera frustum).
 /// Returns 4 (screen_x, screen_y) positions for corners at near plane.
 pub fn screen_quad_corners(screen_dims: (f32, f32)) -> [(f32, f32); 4] {
@@ -198,8 +207,10 @@ pub fn map_uv_to_panel(u: f32, v: f32, yaw: f32, panel_w: f32, panel_h: f32) -> 
     // panel_y ∝ −dot((cu, cv), screen_up_xz)·FS = −(−cu·cosY − cv·sinY)·FS = (cu·cosY + cv·sinY)·FS
     let panel_y_unnormalized = (cu * cos_yaw + cv * sin_yaw) * FS;
 
-    // Scale to fit the panel with margin
-    let s = ((panel_w * 0.5 - 6.0) / 1.0).min((panel_h * 0.5 - 6.0) / FS);
+    // U-13: Scale to FILL the panel — isometric diamond corners touch panel edges
+    // Diamond ranges x in [center_x ± 0.5*s], y in [center_y ± 0.5*FS*s]
+    // To fill panel [0, panel_w]×[0, panel_h]: s = min(panel_w, panel_h/FS)
+    let s = (panel_w).min(panel_h / FS);
     let center_x = panel_w * 0.5;
     let center_y = panel_h * 0.5;
 
@@ -216,8 +227,8 @@ pub fn map_uv_to_panel(u: f32, v: f32, yaw: f32, panel_w: f32, panel_h: f32) -> 
 pub fn panel_to_map_uv(x: f32, y: f32, yaw: f32, panel_w: f32, panel_h: f32) -> glam::Vec2 {
     const FS: f32 = 0.577_350_3;
 
-    // Undo centering and scaling
-    let s = ((panel_w * 0.5 - 6.0) / 1.0).min((panel_h * 0.5 - 6.0) / FS);
+    // U-13: Undo centering and scaling (must match map_uv_to_panel exactly)
+    let s = (panel_w).min(panel_h / FS);
     let center_x = panel_w * 0.5;
     let center_y = panel_h * 0.5;
 
