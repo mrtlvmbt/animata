@@ -7,13 +7,16 @@
 use std::path::PathBuf;
 
 /// Landform configuration flags (deterministically derived from seed or set manually).
+/// W-18: additive worldgen — SOURCES (base, tect/ridges, volcanic) vs TRANSFORMS (erosion, aeolian, glacial, coastal/beaches).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LandformFlags {
+    pub base: bool,       // W-18: seed height from fBm (true) or FLAT_DATUM (false)
     pub tect: bool,
     pub aeolian: bool,
     pub volcanic: bool,
     pub glacial: bool,
     pub coastal: bool,
+    pub erosion: bool,    // W-18: run erosion chain (talus/fluvial/deposition)
     pub ridges: bool,
     pub beaches: bool,
 }
@@ -21,21 +24,25 @@ pub struct LandformFlags {
 impl LandformFlags {
     /// Create landform flags without clamps (raw values).
     /// Clamps are applied later in `apply_guard()` AFTER the guard potentially enables tect/coastal.
+    /// W-18: base and erosion must be specified explicitly.
     pub fn new(
+        base: bool,
         tect: bool,
         aeolian: bool,
         volcanic: bool,
         glacial: bool,
         coastal: bool,
+        erosion: bool,
         ridges: bool,
         beaches: bool,
     ) -> Self {
-        LandformFlags { tect, aeolian, volcanic, glacial, coastal, ridges, beaches }
+        LandformFlags { base, tect, aeolian, volcanic, glacial, coastal, erosion, ridges, beaches }
     }
 
     /// Apply guards and dependency clamps to ensure a valid state.
     /// Order: (1) if all five original landforms are off, enable tectonic;
     /// (2) then apply clamps so guard's tect-enabling makes ridges/beaches permissible.
+    /// W-18: base and erosion are not affected by guard (user controls these independently).
     pub fn apply_guard(mut self) -> Self {
         // Guard: never all-off for the original five (avoid flat/boring maps)
         if !(self.tect || self.aeolian || self.volcanic || self.glacial || self.coastal) {
@@ -214,20 +221,27 @@ impl Stage {
 }
 
 /// Landform flags: derived deterministically from seed + standalone mode.
-/// Returns LandformFlags with tectonic, aeolian, volcanic, glacial, coastal, ridges, beaches.
+/// Returns LandformFlags with base, tectonic, aeolian, volcanic, glacial, coastal, erosion, ridges, beaches.
 ///
-/// Each landform toggles independently (well-spaced bit positions in splitmix64).
+/// W-18: Each landform toggles independently (well-spaced bit positions in splitmix64).
+/// SOURCES (base, tect/ridges, volcanic) vs TRANSFORMS (erosion, aeolian, glacial, coastal/beaches).
+/// Splitmix64 bit layout: base at shift 47, erosion at shift 29, tect/aeolian/volcanic/glacial/coastal at shifts 3/13/23/33/43,
+/// ridges at shift 53, beaches at shift 59.
+/// **CRITICAL:** base and erosion bits are INVERTED so that the DEFAULT state (base=true, erosion=true)
+/// contributes salt IDENTICAL to today (0 at both positions), preserving byte-identity of default flags.
 /// Dependency clamps: ridges &= tect (needs uplift), beaches &= coastal (needs sea datum).
 /// Guard: never all-off for the original five (ensures maps never become flat/featureless).
 pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     if !standalone {
         // Sim mode: all landforms off (unchanged from original contract)
         return LandformFlags {
+            base: true,
             tect: false,
             aeolian: false,
             volcanic: false,
             glacial: false,
             coastal: false,
+            erosion: true,
             ridges: false,
             beaches: false,
         };
@@ -239,17 +253,20 @@ pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^= x >> 31;
 
-    // Extract independent bits for each landform (well-spaced bit positions)
+    // Extract independent bits for each landform (well-spaced bit positions).
+    // W-18: base and erosion bits are INVERTED so default state matches pre-slice salt.
+    let base = !((x >> 47) & 1 == 1);  // Inverted: false when bit is 1 (salt=1), true when bit is 0 (salt=0)
     let tect = (x >> 3) & 1 == 1;
     let aeol = (x >> 13) & 1 == 1;
     let volc = (x >> 23) & 1 == 1;
     let glac = (x >> 33) & 1 == 1;
     let coast = (x >> 43) & 1 == 1;
+    let erosion = !((x >> 29) & 1 == 1);  // Inverted: false when bit is 1 (salt=1), true when bit is 0 (salt=0)
     let ridg = (x >> 53) & 1 == 1;
     let beach = (x >> 59) & 1 == 1;
 
     // Apply clamps and guard
-    LandformFlags::new(tect, aeol, volc, glac, coast, ridg, beach).apply_guard()
+    LandformFlags::new(base, tect, aeol, volc, glac, coast, erosion, ridg, beach).apply_guard()
 }
 
 #[cfg(test)]

@@ -472,7 +472,7 @@ async fn main() {
         let flags = landform_flags(spec.seed, spec.standalone);
         let temp_world: Box<dyn WorldView> = Box::new(world::ProcgenWorld::new(
             config.econ.world_dim, cli::HMAX, cli::RESOURCE_BASE, spec.seed ^ cli::WORLD_SALT, None,
-            flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal, flags.ridges, flags.beaches  // Use spec.seed (F4), landforms always match eventually
+            flags.base, flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal, flags.erosion, flags.ridges, flags.beaches  // Use spec.seed (F4), landforms always match eventually
         ));
         (Vec::new(), Vec::new(), config.econ.world_dim, temp_world)
     };
@@ -1418,7 +1418,7 @@ mod tests {
     #[test]
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
-        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, false, false, false, false, false, false, false);
+        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, true, false, false, false, false, false, true, false, false);
         let hex_chunks = terrain::build_hex_terrain(dim, &world, SEED, false);
         let cube_chunks = terrain_cube::build_cube_terrain(dim, &world, SEED, false);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");
