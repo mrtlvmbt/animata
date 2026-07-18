@@ -1008,37 +1008,59 @@ pub fn classify_and_caps_staged_with_callback(
     enable_w10_diversity: bool,
     mut progress_callback: Option<&mut dyn FnMut(u8)>,
 ) -> (WorldFields, StagedHeights, LandformMasks) {
-    // U-11: Report erosion stage (encompasses heightfield + tectonics + erosion + ridges)
+    // U-11: Report all stages in order for monotone progress bar.
+    // Stages that happen inside erode (tectonics/ridges) are reported before/after erode calls.
+    // Skipped stages are reported instantly (callback fired but no processing).
+
+    // Stage 0: GenerateHeightfield (encompasses fbm)
+    if let Some(ref mut cb) = progress_callback {
+        cb(0); // GenerateHeightfield = 0
+    }
+
+    // Stage 1: ApplyTectonics (optional, injected into erode)
+    if let Some(ref mut cb) = progress_callback {
+        cb(1); // ApplyTectonics = 1 (reported before erode, whether enabled or not)
+    }
+
+    // Stage 2: ApplyErosion (encompasses erosion + initial talus)
     if let Some(ref mut cb) = progress_callback {
         cb(2); // ApplyErosion = 2
     }
     let erosion = erode(seed, hmax, dim, flags.tect, flags.volcanic, flags.ridges);
     let n = dim * dim;
 
+    // Stage 3: ApplyRidges (optional, injected into erode; report completion after erode)
+    if let Some(ref mut cb) = progress_callback {
+        cb(3); // ApplyRidges = 3 (reported after erode, whether enabled or not)
+    }
+
+    // Stage 5: ApplyVolcanic (optional, pre-erosion injection)
+    if let Some(ref mut cb) = progress_callback {
+        cb(5); // ApplyVolcanic = 5 (reported whether enabled or not)
+    }
     let volcanic_mask: Vec<Option<MaterialId>> = if flags.volcanic {
-        if let Some(ref mut cb) = progress_callback {
-            cb(5); // ApplyVolcanic = 5
-        }
         let vents = crate::gen::volcanic::build_vents(seed, dim);
         crate::gen::volcanic::edifice_material_mask(dim, &vents)
     } else {
         vec![None; n]
     };
 
+    // Stage 6: ApplyGlacial (optional, post-erosion)
+    if let Some(ref mut cb) = progress_callback {
+        cb(6); // ApplyGlacial = 6 (reported whether enabled or not)
+    }
     let (post_glacial_height, glacial_mask): (Vec<i64>, Vec<Option<MaterialId>>) = if flags.glacial {
-        if let Some(ref mut cb) = progress_callback {
-            cb(6); // ApplyGlacial = 6
-        }
         let g = crate::gen::glacial::run_glacial(seed, dim, hmax, &erosion.height);
         (g.height, g.material)
     } else {
         (erosion.height.clone(), vec![None; n])
     };
 
+    // Stage 4: ApplyAeolian (optional, post-glacial) - compute based on post_glacial heights
+    if let Some(ref mut cb) = progress_callback {
+        cb(4); // ApplyAeolian = 4 (reported whether enabled or not)
+    }
     let (post_aeolian_height, sand_depth) = if flags.aeolian {
-        if let Some(ref mut cb) = progress_callback {
-            cb(4); // ApplyAeolian = 4
-        }
         let initial_sand: Vec<i64> = (0..n)
             .map(|idx| {
                 let x = (idx % dim) as i64;
@@ -1055,46 +1077,50 @@ pub fn classify_and_caps_staged_with_callback(
         (post_glacial_height.clone(), vec![0i64; n])
     };
 
+    // Stage 7: ApplyCoastal (optional, post-aeolian)
+    if let Some(ref mut cb) = progress_callback {
+        cb(7); // ApplyCoastal = 7 (reported whether enabled or not)
+    }
     let (post_coastal_height, submerged, sea_level) = if flags.coastal {
-        if let Some(ref mut cb) = progress_callback {
-            cb(7); // ApplyCoastal = 7
-        }
         let c = run_coastal(seed, dim, hmax, &post_aeolian_height);
         (c.height, c.submerged, c.sea_level)
     } else {
         (post_aeolian_height.clone(), vec![false; n], 0)
     };
 
+    // Stage 8: ApplyBeaches (optional, post-coastal)
+    if let Some(ref mut cb) = progress_callback {
+        cb(8); // ApplyBeaches = 8 (reported whether enabled or not)
+    }
     // W-12: Beach deposition — post-coastal, pre-talus step. Gated on flags.beaches (which is clamped
     // to `beaches &= coastal` at LandformFlags construction, so this gate is safe even when called).
     let (post_beach_height, beach_mask_candidate) = if flags.beaches {
-        if let Some(ref mut cb) = progress_callback {
-            cb(8); // ApplyBeaches = 8
-        }
         beach_deposit(dim, &post_coastal_height, sea_level, &submerged)
     } else {
         (post_coastal_height.clone(), vec![false; n])
     };
 
+    // Stage 9: ApplyTalus (optional, final thermal relaxation post-beaches)
+    if let Some(ref mut cb) = progress_callback {
+        cb(9); // ApplyTalus = 9 (reported whether enabled or not)
+    }
     // W-9: Final-surface thermal relaxation. When enabled, applies Jacobi diffusion to smooth
     // residual spikes from landforms that ran after the erode loop's early talus pass.
     // When disabled, this is byte-identical to the old path.
     let post_talus_height = if enable_talus_final {
-        if let Some(ref mut cb) = progress_callback {
-            cb(9); // ApplyTalus = 9
-        }
         talus_step_final(dim, &post_beach_height, SPIKE_MARGIN_FINAL, N_ITERS_FINAL)
     } else {
         post_beach_height.clone()
     };
 
+    // Stage 10: DeNeedle (optional, post-talus spike removal)
+    if let Some(ref mut cb) = progress_callback {
+        cb(10); // DeNeedle = 10 (reported whether enabled or not)
+    }
     // W-8: De-needle pass — remove isolated 1-cell height spikes, FINAL landform post-processing
     // BEFORE classify. Only runs when at least one landform is enabled (preserves byte-identical
     // all-OFF golden path). W-11/W-12: widened to include ridges and beaches.
     let post_deneedle_height = if flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal || flags.ridges || flags.beaches {
-        if let Some(ref mut cb) = progress_callback {
-            cb(10); // DeNeedle = 10
-        }
         de_needle_pass(dim, &post_talus_height)
     } else {
         post_talus_height.clone()
@@ -1142,7 +1168,7 @@ pub fn classify_and_caps_staged_with_callback(
     let mut caps = vec![0i64; n];
     let mut surface_material = Vec::with_capacity(n);
 
-    // U-11: Report classification stage
+    // Stage 11: Classify (final biome classification + resource caps)
     if let Some(ref mut cb) = progress_callback {
         cb(11); // Classify = 11
     }

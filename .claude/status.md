@@ -1,5 +1,5 @@
-task: #480 U-11 granular loading progress
-phase: CI
-blocked_on: CI green (awaiting test results)
-next: code-critic review once CI passes, then push to ready-for-review
-updated: 2026-07-18 07:30
+task: #478 U-11 granular loading progress
+phase: CI + code-critic
+blocked_on: CI exit code (run #29635640991 in progress), code-critic verdict
+next: post critic verdict to PR #479, then await PM intake
+updated: 2026-07-18 08:15

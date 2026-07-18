@@ -157,21 +157,23 @@ impl Stage {
 
     /// Progress permille (0–1000) for this stage.
     /// Gen pipeline occupies 0..800, meshing/upload 800..1000.
+    /// Order follows EXECUTION sequence: heightfield → tectonics → erosion → ridges → volcanic →
+    /// glacial → aeolian → coastal → beaches → talus → de-needle → classify.
     pub fn progress_permille(self) -> u32 {
         match self {
-            Stage::GenerateHeightfield => 0,
-            Stage::ApplyTectonics => 67,
-            Stage::ApplyErosion => 133,
-            Stage::ApplyRidges => 200,
-            Stage::ApplyAeolian => 267,
-            Stage::ApplyVolcanic => 333,
-            Stage::ApplyGlacial => 400,
-            Stage::ApplyCoastal => 467,
-            Stage::ApplyBeaches => 533,
-            Stage::ApplyTalus => 600,
-            Stage::DeNeedle => 667,
-            Stage::Classify => 733,
-            Stage::BuildMeshes => 800,
+            Stage::GenerateHeightfield => 0,      // First: heightfield FBM
+            Stage::ApplyTectonics => 57,          // Tectonics (injected into erode)
+            Stage::ApplyErosion => 114,           // Erosion + ridges injected
+            Stage::ApplyRidges => 171,            // Ridges reported after erode
+            Stage::ApplyVolcanic => 228,          // Volcanic mask post-erosion
+            Stage::ApplyGlacial => 343,           // Glacial post-erosion (takes time)
+            Stage::ApplyAeolian => 457,           // Aeolian post-glacial
+            Stage::ApplyCoastal => 514,           // Coastal post-aeolian
+            Stage::ApplyBeaches => 571,           // Beaches post-coastal
+            Stage::ApplyTalus => 628,             // Talus/thermal relaxation
+            Stage::DeNeedle => 685,               // De-needle pass
+            Stage::Classify => 743,               // Biome + caps classification
+            Stage::BuildMeshes => 850,            // Meshing + GPU upload (400‰ for mesh phase)
             Stage::Done => 1000,
         }
     }
