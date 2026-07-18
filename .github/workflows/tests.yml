@@ -86,14 +86,6 @@ jobs:
         with:
           shared-key: test-x86
           workspaces: .
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
 
       # Everything except the 3 arch-bound golden-constant tests (those run on golden-arm64).
       - name: Run tests
@@ -128,14 +120,6 @@ jobs:
         with:
           shared-key: golden-arm64
           workspaces: .
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
 
       # ONLY the 3 exact-golden locks — they reproduce bit-for-bit only on the dev's arch (arm64).
       - name: Run golden locks
@@ -187,14 +171,6 @@ jobs:
         with:
           shared-key: v2-sim-x86
           workspaces: v2
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            v2/target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('v2/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-v2-
 
       # Everything EXCEPT the arch-bound golden — the integer invariants (R14 1-vs-N conserved + its
       # negative teeth test, two-run-same-seed, exact energy conservation, NaN/Inf, bounded
@@ -226,14 +202,6 @@ jobs:
         with:
           shared-key: v2-golden-arm64
           workspaces: v2
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            v2/target
-          key: ${{ runner.os }}-cargo-v2-${{ hashFiles('v2/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-v2-
 
       # Full suite in RELEASE on the matched arch: the `v2_golden_*` bit-for-bit lock reproduces here
       # (pinned on this arch+profile), and the integer invariants run again — so two-run-same-seed +
