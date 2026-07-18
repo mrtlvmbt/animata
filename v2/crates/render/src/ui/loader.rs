@@ -10,7 +10,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Shape, Stroke};
 use super::theme;
 use crate::loader_state::LoadState;
-use crate::world_spec::Stage;
+use crate::world_spec::{Stage, EXEC_ORDER};
 
 /// Pulse keyframe for active step (triangle wave, peak at half-period).
 /// Returns (opacity, scale) ramping 0.55→1.0 and 1.0→1.25.
@@ -188,16 +188,24 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
             );
             y += 11.0 + 32.0;
 
-            // --- STEP CHECKLIST (Russian labels via Stage::label_ru) ---
+            // --- STEP CHECKLIST (in EXEC_ORDER) ---
+            // Compare stages by execution position, not raw ordinal.
+            // This prevents checkmark regressions when volcanic/glacial/aeolian execute out of display order.
             let label_font = theme::sans(13.0);
-            for i in 0..14 {
-                if let Some(stage) = Stage::from_u8(i as u8) {
+            let current_stage = Stage::from_u8(step_index as u8);
+            let current_exec_pos = current_stage.map(|s| s.exec_pos()).unwrap_or(14);
+
+            for &stage_ordinal in EXEC_ORDER {
+                if let Some(stage) = Stage::from_u8(stage_ordinal) {
                     let label = stage.label_ru();
+                    let stage_exec_pos = stage.exec_pos();
                     let glyph_c = Pos2::new(left + 7.0, y + 7.0);
-                    let label_color = if i < step_index {
+                    let label_color = if stage_exec_pos < current_exec_pos {
+                        // This stage finished before current stage began (in execution order)
                         paint_check(ui.painter(), glyph_c);
                         TXT_55
-                    } else if i == step_index {
+                    } else if stage_exec_pos == current_exec_pos {
+                        // This is the active stage
                         let (op2, sc2) = pulse(t, 1.4);
                         ui.painter().circle_filled(
                             glyph_c,
@@ -206,6 +214,7 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
                         );
                         theme::TEXT
                     } else {
+                        // This stage hasn't run yet (in execution order)
                         let dash = egui::Rect::from_center_size(glyph_c, egui::vec2(8.0, 1.5));
                         ui.painter().rect_filled(dash, 1.0, TXT_28);
                         TXT_32

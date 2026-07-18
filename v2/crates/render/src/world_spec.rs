@@ -86,9 +86,32 @@ pub struct WorldSpec {
     pub explicit_landform_flags: Option<LandformFlags>,
 }
 
+/// Real execution order of stages in the worldgen pipeline.
+/// The Stage enum is numbered in DISPLAY order (intuitive for UI layout),
+/// but the pipeline runs in this order: heightfield → tectonics → erosion → ridges →
+/// volcanic → glacial → aeolian → coastal → beaches → talus → de-needle → classify.
+/// See [`crate::gen::caps`] for actual stage callbacks.
+/// Used by loader.rs to compare stages by execution position, not raw ordinal.
+pub const EXEC_ORDER: &[u8] = &[
+    0,  // GenerateHeightfield (exec_pos 0)
+    1,  // ApplyTectonics (exec_pos 1)
+    2,  // ApplyErosion (exec_pos 2)
+    3,  // ApplyRidges (exec_pos 3)
+    5,  // ApplyVolcanic (exec_pos 4) — runs before glacial and aeolian
+    6,  // ApplyGlacial (exec_pos 5)
+    4,  // ApplyAeolian (exec_pos 6) — runs after glacial
+    7,  // ApplyCoastal (exec_pos 7)
+    8,  // ApplyBeaches (exec_pos 8)
+    9,  // ApplyTalus (exec_pos 9)
+    10, // DeNeedle (exec_pos 10)
+    11, // Classify (exec_pos 11)
+    12, // BuildMeshes (exec_pos 12)
+    13, // Done (exec_pos 13)
+];
+
 /// Stage of world building (used for progress reporting via callback).
 /// Stages map to worldgen pipeline boundaries: heightfield fbm → tectonics → erosion → ridges →
-/// aeolian → volcanic → glacial → coastal → beaches → talus → de-needle → classify → meshing → done.
+/// volcanic → glacial → aeolian → coastal → beaches → talus → de-needle → classify → meshing → done.
 /// Skipped stages (flags off) report instantly — bar must not stall on disabled landforms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Stage {
@@ -176,6 +199,17 @@ impl Stage {
             Stage::BuildMeshes => 850,            // Meshing + GPU upload (400‰ for mesh phase)
             Stage::Done => 1000,
         }
+    }
+
+    /// Get execution position of this stage in EXEC_ORDER (0..13).
+    /// Used by loader.rs to compare stages by execution order, not display order.
+    /// For example, ApplyVolcanic (ordinal 5) comes BEFORE ApplyAeolian (ordinal 4)
+    /// in execution, so this returns exec_pos(5)=4 < exec_pos(4)=6.
+    pub fn exec_pos(self) -> u8 {
+        let ord = self.as_u8();
+        EXEC_ORDER.iter()
+            .position(|&x| x == ord)
+            .unwrap_or(14) as u8
     }
 }
 
