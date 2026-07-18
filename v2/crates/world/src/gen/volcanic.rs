@@ -121,7 +121,9 @@ impl EdificeGeom {
         let dim_i64 = dim as i64;
 
         let peak = (hmax * 3) / 5;
-        let shield_radius = (peak / 8).clamp(8, (dim_i64 / 6).max(8));
+        // Shield aspect (peak_shield/radius) ≈ 2.4 at hmax=200: radius = peak*5/24
+        let shield_radius = ((peak * 5) / 24).clamp(8, (dim_i64 / 6).max(8));
+        // Cone aspect (peak/radius) ≈ 6 at hmax=200: radius = peak/6
         let cone_radius = (peak / 6).clamp(4, (dim_i64 / 6).max(4));
         let caldera_r = (cone_radius / 3).max(1);
 
@@ -572,7 +574,7 @@ mod tests {
 
     /// Acceptance criterion W-16b amendment: shield_radius tied to peak, not dim — maintains
     /// aspect ratio (peak_shield / radius ≈ 2.4 at hmax=200).
-    /// Formula: clamp(peak/8, 8, (dim/6).max(8)).
+    /// Formula: clamp(peak*5/24, 8, (dim/6).max(8)).
     #[test]
     fn shield_radius_peak_tied() {
         const HMAX: i64 = 200;
@@ -580,9 +582,9 @@ mod tests {
         let geom_512 = EdificeGeom::derive(512, HMAX);
         let geom_64 = EdificeGeom::derive(64, HMAX);
 
-        assert_eq!(geom_512.shield_radius, 15, "shield_radius(512, 200) must be 15");
-        assert_eq!(geom_256.shield_radius, 15, "shield_radius(256, 200) must be 15");
-        assert_eq!(geom_64.shield_radius, 10, "shield_radius(64, 200) must be 10");
+        assert_eq!(geom_512.shield_radius, 25, "shield_radius(512, 200) must be 25");
+        assert_eq!(geom_256.shield_radius, 25, "shield_radius(256, 200) must be 25");
+        assert_eq!(geom_64.shield_radius, 10, "shield_radius(64, 200) must be 10 (clamped by dim/6)");
     }
 
     /// Acceptance criterion W-16b amendment: radii scale correctly at dim=64 and dim=512.
@@ -593,8 +595,8 @@ mod tests {
         let geom_64 = EdificeGeom::derive(64, HMAX);
         let geom_512 = EdificeGeom::derive(512, HMAX);
 
-        assert_eq!(geom_64.shield_radius, 10, "shield_radius(64) must be 10 (peak/8 clamped to dim/6)");
-        assert_eq!(geom_512.shield_radius, 15, "shield_radius(512) must be 15 (peak/8)");
+        assert_eq!(geom_64.shield_radius, 10, "shield_radius(64) must be 10 (peak*5/24 clamped to dim/6)");
+        assert_eq!(geom_512.shield_radius, 25, "shield_radius(512) must be 25 (peak*5/24)");
         assert_eq!(geom_64.cone_radius, 10, "cone_radius(64) must be 10 (peak/6 clamped to dim/6)");
         assert_eq!(geom_512.cone_radius, 20, "cone_radius(512) must be 20 (peak/6)");
     }
