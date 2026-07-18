@@ -72,6 +72,11 @@ must be committed+pushed to animata-pm or it exists only on this machine.
 - `ci-report.sh` finds the run for HEAD, waits for it, and exits **0 = all green / 1 = tests failed /
   2 = infra/timeout**. The exit code is the signal; on failure read `.ci-report/failed.log` (panic
   body, assert `left:`/`right:`) and `.ci-report/artifacts/*/junit.xml` (which tests failed).
+- **Stale-run cancellation is EXPLICIT** — use `rtk proxy gh run cancel <id>` to manually cancel an old run.
+  Never automatic (`concurrency` block rejected); parallel runs stay legal by design when needed.
+- **Render-only diffs skip sim jobs by design.** A change touching only `v2/crates/render/**`, `*.md`,
+  `.claude/**`, `pm/**`, or `.claude-dev-kit` sets the `changes` gate to skip test-x86/v2-sim-x86/v2-golden-arm64
+  (path-gated jobs); the `golden-arm64` canary still runs (2 min). Full 4/4 run is required for any sim-relevant diff.
 - **Merge ONLY when `ci-report.sh` exits 0.** That replaces the old "run the full `--release` suite
   locally" gate. Do NOT run the full `./scripts/test-bar.sh` suite locally — that is exactly the
   machine-load CI exists to remove.
