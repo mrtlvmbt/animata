@@ -10,7 +10,7 @@
 use egui::{Align2, Color32, FontId, Pos2, Shape, Stroke};
 use super::theme;
 use crate::loader_state::LoadState;
-use crate::world_spec::{Stage, Phase, EXEC_ORDER};
+use crate::world_spec::{Stage, Phase};
 
 /// Pulse keyframe for active step (triangle wave, peak at half-period).
 /// Returns (opacity, scale) ramping 0.55→1.0 and 1.0→1.25.
@@ -190,11 +190,13 @@ pub fn draw(ctx: &egui::Context, load_state: &LoadState) {
 
             // --- PHASE CHECKLIST (coarse phases only) ---
             // U-12: Show 3 coarse phases (GenerateWorld, BuildMesh, Done).
-            // Map current stage to its phase and compare by execution position for monotone ticking.
+            // Map current stage to its phase for monotone ticking.
             let label_font = theme::sans(13.0);
             let current_stage = Stage::from_u8(step_index as u8);
-            let current_phase = current_stage.map(|s| s.phase());
-            let current_exec_pos = current_stage.map(|s| s.exec_pos()).unwrap_or(14);
+            let current_phase = current_stage.map(|s| s.phase()).or(
+                // F3: If step_index >= 14 (out of bounds), treat as Phase::Done for coherent UI state
+                if step_index >= 14 { Some(Phase::Done) } else { None }
+            );
 
             // Display all 3 phases in order
             for phase in [Phase::GenerateWorld, Phase::BuildMesh, Phase::Done].iter() {
