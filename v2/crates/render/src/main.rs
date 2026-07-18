@@ -197,6 +197,7 @@ struct CliArgs {
     /// If set, overrides seed-derived flags for determinism testing.
     landforms: Option<String>,
     /// W-18: `--transform <csv>`: TRANSFORMS only (erosion, aeolian, glacial, coastal, beaches).
+    /// W-19: Strength via `erosion=50`, `glacial=200` (percent, default 100, range [0, 400]).
     /// If set, overrides seed-derived flags for determinism testing.
     transforms: Option<String>,
 }
@@ -375,12 +376,25 @@ fn parse_sources_flags(csv: &str) -> world_spec::LandformFlags {
 
 /// Parse TRANSFORMS from CSV string (e.g., "erosion,aeolian,coastal").
 /// Valid transforms: erosion, aeolian, glacial, coastal, beaches.
+/// W-19: Strength can be specified as `erosion=50` or `glacial=200` (default 100, range [0, 400]).
 /// Empty string means all transforms off (explicitly NONE).
-/// Unknown tokens trigger fail-fast exit(2).
+/// Unknown tokens or bad values trigger fail-fast exit(2).
 fn parse_transforms_flags(csv: &str) -> world_spec::LandformFlags {
     // Empty CSV means explicitly NONE — all transforms off
     if csv.trim().is_empty() {
-        return world_spec::LandformFlags::new(true, false, false, false, false, false, false, false, false);
+        return world_spec::LandformFlags {
+            base: true,
+            tect: false,
+            aeolian: false,
+            volcanic: false,
+            glacial: false,
+            coastal: false,
+            erosion: false,
+            ridges: false,
+            beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
+        };
     }
 
     let mut erosion = false;
@@ -388,45 +402,90 @@ fn parse_transforms_flags(csv: &str) -> world_spec::LandformFlags {
     let mut glacial = false;
     let mut coastal = false;
     let mut beaches = false;
+    let mut erosion_strength = 100i64;
+    let mut glacial_strength = 100i64;
 
     for token in csv.split(',') {
         let token = token.trim();
         if token.is_empty() {
             continue;  // Skip empty tokens
         }
-        match token {
-            "erosion" => erosion = true,
-            "aeolian" => aeolian = true,
-            "glacial" => glacial = true,
-            "coastal" => coastal = true,
-            "beaches" => beaches = true,
-            other => {
-                eprintln!("render: --transform: unrecognized transform '{other}' (valid: erosion, aeolian, glacial, coastal, beaches)");
-                std::process::exit(2);
+
+        // Check for name=value syntax (W-19: strength parameters)
+        if let Some((name, value_str)) = token.split_once('=') {
+            let name = name.trim();
+            let value_str = value_str.trim();
+            match value_str.parse::<i64>() {
+                Ok(value) => {
+                    if value < 0 || value > 400 {
+                        eprintln!("render: --transform: strength '{}' out of range [0, 400] (got {})", name, value);
+                        std::process::exit(2);
+                    }
+                    match name {
+                        "erosion" => { erosion = true; erosion_strength = value; }
+                        "glacial" => { glacial = true; glacial_strength = value; }
+                        other => {
+                            eprintln!("render: --transform: '{}={}' — strength not supported for '{}' (valid: erosion, glacial)", name, value, other);
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                Err(_) => {
+                    eprintln!("render: --transform: '{}' — value is not a valid integer", token);
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            // Bare token (no =value)
+            match token {
+                "erosion" => erosion = true,
+                "aeolian" => aeolian = true,
+                "glacial" => glacial = true,
+                "coastal" => coastal = true,
+                "beaches" => beaches = true,
+                other => {
+                    eprintln!("render: --transform: unrecognized transform '{}' (valid: erosion, aeolian, glacial, coastal, beaches; strength via erosion=50, glacial=200)", other);
+                    std::process::exit(2);
+                }
             }
         }
     }
 
     // Don't apply guard here — transforms are additive
-    world_spec::LandformFlags::new(true, false, aeolian, false, glacial, coastal, erosion, false, beaches)
+    world_spec::LandformFlags {
+        base: true,
+        tect: false,
+        aeolian,
+        volcanic: false,
+        glacial,
+        coastal,
+        erosion,
+        ridges: false,
+        beaches,
+        erosion_strength,
+        glacial_strength,
+    }
 }
 
 /// Merge sources and transforms into final LandformFlags (explicit flags bypass guard).
 /// Sources provide base/tect/volcanic/ridges, transforms provide erosion/aeolian/glacial/coastal/beaches.
 /// W-18: Explicit flags (even empty) bypass the "auto-variety guard" per issue §10.
+/// W-19: Strength values (erosion_strength, glacial_strength) are threaded from transforms.
 /// Dependency clamps (ridges&=tect, beaches&=coastal) are NOT applied here — user is explicit.
 fn merge_sources_and_transforms(sources: world_spec::LandformFlags, transforms: world_spec::LandformFlags) -> world_spec::LandformFlags {
-    world_spec::LandformFlags::new(
-        sources.base,           // From sources
-        sources.tect,           // From sources
-        transforms.aeolian,     // From transforms
-        sources.volcanic,       // From sources
-        transforms.glacial,     // From transforms
-        transforms.coastal,     // From transforms
-        transforms.erosion,     // From transforms
-        sources.ridges,         // From sources
-        transforms.beaches,     // From transforms
-    )
+    world_spec::LandformFlags {
+        base: sources.base,                          // From sources
+        tect: sources.tect,                          // From sources
+        aeolian: transforms.aeolian,                 // From transforms
+        volcanic: sources.volcanic,                  // From sources
+        glacial: transforms.glacial,                 // From transforms
+        coastal: transforms.coastal,                 // From transforms
+        erosion: transforms.erosion,                 // From transforms
+        ridges: sources.ridges,                      // From sources
+        beaches: transforms.beaches,                 // From transforms
+        erosion_strength: transforms.erosion_strength,   // From transforms (W-19)
+        glacial_strength: transforms.glacial_strength,   // From transforms (W-19)
+    }
     // W-18: Do NOT call apply_guard() — explicit flags bypass the auto-variety guard (issue §10).
     // User is explicit; if they provide invalid combos (e.g., ridges without tect),
     // that's intentional and will result in the clamps disabling them client-side (world_builder).
@@ -575,7 +634,8 @@ async fn main() {
         let flags = landform_flags(spec.seed, spec.standalone);
         let temp_world: Box<dyn WorldView> = Box::new(world::ProcgenWorld::new(
             config.econ.world_dim, cli::HMAX, cli::RESOURCE_BASE, spec.seed ^ cli::WORLD_SALT, None,
-            flags.base, flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal, flags.erosion, flags.ridges, flags.beaches  // Use spec.seed (F4), landforms always match eventually
+            flags.base, flags.tect, flags.aeolian, flags.volcanic, flags.glacial, flags.coastal, flags.erosion, flags.ridges, flags.beaches,
+            flags.erosion_strength, flags.glacial_strength  // W-19: Use spec.seed (F4), landforms always match eventually
         ));
         (Vec::new(), Vec::new(), config.econ.world_dim, temp_world)
     };
@@ -977,6 +1037,7 @@ async fn main() {
                 landform_manual_flags: world_spec::LandformFlags {
                     base: true, tect: true, aeolian: false, volcanic: false, glacial: false,
                     coastal: false, erosion: true, ridges: false, beaches: false,
+                    erosion_strength: 100, glacial_strength: 100,
                 },
             };
 
@@ -1258,6 +1319,7 @@ async fn main() {
                     let mut lf_manual_flags = world_spec::LandformFlags {
                         base: true, tect: true, aeolian: false, volcanic: false, glacial: false,
                         coastal: false, erosion: true, ridges: false, beaches: false,
+                        erosion_strength: 100, glacial_strength: 100,
                     };
 
                     let ui_out = if let Some(ref load_state) = regen_load_state {
@@ -1299,6 +1361,7 @@ async fn main() {
                             landform_manual_flags: world_spec::LandformFlags {
                                 base: true, tect: true, aeolian: false, volcanic: false, glacial: false,
                                 coastal: false, erosion: true, ridges: false, beaches: false,
+                                erosion_strength: 100, glacial_strength: 100,
                             },
                         };
                         let ui_out_inner = ui_root.draw(ctx, &mut ui_ctx);
@@ -1521,7 +1584,7 @@ mod tests {
     #[test]
     fn standalone_world_builds_nonempty_terrain() {
         let dim = 64;
-        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, true, false, false, false, false, false, true, false, false);
+        let world = world::ProcgenWorld::new(dim, cli::HMAX, cli::RESOURCE_BASE, SEED ^ cli::WORLD_SALT, None, true, false, false, false, false, false, true, false, false, 100, 100);
         let hex_chunks = terrain::build_hex_terrain(dim, &world, SEED, false);
         let cube_chunks = terrain_cube::build_cube_terrain(dim, &world, SEED, false);
         assert!(!hex_chunks.is_empty(), "hex terrain must produce at least one chunk");

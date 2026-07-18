@@ -990,7 +990,7 @@ pub fn build_sim(config: SimConfig) -> Sim {
         }
     }
     let econ = config.econ.clone();
-    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT, config.thermal_verdict_temps, true, false, false, false, false, false, true, false, false);
+    let world = ProcgenWorld::new(econ.world_dim, HMAX, econ.resource_base, config.seed ^ WORLD_SALT, config.thermal_verdict_temps, true, false, false, false, false, false, true, false, false, 100, 100);
     let grid_w = econ.world_dim / M_FIELD;
     let n = (grid_w * grid_w) as usize;
 

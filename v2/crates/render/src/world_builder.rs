@@ -61,6 +61,8 @@ where
                 flags.erosion,
                 flags.ridges,
                 flags.beaches,
+                flags.erosion_strength,
+                flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
             ))
         }
@@ -87,6 +89,8 @@ where
                 flags.erosion,
                 flags.ridges,
                 flags.beaches,
+                flags.erosion_strength,
+                flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
             ))
         }

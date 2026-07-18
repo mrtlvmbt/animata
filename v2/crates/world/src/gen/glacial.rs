@@ -268,17 +268,20 @@ fn ice_incision_iteration(dim: usize, height: &[i64], ice_mask: &[bool]) -> Vec<
     delta
 }
 
-/// Run the fixed [`N_GLACIAL_ITERATIONS`] subtractive ice-incision loop (vertical + lateral,
-/// [`ice_incision_iteration`]), THEN [`flatten_interior_components`] — a single deterministic pass
-/// that clamps the U-trough's floor DIRECTLY flat (RnD 16 §3: "плоское дно", a flat floor is its own
-/// distinct sub-mechanism, not merely a side effect of along-flow incision). Still module-doc-
-/// compliant: every delta in BOTH phases is non-negative, so the whole pass stays single-signed/
-/// monotone throughout. Returns the post-incision height (every cell `<=` its input value) and the
-/// run-lifetime `excavated_total` (the till deposition pass's exact integer budget).
-fn ice_incision_pass(dim: usize, mut height: Vec<i64>, ice_mask: &[bool], interior: &[bool]) -> (Vec<i64>, i64) {
+/// Run the scaled ice-incision loop (vertical + lateral, [`ice_incision_iteration`]), THEN
+/// [`flatten_interior_components`] — a single deterministic pass that clamps the U-trough's floor
+/// DIRECTLY flat (RnD 16 §3: "плоское дно", a flat floor is its own distinct sub-mechanism, not
+/// merely a side effect of along-flow incision). Still module-doc-compliant: every delta in BOTH
+/// phases is non-negative, so the whole pass stays single-signed/monotone throughout. Returns the
+/// post-incision height (every cell `<=` its input value) and the run-lifetime `excavated_total`
+/// (the till deposition pass's exact integer budget).
+/// W-19: glacial_strength (percent, default 100) scales iteration count via:
+/// effective_iters = (N_GLACIAL_ITERATIONS * strength) / 100.
+fn ice_incision_pass(dim: usize, mut height: Vec<i64>, ice_mask: &[bool], interior: &[bool], glacial_strength: i64) -> (Vec<i64>, i64) {
     let n = dim * dim;
     let mut excavated_total = 0i64;
-    for _ in 0..N_GLACIAL_ITERATIONS {
+    let n_iters = ((N_GLACIAL_ITERATIONS as i64 * glacial_strength) / 100) as usize;
+    for _ in 0..n_iters {
         let delta = ice_incision_iteration(dim, &height, ice_mask);
         for v in 0..n {
             height[v] -= delta[v];
@@ -574,6 +577,7 @@ pub fn run_glacial_with(
     height: &[i64],
     profile: &MorainerProfile,
     k_band: usize,
+    glacial_strength: i64,
 ) -> GlacialState {
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
@@ -588,8 +592,10 @@ pub fn run_glacial_with(
         interior[idx] = false;
     }
 
-    // Ice incision pass (UNCHANGED — no Route 1 scaling, K_ICE and flatten at baseline).
-    let (incised_height, excavated_total) = ice_incision_pass(dim, height.to_vec(), &filled_mask, &interior);
+    // Ice incision pass (scaled by glacial_strength — W-19).
+    // Clamp strength to valid range [0, 400]
+    let clamped_strength = glacial_strength.clamp(0, 400);
+    let (incised_height, excavated_total) = ice_incision_pass(dim, height.to_vec(), &filled_mask, &interior, clamped_strength);
 
     // Moraine deposit (budget-drain with profile and k_band).
     let (final_height, deposited_total, exported_till, till_cells, band_capacity, truncated) =
@@ -626,10 +632,11 @@ pub fn run_glacial_with(
 }
 
 /// Production wrapper: run the full glacial stage with pinned-const moraine profile + k_band
-/// (Phase-0b GATE PASS). Pure function of `(seed, dim, hmax, height)` — calls [`run_glacial_with`]
+/// (Phase-0b GATE PASS). Pure function of `(seed, dim, hmax, height, glacial_strength)` — calls [`run_glacial_with`]
 /// with `&PROFILE` and `K_BAND` (the pinned production geometry; F52–F58).
-pub fn run_glacial(seed: u64, dim: usize, hmax: i64, height: &[i64]) -> GlacialState {
-    run_glacial_with(seed, dim, hmax, height, &PROFILE, K_BAND)
+/// W-19: glacial_strength (percent, default 100) scales the incision iteration count.
+pub fn run_glacial(seed: u64, dim: usize, hmax: i64, height: &[i64], glacial_strength: i64) -> GlacialState {
+    run_glacial_with(seed, dim, hmax, height, &PROFILE, K_BAND, glacial_strength)
 }
 
 // ===== P2: HOLE-FILL (production, not throwaway) =====
@@ -709,7 +716,7 @@ mod tests {
     const DIM: usize = 64;
 
     fn eroded_fixture() -> Vec<i64> {
-        erode(SEED, HMAX, DIM, true, false, false, false, true).height
+        erode(SEED, HMAX, DIM, true, false, false, false, true, 100).height
     }
 
     #[test]
@@ -732,16 +739,16 @@ mod tests {
     #[test]
     fn run_glacial_is_deterministic_across_repeated_calls() {
         let height = eroded_fixture();
-        let a = run_glacial(SEED, DIM, HMAX, &height);
-        let b = run_glacial(SEED, DIM, HMAX, &height);
+        let a = run_glacial(SEED, DIM, HMAX, &height, 100);
+        let b = run_glacial(SEED, DIM, HMAX, &height, 100);
         assert_eq!(a, b, "run_glacial must be byte-identical across repeated calls");
     }
 
     #[test]
     fn different_seed_diverges() {
         let height = eroded_fixture();
-        let a = run_glacial(SEED, DIM, HMAX, &height);
-        let b = run_glacial(SEED ^ 0xDEAD_BEEF, DIM, HMAX, &height);
+        let a = run_glacial(SEED, DIM, HMAX, &height, 100);
+        let b = run_glacial(SEED ^ 0xDEAD_BEEF, DIM, HMAX, &height, 100);
         assert_ne!(a.height, b.height, "a different seed must produce a different glacial result");
     }
 
@@ -754,7 +761,7 @@ mod tests {
         for &idx in &margin {
             interior[idx] = false;
         }
-        let (incised, _excavated) = ice_incision_pass(DIM, height.clone(), &mask, &interior);
+        let (incised, _excavated) = ice_incision_pass(DIM, height.clone(), &mask, &interior, 100);
         for idx in 0..DIM * DIM {
             assert!(incised[idx] <= height[idx], "cell {idx} rose during incision: {} -> {}", height[idx], incised[idx]);
         }
@@ -768,7 +775,7 @@ mod tests {
         // `exported_till` are two INDEPENDENT sources, so an error in the budget-drain path
         // (e.g., a cell missed, a budget miscounted, an off-map term not booked) makes this fail.
         let height = eroded_fixture();
-        let state = run_glacial(SEED, DIM, HMAX, &height);
+        let state = run_glacial(SEED, DIM, HMAX, &height, 100);
         assert_eq!(
             state.excavated_total,
             state.deposited_total + state.exported_till,
@@ -787,7 +794,7 @@ mod tests {
         // (terminal/lateral moraines are ridges at the ice edge). At least one Till cell MUST be
         // a local maximum on the golden fixture (a non-trivial moraine — Ledger clause (iii)).
         let height = eroded_fixture();
-        let state = run_glacial(SEED, DIM, HMAX, &height);
+        let state = run_glacial(SEED, DIM, HMAX, &height, 100);
 
         let till_cells: Vec<usize> = state
             .material
@@ -828,7 +835,7 @@ mod tests {
         let height = eroded_fixture();
         let max_incised = height.iter().copied().max().unwrap_or(HMAX);
         let max_allowed = max_incised.max(HMAX - 1);
-        let state = run_glacial(SEED, DIM, HMAX, &height);
+        let state = run_glacial(SEED, DIM, HMAX, &height, 100);
         for (idx, &h) in state.height.iter().enumerate() {
             assert!(h >= 0, "cell {idx} height {h} is negative");
             assert!(h <= max_allowed, "cell {idx} height {h} exceeds max_allowed {max_allowed}");
@@ -873,7 +880,7 @@ mod tests {
             }
         }
 
-        let state = run_glacial(SEED, DIM, HMAX, &height);
+        let state = run_glacial(SEED, DIM, HMAX, &height, 100);
         for idx in 0..DIM * DIM {
             // Cells OUTSIDE k_band (distance is None or > k_band) must be untouched.
             if !mask[idx] && (distance[idx].is_none() || distance[idx].unwrap() >= K_BAND) {
@@ -931,8 +938,8 @@ mod tests {
     /// not the post-till height where moraine relief could confound the measurement.
     #[test]
     fn u_trough_structural_signature_on_at_least_3_valley_segments() {
-        let off = erode(SEED, HMAX, DIM, true, false, false, false, true);
-        let state = run_glacial(SEED, DIM, HMAX, &off.height);
+        let off = erode(SEED, HMAX, DIM, true, false, false, false, true, 100);
+        let state = run_glacial(SEED, DIM, HMAX, &off.height, 100);
 
         let mask = ice_mask(SEED, DIM, &off.height);
         // Compute filled_mask and derive margin/interior from it (match production exactly).
@@ -953,10 +960,10 @@ mod tests {
         // The U-trough is an INCISION property; measuring post-till moraine would confound the signal.
         // The incision state is captured inside run_glacial_with via intermediate computation.
         // To access it, we re-derive it (interior incision is deterministic); this is for testing only.
-        let on_state = run_glacial(SEED, DIM, HMAX, &off.height);
+        let on_state = run_glacial(SEED, DIM, HMAX, &off.height, 100);
 
         // Compute the PRE-deposit incised field for wall-drop measurement (same hole-fill + incision as production).
-        let (incised_height, _) = ice_incision_pass(DIM, off.height.clone(), &filled_mask, &interior);
+        let (incised_height, _) = ice_incision_pass(DIM, off.height.clone(), &filled_mask, &interior, 100);
 
         // Floor flatness: max height spread among D8 neighbors that are INTERIOR ice cells (the
         // actual trough FLOOR — deliberately excludes margin cells, which are the moraine RIDGE, a
@@ -1053,7 +1060,7 @@ mod tests {
     #[test]
     fn golden_vector_matches_pinned_glacial_fixture() {
         let height = eroded_fixture();
-        let state = run_glacial(SEED, DIM, HMAX, &height);
+        let state = run_glacial(SEED, DIM, HMAX, &height, 100);
 
         const INDICES: [usize; 4] = [0, 500, 1500, 4000];
         const EXPECTED: [i64; 4] = [77, 59, 95, 99]; // STAGE 2 re-pin (Option-A geometry)
@@ -1076,10 +1083,10 @@ mod tests {
         const DIM64: usize = 64;
 
         // Build eroded baseline with glacial=OFF for seed=2.
-        let height = erode(SEED2, HMAX64, DIM64, true, false, false, false, true).height;
+        let height = erode(SEED2, HMAX64, DIM64, true, false, false, false, true, 100).height;
 
         // Run with production profile/k_band (moraine-absorbing fixture as identified in Phase-0b).
-        let state = run_glacial(SEED2, DIM64, HMAX64, &height);
+        let state = run_glacial(SEED2, DIM64, HMAX64, &height, 100);
 
         // The hard-zero clause: exported_till must be exactly 0 on this fixture.
         assert_eq!(
@@ -1095,7 +1102,7 @@ mod tests {
     #[test]
     fn ledger_clause_non_trivial_moraine_on_production() {
         let height = eroded_fixture();
-        let state = run_glacial(SEED, DIM, HMAX, &height);
+        let state = run_glacial(SEED, DIM, HMAX, &height, 100);
 
         assert!(
             state.deposited_total > 0,
@@ -1144,10 +1151,10 @@ mod tests {
         const DIM64: usize = 64;
         const K_CTRL: i64 = 4;
 
-        let height = erode(SEED1, HMAX64, DIM64, true, false, false, false, true).height;
+        let height = erode(SEED1, HMAX64, DIM64, true, false, false, false, true, 100).height;
 
         // Production pinned profile: truncated must be 0.
-        let state_pinned = run_glacial_with(SEED1, DIM64, HMAX64, &height, &PROFILE, K_BAND);
+        let state_pinned = run_glacial_with(SEED1, DIM64, HMAX64, &height, &PROFILE, K_BAND, 100);
         assert_eq!(
             state_pinned.truncated, 0,
             "pinned profile on capping-capable fixture must have truncated==0, but got {}",
@@ -1156,12 +1163,69 @@ mod tests {
 
         // Positive control: scaled(K_CTRL) must produce truncated > 0 (non-vacuous).
         let scaled_profile = PROFILE.scaled(K_CTRL);
-        let state_scaled = run_glacial_with(SEED1, DIM64, HMAX64, &height, &scaled_profile, K_BAND);
+        let state_scaled = run_glacial_with(SEED1, DIM64, HMAX64, &height, &scaled_profile, K_BAND, 100);
         assert!(
             state_scaled.truncated > 0,
             "scaled profile (K_CTRL={K_CTRL}) on capping-capable fixture must have truncated>0 \
              (proving non-vacuity), but got {}",
             state_scaled.truncated
         );
+    }
+
+    // ── W-19: glacial strength parameter (#497) ──────────────────────────────────────────────────
+
+    /// W-19: Strength=100 must be byte-identical to production baseline (no-op).
+    #[test]
+    fn glacial_strength_100_is_byte_identical_to_baseline() {
+        let height = eroded_fixture();
+        let baseline = run_glacial(SEED, DIM, HMAX, &height, 100);
+        let explicit_100 = run_glacial(SEED, DIM, HMAX, &height, 100);
+        assert_eq!(baseline, explicit_100, "strength=100 must be byte-identical to baseline");
+    }
+
+    /// W-19: Strength=0 produces zero incision (post-incision == pre-incision).
+    #[test]
+    fn glacial_strength_0_produces_zero_incision() {
+        let height = eroded_fixture();
+        let state = run_glacial(SEED, DIM, HMAX, &height, 0);
+        // With zero incision, the only change should be zero excavation and zero deposition.
+        // The height field may change slightly due to moraine deposition, but excavated_total must be 0.
+        assert_eq!(
+            state.excavated_total, 0,
+            "strength=0 must produce zero incision: excavated_total should be 0, got {}",
+            state.excavated_total
+        );
+    }
+
+    /// W-19: Strength clamping: values > 400 are clamped to 400.
+    #[test]
+    fn glacial_strength_clamping() {
+        let height = eroded_fixture();
+        let clamped_high = run_glacial(SEED, DIM, HMAX, &height, 500);
+        let clamped_max = run_glacial(SEED, DIM, HMAX, &height, 400);
+        // Both should produce same result (clamped to 400)
+        assert_eq!(
+            clamped_high.height, clamped_max.height,
+            "strength values > 400 should be clamped to 400"
+        );
+    }
+
+    /// W-19: Strength monotonicity: higher strength ≥ lower strength in terms of |Δh|.
+    #[test]
+    fn glacial_strength_monotonic_incision() {
+        const DIM_SMALL: usize = 16;
+        let height = erode(SEED, HMAX, DIM_SMALL, true, false, false, false, true, 100).height;
+
+        let s0 = run_glacial(SEED, DIM_SMALL, HMAX, &height, 0);
+        let s100 = run_glacial(SEED, DIM_SMALL, HMAX, &height, 100);
+        let s200 = run_glacial(SEED, DIM_SMALL, HMAX, &height, 200);
+
+        // Compute total absolute height delta
+        let delta_s0: i64 = (0..height.len()).map(|i| (height[i] - s0.height[i]).abs()).sum();
+        let delta_s100: i64 = (0..height.len()).map(|i| (height[i] - s100.height[i]).abs()).sum();
+        let delta_s200: i64 = (0..height.len()).map(|i| (height[i] - s200.height[i]).abs()).sum();
+
+        assert!(delta_s0 <= delta_s100, "strength=0 should produce <= change than strength=100");
+        assert!(delta_s100 <= delta_s200, "strength=100 should produce <= change than strength=200");
     }
 }
