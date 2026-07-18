@@ -1552,6 +1552,20 @@ mod tests {
                     center_height < edifice_max,
                     "cone vent at ({cx},{cz}) center={center_height} must be < edifice_max={edifice_max} (crater should remain depressed)"
                 );
+                // Strength check: cone rim must survive erosion/talus/de-needle with at least 2/3 of peak
+                let min_cone_h = (geom.peak * 2) / 3;
+                assert!(
+                    edifice_max >= min_cone_h,
+                    "cone vent at ({cx},{cz}) edifice_max={edifice_max} must be >= {min_cone_h} after pipeline"
+                );
+            } else if matches!(vent.class, crate::gen::volcanic::SlopeClass::Shield) {
+                // Strength check: shield summit must survive erosion with at least 2/3 of peak_shield
+                let peak_shield = geom.peak / 2;
+                let min_shield_h = (peak_shield * 2) / 3;
+                assert!(
+                    edifice_max >= min_shield_h,
+                    "shield vent at ({cx},{cz}) edifice_max={edifice_max} must be >= {min_shield_h} after pipeline"
+                );
             }
         }
     }
@@ -1569,7 +1583,7 @@ mod tests {
         let state = erode(GOLDEN_SEED, GOLDEN_HMAX, DIM, true, false, true, false, true);
 
         const INDICES: [usize; 4] = [0, 36, 100, 255];
-        const EXPECTED: [i64; 4] = [139, 132, 128, 143]; // CI pass 1 actual values (both arches agree)
+        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // W-16 amendment: re-pin from amended formulas
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }

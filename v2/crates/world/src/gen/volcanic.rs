@@ -113,7 +113,8 @@ pub struct EdificeGeom {
 }
 
 impl EdificeGeom {
-    /// Derive edifice geometry from `(dim, hmax)`, following W-16 consensus-locked formulas.
+    /// Derive edifice geometry from `(dim, hmax)`, following W-16 amended formulas.
+    /// Cone profiles anchor at RIM (delta(rim_r) = peak EXACTLY) — fixes flat-disc issue.
     /// Pure integer arithmetic: multiply first, divide last.
     pub fn derive(dim: usize, hmax: i64) -> Self {
         let dim_i64 = dim as i64;
@@ -123,13 +124,12 @@ impl EdificeGeom {
         let caldera_r = (cone_radius / 3).max(1);
         let peak = (hmax * 3) / 5;
 
-        // rim_h = peak * (R - (caldera_r + 1))^2 / R^2, where R = cone_radius
-        // Compute as: (peak * (R - (caldera_r + 1)) * (R - (caldera_r + 1))) / (R * R)
-        let rim_delta = cone_radius - (caldera_r + 1);
-        let rim_h = (peak * rim_delta * rim_delta) / (cone_radius * cone_radius);
+        // Rim anchored at peak: delta(rim_r) == peak exactly (rim_r = caldera_r + 1)
+        let rim_h = peak;
 
-        let caldera_depth = (rim_h / 3).max(1);
-        let floor = (rim_h - caldera_depth).max(0);
+        // Caldera floor
+        let caldera_depth = (peak / 3).max(1);
+        let floor = (peak - caldera_depth).max(0);
 
         EdificeGeom {
             peak,
@@ -177,7 +177,7 @@ pub fn build_vents(seed: u64, dim: usize) -> Vec<Vent> {
 }
 
 /// This vent's height contribution at grid offset `(dx, dz)` from its own center.
-/// Cone (high-viscosity): quadratic profile with caldera floor.
+/// Cone (high-viscosity): rim-anchored quadratic profile with caldera floor.
 /// Shield (low-viscosity): quadratic convex profile (no caldera).
 fn vent_height_at(vent: &Vent, dx: i64, dz: i64, geom: &EdificeGeom) -> i64 {
     let r = isqrt(dx * dx + dz * dz);
@@ -191,19 +191,26 @@ fn vent_height_at(vent: &Vent, dx: i64, dz: i64, geom: &EdificeGeom) -> i64 {
             if r <= geom.caldera_r {
                 return geom.floor;
             }
-            // Quadratic cone profile: delta(r) = peak * (R - r)^2 / (R * R)
+            // Rim-anchored cone: delta(r) = peak * (R-r)^2 / ((R-rim_r)^2), clamped to peak
+            // rim_r = caldera_r + 1
+            let rim_r = geom.caldera_r + 1;
             let cone_r = geom.cone_radius;
-            let delta = (geom.peak * (cone_r - r) * (cone_r - r)) / (cone_r * cone_r);
-            delta.max(0)
+            let denom_base = cone_r - rim_r;
+            if denom_base <= 0 {
+                // No room for profile beyond rim (shouldn't happen given R >= 4 minimum)
+                return geom.peak;
+            }
+            let delta = (geom.peak * (cone_r - r) * (cone_r - r)) / (denom_base * denom_base);
+            delta.min(geom.peak).max(0)
         }
         SlopeClass::Shield => {
             if r > geom.shield_radius {
                 return 0;
             }
             // Shield quadratic profile: delta(r) = peak_shield * (R^2 - r^2) / R^2
-            // where peak_shield = peak / 3, and R = shield_radius
+            // where peak_shield = peak / 2, and R = shield_radius
             let shield_r = geom.shield_radius;
-            let peak_shield = geom.peak / 3;
+            let peak_shield = geom.peak / 2;
             let r_sq = r * r;
             let shield_r_sq = shield_r * shield_r;
             let delta = (peak_shield * (shield_r_sq - r_sq)) / shield_r_sq;
@@ -479,8 +486,8 @@ mod tests {
         indices.truncate(4);
 
         let actual: [i64; 4] = [delta[indices[0]], delta[indices[1]], delta[indices[2]], delta[indices[3]]];
-        const EXPECTED: [i64; 4] = [20, 30, 40, 24]; // CI pass 3 run 29643308569 (x86/arm64 agree)
-        assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices");
+        const EXPECTED: [i64; 4] = [0, 0, 0, 0]; // W-16 amendment: re-pin from amended formulas
+        assert_eq!(actual, EXPECTED, "golden drift at derived vent-network indices; placeholder awaiting CI pin");
     }
 
     /// Acceptance criterion W-16: cone profile monotone non-increasing and δ(R) == 0.
