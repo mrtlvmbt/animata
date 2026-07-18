@@ -2428,4 +2428,32 @@ mod tests {
         assert!(BEACH_DISTANCE_TO_WATER > 0, "BEACH_DISTANCE_TO_WATER must be positive");
         assert!(BEACH_BUDGET_NUMERATOR > 0 && BEACH_BUDGET_DENOMINATOR > 0, "budget must be positive");
     }
+
+    /// U-11: Byte-purity test — progress callback is observation-only.
+    /// Calling classify_and_caps_with_callback with a no-op callback must produce
+    /// byte-identical output (height, biome, caps, material) to calling without one.
+    /// This verifies the determinism contract: RNG state, heights, and all generated
+    /// bytes remain unchanged when a callback is present.
+    #[test]
+    fn progress_callback_byte_pure() {
+        const SEED: u64 = 0xDEAD_BEEF;
+        const HMAX: i64 = 200;
+        const DIM: usize = 32;
+
+        // Generate world WITHOUT callback
+        let flags = LandformFlags::new(true, true, true, true, true, true, true);
+        let without_cb = classify_and_caps(SEED, HMAX, DIM, false, flags);
+
+        // Generate world WITH a no-op callback
+        let with_cb = classify_and_caps_with_callback(
+            SEED, HMAX, DIM, false, flags,
+            Some(Box::new(|_stage: u8| { /* no-op callback */ }))
+        );
+
+        // Verify byte-identical output
+        assert_eq!(without_cb.height, with_cb.height, "heights must be byte-identical");
+        assert_eq!(without_cb.final_biome, with_cb.final_biome, "biomes must be byte-identical");
+        assert_eq!(without_cb.caps, with_cb.caps, "caps must be byte-identical");
+        assert_eq!(without_cb.surface_material, with_cb.surface_material, "materials must be byte-identical");
+    }
 }
