@@ -43,7 +43,7 @@ fn main() {
 
         let _n = dim * dim;
         let post_deneedle_height = &staged.post_deneedle;
-        let erosion = world::gen::erosion::erode(seed, HMAX, dim, true, true, false);
+        let erosion = world::gen::erosion::erode(seed, HMAX, dim, true, true, true, false, true);
 
         // Collect moisture and slope for Soil cells only
         let mut soil_moistures = Vec::new();

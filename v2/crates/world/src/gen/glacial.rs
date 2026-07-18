@@ -709,7 +709,7 @@ mod tests {
     const DIM: usize = 64;
 
     fn eroded_fixture() -> Vec<i64> {
-        erode(SEED, HMAX, DIM, false, false, false).height
+        erode(SEED, HMAX, DIM, true, false, false, false, true).height
     }
 
     #[test]
@@ -931,7 +931,7 @@ mod tests {
     /// not the post-till height where moraine relief could confound the measurement.
     #[test]
     fn u_trough_structural_signature_on_at_least_3_valley_segments() {
-        let off = erode(SEED, HMAX, DIM, false, false, false);
+        let off = erode(SEED, HMAX, DIM, true, false, false, false, true);
         let state = run_glacial(SEED, DIM, HMAX, &off.height);
 
         let mask = ice_mask(SEED, DIM, &off.height);
@@ -1076,7 +1076,7 @@ mod tests {
         const DIM64: usize = 64;
 
         // Build eroded baseline with glacial=OFF for seed=2.
-        let height = erode(SEED2, HMAX64, DIM64, false, false, false).height;
+        let height = erode(SEED2, HMAX64, DIM64, true, false, false, false, true).height;
 
         // Run with production profile/k_band (moraine-absorbing fixture as identified in Phase-0b).
         let state = run_glacial(SEED2, DIM64, HMAX64, &height);
@@ -1144,7 +1144,7 @@ mod tests {
         const DIM64: usize = 64;
         const K_CTRL: i64 = 4;
 
-        let height = erode(SEED1, HMAX64, DIM64, false, false, false).height;
+        let height = erode(SEED1, HMAX64, DIM64, true, false, false, false, true).height;
 
         // Production pinned profile: truncated must be 0.
         let state_pinned = run_glacial_with(SEED1, DIM64, HMAX64, &height, &PROFILE, K_BAND);

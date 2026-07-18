@@ -7,13 +7,16 @@
 use std::path::PathBuf;
 
 /// Landform configuration flags (deterministically derived from seed or set manually).
+/// W-18: additive worldgen — SOURCES (base, tect/ridges, volcanic) vs TRANSFORMS (erosion, aeolian, glacial, coastal/beaches).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LandformFlags {
+    pub base: bool,       // W-18: seed height from fBm (true) or FLAT_DATUM (false)
     pub tect: bool,
     pub aeolian: bool,
     pub volcanic: bool,
     pub glacial: bool,
     pub coastal: bool,
+    pub erosion: bool,    // W-18: run erosion chain (talus/fluvial/deposition)
     pub ridges: bool,
     pub beaches: bool,
 }
@@ -21,21 +24,25 @@ pub struct LandformFlags {
 impl LandformFlags {
     /// Create landform flags without clamps (raw values).
     /// Clamps are applied later in `apply_guard()` AFTER the guard potentially enables tect/coastal.
+    /// W-18: base and erosion must be specified explicitly.
     pub fn new(
+        base: bool,
         tect: bool,
         aeolian: bool,
         volcanic: bool,
         glacial: bool,
         coastal: bool,
+        erosion: bool,
         ridges: bool,
         beaches: bool,
     ) -> Self {
-        LandformFlags { tect, aeolian, volcanic, glacial, coastal, ridges, beaches }
+        LandformFlags { base, tect, aeolian, volcanic, glacial, coastal, erosion, ridges, beaches }
     }
 
     /// Apply guards and dependency clamps to ensure a valid state.
     /// Order: (1) if all five original landforms are off, enable tectonic;
     /// (2) then apply clamps so guard's tect-enabling makes ridges/beaches permissible.
+    /// W-18: base and erosion are not affected by guard (user controls these independently).
     pub fn apply_guard(mut self) -> Self {
         // Guard: never all-off for the original five (avoid flat/boring maps)
         if !(self.tect || self.aeolian || self.volcanic || self.glacial || self.coastal) {
@@ -214,20 +221,31 @@ impl Stage {
 }
 
 /// Landform flags: derived deterministically from seed + standalone mode.
-/// Returns LandformFlags with tectonic, aeolian, volcanic, glacial, coastal, ridges, beaches.
+/// Returns LandformFlags with base, tectonic, aeolian, volcanic, glacial, coastal, erosion, ridges, beaches.
 ///
-/// Each landform toggles independently (well-spaced bit positions in splitmix64).
+/// W-18: Absent explicit flags (§10 ТЗ #483) use auto mode with base=true, erosion=true ALWAYS.
+/// The seven dynamic landforms (tect, aeolian, volcanic, glacial, coastal, ridges, beaches) toggle
+/// independently via splitmix64 bits at shifts 3/13/23/33/43/53/59.
+/// SOURCES (base, tect/ridges, volcanic) vs TRANSFORMS (erosion, aeolian, glacial, coastal/beaches).
+///
+/// **CRITICAL:** base and erosion are NOT part of the seed-derived bit extraction.
+/// Auto mode (standalone=true, no explicit CLI flags) HARDCODES base=true, erosion=true.
+/// Only explicit CLI flags (--landforms / --transform) can override base/erosion; sim mode
+/// hardcodes both true as well. This ensures the default state is byte-identical to pre-W-18.
+///
 /// Dependency clamps: ridges &= tect (needs uplift), beaches &= coastal (needs sea datum).
 /// Guard: never all-off for the original five (ensures maps never become flat/featureless).
 pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     if !standalone {
-        // Sim mode: all landforms off (unchanged from original contract)
+        // Sim mode: all landforms off except base/erosion which are always on (unchanged from original contract)
         return LandformFlags {
+            base: true,
             tect: false,
             aeolian: false,
             volcanic: false,
             glacial: false,
             coastal: false,
+            erosion: true,
             ridges: false,
             beaches: false,
         };
@@ -239,7 +257,8 @@ pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     x = (x ^ (x >> 27)).wrapping_mul(0x94d049bb133111eb);
     x ^= x >> 31;
 
-    // Extract independent bits for each landform (well-spaced bit positions)
+    // Extract independent bits for the seven dynamic landforms (well-spaced bit positions).
+    // W-18: base=true and erosion=true are hardcoded in auto mode (no bit extraction).
     let tect = (x >> 3) & 1 == 1;
     let aeol = (x >> 13) & 1 == 1;
     let volc = (x >> 23) & 1 == 1;
@@ -248,8 +267,9 @@ pub fn landform_flags(seed: u64, standalone: bool) -> LandformFlags {
     let ridg = (x >> 53) & 1 == 1;
     let beach = (x >> 59) & 1 == 1;
 
+    // Auto mode: base and erosion always true; only the seven landforms vary by seed
     // Apply clamps and guard
-    LandformFlags::new(tect, aeol, volc, glac, coast, ridg, beach).apply_guard()
+    LandformFlags::new(true, tect, aeol, volc, glac, coast, true, ridg, beach).apply_guard()
 }
 
 #[cfg(test)]
@@ -320,6 +340,26 @@ mod tests {
         }
     }
 
+    /// W-18: Auto-mode MUST always have base=true, erosion=true (§10 ТЗ #483).
+    /// The seven dynamic landforms derive from splitmix64 bits 3/13/23/33/43/53/59 (byte-compatible).
+    /// This test covers 256 seeds to guarantee the contract holds across the seed space.
+    #[test]
+    fn w18_auto_mode_always_enables_base_and_erosion() {
+        // Auto mode (standalone=true) must ALWAYS enable base and erosion,
+        // regardless of seed value. Only explicit CLI flags can override.
+        for seed in 0u64..256 {
+            let flags = landform_flags(seed, true);
+            assert!(flags.base, "seed {seed:016x}: auto-mode base must always be true (§10 ТЗ #483)");
+            assert!(flags.erosion, "seed {seed:016x}: auto-mode erosion must always be true (§10 ТЗ #483)");
+
+            // Verify the seven dynamic landforms exist and are byte-compatible with pre-W-18.
+            // (tect, aeolian, volcanic, glacial, coastal, ridges, beaches all extract normally)
+            // At least one of the five main landforms should be on (guard ensures this).
+            assert!(flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal,
+                    "seed {seed:016x}: guard must force at least one of the five main landforms");
+        }
+    }
+
     /// U-3: Reseed guard conditions — verify which combinations allow reseed.
     /// Reseed is enabled ONLY when source == Procgen && standalone (F12/F15).
     #[test]
@@ -378,47 +418,49 @@ mod tests {
         assert!(!can_reseed, "Dump + sim_mode must NOT allow reseed (F15)");
     }
 
-    // U-10: Landform flag clamp tests (applied in apply_guard after guard runs)
+    // W-18: Landform flag clamp tests (applied in apply_guard after guard runs)
     #[test]
     fn landform_clamps_ridges_requires_tect() {
         // Guard forces tect when all five originals are off, then clamp permits ridges.
-        let flags = LandformFlags::new(false, false, false, false, false, true, false).apply_guard();
+        let flags = LandformFlags::new(true, false, false, false, false, false, true, true, false).apply_guard();
         assert!(flags.tect && flags.ridges, "guard forces tect, clamp then permits ridges");
     }
 
     #[test]
     fn landform_clamps_beaches_requires_coastal() {
         // Guard only forces tect (not coastal), so beaches stays clamped false.
-        let flags = LandformFlags::new(false, false, false, false, false, false, true).apply_guard();
+        let flags = LandformFlags::new(true, false, false, false, false, false, true, false, true).apply_guard();
         assert!(flags.tect && !flags.coastal && !flags.beaches, "guard forces tect but not coastal; beaches stays false");
     }
 
     #[test]
     fn landform_clamps_both_dependencies() {
         // Guard forces tect (rescues ridges), but not coastal (beaches stays false).
-        let flags = LandformFlags::new(false, false, false, false, false, true, true).apply_guard();
+        let flags = LandformFlags::new(true, false, false, false, false, false, true, true, true).apply_guard();
         assert!(flags.tect && flags.ridges && !flags.coastal && !flags.beaches, "guard forces tect; ridges true, beaches false");
     }
 
     #[test]
     fn landform_preserves_valid_dependencies() {
         // ridges valid when tect=true
-        let flags1 = LandformFlags::new(true, false, false, false, false, true, false).apply_guard();
+        let flags1 = LandformFlags::new(true, true, false, false, false, false, true, true, false).apply_guard();
         assert!(flags1.ridges, "ridges should be true when tect=true");
 
         // beaches valid when coastal=true
-        let flags2 = LandformFlags::new(false, false, false, false, true, false, true).apply_guard();
+        let flags2 = LandformFlags::new(true, false, false, false, false, true, true, false, true).apply_guard();
         assert!(flags2.beaches, "beaches should be true when coastal=true");
     }
 
     #[test]
     fn landform_guard_forces_tect_if_all_off() {
         let flags = LandformFlags {
+            base: true,
             tect: false,
             aeolian: false,
             volcanic: false,
             glacial: false,
             coastal: false,
+            erosion: true,
             ridges: false,
             beaches: false,
         };
@@ -429,11 +471,13 @@ mod tests {
     #[test]
     fn landform_guard_preserves_existing() {
         let flags = LandformFlags {
+            base: true,
             tect: true,
             aeolian: false,
             volcanic: false,
             glacial: false,
             coastal: false,
+            erosion: true,
             ridges: false,
             beaches: false,
         };
