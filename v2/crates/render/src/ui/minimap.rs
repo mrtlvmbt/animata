@@ -207,8 +207,10 @@ pub fn map_uv_to_panel(u: f32, v: f32, yaw: f32, panel_w: f32, panel_h: f32) -> 
     // panel_y ∝ −dot((cu, cv), screen_up_xz)·FS = −(−cu·cosY − cv·sinY)·FS = (cu·cosY + cv·sinY)·FS
     let panel_y_unnormalized = (cu * cos_yaw + cv * sin_yaw) * FS;
 
-    // U-13: Scale to FILL the panel (no margin) — isometric diamond covers the rect edge-to-edge
-    let s = (panel_w * 0.5).min(panel_h * 0.5 / FS);
+    // U-13: Scale to FILL the panel — isometric diamond corners touch panel edges
+    // Diamond ranges x in [center_x ± 0.5*s], y in [center_y ± 0.5*FS*s]
+    // To fill panel [0, panel_w]×[0, panel_h]: s = min(panel_w, panel_h/FS)
+    let s = (panel_w).min(panel_h / FS);
     let center_x = panel_w * 0.5;
     let center_y = panel_h * 0.5;
 
@@ -225,8 +227,8 @@ pub fn map_uv_to_panel(u: f32, v: f32, yaw: f32, panel_w: f32, panel_h: f32) -> 
 pub fn panel_to_map_uv(x: f32, y: f32, yaw: f32, panel_w: f32, panel_h: f32) -> glam::Vec2 {
     const FS: f32 = 0.577_350_3;
 
-    // Undo centering and scaling
-    let s = ((panel_w * 0.5 - 6.0) / 1.0).min((panel_h * 0.5 - 6.0) / FS);
+    // U-13: Undo centering and scaling (must match map_uv_to_panel exactly)
+    let s = (panel_w).min(panel_h / FS);
     let center_x = panel_w * 0.5;
     let center_y = panel_h * 0.5;
 

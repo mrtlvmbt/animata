@@ -397,12 +397,20 @@ impl Panel for MinimapPanel {
                 theme::themed_frame(theme::FrameKind::Vitals)
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
-                        // U-13: Use available space to fill the panel, respecting aspect ratio
-                        // The minimap is always square (world is square), so pick the smaller dimension
+                        // U-13: Use full available space (may be rectangular due to panel layout)
+                        // The isometric projection will scale the diamond to fill the rect edge-to-edge
                         let available = ui.available_size();
-                        let size_scalar = available.x.min(available.y).max(100.0);  // Minimum 100×100
-                        let size = egui::vec2(size_scalar, size_scalar);
+                        let size = egui::vec2(
+                            available.x.max(100.0),  // Use full width, min 100
+                            available.y.max(100.0),  // Use full height, min 100
+                        );
                         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+
+                        // DEBUG: Print panel dimensions for verification
+                        if std::env::var("DEBUG_MINIMAP").is_ok() {
+                            eprintln!("[U-13 MINIMAP] available={:?}, rect_size=({:.0}×{:.0})",
+                                available, rect.width(), rect.height());
+                        }
 
                         // U-8: Draw the minimap texture as a screen-aligned iso diamond through the new projection
                         let painter = ui.painter_at(rect);
