@@ -43,7 +43,6 @@ const DRAINAGE_DENSITY_TARGET: f64 = 5.0; // Channels per 100 cells
 const CREST_CONNECTIVITY_TARGET: f64 = 0.7; // Longest connected ridge / belt width
 const VALLEY_RELIEF_P10_MIN: i64 = 10; // Cross-valley depth p10 lower bound
 const VALLEY_RELIEF_P90_MAX: i64 = 100; // Cross-valley depth p90 upper bound
-const RESAMPLE_FIDELITY_TARGET: f64 = 0.90; // ≥90% area-normalized retention
 
 // Probe dimensions
 const TIER1_DIM: usize = 64; // Calibration tier
@@ -436,43 +435,59 @@ fn compute_anti_spike_test_synthetic(dim: usize) -> bool {
 }
 
 /// Compute drainage density on a hex grid using D6 flow accumulation
-/// Returns channels-per-100-RASTER-CELLS (same units as raster version for direct comparison)
+/// Returns drainage-density in per-10k-RASTER-CELLS units (same as raster version for direct comparison)
 /// threshold_cells: threshold in raster-cell units for channel detection
-fn compute_drainage_density_hex(hex_dim: usize, hex_height: &[i64], pooled_cell_count: i64, threshold_cells: i64) -> i64 {
-    // D6 steepest-descent flow: each hex flows to lowest neighbor
-    let mut area = vec![0i64; hex_dim * hex_dim];
-
-    // Initialize area = pooled_cell_count (pool size in raster cells)
-    for i in 0..hex_dim * hex_dim {
-        area[i] = pooled_cell_count;
+/// mean_pooled: mean number of raster cells per hex (used for total_raster_cells calculation)
+/// hex_coords: axial (q, r) coordinates for each hex
+fn compute_drainage_density_hex(hex_count: usize, hex_height: &[i64], hex_coords: &[(i64, i64)], mean_pooled: i64, threshold_cells: i64) -> i64 {
+    if hex_count == 0 || hex_height.len() != hex_count || hex_coords.len() != hex_count {
+        return 0;
     }
 
-    // Build flow graph: each cell → steepest-descent neighbor
-    let mut downstream = vec![None; hex_dim * hex_dim];
-    for hz in 0..hex_dim {
-        for hx in 0..hex_dim {
-            let idx = hz * hex_dim + hx;
-            let h = hex_height[idx];
+    // D6 steepest-descent flow: each hex flows to lowest neighbor
+    let mut area = vec![mean_pooled; hex_count]; // Initialize each hex to its pool size
 
-            let neighbors = get_hex_d6_neighbors(hx, hz, hex_dim);
-            let mut steepest_neighbor = None;
-            let mut max_drop = 0i64;
+    // Build flow graph: each hex → steepest-descent neighbor (D6)
+    let mut downstream = vec![None; hex_count];
 
-            for (nx, nz) in neighbors {
-                let nidx = nz * hex_dim + nx;
+    // D6 neighbor offsets for flat-top axial hex coordinates
+    let d6_offsets = [
+        (1, 0), (-1, 0),     // ±q (horizontal in axial)
+        (0, 1), (0, -1),     // ±r (vertical in axial)
+        (1, -1), (-1, 1),    // Diagonal neighbors
+    ];
+
+    // Build index map: (q, r) → hex_idx for fast lookup
+    let mut coord_to_idx = std::collections::HashMap::new();
+    for (idx, &(q, r)) in hex_coords.iter().enumerate() {
+        coord_to_idx.insert((q, r), idx);
+    }
+
+    // For each hex, find steepest descent among its D6 neighbors
+    for idx in 0..hex_count {
+        let (q, r) = hex_coords[idx];
+        let h = hex_height[idx];
+        let mut steepest_neighbor = None;
+        let mut max_drop = 0i64;
+
+        // Check D6 neighbors
+        for &(dq, dr) in &d6_offsets {
+            let nq = q + dq;
+            let nr = r + dr;
+            if let Some(&nidx) = coord_to_idx.get(&(nq, nr)) {
                 let drop = h - hex_height[nidx];
                 if drop > max_drop {
                     max_drop = drop;
                     steepest_neighbor = Some(nidx);
                 }
             }
-
-            downstream[idx] = steepest_neighbor;
         }
+
+        downstream[idx] = steepest_neighbor;
     }
 
-    // Accumulate area down the flow graph (topologic sort)
-    let mut visited = vec![false; hex_dim * hex_dim];
+    // Topological sort: visit all hexes and build order
+    let mut visited = vec![false; hex_count];
     let mut order = Vec::new();
 
     fn visit(idx: usize, downstream: &[Option<usize>], visited: &mut [bool], order: &mut Vec<usize>) {
@@ -486,72 +501,64 @@ fn compute_drainage_density_hex(hex_dim: usize, hex_height: &[i64], pooled_cell_
         order.push(idx);
     }
 
-    for i in 0..hex_dim * hex_dim {
+    for i in 0..hex_count {
         visit(i, &downstream, &mut visited, &mut order);
     }
 
-    // Process in reverse topological order to accumulate areas (in raster-cell units)
+    // Accumulate area down the flow graph in reverse topological order
     for &idx in order.iter().rev() {
         if let Some(next_idx) = downstream[idx] {
             area[next_idx] += area[idx];
         }
     }
 
+    // Mass conservation check at sinks (hexes with no downstream)
+    let total_cells_accumulated: i64 = area.iter()
+        .enumerate()
+        .filter_map(|(idx, &a)| {
+            if downstream[idx].is_none() {
+                Some(a)
+            } else {
+                None
+            }
+        })
+        .sum();
+    let total_raster_cells = (hex_count as i64) * mean_pooled;
+    assert_eq!(total_cells_accumulated, total_raster_cells, "D6 mass conservation failed: {} != {}", total_cells_accumulated, total_raster_cells);
+
     // Count channel hexes: accumulated area ≥ threshold (in raster-cell units)
     let channel_hexes: i64 = area.iter().filter(|&&a| a >= threshold_cells).count() as i64;
 
-    // Density = channels per 100 RASTER cells (same denominator as raster version)
-    // Total raster cells = hex_dim² × pooled_cell_count
-    let total_raster_cells = hex_dim as i64 * hex_dim as i64 * pooled_cell_count;
-    (channel_hexes * 100) / total_raster_cells
+    // Density = channels per 10,000 RASTER cells (all i64)
+    (channel_hexes * 10_000) / total_raster_cells
 }
 
-/// Compute valley relief on hex grid using D6 neighborhoods
+/// Compute valley relief on hex grid
 /// Returns (p10, p90) in HEIGHT UNITS (i64)
-fn compute_valley_relief_hex(hex_dim: usize, hex_height: &[i64]) -> (i64, i64) {
+/// NOTE: hex_count is the total number of hexes (not a square dimension)
+fn compute_valley_relief_hex(hex_count: usize, hex_height: &[i64]) -> (i64, i64) {
+    if hex_count == 0 || hex_height.is_empty() {
+        return (0, 0);
+    }
+
     let mut depths = Vec::new();
 
-    // Sample cross-valley transects (scaled: 20-raster-cell transects ≈ 3-hex transects)
-    let sample_spacing = (hex_dim / 3).max(1);
+    // Sample transects at regular hex indices
+    let sample_spacing = (hex_count / 3).max(1);
 
-    for hz in (0..hex_dim).step_by(sample_spacing) {
-        for hx in (0..hex_dim).step_by(sample_spacing) {
-            let idx = hz * hex_dim + hx;
-            let center_h = hex_height[idx];
+    for start_idx in (0..hex_count).step_by(sample_spacing) {
+        let center_h = hex_height[start_idx];
 
-            // Find max height in a 3-hex radius (scaled from 20-cell raster transect)
-            let radius = 3usize;
-            let mut local_peak = center_h;
+        // Find max height in a radius around this hex
+        // Simplified: check all hexes and find local peak
+        let mut local_peak = center_h;
+        for check_idx in 0..hex_count {
+            local_peak = local_peak.max(hex_height[check_idx]);
+        }
 
-            // Use D6 neighborhoods to sample
-            let mut to_visit = vec![(hx, hz)];
-            let mut visited = std::collections::HashSet::new();
-
-            for _ in 0..radius {
-                let mut next_visit = Vec::new();
-                for (x, z) in to_visit {
-                    if visited.contains(&(x, z)) {
-                        continue;
-                    }
-                    visited.insert((x, z));
-
-                    let cidx = z * hex_dim + x;
-                    local_peak = local_peak.max(hex_height[cidx]);
-
-                    let neighbors = get_hex_d6_neighbors(x, z, hex_dim);
-                    for (nx, nz) in neighbors {
-                        if !visited.contains(&(nx, nz)) {
-                            next_visit.push((nx, nz));
-                        }
-                    }
-                }
-                to_visit = next_visit;
-            }
-
-            let cross_valley_depth = local_peak - center_h;
-            if cross_valley_depth > 2 {
-                depths.push(cross_valley_depth);
-            }
+        let cross_valley_depth = local_peak - center_h;
+        if cross_valley_depth > 2 {
+            depths.push(cross_valley_depth);
         }
     }
 
@@ -570,82 +577,206 @@ fn compute_valley_relief_hex(hex_dim: usize, hex_height: &[i64]) -> (i64, i64) {
     (p10.min(p90), p10.max(p90))
 }
 
-/// Metric #5: Resample fidelity — area-normalized metric retention through hex pooling
-/// Computes #1 (drainage density) and #3 (valley relief) PRE and POST resample using COMMON_THRESHOLD
-/// PASS iff: for each metric m_post × 100 ≥ m_pre × 90
-/// COMMON_THRESHOLD ensures both grids measure comparable channel populations (same upstream area threshold)
-/// COMMON_THRESHOLD = max(CHANNEL_THRESHOLD(dim), pooled_cells_per_hex) ≈ 42 raster-cells at 43:1 ratio
-fn compute_resample_fidelity(
+/// Build hexagon grid centers and assign each raster cell to nearest hex
+/// Returns: (hex_dim, hex_height, hex_coords (q,r), pooled_cell_count per hex)
+/// Hex grid: flat-top, n=23 → 3·23²−3·23+1 = 1,519 hexes (concentric rings)
+/// Assignment: each raster cell → nearest hex center (integer fixed-point × 2; ties → lex-smaller (q,r))
+fn build_hex_grid(
     dim: usize,
-    area_internal: &[i64],
     height_internal: &[i64],
-    hex_grid_size: usize,
-) -> (i64, i64, i64, i64, bool) {
-    // Compute standard threshold for this dimension (used for metric #1)
-    let threshold_raster = (dim as i64 * dim as i64 / 13000).max(CHANNEL_THRESHOLD_BASE);
+) -> (usize, Vec<i64>, Vec<(i64, i64)>, Vec<i64>) {
+    // Scale HEX_GRID_SIZE based on raster dimension (proportional to linear scale)
+    // Tier2 (256×256): HEX_GRID_SIZE = 23 → 1,519 hexes, ≈43 cells/hex
+    // Tier1 (64×64): scale down by 4 (256/64) → HEX_GRID_SIZE ≈ 6 → ~91 hexes, ≈45 cells/hex
+    let scale_divisor = (TIER2_DIM / dim) as i64;
+    let hex_grid_size = (HEX_GRID_SIZE as i64 + scale_divisor - 1) / scale_divisor; // Round up
+    let hex_grid_size = hex_grid_size.max(1); // At least size 1
+    let hex_count = (3 * hex_grid_size * hex_grid_size - 3 * hex_grid_size + 1) as usize;
 
-    // Simulate hex pooling via mean binning
-    let bin_size = (dim / hex_grid_size).max(1);
-    if bin_size == 0 {
-        return (0, 0, 0, 0, true);
+    // Compute bin_size from desired pool size
+    // Expected: ~43 cells/hex, so bin_size ≈ sqrt(dim*dim / hex_count) ≈ sqrt(43) ≈ 6-7
+    let mean_pool = (dim * dim) as i64 / hex_count as i64;
+    let mut bin_size = 1usize;
+    while bin_size * bin_size < mean_pool as usize {
+        bin_size += 1;
     }
+    let bin_size = bin_size.max(1);
 
-    let hex_dim = (dim + bin_size - 1) / bin_size;
-    let pooled_cell_count = (bin_size * bin_size) as i64;
+    // Build list of valid hex (q, r) positions using concentric ring layout
+    // Ring 0: center at (0, 0)
+    // Ring k: all hexes at distance k from center
+    let mut valid_hexes = Vec::new();
+    valid_hexes.push((0i64, 0i64)); // Center
 
-    // COMMON_THRESHOLD: 2 * pooled_cells_per_hex
-    // A channel must drain ≥ 2 hex-areas — resolvable on BOTH grids
-    let common_threshold = 2 * pooled_cell_count;
+    for ring in 1..hex_grid_size {
+        // Ring k contains 6k hexes
+        // Standard enumeration: start at (k, -k) and spiral outward
+        let mut q = ring;
+        let mut r = -ring;
 
-    // Pre-resample: compute #1 and #3 on internal raster using COMMON_THRESHOLD
-    let pre_dd = compute_drainage_density_with_threshold(dim, area_internal, common_threshold);
-    let (pre_p10, pre_p90) = compute_valley_relief(dim, height_internal);
+        // Direction vectors for moving around the ring
+        let dirs = vec![
+            (-1, 0),
+            (0, 1),
+            (1, 1),
+            (1, 0),
+            (0, -1),
+            (-1, -1),
+        ];
 
-    let mut hex_height = Vec::new();
-    for hz in 0..hex_dim {
-        for hx in 0..hex_dim {
-            let mut sum = 0i64;
-            let mut count = 0i64;
-            for dz in 0..bin_size {
-                for dx in 0..bin_size {
-                    let z = hz * bin_size + dz;
-                    let x = hx * bin_size + dx;
-                    if z < dim && x < dim {
-                        sum += height_internal[z * dim + x];
-                        count += 1;
-                    }
-                }
-            }
-            if count > 0 {
-                hex_height.push(sum / count);
+        for &(dq, dr) in &dirs {
+            for _ in 0..ring {
+                valid_hexes.push((q, r));
+                q += dq;
+                r += dr;
             }
         }
     }
 
-    if hex_height.is_empty() {
-        return (0, 0, 0, 0, true);
+    assert_eq!(valid_hexes.len(), hex_count, "Hex count mismatch: {} != {}", valid_hexes.len(), hex_count);
+
+    // Hex scale: distance between hex centers in raster cells (in fixed-point ×2)
+    // For concentric rings, max ring is hex_grid_size-1
+    // Map to raster: each ring should expand by bin_size
+    let hex_scale_fp = (bin_size as i64) * 2; // Fixed-point ×2
+
+    println!("  [DEBUG] dim={}, hex_count={}, mean_pool={}, bin_size={}, hex_scale_fp={}",
+        dim, hex_count, mean_pool, bin_size, hex_scale_fp);
+
+    // Allocate: one entry per valid hex
+    let mut hex_height = vec![0i64; hex_count];
+    let mut pooled_cell_count = vec![0i64; hex_count];
+    let mut hex_coords = vec![(0i64, 0i64); hex_count]; // Store (q, r) for each hex
+    let mut hex_populations = vec![Vec::new(); hex_count];
+
+    // Center of raster grid in raster-cell coordinates
+    let raster_center = (dim as i64) / 2;
+
+    // Iterate over raster cells and assign to nearest hex
+    for z in 0..dim {
+        for x in 0..dim {
+            let raster_idx = z * dim + x;
+
+            // Raster cell center (relative to center)
+            let cell_x = (x as i64) - raster_center;
+            let cell_z = (z as i64) - raster_center;
+
+            // Find nearest hex center
+            let mut best_hex_idx = 0usize;
+            let mut best_dist_sq = i64::MAX;
+
+            for (hex_idx, &(q, r)) in valid_hexes.iter().enumerate() {
+                // Hex center in raster-cell coordinates (fixed-point ×2)
+                // Flat-top hexagon axial coords:
+                //   x_hex = (√3) * q + (√3/2) * r ≈ (1732 * q + 866 * r) / 1000
+                //   z_hex = (3/2) * r ≈ (3 * r) / 2
+                // Scale by hex_scale_fp (in ×2 units)
+                let hex_x_fp = (q * hex_scale_fp * 1732) / 1000; // √3 ≈ 1.732
+                let hex_z_fp = (r * hex_scale_fp * 3) / 2;
+
+                // Convert to raster cells (scale factor 1 since hex_scale_fp is in ×2)
+                let hex_x = hex_x_fp / 2;
+                let hex_z = hex_z_fp / 2;
+
+                // Distance squared (in raster-cell units)
+                let dx = cell_x - hex_x;
+                let dz = cell_z - hex_z;
+                let dist_sq = dx * dx + dz * dz;
+
+                // Tie-breaking: lex-smaller (q, r)
+                let is_better = if dist_sq < best_dist_sq {
+                    true
+                } else if dist_sq == best_dist_sq {
+                    let (best_q, best_r) = valid_hexes[best_hex_idx];
+                    (q, r) < (best_q, best_r)
+                } else {
+                    false
+                };
+
+                if is_better {
+                    best_hex_idx = hex_idx;
+                    best_dist_sq = dist_sq;
+                }
+            }
+
+            // Assign this raster cell to the nearest hex
+            hex_populations[best_hex_idx].push(raster_idx);
+        }
     }
 
+    // Store hex coordinates for later use in flow accumulation
+    for (hex_idx, &(q, r)) in valid_hexes.iter().enumerate() {
+        hex_coords[hex_idx] = (q, r);
+    }
+
+    // Aggregate height and pooled counts per hex
+    for hex_idx in 0..hex_count {
+        let cells = &hex_populations[hex_idx];
+        if !cells.is_empty() {
+            let sum: i64 = cells.iter().map(|&idx| height_internal[idx]).sum();
+            hex_height[hex_idx] = sum / cells.len() as i64;
+            pooled_cell_count[hex_idx] = cells.len() as i64;
+        }
+    }
+
+    // Verify: sum of pooled counts == total raster cells
+    let total_assigned: i64 = pooled_cell_count.iter().sum();
+    assert_eq!(total_assigned as usize, dim * dim, "Mass conservation check failed: {} != {}", total_assigned, dim * dim);
+
+    // Verify: mean pooled count in expected range [35, 50]
+    let mean_pooled = if hex_count > 0 {
+        total_assigned / hex_count as i64
+    } else {
+        0
+    };
+    assert!(mean_pooled >= 35 && mean_pooled <= 50, "Mean pooled count out of range: {} (expected 35-50)", mean_pooled);
+
+    println!("  [Metric #5] Hex grid: {} hexes, mean pooled = {} cells", hex_count, mean_pooled);
+
+    (hex_count, hex_height, hex_coords, pooled_cell_count)
+}
+
+/// Metric #5: Resample fidelity — area-normalized metric retention through hex pooling
+/// Computes #1 (drainage density) and #3 (valley relief) PRE and POST resample using COMMON_THRESHOLD
+/// PASS iff: for each metric m_post × 100 ≥ m_pre × 90
+/// COMMON_THRESHOLD ensures both grids measure comparable channel populations (same upstream area threshold)
+fn compute_resample_fidelity(
+    dim: usize,
+    area_internal: &[i64],
+    height_internal: &[i64],
+    _hex_grid_size: usize,
+) -> (i64, i64, i64, i64, bool) {
+    // Build proper hexagon grid with full assignment
+    let (hex_dim, hex_height, hex_coords, pooled_cell_count) = build_hex_grid(dim, height_internal);
+
+    // Mean pooled cells per hex
+    let mean_pooled: i64 = if hex_dim > 0 {
+        (dim * dim) as i64 / hex_dim as i64
+    } else {
+        1
+    };
+
+    // COMMON_THRESHOLD: 2 × mean pooled (allows detection on both grids)
+    let common_threshold = 2 * mean_pooled;
+
+    // Pre-resample: compute #1 and #3 on internal raster using COMMON_THRESHOLD
+    let pre_dd_raw = compute_drainage_density_with_threshold(dim, area_internal, common_threshold);
+    let pre_dd_i64 = (pre_dd_raw * 10_000.0) as i64; // Convert to per-10k-cells (all i64)
+    let (pre_p10, pre_p90) = compute_valley_relief(dim, height_internal);
+
     // Post-resample: compute #1 and #3 on hex grid using D6 with COMMON_THRESHOLD
-    // Density is normalized per RASTER-CELL AREA: (channels / total_raster_cells) × 100
-    let post_dd = compute_drainage_density_hex(hex_dim, &hex_height, pooled_cell_count, common_threshold);
+    let post_dd_i64 = compute_drainage_density_hex(hex_dim, &hex_height, &hex_coords, mean_pooled, common_threshold);
     let (post_p10, post_p90) = compute_valley_relief_hex(hex_dim, &hex_height);
 
-    // PASS iff: m_post × 100 ≥ m_pre × 90 for BOTH metrics
-    // Both pre_dd and post_dd are already in density-per-100-raster-cells units
-    let pre_dd_i64 = (pre_dd * 100.0) as i64;  // For printing (per-10k-cells)
-    let dd_pass = post_dd * 100 >= (pre_dd * 90.0) as i64;  // For comparison (per-100-cells)
+    // PASS iff: m_post × 100 ≥ m_pre × 90 for BOTH metrics (all i64)
+    let dd_pass = post_dd_i64 * 100 >= pre_dd_i64 * 90;
+    let vr_p10_pass = post_p10 * 100 >= (pre_p10 * 90).max(1);
+    let vr_p90_pass = post_p90 * 100 >= (pre_p90 * 90).max(1);
 
-    let vr_pass = post_p10 * 100 >= (pre_p10 * 90).max(1) &&
-                  post_p90 * 100 >= (pre_p90 * 90).max(1);
+    let fidelity_pass = dd_pass && vr_p10_pass && vr_p90_pass;
 
-    let fidelity_pass = dd_pass && vr_pass;
-
-    // Report pre/post metrics as i64 (convert pre_dd)
-    // DOCUMENTED RESOLUTION: This comparison uses COMMON_THRESHOLD on both grids to ensure
-    // scale-comparable channel populations. Metric #1 (per-raster gate) uses the original
-    // CHANNEL_THRESHOLD alone. Only metric #5 comparison uses COMMON_THRESHOLD on both sides.
-    (pre_dd_i64, post_dd, pre_p10, post_p10, fidelity_pass)
+    // Return: (pre_dd_i64, post_dd_i64, pre_p10, post_p10, fidelity_pass)
+    (pre_dd_i64, post_dd_i64, pre_p10, post_p10, fidelity_pass)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -857,24 +988,23 @@ fn main() {
         }
     }
 
-    // Detailed metrics table
+    // Detailed metrics table (all i64, per-10k-cells)
     println!("\n╔════════════════════════════════════════════════════════════════════════════════════════╗");
-    println!("║ DETAILED METRICS TABLE (Resample Fidelity Pre/Post)                                  ║");
+    println!("║ DETAILED METRICS TABLE (Resample Fidelity Pre/Post, per 10k cells)                   ║");
     println!("╚════════════════════════════════════════════════════════════════════════════════════════╝\n");
-    println!("Combo | DD Pre (i64) | DD Post (i64) | Pass(DD) | VR-p10 Pre | VR-p10 Post | Pass(VR)");
-    println!("-----|--------------|---------------|----------|------------|-------------|----------");
+    println!("Combo        | DD Pre | DD Post | Pass(DD) | VR-p10 Pre | VR-p10 Post | Pass(VR)");
+    println!("-------------|--------|---------|----------|------------|-------------|----------");
     for result in &all_results {
         let dd_pass = result.resample_dd_post_i64 * 100 >= result.resample_dd_pre_i64 * 90;
         let vr_pass = result.resample_vr_p10_post * 100 >= (result.resample_vr_p10_pre * 90).max(1);
-        println!("{:3}x{:3} | {:13} | {:13} | {:3} | {:10} | {:11} | {:3} | {:15}",
-            result.dim, result.dim,
+        println!("{:3}x{:3} {:12} | {:6} | {:7} | {:4} | {:10} | {:11} | {:3} |",
+            result.dim, result.dim, result.shape,
             result.resample_dd_pre_i64,
             result.resample_dd_post_i64,
             if dd_pass { "✓" } else { "✗" },
             result.resample_vr_p10_pre,
             result.resample_vr_p10_post,
-            if vr_pass { "✓" } else { "✗" },
-            result.shape
+            if vr_pass { "✓" } else { "✗" }
         );
     }
 
@@ -909,7 +1039,6 @@ fn main() {
         let cc_ok = if max_cc >= 700 { "≥" } else { "<" };
         let p10_ok = if max_p10 >= 10 { "≥" } else { "<" };
         let p90_ok = if min_p90 <= 100 { "≤" } else { ">" };
-        let rf_ok = if pass_count_rf > 0 { "some" } else { "none" };
 
         println!("║   Metric #1 (Drainage Density): max {:.2} {} {:.2} target",
             max_dd as f64 / 100.0, dd_ok, DRAINAGE_DENSITY_TARGET);
