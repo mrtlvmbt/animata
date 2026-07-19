@@ -154,3 +154,15 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   `gh api compare/<prev>...main` → 0 files changed); (2) re-land the real slice via a fresh PR whose base IS the
   integration branch, cut from the SAME verified sha (it stays reachable by sha even after `--delete-branch`).
   No work is lost and sim goldens are untouched (landforms default-off).
+
+- **CI-1 `detect changes` SKIPS the 3 sim jobs on a sim-relevant PR after a force-push** → the `changes`
+  job computes `sim_relevant` by diffing against `event.before` (the PRIOR push on a `push` event), NOT
+  against the PR base. So if the final pre-merge push touches ONLY a gated path (e.g. a force-push that just
+  removes a stray `.claude/status.md`), the delta looks render-only ⇒ sim jobs skip — even though the PR as a
+  whole net-changes `v2/crates/world/**`. The acceptance test then never runs on the head commit, and
+  `skipped-as-green` would wave it through (origin: W-15a #503, the status.md-hygiene force-push). → Before
+  merging a world/sim PR whose HEAD run shows sim jobs `skipping`, confirm the sim-relevant content was
+  validated by an EARLIER full run on an IDENTICAL tree: find a prior full-4/4-green run's sha and check
+  `git diff <that-sha>..<head>` lists ONLY gated paths (status.md/docs/.claude). If it does, the world content
+  is byte-identical and validated; if not, force a fresh full run (push a no-op touching a world file, or
+  re-dispatch). Never merge sim-relevant code on a skipped-sim run without this identical-tree proof.
