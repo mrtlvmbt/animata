@@ -159,9 +159,10 @@ pub const N_ITERS_FINAL: usize = 4;
 
 /// W-17 PAR_MIN_DIM: dimension threshold below which parallel overhead exceeds benefit.
 /// dim=64 shows ~25% regression with par_iter; gate at 128 (matches practical break-even).
-/// Applied uniformly across all parallelized functions (incision_step, talus_step, talus_step_final,
-/// de_needle_pass, d8_directions) — both par and serial paths are byte-identical (G1 proven).
-const PAR_MIN_DIM: usize = 128;
+/// Applied uniformly across all parallelized functions in erosion (incision_step, talus_step,
+/// talus_step_final, de_needle_pass, d8_directions), drainage (d8_directions), and caps/volcanic
+/// M3 stages (classify, edifice_material_mask). Both par and serial paths are byte-identical (G1 proven).
+pub(crate) const PAR_MIN_DIM: usize = 128;
 
 // Static assertion: MAX_SPIKE_FINAL must be strictly less than NEEDLE_MARGIN.
 const _: () = assert!(MAX_SPIKE_FINAL < NEEDLE_MARGIN);
@@ -1143,15 +1144,32 @@ pub fn erode_with_tectonics(
     // W-18: when base=false, initialize with FLAT_DATUM; when base=true, use fBm (byte-identical default)
     let base_height = if enable_base { None } else { Some(flat_datum(hmax)) };
     // M3 (W-17): par_iter height fBm fill loop — pure map-into-slice, byte-safe.
-    let height: Vec<i64> = (0..n).into_par_iter().map(|idx| {
-        if let Some(datum) = base_height {
-            datum
-        } else {
-            let x = idx % dim;
-            let z = idx / dim;
-            height_at(x as i64, z as i64, seed, hmax)
+    // PAR_MIN_DIM gate: dim-64 shows regression; parallel only when dim≥128.
+    let height: Vec<i64> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|idx| {
+            if let Some(datum) = base_height {
+                datum
+            } else {
+                let x = idx % dim;
+                let z = idx / dim;
+                height_at(x as i64, z as i64, seed, hmax)
+            }
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut height = Vec::with_capacity(n);
+        for idx in 0..n {
+            if let Some(datum) = base_height {
+                height.push(datum);
+            } else {
+                let x = idx % dim;
+                let z = idx / dim;
+                height.push(height_at(x as i64, z as i64, seed, hmax));
+            }
         }
-    }).collect();
+        height
+    };
     let mut height = height;
 
     let mut resistance = resistance_field(dim, seed, hmax);

@@ -56,6 +56,7 @@
 use sim_core::{isqrt, seed_fold};
 
 use crate::gen::material::MaterialId;
+use crate::gen::erosion::PAR_MIN_DIM;
 
 /// Number of vents per world (implementer's call, mirrors `tectonics::N_FAULTS`'s "a handful is
 /// enough to produce a visibly non-isotropic network" reasoning). Documented, locked by the
@@ -263,7 +264,10 @@ pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Optio
     let geom = EdificeGeom::derive(dim, hmax);
     // M3 (W-17): per-cell scatter-to-mask par_iter (immutable read over vents, write to disjoint output).
     // Each cell computes the max-contribution vent and derives material independently.
-    let mask: Vec<Option<MaterialId>> = (0..n).into_par_iter().map(|idx| {
+    // PAR_MIN_DIM gate: dim-64 shows regression; parallel only when dim≥128.
+    let mask: Vec<Option<MaterialId>> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|idx| {
         let x = idx % dim;
         let z = idx / dim;
         let mut best_contribution = 0i64;
@@ -286,7 +290,35 @@ pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Optio
             }
         }
         best_material
-    }).collect();
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut mask = Vec::with_capacity(n);
+        for idx in 0..n {
+            let x = idx % dim;
+            let z = idx / dim;
+            let mut best_contribution = 0i64;
+            let mut best_material = None;
+
+            for vent in vents {
+                let dx = x as i64 - vent.x;
+                let dz = z as i64 - vent.z;
+                let contribution = vent_height_at(vent, dx, dz, &geom);
+                if contribution > best_contribution {
+                    best_contribution = contribution;
+                    let r = isqrt(dx * dx + dz * dz);
+                    let material = match vent.class {
+                        SlopeClass::Cone if r <= geom.caldera_r => MaterialId::Basalt,
+                        SlopeClass::Cone => MaterialId::Tuff,
+                        SlopeClass::Shield => MaterialId::Basalt,
+                    };
+                    best_material = Some(material);
+                }
+            }
+            mask.push(best_material);
+        }
+        mask
+    };
     mask
 }
 
