@@ -856,7 +856,7 @@ pub struct ErosionState {
 /// W-18: added enable_erosion parameter. When false, skips the erosion macro-loop but still
 /// computes drainage and surface materials, preserving the accumulated source field (base+tect+volcanic).
 /// W-19: erosion_strength (percent, default 100) scales the iteration count via: effective_iters = (MACRO_ITERATIONS * strength) / 100.
-fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, resistance: Vec<i64>, enable_erosion: bool, erosion_strength: i64) -> ErosionState {
+pub fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, resistance: Vec<i64>, enable_erosion: bool, erosion_strength: i64) -> ErosionState {
     let n = dim * dim;
     let initial_height = height.clone();
 
