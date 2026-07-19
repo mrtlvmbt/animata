@@ -200,8 +200,9 @@ jobs:
               cargo nextest run -p world -p sim-core -p brain --release --locked -E 'not test(v2_golden)'
               ;;
             3)
-              # Shard 3: release invariants (cli — large crate, excluding work_counter perf run)
-              cargo nextest run -p cli --release --locked -E 'not test(v2_golden)' -E 'not test(work_counter)'
+              # Shard 3: release invariants (cli — large crate; work_counter runs here in release,
+              # not in shard 1's perf variant which is release+perf feature)
+              cargo nextest run -p cli --release --locked -E 'not test(v2_golden)'
               ;;
           esac
 
