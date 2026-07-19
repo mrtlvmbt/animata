@@ -147,30 +147,30 @@ pub fn priority_flood_fill(dim: usize, height: &[i64]) -> Vec<i64> {
 /// with the smallest `(elevation, linear_index)` key strictly less than the cell's own key.
 /// Acyclic BY CONSTRUCTION (see module doc). `None` = off-map sink (critic F7).
 pub fn d8_directions(dim: usize, filled: &[i64]) -> Vec<Option<usize>> {
+    use rayon::prelude::*;
+
     assert_eq!(filled.len(), dim * dim, "filled slice must have dim*dim elements");
     let n = dim * dim;
-    let mut downstream = vec![None; n];
-
-    for z in 0..dim {
-        for x in 0..dim {
-            let idx = linear_index(x, z, dim);
-            let self_key = (filled[idx], idx);
-            let mut best: Option<(i64, usize)> = None;
-            for &(dx, dz) in &D8_OFFSETS {
-                let nx = x as i64 + dx;
-                let nz = z as i64 + dz;
-                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
-                    continue;
-                }
-                let nidx = linear_index(nx as usize, nz as usize, dim);
-                let n_key = (filled[nidx], nidx);
-                if n_key < self_key && best.is_none_or(|b| n_key < b) {
-                    best = Some(n_key);
-                }
+    // M1 (W-17): par_iter per-cell argmin — pure map, no state sharing.
+    let downstream: Vec<Option<usize>> = (0..n).into_par_iter().map(|idx| {
+        let z = idx / dim;
+        let x = idx % dim;
+        let self_key = (filled[idx], idx);
+        let mut best: Option<(i64, usize)> = None;
+        for &(dx, dz) in &D8_OFFSETS {
+            let nx = x as i64 + dx;
+            let nz = z as i64 + dz;
+            if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                continue;
             }
-            downstream[idx] = best.map(|(_, i)| i);
+            let nidx = linear_index(nx as usize, nz as usize, dim);
+            let n_key = (filled[nidx], nidx);
+            if n_key < self_key && best.is_none_or(|b| n_key < b) {
+                best = Some(n_key);
+            }
         }
-    }
+        best.map(|(_, i)| i)
+    }).collect();
 
     downstream
 }

@@ -276,17 +276,19 @@ pub fn incision_step(
     area: &[i64],
     resistance: &[i64],
 ) -> Vec<i64> {
+    use rayon::prelude::*;
+
     let n = height.len();
-    let mut delta = vec![0i64; n];
-    for v in 0..n {
-        let Some(d) = downstream[v] else { continue };
+    // M1 (W-17): par_iter per-cell incision delta into preallocated slice
+    let delta: Vec<i64> = (0..n).into_par_iter().map(|v| {
+        let Some(d) = downstream[v] else { return 0i64 };
         let s = (height[v] - height[d]).max(0);
         let a_isqrt = isqrt(area[v]);
         let divisor = RESIST_DIVISOR[resistance[v] as usize];
         let raw = K_INCISE_NUM * a_isqrt * s;
         let dz = (raw / (K_INCISE_DEN * divisor)).clamp(0, height[v]);
-        delta[v] = dz;
-    }
+        dz
+    }).collect();
     delta
 }
 
@@ -295,27 +297,30 @@ pub fn incision_step(
 /// cell PULL its neighbors' intentions that target it — no cell ever writes into another's slot.
 /// Returns the NEW height buffer (Jacobi: reads only `height`/`downstream`, the OLD frame).
 pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> Vec<i64> {
+    use rayon::prelude::*;
+
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
     debug_assert_eq!(downstream.len(), n);
 
-    // Pass 1: local outflow intention.
-    let mut send_out = vec![0i64; n];
-    for v in 0..n {
-        let Some(d) = downstream[v] else { continue };
+    // Pass 1: local outflow intention — M1 (W-17): par_iter per-cell
+    let send_out: Vec<i64> = (0..n).into_par_iter().map(|v| {
+        let Some(d) = downstream[v] else { return 0i64 };
         let slope = (height[v] - height[d]).max(0);
         if slope > REPOSE_THRESHOLD {
-            send_out[v] = (slope - REPOSE_THRESHOLD) * TALUS_FRAC_NUM / TALUS_FRAC_DEN;
+            (slope - REPOSE_THRESHOLD) * TALUS_FRAC_NUM / TALUS_FRAC_DEN
+        } else {
+            0
         }
-    }
+    }).collect();
 
-    // Pass 2: gather — each cell v reads its own send_out plus its neighbors' send_out where that
+    // Pass 2: gather — M1 (W-17): par_iter per-cell (Jacobi, disjoint writes)
+    // Each cell v reads its own send_out plus its neighbors' send_out where that
     // neighbor's D8 receiver IS v. Never writes into a neighbor's slot.
-    let mut new_height = height.to_vec();
-    for v in 0..n {
-        new_height[v] -= send_out[v];
+    let new_height: Vec<i64> = (0..n).into_par_iter().map(|v| {
         let z = v / dim;
         let x = v % dim;
+        let mut h = height[v] - send_out[v];
         for &(dx, dz) in &D8_OFFSETS {
             let nx = x as i64 + dx;
             let nz = z as i64 + dz;
@@ -324,10 +329,11 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
             }
             let u = linear_index(nx as usize, nz as usize, dim);
             if downstream[u] == Some(v) {
-                new_height[v] += send_out[u];
+                h += send_out[u];
             }
         }
-    }
+        h
+    }).collect();
     new_height
 }
 
