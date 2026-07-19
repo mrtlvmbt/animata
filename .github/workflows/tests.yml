@@ -196,8 +196,8 @@ jobs:
               cargo nextest run --workspace --release --locked --features perf -E 'test(work_counter)'
               ;;
             2)
-              # Shard 2: release invariants (world, sim-core, brain — small crates)
-              cargo nextest run -p world -p sim-core -p brain --release --locked -E 'not test(v2_golden)'
+              # Shard 2: release invariants (world, sim-core, brain, fields, telemetry — small crates)
+              cargo nextest run -p world -p sim-core -p brain -p fields -p telemetry --release --locked -E 'not test(v2_golden)'
               ;;
             3)
               # Shard 3: release invariants (cli — large crate; work_counter runs here in release,

@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Verify that v2-sim sharding covers all tests exactly once: no gaps, no overlaps, deterministic.
+# Shard partition:
+#   - Shard 1 (debug): all packages (world, sim-core, brain, cli, fields, telemetry)
+#   - Shard 2 (release): world, sim-core, brain, fields, telemetry
+#   - Shard 3 (release): cli
 # Run from the v2 directory during CI.
 set -uo pipefail
 
@@ -7,15 +11,13 @@ echo "→ Collecting test names from all shards..."
 
 # List all tests from the current v2-sim-x86 setup (the golden set we're sharding)
 # This is what SHOULD be covered by the shards.
-echo "  Baseline (all non-golden + all non-v2_golden except work_counter in perf)..."
+echo "  Baseline (all non-golden in both debug and release)..."
 BASELINE=$(
   {
-    # Debug: all non-golden
+    # Debug: all non-golden (all packages)
     cargo nextest list --workspace --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null || true
-    # Release: all non-golden (work_counter runs both here and in perf)
+    # Release: all non-golden (all packages)
     cargo nextest list --workspace --release --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null || true
-    # Perf: work_counter with perf feature (already in the release run, so we don't double-count)
-    # Omit this to avoid duplicates; work_counter is already covered by release
   } | grep "::" | sort -u
 )
 
@@ -28,9 +30,9 @@ SHARD1=$(
   } | grep "::" | sort -u
 )
 
-echo "  Shard 2 (release world/sim-core/brain)..."
+echo "  Shard 2 (release world/sim-core/brain/fields/telemetry)..."
 SHARD2=$(
-  cargo nextest list -p world -p sim-core -p brain --release --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null | grep "::" | sort -u || true
+  cargo nextest list -p world -p sim-core -p brain -p fields -p telemetry --release --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null | grep "::" | sort -u || true
 )
 
 echo "  Shard 3 (release cli, excluding work_counter perf)..."
