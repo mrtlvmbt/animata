@@ -170,3 +170,10 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
 - **A perf pass parallelizes a gen loop and the golden checksum moves** → Cause: RNG-consumption/topo-order/budget-order is load-bearing in five serial sections (Priority-Flood heap tie-break, Kahn FIFO accumulation, aeolian deposit_roll RNG iteration order, beach budget counter, and macro-loop iteration structures for erosion/glacial/coastal) → What to do: grep `DO NOT PARALLELIZE (W-17)` before touching gen loops; those five categories stay serial by design. Any perf pass that parallelizes one of those sections will produce different byte output due to changed ordering — the fix is to revert to serial or restructure around the order-critical section.
 
 - **`cargo build --release` shows 0 warnings after touching one file and rebuilding, but a cold build shows 18 warnings** → Cause: cargo incremental compilation re-emits warnings only for recompiled units; a `touch main.rs` + rebuild touches only that one unit, so warnings from unchanged code are not re-emitted, creating a false-clean verdict → What to do: verify warning-free claims with `cargo clean -p <crate> && cargo build --release`, never trust a cached/incremental build for warning counts; same gate applies to `cargo clippy --release`.
+- **`compile-check.sh` PASS, but a `src/bin/*` binary doesn't build** (probe bin on tg3-probe: pushed
+  HEAD had a format-string arg-count error; compile-check said PASS, 3 agent reports quoted it as build
+  proof) → `cargo test --no-run` builds lib+test targets but NOT plain binaries without tests; a broken
+  bin is invisible to the pre-push gate AND to reports quoting it. → What to do: any slice whose
+  deliverable is a bin (probe/harness/tool) must quote `cargo build --release -p <crate> --bin <name>`
+  (clean tail) as its build proof; PM intake of a bin-deliverable slice rebuilds the bin, and the RUN
+  output — not the code — is the deliverable (an unexecuted probe is an unfinished probe).
