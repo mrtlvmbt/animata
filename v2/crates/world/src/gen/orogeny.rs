@@ -212,11 +212,11 @@ pub fn generate_plate_uplift_field(
                 }
                 (true, false) => {
                     // Subduction: continental up, oceanic subsides (use subduction override).
-                    (OROGEN_CONT_OCEAN_NUM, OROGEN_CONT_OCEAN_DEN, OROGEN_OCEAN_SUBSID_NUM, OROGEN_OCEAN_SUBSID_DEN)
+                    (OROGEN_CONT_OCEAN_NUM, OROGEN_CONT_OCEAN_DEN, 0, 1)
                 }
                 (false, true) => {
-                    // Subduction (flipped): oceanic up (less), continental down.
-                    (OROGEN_OCEAN_OCEAN_NUM, OROGEN_OCEAN_OCEAN_DEN, 0, 1)
+                    // Subduction (oceanic side): oceanic plate subsides under the continental override → fore-arc trench.
+                    (OROGEN_OCEAN_OCEAN_NUM, OROGEN_OCEAN_OCEAN_DEN, OROGEN_OCEAN_SUBSID_NUM, OROGEN_OCEAN_SUBSID_DEN)
                 }
                 (false, false) => {
                     // Oceanic rifts: sparse vents, low amplitude.
@@ -236,7 +236,7 @@ pub fn generate_plate_uplift_field(
             let scaled_amp = (amp_num * hmax * strength_frac) / (amp_den * 100);
             let up = (scaled_amp * ramp_weight) / BELT_HALF_WIDTH;
 
-            // For subduction (cont-ocean), apply the subsidence ramp to the oceanic plate IF neighbor is oceanic.
+            // For subduction (cont-ocean), apply the subsidence ramp to the oceanic plate when its neighbor is CONTINENTAL.
             if !this_cont && neighbor_cont {
                 // This is oceanic, neighbor is continental.
                 let alt_scaled_amp = (alt_amp_num * hmax * strength_frac) / (alt_amp_den * 100);
