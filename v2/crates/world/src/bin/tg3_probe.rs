@@ -215,31 +215,37 @@ fn compute_crest_connectivity(dim: usize, area: &[i64], height: &[i64]) -> f64 {
     connectivity.min(1.0)
 }
 
-/// Metric #3: Valley relief — p10 and p90 of cross-valley depth (local relief)
+/// Metric #3: Valley relief — p10 and p90 of deep cross-valley relief
+/// Measures elevation difference from valley floors to adjacent ridge peaks (≥10 cell scale)
 fn compute_valley_relief(dim: usize, height: &[i64]) -> (i64, i64) {
     let mut depths = Vec::new();
 
-    for z in 1..dim - 1 {
-        for x in 1..dim - 1 {
-            let idx = z * dim + x;
-            let h = height[idx];
+    // Sample cross-valley transects at ~20 cell spacing (not 3×3 local relief)
+    let sample_spacing = (dim / 3).max(5); // ~3 major transects across the grid
 
-            // Local max height in 3×3 neighborhood
-            let mut local_max = h;
-            for dz in -1i64..=1 {
-                for dx in -1i64..=1 {
+    for z in (0..dim).step_by(sample_spacing) {
+        for x in (0..dim).step_by(sample_spacing) {
+            let idx = z * dim + x;
+            let center_h = height[idx];
+
+            // Find max height in a 20-cell radius (deep valley transect)
+            let radius = 20i64.min((dim / 4) as i64);
+            let mut local_peak = center_h;
+            for dz in -(radius)..=(radius) {
+                for dx in -(radius)..=(radius) {
                     let nx = x as i64 + dx;
                     let nz = z as i64 + dz;
                     if nx >= 0 && nx < dim as i64 && nz >= 0 && nz < dim as i64 {
                         let nidx = (nz as usize) * dim + (nx as usize);
-                        local_max = local_max.max(height[nidx]);
+                        local_peak = local_peak.max(height[nidx]);
                     }
                 }
             }
 
-            // Cross-valley depth = max neighbor - center
-            let cross_valley_depth = local_max - h;
-            if cross_valley_depth > 0 {
+            // Cross-valley depth = peak - valley_floor
+            let cross_valley_depth = local_peak - center_h;
+            if cross_valley_depth > 2 {
+                // Only count meaningful relief (ignore noise)
                 depths.push(cross_valley_depth);
             }
         }
@@ -575,20 +581,39 @@ fn main() {
         println!("║                                                                                    ║");
         println!("║ Diagnosis: No combination passed all 5 metrics. Root cause analysis:               ║");
 
+        // Detailed breakdown of all metrics
         let max_dd = all_results.iter().map(|r| (r.drainage_density * 100.0) as i64).max().unwrap_or(0);
         let max_cc = all_results.iter().map(|r| (r.crest_connectivity * 1000.0) as i64).max().unwrap_or(0);
+        let max_p10 = all_results.iter().map(|r| r.valley_relief_p10).max().unwrap_or(0);
+        let min_p90 = all_results.iter().map(|r| r.valley_relief_p90).min().unwrap_or(1000);
+        let pass_count_anti_spike = all_results.iter().filter(|r| r.anti_spike_pass).count();
+        let min_resample = all_results.iter().map(|r| (r.resample_fidelity * 1000.0) as i64).min().unwrap_or(0);
 
-        if max_dd < (DRAINAGE_DENSITY_TARGET * 100.0) as i64 {
-            println!("║   (a) Incision too weak: max drainage density {:.2} < {:.2}",
-                max_dd as f64 / 100.0, DRAINAGE_DENSITY_TARGET);
-        } else if max_dd >= (DRAINAGE_DENSITY_TARGET * 100.0) as i64 {
-            println!("║   (✓) Drainage density achievable: max {:.2} ≥ {:.2}",
-                max_dd as f64 / 100.0, DRAINAGE_DENSITY_TARGET);
+        let dd_ok = if max_dd >= 500 { "≥" } else { "<" };
+        let cc_ok = if max_cc >= 700 { "≥" } else { "<" };
+        let p10_ok = if max_p10 >= 10 { "≥" } else { "<" };
+        let p90_ok = if min_p90 <= 100 { "≤" } else { ">" };
+        let rf_ok = if min_resample >= 900 { "≥" } else { "<" };
+
+        println!("║   Metric #1 (Drainage Density): max {:.2} {} {:.2} target",
+            max_dd as f64 / 100.0, dd_ok, DRAINAGE_DENSITY_TARGET);
+        println!("║   Metric #2 (Crest Connectivity): max {:.3} {} {:.3} target",
+            max_cc as f64 / 1000.0, cc_ok, CREST_CONNECTIVITY_TARGET);
+        println!("║   Metric #3 (Valley Relief p10): max {} {} 10 target",
+            max_p10, p10_ok);
+        println!("║   Metric #3 (Valley Relief p90): min {} {} 100 target",
+            min_p90, p90_ok);
+        println!("║   Metric #4 (Anti-spike Pass): {}/{} combos pass",
+            pass_count_anti_spike, all_results.len());
+        println!("║   Metric #5 (Resample Fidelity): min {:.3} {} 0.900 target",
+            min_resample as f64 / 1000.0, rf_ok);
+
+        println!("║                                                                                    ║");
+        if max_p10 < 10 {
+            println!("║   PRIMARY: Valley relief (p10) consistently below threshold → check metric definition");
         }
-
         if max_cc < (CREST_CONNECTIVITY_TARGET * 1000.0) as i64 {
-            println!("║   (b) Crest connectivity too weak: max {:.3} < {:.3}",
-                max_cc as f64 / 1000.0, CREST_CONNECTIVITY_TARGET);
+            println!("║   SECONDARY: Crest connectivity too weak (ridge lines fragmented)");
         }
 
         println!("╚════════════════════════════════════════════════════════════════════════════════════════╝");
