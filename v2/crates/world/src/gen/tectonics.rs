@@ -85,12 +85,12 @@ const FAULT_WARP_SALT: u64 = 0x5741_5250_4641_554C; // "WARPFAUL" (ASCII, folded
 /// vs. down-dropped by the scarp step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Fault {
-    px: i64,
-    pz: i64,
-    dx: i64,
-    dz: i64,
-    dlen_sq: i64,
-    polarity: i64,
+    pub(crate) px: i64,
+    pub(crate) pz: i64,
+    pub(crate) dx: i64,
+    pub(crate) dz: i64,
+    pub(crate) dlen_sq: i64,
+    pub(crate) polarity: i64,
 }
 
 /// Derive fault `index` (`0..N_FAULTS`) as a pure function of `(seed, dim)` via `seed_fold` —
