@@ -68,6 +68,7 @@ impl LoadState {
     }
 
     /// Check if build is complete.
+    #[allow(dead_code)]
     pub fn is_complete(&self) -> bool {
         self.is_done.load(Ordering::Acquire)
     }

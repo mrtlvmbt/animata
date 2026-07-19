@@ -97,8 +97,10 @@ pub struct BuiltWorld {
 #[derive(Debug, Clone)]
 pub enum BuildError {
     /// Invalid dimension (must be > 0).
+    #[allow(dead_code)]
     InvalidDim(i64),
     /// World generation failed (e.g., file load error).
+    #[allow(dead_code)]
     WorldGenFailed(String),
     /// Mesh building failed (e.g., vertex overflow).
     MeshBuildFailed(String),

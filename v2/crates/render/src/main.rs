@@ -57,7 +57,6 @@ use camera::IsoCam;
 use macroquad::prelude::*;
 use sim_core::WorldView;
 use std::sync::mpsc;
-use std::sync::Arc;
 use std::time::Instant;
 use world_spec::{landform_flags, WorldSpec, WorldSource, Stage};
 use loader_state::{LoadState, AppPhase};
@@ -834,7 +833,7 @@ async fn main() {
             }
         };
 
-        let mut gl = unsafe { get_internal_gl() };
+        let gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
 
         let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
@@ -1010,7 +1009,7 @@ async fn main() {
                                 std::process::exit(2);
                             }
                         };
-                        let mut gl = unsafe { get_internal_gl() };
+                        let gl = unsafe { get_internal_gl() };
                         let ctx = gl.quad_context;
                         let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
                         gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
@@ -1113,7 +1112,7 @@ async fn main() {
                                     std::process::exit(2);
                                 }
                             };
-                            let mut gl = unsafe { get_internal_gl() };
+                            let gl = unsafe { get_internal_gl() };
                             let ctx = gl.quad_context;
                             let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
                             gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
@@ -1495,7 +1494,7 @@ async fn main() {
                             }
                         };
 
-                        let mut gl = unsafe { get_internal_gl() };
+                        let gl = unsafe { get_internal_gl() };
                         let ctx = gl.quad_context;
                         let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
                         gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);
@@ -1768,7 +1767,7 @@ async fn main() {
                                     std::process::exit(2);
                                 }
                             };
-                            let mut gl = unsafe { get_internal_gl() };
+                            let gl = unsafe { get_internal_gl() };
                             let ctx = gl.quad_context;
                             let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
                             gpu_hex_chunks = gpu_terrain::upload_chunks(ctx, &hex_terrain_chunks);

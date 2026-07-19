@@ -22,6 +22,7 @@ pub const PANEL_STROKE: Color32 = straight(255, 255, 255, 26); // 0.10 edge
 pub const HAIRLINE: Color32 = straight(255, 255, 255, 26); // dividers
 
 pub const TEXT: Color32 = Color32::from_rgb(233, 236, 230); // primary
+#[allow(dead_code)]
 pub const TEXT_DIM: Color32 = straight(233, 236, 230, 158); // secondary (.62)
 pub const TEXT_LABEL: Color32 = straight(233, 236, 230, 140); // flyout kv labels (.55)
 pub const TEXT_FAINT: Color32 = straight(233, 236, 230, 115); // caps labels (.45)
@@ -29,6 +30,7 @@ pub const TEXT_FAINT: Color32 = straight(233, 236, 230, 115); // caps labels (.4
 pub const ACCENT: Color32 = Color32::from_rgb(242, 166, 75); // amber — active states
 pub const ACCENT_TEXT: Color32 = Color32::from_rgb(244, 184, 106); // amber text on dark
 pub const ACCENT_FILL: Color32 = straight(242, 166, 75, 41); // 0.16 backing
+#[allow(dead_code)]
 pub const ACCENT_LINE: Color32 = straight(242, 166, 75, 128); // 0.50 frame
 
 pub const GOOD_GREEN: Color32 = Color32::from_rgb(143, 209, 111); // population sparkline
@@ -75,6 +77,7 @@ pub enum FrameKind {
     Rail,      // control rail: r14, pad 7
     Transport, // bottom-left transport: r14, pad 9×14, stronger glass .74
     Flyout,    // detail flyouts: r14, pad 16×18, stronger glass .74
+    #[allow(dead_code)]
     Inspector, // creature inspector (left, under vitals): r14, pad 17×15, stronger glass
 }
 
@@ -132,6 +135,7 @@ pub fn themed_frame(kind: FrameKind) -> Frame {
 
 /// Global style: transparent widget backgrounds, amber selection, no default widget frames — so our
 /// hand-styled panels/areas read as "glass over the world".
+#[allow(dead_code)]
 pub fn install_style(ctx: &egui::Context) {
     let mut style = (*ctx.style()).clone();
     let v = &mut style.visuals;

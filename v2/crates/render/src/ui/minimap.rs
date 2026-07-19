@@ -138,6 +138,7 @@ pub fn build_minimap_image(
 
 /// Project a world point to minimap UV coordinates [0, 1].
 /// world_pos is (x, z) in world space; returns (u, v) in [0, 1].
+#[allow(dead_code)]
 pub fn world_to_minimap_uv(world_pos: glam::Vec2, dim: i64) -> glam::Vec2 {
     glam::vec2(
         (world_pos.x / dim as f32).clamp(0.0, 1.0),
