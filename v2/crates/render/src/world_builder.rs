@@ -65,6 +65,14 @@ where
                 flags.erosion_strength,
                 flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
+                false, // enable_plate_sim (Slice-0: inert, default false)
+                15, // plate_count
+                100, // plate_strength
+                60, // ela_threshold_percent
+                -1, // sea_level (sentinel: -1 = unset)
+                100, // volcanic_strength
+                100, // aeolian_strength
+                100, // coastal_strength
             ))
         }
         WorldSource::Dump(_) => {
@@ -93,6 +101,14 @@ where
                 flags.erosion_strength,
                 flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
+                false, // enable_plate_sim (Slice-0: inert, default false)
+                15, // plate_count
+                100, // plate_strength
+                60, // ela_threshold_percent
+                -1, // sea_level (sentinel: -1 = unset)
+                100, // volcanic_strength
+                100, // aeolian_strength
+                100, // coastal_strength
             ))
         }
     };
