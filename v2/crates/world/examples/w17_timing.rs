@@ -67,6 +67,14 @@ fn run(dim: i64, config: &str, all_on: bool) {
         Some(Box::new(move |stage: u8| {
             events_clone.borrow_mut().push((stage, Instant::now()));
         })),
+        false, // enable_plate_sim (Slice-0: inert, default false)
+        15, // plate_count
+        100, // plate_strength
+        60, // ela_threshold_percent
+        -1, // sea_level (sentinel: -1 = unset)
+        100, // volcanic_strength
+        100, // aeolian_strength
+        100, // coastal_strength
     );
 
     let total = start.elapsed();

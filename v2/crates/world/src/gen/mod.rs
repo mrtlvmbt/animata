@@ -133,3 +133,53 @@ impl LandformFlags {
         }
     }
 }
+
+/// Slice-0 (terragen-v3): Terrain process parameters for physics-driven relief generation.
+/// Aggregates plate simulation, sea-level datum, and per-process strength modifiers.
+/// All fields are `i64` or `bool` — the struct is `Copy` (required for threading through the gen pipeline).
+/// Defaults reproduce current behavior exactly (byte-identical goldens).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TerrainProcessParams {
+    /// Plate tectonics simulation enable flag (default `false`; plate sim not yet implemented in Slice-0).
+    pub enable_plate_sim: bool,
+    /// Number of plates for simulation (default `15`; inert this slice).
+    pub plate_count: i64,
+    /// Plate orogeny strength, percent (default `100`; inert this slice).
+    pub plate_strength: i64,
+    /// ELA (Equilibrium Line Altitude) threshold, percent of hmax (default `60`; inert this slice).
+    pub ela_threshold_percent: i64,
+    /// Sea level datum (default `-1` = unset / derive from context; **sentinel value** — height 0 is
+    /// valid, so `-1` marks "no explicit sea level"). When `< 0`, sea level is derived as today;
+    /// when `>= 0`, the given height becomes the world's water datum (e.g. `sea_level=100` makes all
+    /// cells below 100 submerged). Inert this slice (coastal stage already uses internal logic; this
+    /// field is plumbing for future integration).
+    pub sea_level: i64,
+    /// Volcanic edifice construction strength, percent (default `100`; inert this slice).
+    pub volcanic_strength: i64,
+    /// Aeolian (wind-driven) dune formation strength, percent (default `100`; inert this slice).
+    pub aeolian_strength: i64,
+    /// Coastal (wave-cut platform + cliff) carving strength, percent (default `100`; inert this slice).
+    pub coastal_strength: i64,
+}
+
+impl Default for TerrainProcessParams {
+    fn default() -> Self {
+        TerrainProcessParams {
+            enable_plate_sim: false,
+            plate_count: 15,
+            plate_strength: 100,
+            ela_threshold_percent: 60,
+            sea_level: -1,
+            volcanic_strength: 100,
+            aeolian_strength: 100,
+            coastal_strength: 100,
+        }
+    }
+}
+
+/// Marker: base-fBm is SIM-LANE-ONLY per terragen-v3 decision #2.
+/// **Sunset condition:** Goldens re-pinned on physics world OR sim map contract renegotiated.
+/// **Sunset action:** Removed in the fBm-removal slice (Slice-4): replace every `if SIM_ONLY_BASE_FBM`
+/// guard with unconditional logic (unwrap the negation), then delete the const. No behavior change
+/// this slice; the marker is introduced for future slicing.
+pub const SIM_ONLY_BASE_FBM: bool = true;
