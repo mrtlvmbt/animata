@@ -157,6 +157,36 @@ pub const SPIKE_MARGIN_FINAL: i64 = 12;
 /// landform relief (till p10 retention 37%, user-accepted; see w9_sweep table in PR #434).
 pub const N_ITERS_FINAL: usize = 4;
 
+/// Slice-1c: Channel threshold for flow-aware anti-spike pass. A cell with flow area >= this value
+/// is considered a flow-organized channel and protected from clamping. Tuned to dim (dim>=256 uses
+/// dim*dim/13000, else 8) so the mask adapts to grid size.
+pub fn channel_threshold(dim: usize) -> i64 {
+    if dim >= 256 {
+        ((dim as i64) * (dim as i64) / 13000).max(8)
+    } else {
+        8
+    }
+}
+
+/// Compute median of a sorted slice using the standard rounding rule:
+/// - Odd length: middle element.
+/// - Even length: (lower_mid + upper_mid) / 2 (truncate-toward-zero, matching caps.rs).
+/// Assumes the input is already sorted. Used by flow-aware spike suppression for cross-arch determinism.
+fn median_from_sorted(sorted: &[i64]) -> i64 {
+    let len = sorted.len();
+    if len == 0 {
+        return 0;
+    }
+    let mid = len / 2;
+    if len % 2 == 1 {
+        sorted[mid]
+    } else if mid > 0 {
+        (sorted[mid - 1] + sorted[mid]) / 2
+    } else {
+        sorted[0]
+    }
+}
+
 /// W-17 PAR_MIN_DIM: dimension threshold below which parallel overhead exceeds benefit.
 /// dim=64 shows ~25% regression with par_iter; gate at 128 (matches practical break-even).
 /// Applied uniformly across all parallelized functions in erosion (incision_step, talus_step,
@@ -756,6 +786,134 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
 
     // Unscale: divide by 64 (floor division)
     hs.iter().map(|&hs_val| hs_val / 64).collect()
+}
+
+/// Slice-1c: Flow-aware final anti-spike pass. Protects flow-organized channels and crests
+/// while clamping isolated spikes. Applied to plate-sim path only (enable_plate_sim=true).
+///
+/// Algorithm:
+/// 1. Compute D8 flow directions on the current height surface via priority_flood_fill + d8_directions.
+/// 2. Compute flow area via kahn_accumulate.
+/// 3. Identify channel cells: area >= channel_threshold (protected).
+/// 4. Identify crest cells: local max over D8 neighbors with >= (non-strict, protects plateaus).
+/// 5. For cells that are neither channel nor crest, apply the blanket spike-clamping rule:
+///    if (h - median(neighbors)) > bound, clamp to median + bound.
+///
+/// Uses the EXISTING median_d8_neighbors rounding rule (truncate-toward-zero on even count).
+pub fn flow_aware_spike_suppression(dim: usize, height: &[i64], spike_bound: i64) -> Vec<i64> {
+    use rayon::prelude::*;
+
+    let n = dim * dim;
+    debug_assert_eq!(height.len(), n);
+
+    // Step 1: Compute priority-flood fill on current height (fill = fill_local_minima)
+    let filled = priority_flood_fill(dim, height);
+
+    // Step 2: Compute D8 flow directions on filled surface
+    let downstream = d8_directions(dim, &filled);
+
+    // Step 3: Compute flow area via Kahn accumulation
+    let area = kahn_accumulate(dim, &downstream);
+
+    // Step 4: Identify channel and crest masks
+    let threshold = channel_threshold(dim);
+    let is_channel: Vec<bool> = area.iter().map(|&a| a >= threshold).collect();
+
+    // Crest mask: local max over D8 neighbors, non-strict >= (protects flat plateaus)
+    let is_crest: Vec<bool> = (0..n).map(|v| {
+        let z = v / dim;
+        let x = v % dim;
+        let h_v = height[v];
+
+        // Check if this cell is >= all its D8 neighbors (non-strict)
+        for &(dx, dz) in &D8_OFFSETS {
+            let nx = x as i64 + dx;
+            let nz = z as i64 + dz;
+            if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                let nidx = linear_index(nx as usize, nz as usize, dim);
+                if height[nidx] > h_v {
+                    return false; // Has a higher neighbor, not a crest
+                }
+            }
+        }
+        true // All neighbors are <= this cell (local max, non-strict)
+    }).collect();
+
+    // Step 5: Selective clamping — only clamp cells that are neither channel nor crest
+    let result: Vec<i64> = if dim >= PAR_MIN_DIM {
+        // Parallel path
+        (0..n).into_par_iter().map(|v| {
+            // If this is a channel or crest, protect it (unchanged)
+            if is_channel[v] || is_crest[v] {
+                return height[v];
+            }
+
+            // Isolated bump: apply clamping rule
+            let z = v / dim;
+            let x = v % dim;
+            let h_v = height[v];
+
+            // Compute median of D8 neighbors
+            let mut neighbor_heights = Vec::new();
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                    let nidx = linear_index(nx as usize, nz as usize, dim);
+                    neighbor_heights.push(height[nidx]);
+                }
+            }
+
+            if neighbor_heights.is_empty() {
+                return h_v;
+            }
+
+            neighbor_heights.sort();
+            let median = median_from_sorted(&neighbor_heights);
+            let excess = h_v - median;
+
+            if excess > spike_bound {
+                median + spike_bound
+            } else {
+                h_v
+            }
+        }).collect()
+    } else {
+        // Serial fallback
+        let mut result = height.to_vec();
+        for v in 0..n {
+            // If this is a channel or crest, protect it
+            if is_channel[v] || is_crest[v] {
+                continue;
+            }
+
+            let z = v / dim;
+            let x = v % dim;
+            let h_v = height[v];
+
+            let mut neighbor_heights = Vec::new();
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                    let nidx = linear_index(nx as usize, nz as usize, dim);
+                    neighbor_heights.push(height[nidx]);
+                }
+            }
+
+            if !neighbor_heights.is_empty() {
+                neighbor_heights.sort();
+                let median = median_from_sorted(&neighbor_heights);
+                let excess = h_v - median;
+                if excess > spike_bound {
+                    result[v] = median + spike_bound;
+                }
+            }
+        }
+        result
+    };
+
+    result
 }
 
 /// Route a per-cell `source` quantity (e.g. this iteration's incised sediment) through the CURRENT
