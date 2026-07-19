@@ -219,6 +219,7 @@ fn transport_iteration(
             delta[idx] -= 1; // deterministic pickup (module doc: no RNG roll needed here)
 
             let mut landed = false;
+            // DO NOT PARALLELIZE (W-17): deposit_roll RNG order is load-bearing per source/iteration/hop
             for hop in 1..=K_MAX_HOPS {
                 let land_x = x as i64 + hop * HOP_LENGTH;
                 if land_x as usize >= dim {
@@ -333,6 +334,7 @@ pub fn run_aeolian(seed: u64, dim: usize, rock_height: &[i64], initial_sand_dept
     let mut sand_depth = initial_sand_depth;
     let mut exported_at_edge = 0i64;
 
+    // DO NOT PARALLELIZE (W-17): aeolian iteration order is load-bearing (state accumulation)
     for iteration in 0..N_AEOLIAN_ITERATIONS {
         let (delta, exp) = transport_iteration(dim, seed, iteration, rock_height, &sand_depth);
         for i in 0..n {

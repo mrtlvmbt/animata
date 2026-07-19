@@ -640,6 +640,7 @@ fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, res
     // W-19: erosion_strength scales the macro loop iteration count (default 100 = MACRO_ITERATIONS)
     if enable_erosion {
         let n_iters = ((MACRO_ITERATIONS as i64 * erosion_strength) / 100) as usize;
+        // DO NOT PARALLELIZE (W-17): macro-loop iteration count is load-bearing (sequential state updates)
         for _ in 0..n_iters {
         // 1. Recompute drainage on the CURRENT eroding surface (reused verbatim from gen::drainage).
         let filled = priority_flood_fill(dim, &height);

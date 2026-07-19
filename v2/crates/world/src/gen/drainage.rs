@@ -94,6 +94,7 @@ const fn linear_index(x: usize, z: usize, dim: usize) -> usize {
 /// Priority-Flood pit-fill (Barnes et al. 2014): eliminate every interior closed depression in
 /// `height` (row-major `z*dim+x`, `dim × dim`), returning a depression-free `filled` elevation.
 /// Generic over ANY heightmap input (critic F5/F6) — W-4 re-runs this on its own eroding terrain.
+// DO NOT PARALLELIZE (W-17): min-heap with tie-break counter is load-bearing for determinism
 pub fn priority_flood_fill(dim: usize, height: &[i64]) -> Vec<i64> {
     assert_eq!(height.len(), dim * dim, "height slice must have dim*dim elements");
     let n = dim * dim;
@@ -179,6 +180,7 @@ pub fn d8_directions(dim: usize, filled: &[i64]) -> Vec<Option<usize>> {
 /// `assert!`, checked in ALL builds — not `debug_assert!`) if the traversal does not complete —
 /// structurally impossible given `d8_directions`'s strictly-decreasing-key invariant, but this is
 /// the in-algorithm acyclicity check the phase plan requires.
+// DO NOT PARALLELIZE (W-17): FIFO topological ordering is load-bearing for accum order
 pub fn kahn_accumulate(dim: usize, downstream: &[Option<usize>]) -> Vec<i64> {
     assert_eq!(downstream.len(), dim * dim, "downstream slice must have dim*dim elements");
     let n = dim * dim;

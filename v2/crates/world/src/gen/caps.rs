@@ -320,6 +320,7 @@ fn beach_deposit(dim: usize, height: &[i64], sea_level: i64, submerged: &[bool])
             let h_post_deposit = h_relaxed.max(sea_level + 1);
 
             // Budget check: only apply if we have budget left.
+            // DO NOT PARALLELIZE (W-17): beach budget running counter is load-bearing
             let actual_delta = h - h_post_deposit;
             if total_deposit + actual_delta <= budget_max {
                 post_deposit_height[idx] = h_post_deposit;

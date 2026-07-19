@@ -232,6 +232,7 @@ fn cliff_iteration(dim: usize, height: &[i64], sea_level: i64, resistance: &[i64
 /// height (every cell `<=` its input value — single-signed, monotone, module doc).
 fn cliff_retreat_pass(dim: usize, mut height: Vec<i64>, sea_level: i64, resistance: &[i64]) -> Vec<i64> {
     let n = dim * dim;
+    // DO NOT PARALLELIZE (W-17): coastal iteration order is load-bearing (state accumulation)
     for _ in 0..N_CLIFF_ITERATIONS {
         let delta = cliff_iteration(dim, &height, sea_level, resistance);
         for v in 0..n {
