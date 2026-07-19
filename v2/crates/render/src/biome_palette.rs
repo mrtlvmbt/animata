@@ -33,6 +33,7 @@ const AMBIENT: f32 = 0.55;
 const DIFFUSE: f32 = 0.45;
 
 /// `id` → top-face color. `_ => UNKNOWN` is the "no panic" fallback the acceptance criterion asks for.
+#[allow(dead_code)]
 pub fn biome_color(id: u8) -> Color {
     match id {
         0 => Color::from_rgba(198, 201, 189, 255),  // Tundra — pale lichen (NoiseWorld: lowland)
@@ -154,6 +155,7 @@ pub fn surface_color_v2(
 /// ramp's low green third — one uniform hue. Stretching against `[p2, p98]` spreads the full
 /// green→brown→snow band over the relief that actually exists; the sparse >p98 peaks clamp to the
 /// snow-white top rather than wasting the upper 40% of the ramp on cells that never occur.
+#[allow(dead_code)]
 pub fn height_color(height: i64, h_lo: i64, h_hi: i64) -> Color {
     let span = (h_hi - h_lo).max(1) as f32;
     let t = ((height - h_lo) as f32 / span).clamp(0.0, 1.0);

@@ -245,7 +245,7 @@ impl IsoCam {
             let cam_vp = view_proj_matrix(self.focus, self.yaw, self.ortho_span, aspect);
             let before = ground_under_cursor(cam_vp, input.mouse_pos, input.screen_dims);
 
-            let old_span = self.ortho_span;
+            let _old_span = self.ortho_span;
             let zoom_factor = (1.0 - tuning.zoom_rate * input.wheel_y).max(0.1);
             self.ortho_span = (self.ortho_span * zoom_factor).clamp(ORTHO_SPAN_MIN, ORTHO_SPAN_MAX);
 

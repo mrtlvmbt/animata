@@ -58,7 +58,6 @@ use macroquad::prelude::*;
 use sim_core::WorldView;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::time::Instant;
 use world_spec::{landform_flags, WorldSpec, WorldSource, Stage};
 use loader_state::{LoadState, AppPhase};
@@ -68,10 +67,12 @@ use terrain::TerrainChunk;
 // ── R-4 LOD tier thresholds (px_per_m-driven) ──────────────────────────────────────────────────────
 /// FAR tier: creatures are sub-pixel or nearly invisible (point/billboard). Triggers when px_per_m < 5.
 /// At default 768px tall, this happens when ortho_span > ~154 world units (very far zoom).
+#[allow(dead_code)]
 const PX_PER_M_FAR_THRESHOLD: f32 = 5.0;
 
 /// MID tier: creatures are cell-type-colored spheres (R-3 behavior). Active when 5 <= px_per_m < 20.
 /// At default viewport, this is ortho_span in [38, 154] — a standard play range.
+#[allow(dead_code)]
 const PX_PER_M_MID_THRESHOLD: f32 = 20.0;
 
 /// NEAR tier: creatures are minimal cell-type morphology (differentiated small shapes).
@@ -98,7 +99,105 @@ fn convert_raw_chunks(raw_chunks: Vec<RawChunk>) -> Vec<TerrainChunk> {
     raw_chunks.into_iter().map(raw_chunk_to_terrain_chunk).collect()
 }
 
+// ── R-15: Shared CLI validation constants (single source of truth) ───────────────────────────────────
+const VALID_FLAGS: &[&str] = &[
+    "--standalone", "--no-sim", "--v1-dump", "--seed", "--dim", "--screenshot",
+    "--screenshot-warmup", "--bench", "--cam", "--retained", "--no-retained",
+    "--water", "--bare", "--height-scale", "--slow-load", "--screenshot-loader",
+    "--regen-to", "--jump-to", "--screenshot-ui", "--yaw", "--ui-state",
+    "--landforms", "--transform",
+];
+
+const VALUE_REQUIRING_FLAGS: &[&str] = &[
+    "--v1-dump", "--seed", "--dim", "--screenshot", "--screenshot-warmup",
+    "--cam", "--height-scale", "--screenshot-loader", "--regen-to", "--jump-to",
+    "--screenshot-ui", "--yaw", "--ui-state", "--landforms", "--transform",
+];
+
+/// Check if a flag requires a value
+fn flag_requires_value(flag: &str) -> bool {
+    VALUE_REQUIRING_FLAGS.contains(&flag)
+}
+
+/// Validate a flag's value against its expected type. Returns error message if invalid, or None if OK.
+fn validate_flag_value(flag: &str, value: &str) -> Option<String> {
+    match flag {
+        "--seed" | "--regen-to" => {
+            if value.parse::<u64>().is_err() {
+                return Some(format!("render: {flag} expects a u64, got {value:?}"));
+            }
+        }
+        "--dim" => {
+            if value.parse::<i64>().is_err() {
+                return Some(format!("render: {flag} expects an integer, got {value:?}"));
+            }
+        }
+        "--screenshot-warmup" => {
+            if value.parse::<u32>().is_err() {
+                return Some(format!("render: {flag} expects a u32, got {value:?}"));
+            }
+        }
+        "--cam" => {
+            if !["iso-default", "iso-zoom-close", "iso-zoom-far"].contains(&value) {
+                return Some(format!("render: unknown camera preset: {value:?}"));
+            }
+        }
+        "--height-scale" | "--yaw" => {
+            if value.parse::<f32>().is_err() {
+                return Some(format!("render: {flag} expects f32, got {value:?}"));
+            }
+        }
+        "--jump-to" => {
+            let parts: Vec<&str> = value.split(',').collect();
+            if parts.len() != 2 {
+                return Some("render: --jump-to requires <x>,<z> format".to_string());
+            }
+            if parts[0].parse::<f32>().is_err() {
+                return Some(format!("render: --jump-to x must be f32, got {:?}", parts[0]));
+            }
+            if parts[1].parse::<f32>().is_err() {
+                return Some(format!("render: --jump-to z must be f32, got {:?}", parts[1]));
+            }
+        }
+        _ => {}  // Other flags' values are accepted as-is
+    }
+    None
+}
+
+/// R-15: Pre-window CLI validation — exits with code 2 if any argument is invalid, before the window is created.
+/// This ensures no visible window flashes for bad invocations.
+fn validate_cli_args() {
+    let mut args_iter = std::env::args().skip(1).peekable();
+
+    while let Some(arg) = args_iter.next() {
+        if arg.starts_with("--") {
+            if !VALID_FLAGS.contains(&arg.as_str()) {
+                eprintln!("render: unknown argument {arg:?}");
+                std::process::exit(2);
+            }
+
+            // Check for value-requiring flags
+            if flag_requires_value(&arg) {
+                if args_iter.peek().is_none() {
+                    eprintln!("render: {arg} requires a value");
+                    std::process::exit(2);
+                }
+                let val = args_iter.next().unwrap();
+
+                // Validate value type
+                if let Some(err_msg) = validate_flag_value(&arg, &val) {
+                    eprintln!("{err_msg}");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
+}
+
 fn window_conf() -> Conf {
+    // R-15: Validate CLI args BEFORE window creation (exit early if invalid)
+    validate_cli_args();
+
     // R-13: Pre-parse args to detect --bench mode for vsync configuration
     let is_bench = std::env::args().any(|arg| arg == "--bench");
 
@@ -171,7 +270,7 @@ struct CliArgs {
     bench: bool,
     /// R-13: camera preset (default: iso-default).
     cam_preset: CamPreset,
-    /// R-15a: `--retained`: use retained-buffer GPU rendering for terrain (default OFF).
+    /// R-15a: `--retained`/`--no-retained`: use/disable retained-buffer GPU rendering for terrain (default ON).
     retained: bool,
     /// W-14: `--water`: restore water submerged tint (debug opt-in; default is dry-bed sand).
     show_water: bool,
@@ -203,6 +302,22 @@ struct CliArgs {
 }
 
 fn parse_args() -> CliArgs {
+    // R-15: Validate all flags against the shared list to prevent drift
+    let mut args_iter = std::env::args().skip(1).peekable();
+    while let Some(arg) = args_iter.next() {
+        if arg.starts_with("--") && !VALID_FLAGS.contains(&arg.as_str()) {
+            eprintln!("render: unknown argument {arg:?}");
+            std::process::exit(2);
+        }
+        if flag_requires_value(&arg) && args_iter.peek().is_some() {
+            let val = args_iter.next().unwrap();
+            if let Some(err_msg) = validate_flag_value(&arg, &val) {
+                eprintln!("{err_msg}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let mut standalone = false;
     let mut seed = SEED;
     let mut dim_override = None;
@@ -211,7 +326,7 @@ fn parse_args() -> CliArgs {
     let mut screenshot_warmup = 30;
     let mut bench = false;
     let mut cam_preset = CamPreset::IsoDefault;
-    let mut retained = false;
+    let mut retained = true;  // R-15: default ON
     let mut show_water = false;
     let mut height_scale_override = None;
     let mut slow_load = false;
@@ -234,11 +349,23 @@ fn parse_args() -> CliArgs {
             }
             "--seed" => {
                 let v = args.next().expect("--seed requires a value");
-                seed = v.parse().unwrap_or_else(|_| panic!("--seed expects a u64, got {v:?}"));
+                seed = match v.parse::<u64>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        eprintln!("render: --seed expects a u64, got {v:?}");
+                        std::process::exit(2);
+                    }
+                };
             }
             "--dim" => {
                 let v = args.next().expect("--dim requires a value");
-                dim_override = Some(v.parse().unwrap_or_else(|_| panic!("--dim expects an integer, got {v:?}")));
+                dim_override = Some(match v.parse::<i64>() {
+                    Ok(d) => d,
+                    Err(_) => {
+                        eprintln!("render: --dim expects an integer, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--screenshot" => {
                 screenshot = Some(args.next().expect("--screenshot requires a path"));
@@ -246,7 +373,13 @@ fn parse_args() -> CliArgs {
             }
             "--screenshot-warmup" => {
                 let v = args.next().expect("--screenshot-warmup requires a value");
-                screenshot_warmup = v.parse().unwrap_or_else(|_| panic!("--screenshot-warmup expects a u32, got {v:?}"));
+                screenshot_warmup = match v.parse::<u32>() {
+                    Ok(w) => w,
+                    Err(_) => {
+                        eprintln!("render: --screenshot-warmup expects a u32, got {v:?}");
+                        std::process::exit(2);
+                    }
+                };
             }
             "--bench" => {
                 bench = true;
@@ -258,10 +391,14 @@ fn parse_args() -> CliArgs {
                     "iso-default" => CamPreset::IsoDefault,
                     "iso-zoom-close" => CamPreset::IsoZoomClose,
                     "iso-zoom-far" => CamPreset::IsoZoomFar,
-                    other => panic!("unknown camera preset: {other:?}"),
+                    other => {
+                        eprintln!("render: unknown camera preset: {other:?}");
+                        std::process::exit(2);
+                    }
                 };
             }
             "--retained" => retained = true,
+            "--no-retained" => retained = false,  // R-15: explicit escape hatch to immediate path
             "--water" => show_water = true,
             "--bare" => {
                 // W-14: --bare is now a no-op alias (kept for compatibility during transition)
@@ -269,7 +406,13 @@ fn parse_args() -> CliArgs {
             }
             "--height-scale" => {
                 let v = args.next().expect("--height-scale requires a value");
-                height_scale_override = Some(v.parse().unwrap_or_else(|_| panic!("--height-scale expects f32, got {v:?}")));
+                height_scale_override = Some(match v.parse::<f32>() {
+                    Ok(h) => h,
+                    Err(_) => {
+                        eprintln!("render: --height-scale expects f32, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--slow-load" => {
                 slow_load = true;
@@ -280,14 +423,32 @@ fn parse_args() -> CliArgs {
             }
             "--regen-to" => {
                 let v = args.next().expect("--regen-to requires a u64 seed value");
-                regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
+                regen_to = Some(match v.parse::<u64>() {
+                    Ok(r) => r,
+                    Err(_) => {
+                        eprintln!("render: --regen-to expects a u64, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
                 standalone = true; // reseed harness is standalone
             }
             "--jump-to" => {
                 let coords_str = args.next().expect("--jump-to requires <x>,<z>");
                 let parts: Vec<&str> = coords_str.split(',').collect();
-                let x = parts.get(0).unwrap_or(&"0").parse::<f32>().unwrap_or_else(|_| panic!("--jump-to x must be f32, got {:?}", parts.get(0)));
-                let z = parts.get(1).unwrap_or(&"0").parse::<f32>().unwrap_or_else(|_| panic!("--jump-to z must be f32, got {:?}", parts.get(1)));
+                let x = match parts[0].parse::<f32>() {
+                    Ok(x) => x,
+                    Err(_) => {
+                        eprintln!("render: --jump-to x must be f32, got {:?}", parts[0]);
+                        std::process::exit(2);
+                    }
+                };
+                let z = match parts[1].parse::<f32>() {
+                    Ok(z) => z,
+                    Err(_) => {
+                        eprintln!("render: --jump-to z must be f32, got {:?}", parts[1]);
+                        std::process::exit(2);
+                    }
+                };
                 jump_to = Some((x, z));
                 standalone = true; // jump harness is standalone
             }
@@ -297,7 +458,13 @@ fn parse_args() -> CliArgs {
             }
             "--yaw" => {
                 let v = args.next().expect("--yaw requires a value");
-                yaw_degrees = Some(v.parse().unwrap_or_else(|_| panic!("--yaw expects f32 degrees, got {v:?}")));
+                yaw_degrees = Some(match v.parse::<f32>() {
+                    Ok(y) => y,
+                    Err(_) => {
+                        eprintln!("render: --yaw expects f32 degrees, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--ui-state" => {
                 let v = args.next().expect("--ui-state requires a value");
@@ -492,7 +659,8 @@ fn merge_sources_and_transforms(sources: world_spec::LandformFlags, transforms: 
 }
 
 /// Load a shader source from file. Tries multiple paths to find assets/shaders/ relative to the repo root.
-fn load_shader(filename: &str) -> String {
+/// Returns an error if the shader cannot be found.
+fn load_shader(filename: &str) -> Result<String, String> {
     // Try v2 local paths first, then fallback to v1 paths (for compatibility)
     let candidate_paths = [
         format!("v2/crates/render/assets/shaders/{}", filename),  // From repo root
@@ -504,11 +672,15 @@ fn load_shader(filename: &str) -> String {
 
     for path in &candidate_paths {
         if let Ok(content) = std::fs::read_to_string(path) {
-            return content;
+            return Ok(content);
         }
     }
 
-    panic!("[gpu_terrain] FATAL: shader {} not found in any candidate path (tried: {:?})", filename, candidate_paths);
+    Err(format!(
+        "[gpu_terrain] shader {} not found in any candidate path. Tried: {:?}\n\
+         Make sure you are running from a directory where v2/crates/render/assets/shaders/ is accessible.",
+        filename, candidate_paths
+    ))
 }
 
 /// Helper to draw terrain using retained GPU buffers.
@@ -624,7 +796,7 @@ async fn main() {
 
     let (mut hex_terrain_chunks, mut cube_terrain_chunks, mut world_dim, mut world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
         // Harnesses: build_world inline (synchronous, no loader)
-        let mut on_stage = |_stage: Stage| true;  // No-op callback for harnesses
+        let on_stage = |_stage: Stage| true;  // No-op callback for harnesses
         let built = world_builder::build_world(&spec, on_stage, cli_args.height_scale_override).expect("build_world failed");
         let world_dim = built.dim;
         let world = built.world;
@@ -647,8 +819,20 @@ async fn main() {
     let (mut gpu_hex_chunks, mut gpu_cube_chunks, mut gpu_pipeline) = if cli_args.retained {
         use macroquad::prelude::get_internal_gl;
 
-        let chunk_vert = load_shader("chunk_v2.vert");
-        let chunk_frag = load_shader("chunk_v2.frag");
+        let chunk_vert = match load_shader("chunk_v2.vert") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("render: {}", e);
+                std::process::exit(2);
+            }
+        };
+        let chunk_frag = match load_shader("chunk_v2.frag") {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("render: {}", e);
+                std::process::exit(2);
+            }
+        };
 
         let mut gl = unsafe { get_internal_gl() };
         let ctx = gl.quad_context;
@@ -731,7 +915,7 @@ async fn main() {
         let load_clone = load_state.clone();
 
         let _ = std::thread::spawn(move || {
-            let mut on_stage = |stage: Stage| {
+            let on_stage = |stage: Stage| {
                 load_clone.set_stage(stage);
                 if slow_load_flag {
                     std::thread::sleep(std::time::Duration::from_millis(600));
@@ -762,7 +946,7 @@ async fn main() {
                 standalone: spec.standalone,
                 bare_mode: spec.bare_mode,
                 source: spec.source.clone(),
-                explicit_landform_flags: explicit_flags.clone(),
+                explicit_landform_flags: explicit_flags,
             };
             let load_state = LoadState::new(target_seed);
             harness_regen_load_state = Some(load_state.clone());
@@ -771,7 +955,7 @@ async fn main() {
             let height_scale = cli_args.height_scale_override;  // Capture for thread
             let _ = std::thread::spawn(move || {
                 let load_clone = load_state.clone();
-                let mut on_stage = |stage: Stage| {
+                let on_stage = |stage: Stage| {
                     load_clone.set_stage(stage);
                     // U-11: Wire progress permille based on stage (gen 0..800‰, meshing 800..1000‰)
                     let progress = stage.progress_permille();
@@ -812,8 +996,20 @@ async fn main() {
                     world = built.world;
                     if cli_args.retained {
                         use macroquad::prelude::get_internal_gl;
-                        let chunk_vert = load_shader("chunk_v2.vert");
-                        let chunk_frag = load_shader("chunk_v2.frag");
+                        let chunk_vert = match load_shader("chunk_v2.vert") {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("render: {}", e);
+                                std::process::exit(2);
+                            }
+                        };
+                        let chunk_frag = match load_shader("chunk_v2.frag") {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("render: {}", e);
+                                std::process::exit(2);
+                            }
+                        };
                         let mut gl = unsafe { get_internal_gl() };
                         let ctx = gl.quad_context;
                         let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
@@ -838,7 +1034,7 @@ async fn main() {
                 // Modal loader path: render the full-screen loader modal (v1 parity), NOT panels.
                 // CRITICAL: when modal is up, skip ui_root entirely (modal XOR panels, never both).
                 let snap = handle.as_ref().and_then(|h| h.latest());
-                let terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
+                let _terrain_chunks = if use_cube_terrain { &cube_terrain_chunks } else { &hex_terrain_chunks };
                 let mut ui_actions: Vec<ui::UiAction> = Vec::new();
 
                 // U-5: Fire --jump-to action in harness on frame 0 (before any rendering)
@@ -860,11 +1056,8 @@ async fn main() {
 
                 // Apply UI actions (includes --jump-to)
                 for action in ui_actions {
-                    match action {
-                        ui::UiAction::JumpCamera(world_pos) => {
-                            camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
-                        }
-                        _ => {}  // Ignore other actions in harness
+                    if let ui::UiAction::JumpCamera(world_pos) = action {
+                        camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
                     }
                 }
 
@@ -906,8 +1099,20 @@ async fn main() {
                         spec.seed = built.seed;
                         if cli_args.retained {
                             use macroquad::prelude::get_internal_gl;
-                            let chunk_vert = load_shader("chunk_v2.vert");
-                            let chunk_frag = load_shader("chunk_v2.frag");
+                            let chunk_vert = match load_shader("chunk_v2.vert") {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("render: {}", e);
+                                    std::process::exit(2);
+                                }
+                            };
+                            let chunk_frag = match load_shader("chunk_v2.frag") {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("render: {}", e);
+                                    std::process::exit(2);
+                                }
+                            };
                             let mut gl = unsafe { get_internal_gl() };
                             let ctx = gl.quad_context;
                             let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
@@ -1025,7 +1230,7 @@ async fn main() {
                 fps: 60,
                 chunks_drawn: terrain_chunks.len(),
                 verts: 0,
-                snap: snap.as_ref().map(|v| &**v),
+                snap: snap.as_deref(),
                 standalone_mode: cli_args.standalone,
                 terrain_chunks_total: terrain_chunks.len(),
                 actions: &mut ui_actions,
@@ -1053,11 +1258,8 @@ async fn main() {
 
             // Apply UI actions
             for action in ui_actions {
-                match action {
-                    ui::UiAction::JumpCamera(world_pos) => {
-                        camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
-                    }
-                    _ => {}  // Ignore other actions in harness
+                if let ui::UiAction::JumpCamera(world_pos) = action {
+                    camera.focus = glam::vec3(world_pos.x, camera.focus.y, world_pos.y);
                 }
             }
 
@@ -1278,8 +1480,20 @@ async fn main() {
                     // U-2/D5: GPU upload if --retained (GL-thread-only work)
                     if cli_args.retained {
                         use macroquad::prelude::get_internal_gl;
-                        let chunk_vert = load_shader("chunk_v2.vert");
-                        let chunk_frag = load_shader("chunk_v2.frag");
+                        let chunk_vert = match load_shader("chunk_v2.vert") {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("render: {}", e);
+                                std::process::exit(2);
+                            }
+                        };
+                        let chunk_frag = match load_shader("chunk_v2.frag") {
+                            Ok(s) => s,
+                            Err(e) => {
+                                eprintln!("render: {}", e);
+                                std::process::exit(2);
+                            }
+                        };
 
                         let mut gl = unsafe { get_internal_gl() };
                         let ctx = gl.quad_context;
@@ -1345,7 +1559,7 @@ async fn main() {
                             fps: get_fps(),
                             chunks_drawn: 0, // Will be updated after drawing
                             verts: 0,
-                            snap: snap.as_ref().map(|v| &**v),
+                            snap: snap.as_deref(),
                             standalone_mode: cli_args.standalone,
                             terrain_chunks_total: terrain_chunks.len(),
                             actions: &mut ui_actions,
@@ -1457,7 +1671,7 @@ async fn main() {
                                     standalone: spec.standalone,
                                     bare_mode: spec.bare_mode,
                                     source: spec.source.clone(),
-                                    explicit_landform_flags: spec.explicit_landform_flags.clone(),
+                                    explicit_landform_flags: spec.explicit_landform_flags,
                                 };
                                 let load_state = LoadState::new(target_seed);
                                 regen_load_state = Some(load_state.clone());
@@ -1466,7 +1680,7 @@ async fn main() {
                                 let height_scale = cli_args.height_scale_override;  // Capture for thread
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
-                                    let mut on_stage = |stage: Stage| {
+                                    let on_stage = |stage: Stage| {
                                         load_clone.set_stage(stage);
                                         // U-11: Wire progress permille based on stage (gen 0..800‰, meshing 800..1000‰)
                                         let progress = stage.progress_permille();
@@ -1501,7 +1715,7 @@ async fn main() {
                                 let height_scale = cli_args.height_scale_override;
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
-                                    let mut on_stage = |stage: Stage| {
+                                    let on_stage = |stage: Stage| {
                                         load_clone.set_stage(stage);
                                         // U-11: Wire progress permille based on stage (gen 0..800‰, meshing 800..1000‰)
                                         let progress = stage.progress_permille();
@@ -1540,8 +1754,20 @@ async fn main() {
                         // U-2/D5: GPU upload if --retained
                         if cli_args.retained {
                             use macroquad::prelude::get_internal_gl;
-                            let chunk_vert = load_shader("chunk_v2.vert");
-                            let chunk_frag = load_shader("chunk_v2.frag");
+                            let chunk_vert = match load_shader("chunk_v2.vert") {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("render: {}", e);
+                                    std::process::exit(2);
+                                }
+                            };
+                            let chunk_frag = match load_shader("chunk_v2.frag") {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    eprintln!("render: {}", e);
+                                    std::process::exit(2);
+                                }
+                            };
                             let mut gl = unsafe { get_internal_gl() };
                             let ctx = gl.quad_context;
                             let pipeline = gpu_terrain::chunk_pipeline(ctx, &chunk_vert, &chunk_frag);
@@ -1559,7 +1785,7 @@ async fn main() {
                 let cam3d = camera.to_camera3d();
                 set_camera(&cam3d);
 
-                let draw_stats = draw::draw_terrain(
+                let _draw_stats = draw::draw_terrain(
                     &hex_terrain_chunks,
                     &cube_terrain_chunks,
                     &gpu_hex_chunks,

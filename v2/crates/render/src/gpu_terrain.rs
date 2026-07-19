@@ -7,8 +7,8 @@
 
 use macroquad::prelude::*;
 use macroquad::miniquad::{
-    Bindings, BlendFactor, BlendState, BlendValue, BufferSource, BufferType, BufferUsage,
-    Comparison, CullFace, Equation, FrontFaceOrder, Pipeline, PipelineParams,
+    Bindings, BufferSource, BufferType, BufferUsage,
+    Comparison, CullFace, FrontFaceOrder, Pipeline, PipelineParams,
     RenderingBackend, ShaderMeta, ShaderSource, UniformBlockLayout, UniformDesc, UniformType,
     VertexAttribute, VertexFormat,
 };
@@ -32,7 +32,7 @@ pub struct GpuChunk {
 /// Mirrors v1's logic: depth comparison `Less` (not `LessOrEqual`) to avoid depth-tie scallops
 /// along cube rims; back-face culling with clockwise winding order; alpha blending.
 pub fn chunk_pipeline(ctx: &mut dyn RenderingBackend, vertex: &str, fragment: &str) -> Pipeline {
-    let shader = ctx
+    let shader = match ctx
         .new_shader(
             ShaderSource::Glsl {
                 vertex,
@@ -46,8 +46,13 @@ pub fn chunk_pipeline(ctx: &mut dyn RenderingBackend, vertex: &str, fragment: &s
                     ],
                 },
             },
-        )
-        .expect("chunk shader");
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("render: chunk shader compilation failed: {e}");
+                std::process::exit(2);
+            }
+        };
     ctx.new_pipeline(
         &[macroquad::miniquad::BufferLayout::default()],
         &[
@@ -106,6 +111,7 @@ pub fn upload_chunks(ctx: &mut dyn RenderingBackend, chunks: &[TerrainChunk]) ->
 }
 
 /// Release a chunk set's GPU buffers (before re-uploading on reseed).
+#[allow(dead_code)]
 pub fn free_chunks(ctx: &mut dyn RenderingBackend, chunks: &[GpuChunk]) {
     for c in chunks {
         ctx.delete_buffer(c.bindings.vertex_buffers[0]);

@@ -8,7 +8,6 @@
 //! If present but malformed, logs warnings and falls back to defaults for each field.
 
 use macroquad::prelude::KeyCode;
-use std::collections::HashMap;
 
 /// Camera and input tuning parameters.
 #[derive(Clone, Debug)]

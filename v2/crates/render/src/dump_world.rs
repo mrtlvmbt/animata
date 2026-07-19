@@ -17,6 +17,7 @@ pub struct DumpWorld {
 
 impl DumpWorld {
     /// Parse the ATDMP1 dump at `path`.
+    #[allow(dead_code)]
     pub fn load(path: &str) -> Result<Self, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read {path}: {e}"))?;
         if bytes.len() < 12 || &bytes[0..8] != b"ATDMP1\0\0" {
@@ -39,6 +40,7 @@ impl DumpWorld {
         Ok(Self { dim: dim as i64, heights, materials })
     }
 
+    #[allow(dead_code)]
     fn idx(&self, x: i64, z: i64) -> usize {
         let x = x.clamp(0, self.dim - 1);
         let z = z.clamp(0, self.dim - 1);

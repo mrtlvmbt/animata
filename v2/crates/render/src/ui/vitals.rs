@@ -1,6 +1,6 @@
 //! Vitals panel (top-left): compact always-on strip showing world seed, dim, and optionally population.
 
-use egui::{Align, Layout, RichText};
+use egui::RichText;
 use crate::ui::{Panel, UiCtx};
 use super::theme;
 

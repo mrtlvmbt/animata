@@ -2040,6 +2040,7 @@ dependencies = [
 name = "world"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "sim-core",
 ]
 
