@@ -336,11 +336,23 @@ fn parse_args() -> CliArgs {
             }
             "--seed" => {
                 let v = args.next().expect("--seed requires a value");
-                seed = v.parse().unwrap_or_else(|_| panic!("--seed expects a u64, got {v:?}"));
+                seed = match v.parse::<u64>() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        eprintln!("render: --seed expects a u64, got {v:?}");
+                        std::process::exit(2);
+                    }
+                };
             }
             "--dim" => {
                 let v = args.next().expect("--dim requires a value");
-                dim_override = Some(v.parse().unwrap_or_else(|_| panic!("--dim expects an integer, got {v:?}")));
+                dim_override = Some(match v.parse::<i64>() {
+                    Ok(d) => d,
+                    Err(_) => {
+                        eprintln!("render: --dim expects an integer, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--screenshot" => {
                 screenshot = Some(args.next().expect("--screenshot requires a path"));
@@ -348,7 +360,13 @@ fn parse_args() -> CliArgs {
             }
             "--screenshot-warmup" => {
                 let v = args.next().expect("--screenshot-warmup requires a value");
-                screenshot_warmup = v.parse().unwrap_or_else(|_| panic!("--screenshot-warmup expects a u32, got {v:?}"));
+                screenshot_warmup = match v.parse::<u32>() {
+                    Ok(w) => w,
+                    Err(_) => {
+                        eprintln!("render: --screenshot-warmup expects a u32, got {v:?}");
+                        std::process::exit(2);
+                    }
+                };
             }
             "--bench" => {
                 bench = true;
@@ -360,7 +378,10 @@ fn parse_args() -> CliArgs {
                     "iso-default" => CamPreset::IsoDefault,
                     "iso-zoom-close" => CamPreset::IsoZoomClose,
                     "iso-zoom-far" => CamPreset::IsoZoomFar,
-                    other => panic!("unknown camera preset: {other:?}"),
+                    other => {
+                        eprintln!("render: unknown camera preset: {other:?}");
+                        std::process::exit(2);
+                    }
                 };
             }
             "--retained" => retained = true,
@@ -372,7 +393,13 @@ fn parse_args() -> CliArgs {
             }
             "--height-scale" => {
                 let v = args.next().expect("--height-scale requires a value");
-                height_scale_override = Some(v.parse().unwrap_or_else(|_| panic!("--height-scale expects f32, got {v:?}")));
+                height_scale_override = Some(match v.parse::<f32>() {
+                    Ok(h) => h,
+                    Err(_) => {
+                        eprintln!("render: --height-scale expects f32, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--slow-load" => {
                 slow_load = true;
@@ -383,14 +410,32 @@ fn parse_args() -> CliArgs {
             }
             "--regen-to" => {
                 let v = args.next().expect("--regen-to requires a u64 seed value");
-                regen_to = Some(v.parse().unwrap_or_else(|_| panic!("--regen-to expects a u64, got {v:?}")));
+                regen_to = Some(match v.parse::<u64>() {
+                    Ok(r) => r,
+                    Err(_) => {
+                        eprintln!("render: --regen-to expects a u64, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
                 standalone = true; // reseed harness is standalone
             }
             "--jump-to" => {
                 let coords_str = args.next().expect("--jump-to requires <x>,<z>");
                 let parts: Vec<&str> = coords_str.split(',').collect();
-                let x = parts[0].parse::<f32>().unwrap_or_else(|_| panic!("--jump-to x must be f32, got {:?}", parts[0]));
-                let z = parts[1].parse::<f32>().unwrap_or_else(|_| panic!("--jump-to z must be f32, got {:?}", parts[1]));
+                let x = match parts[0].parse::<f32>() {
+                    Ok(x) => x,
+                    Err(_) => {
+                        eprintln!("render: --jump-to x must be f32, got {:?}", parts[0]);
+                        std::process::exit(2);
+                    }
+                };
+                let z = match parts[1].parse::<f32>() {
+                    Ok(z) => z,
+                    Err(_) => {
+                        eprintln!("render: --jump-to z must be f32, got {:?}", parts[1]);
+                        std::process::exit(2);
+                    }
+                };
                 jump_to = Some((x, z));
                 standalone = true; // jump harness is standalone
             }
@@ -400,7 +445,13 @@ fn parse_args() -> CliArgs {
             }
             "--yaw" => {
                 let v = args.next().expect("--yaw requires a value");
-                yaw_degrees = Some(v.parse().unwrap_or_else(|_| panic!("--yaw expects f32 degrees, got {v:?}")));
+                yaw_degrees = Some(match v.parse::<f32>() {
+                    Ok(y) => y,
+                    Err(_) => {
+                        eprintln!("render: --yaw expects f32 degrees, got {v:?}");
+                        std::process::exit(2);
+                    }
+                });
             }
             "--ui-state" => {
                 let v = args.next().expect("--ui-state requires a value");
