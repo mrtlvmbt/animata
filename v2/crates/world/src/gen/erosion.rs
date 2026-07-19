@@ -157,6 +157,12 @@ pub const SPIKE_MARGIN_FINAL: i64 = 12;
 /// landform relief (till p10 retention 37%, user-accepted; see w9_sweep table in PR #434).
 pub const N_ITERS_FINAL: usize = 4;
 
+/// W-17 PAR_MIN_DIM: dimension threshold below which parallel overhead exceeds benefit.
+/// dim=64 shows ~25% regression with par_iter; gate at 128 (matches practical break-even).
+/// Applied uniformly across all parallelized functions (incision_step, talus_step, talus_step_final,
+/// de_needle_pass, d8_directions) — both par and serial paths are byte-identical (G1 proven).
+const PAR_MIN_DIM: usize = 128;
+
 // Static assertion: MAX_SPIKE_FINAL must be strictly less than NEEDLE_MARGIN.
 const _: () = assert!(MAX_SPIKE_FINAL < NEEDLE_MARGIN);
 
@@ -271,6 +277,7 @@ pub fn resistance_field(dim: usize, seed: u64, hmax: i64) -> Vec<i64> {
 /// CURRENT `height`/`downstream`/`area`/`resistance` — a Jacobi read-only pass (the caller applies
 /// the delta to a NEW buffer, never in place).
 pub fn incision_step(
+    dim: usize,
     height: &[i64],
     downstream: &[Option<usize>],
     area: &[i64],
@@ -278,18 +285,39 @@ pub fn incision_step(
 ) -> Vec<i64> {
     use rayon::prelude::*;
 
-    let n = height.len();
-    // M1 (W-17): par_iter per-cell incision delta into preallocated slice
-    let delta: Vec<i64> = (0..n).into_par_iter().map(|v| {
-        let Some(d) = downstream[v] else { return 0i64 };
-        let s = (height[v] - height[d]).max(0);
-        let a_isqrt = isqrt(area[v]);
-        let divisor = RESIST_DIVISOR[resistance[v] as usize];
-        let raw = K_INCISE_NUM * a_isqrt * s;
-        let dz = (raw / (K_INCISE_DEN * divisor)).clamp(0, height[v]);
-        dz
-    }).collect();
-    delta
+    let n = dim * dim;
+    debug_assert_eq!(height.len(), n);
+    debug_assert_eq!(downstream.len(), n);
+    debug_assert_eq!(area.len(), n);
+    debug_assert_eq!(resistance.len(), n);
+
+    // M1 (W-17): par_iter per-cell incision delta — PAR_MIN_DIM gate (dim-64 shows +25% regression).
+    if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        let delta: Vec<i64> = (0..n).into_par_iter().map(|v| {
+            let Some(d) = downstream[v] else { return 0i64 };
+            let s = (height[v] - height[d]).max(0);
+            let a_isqrt = isqrt(area[v]);
+            let divisor = RESIST_DIVISOR[resistance[v] as usize];
+            let raw = K_INCISE_NUM * a_isqrt * s;
+            let dz = (raw / (K_INCISE_DEN * divisor)).clamp(0, height[v]);
+            dz
+        }).collect();
+        delta
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM (rayon overhead not worth it)
+        let mut delta = vec![0i64; n];
+        for v in 0..n {
+            let Some(d) = downstream[v] else { continue };
+            let s = (height[v] - height[d]).max(0);
+            let a_isqrt = isqrt(area[v]);
+            let divisor = RESIST_DIVISOR[resistance[v] as usize];
+            let raw = K_INCISE_NUM * a_isqrt * s;
+            let dz = (raw / (K_INCISE_DEN * divisor)).clamp(0, height[v]);
+            delta[v] = dz;
+        }
+        delta
+    }
 }
 
 /// Thermal talus relaxation: GATHER formulation (`[erosion]` non-negotiable — never a scatter).
@@ -303,37 +331,75 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
     debug_assert_eq!(height.len(), n);
     debug_assert_eq!(downstream.len(), n);
 
-    // Pass 1: local outflow intention — M1 (W-17): par_iter per-cell
-    let send_out: Vec<i64> = (0..n).into_par_iter().map(|v| {
-        let Some(d) = downstream[v] else { return 0i64 };
-        let slope = (height[v] - height[d]).max(0);
-        if slope > REPOSE_THRESHOLD {
-            (slope - REPOSE_THRESHOLD) * TALUS_FRAC_NUM / TALUS_FRAC_DEN
-        } else {
-            0
+    // Pass 1: local outflow intention — M1 (W-17): par_iter per-cell, PAR_MIN_DIM gated
+    let send_out: Vec<i64> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|v| {
+            let Some(d) = downstream[v] else { return 0i64 };
+            let slope = (height[v] - height[d]).max(0);
+            if slope > REPOSE_THRESHOLD {
+                (slope - REPOSE_THRESHOLD) * TALUS_FRAC_NUM / TALUS_FRAC_DEN
+            } else {
+                0
+            }
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut send_out = vec![0i64; n];
+        for v in 0..n {
+            let Some(d) = downstream[v] else { continue };
+            let slope = (height[v] - height[d]).max(0);
+            if slope > REPOSE_THRESHOLD {
+                send_out[v] = (slope - REPOSE_THRESHOLD) * TALUS_FRAC_NUM / TALUS_FRAC_DEN;
+            }
         }
-    }).collect();
+        send_out
+    };
 
-    // Pass 2: gather — M1 (W-17): par_iter per-cell (Jacobi, disjoint writes)
+    // Pass 2: gather — M1 (W-17): par_iter per-cell (Jacobi, disjoint writes), PAR_MIN_DIM gated
     // Each cell v reads its own send_out plus its neighbors' send_out where that
     // neighbor's D8 receiver IS v. Never writes into a neighbor's slot.
-    let new_height: Vec<i64> = (0..n).into_par_iter().map(|v| {
-        let z = v / dim;
-        let x = v % dim;
-        let mut h = height[v] - send_out[v];
-        for &(dx, dz) in &D8_OFFSETS {
-            let nx = x as i64 + dx;
-            let nz = z as i64 + dz;
-            if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
-                continue;
+    let new_height: Vec<i64> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|v| {
+            let z = v / dim;
+            let x = v % dim;
+            let mut h = height[v] - send_out[v];
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+                if downstream[u] == Some(v) {
+                    h += send_out[u];
+                }
             }
-            let u = linear_index(nx as usize, nz as usize, dim);
-            if downstream[u] == Some(v) {
-                h += send_out[u];
+            h
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut new_height = vec![0i64; n];
+        for v in 0..n {
+            let z = v / dim;
+            let x = v % dim;
+            let mut h = height[v] - send_out[v];
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+                if downstream[u] == Some(v) {
+                    h += send_out[u];
+                }
             }
+            new_height[v] = h;
         }
-        h
-    }).collect();
+        new_height
+    };
     new_height
 }
 
@@ -363,70 +429,135 @@ pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
 
-    // Pass 1: identify each cell's clipping intention and receiver — M2 (W-17): par_iter per-cell
+    // Pass 1: identify each cell's clipping intention and receiver — M2 (W-17): par_iter per-cell, PAR_MIN_DIM gated
     #[derive(Clone)]
     struct NeedleResult {
         send_out: i64,
         receiver: Option<usize>,
     }
 
-    let needle_results: Vec<NeedleResult> = (0..n).into_par_iter().map(|v| {
-        let z = v / dim;
-        let x = v % dim;
+    let needle_results: Vec<NeedleResult> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|v| {
+            let z = v / dim;
+            let x = v % dim;
 
-        // Find the max height among the 8 in-grid neighbors.
-        let mut nmax = i64::MIN;
-        for &(dx, dz) in &D8_OFFSETS {
-            let nx = x as i64 + dx;
-            let nz = z as i64 + dz;
-            if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
-                continue;
+            // Find the max height among the 8 in-grid neighbors.
+            let mut nmax = i64::MIN;
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+                nmax = nmax.max(height[u]);
             }
-            let u = linear_index(nx as usize, nz as usize, dim);
-            nmax = nmax.max(height[u]);
+
+            // Compute send_out if this is a spike
+            let send_out = if height[v] > nmax + NEEDLE_MARGIN {
+                height[v] - (nmax + NEEDLE_MARGIN)
+            } else {
+                0
+            };
+
+            // Find the lowest D8 neighbor (deterministic tie-break: lowest linear index)
+            let mut lowest_height = height[v];
+            let mut lowest_idx: Option<usize> = None;
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+                if height[u] < lowest_height || (height[u] == lowest_height && lowest_idx.map_or(true, |idx| u < idx)) {
+                    lowest_height = height[u];
+                    lowest_idx = Some(u);
+                }
+            }
+
+            NeedleResult { send_out, receiver: lowest_idx }
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut needle_results = Vec::with_capacity(n);
+        for v in 0..n {
+            let z = v / dim;
+            let x = v % dim;
+
+            // Find the max height among the 8 in-grid neighbors.
+            let mut nmax = i64::MIN;
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+                nmax = nmax.max(height[u]);
+            }
+
+            // Compute send_out if this is a spike
+            let send_out = if height[v] > nmax + NEEDLE_MARGIN {
+                height[v] - (nmax + NEEDLE_MARGIN)
+            } else {
+                0
+            };
+
+            // Find the lowest D8 neighbor (deterministic tie-break: lowest linear index)
+            let mut lowest_height = height[v];
+            let mut lowest_idx: Option<usize> = None;
+            for &(dx, dz) in &D8_OFFSETS {
+                let nx = x as i64 + dx;
+                let nz = z as i64 + dz;
+                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                    continue;
+                }
+                let u = linear_index(nx as usize, nz as usize, dim);
+                if height[u] < lowest_height || (height[u] == lowest_height && lowest_idx.map_or(true, |idx| u < idx)) {
+                    lowest_height = height[u];
+                    lowest_idx = Some(u);
+                }
+            }
+
+            needle_results.push(NeedleResult { send_out, receiver: lowest_idx });
         }
+        needle_results
+    };
 
-        // Compute send_out if this is a spike
-        let send_out = if height[v] > nmax + NEEDLE_MARGIN {
-            height[v] - (nmax + NEEDLE_MARGIN)
-        } else {
-            0
-        };
-
-        // Find the lowest D8 neighbor (deterministic tie-break: lowest linear index)
-        let mut lowest_height = height[v];
-        let mut lowest_idx: Option<usize> = None;
-        for &(dx, dz) in &D8_OFFSETS {
-            let nx = x as i64 + dx;
-            let nz = z as i64 + dz;
-            if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
-                continue;
-            }
-            let u = linear_index(nx as usize, nz as usize, dim);
-            if height[u] < lowest_height || (height[u] == lowest_height && lowest_idx.map_or(true, |idx| u < idx)) {
-                lowest_height = height[u];
-                lowest_idx = Some(u);
-            }
-        }
-
-        NeedleResult { send_out, receiver: lowest_idx }
-    }).collect();
-
-    // Pass 2: gather — M2 (W-17): par_iter per-cell
+    // Pass 2: gather — M2 (W-17): par_iter per-cell, PAR_MIN_DIM gated
     // Each cell v subtracts its send_out and adds all send_out from cells whose receiver is v
     let send_out: Vec<i64> = needle_results.iter().map(|r| r.send_out).collect();
     let receiver: Vec<Option<usize>> = needle_results.iter().map(|r| r.receiver).collect();
 
-    let new_height: Vec<i64> = (0..n).into_par_iter().map(|v| {
-        let mut h = height[v] - send_out[v];
-        // Gather from all cells whose receiver is v
-        for u in 0..n {
-            if receiver[u] == Some(v) {
-                h += send_out[u];
+    let new_height: Vec<i64> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|v| {
+            let mut h = height[v] - send_out[v];
+            // Gather from all cells whose receiver is v
+            for u in 0..n {
+                if receiver[u] == Some(v) {
+                    h += send_out[u];
+                }
             }
+            h
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut new_height = vec![0i64; n];
+        for v in 0..n {
+            let mut h = height[v] - send_out[v];
+            // Gather from all cells whose receiver is v
+            for u in 0..n {
+                if receiver[u] == Some(v) {
+                    h += send_out[u];
+                }
+            }
+            new_height[v] = h;
         }
-        h
-    }).collect();
+        new_height
+    };
 
     new_height
 }
@@ -464,34 +595,109 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
     let mut hs = height.iter().map(|&h| h * 64).collect::<Vec<i64>>();
     let margin_s = spike_margin * 64;
 
-    // Jacobi iterations (macro-loop stays serial, internal passes parallelized)
+    // Jacobi iterations (macro-loop stays serial, internal passes parallelized with PAR_MIN_DIM gate)
     for _ in 0..n_iters {
-        // Pass 1: compute outflows — M2 (W-17): par_iter per-cell
-        let send_out: Vec<Vec<i64>> = (0..n).into_par_iter().map(|v| {
-            let mut outflows = vec![0i64; 8];
-            let z = v / dim;
-            let x = v % dim;
+        // Pass 1: compute outflows — M2 (W-17): par_iter per-cell, PAR_MIN_DIM gated
+        let send_out: Vec<Vec<i64>> = if dim >= PAR_MIN_DIM {
+            // Parallel path: par_iter per-cell
+            (0..n).into_par_iter().map(|v| {
+                let mut outflows = vec![0i64; 8];
+                let z = v / dim;
+                let x = v % dim;
 
-            // Classify as spike: hs - second_max(neighbors) > margin_s
-            let mut max_hs = i64::MIN;
-            let mut second_max_hs = i64::MIN;
-            for &(dx, dz) in &D8_OFFSETS {
-                let nx = x as i64 + dx;
-                let nz = z as i64 + dz;
-                if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
-                    let u = linear_index(nx as usize, nz as usize, dim);
-                    let neighbor_hs = hs[u];
-                    if neighbor_hs > max_hs {
-                        second_max_hs = max_hs;
-                        max_hs = neighbor_hs;
-                    } else if neighbor_hs > second_max_hs {
-                        second_max_hs = neighbor_hs;
+                // Classify as spike: hs - second_max(neighbors) > margin_s
+                let mut max_hs = i64::MIN;
+                let mut second_max_hs = i64::MIN;
+                for &(dx, dz) in &D8_OFFSETS {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                        let u = linear_index(nx as usize, nz as usize, dim);
+                        let neighbor_hs = hs[u];
+                        if neighbor_hs > max_hs {
+                            second_max_hs = max_hs;
+                            max_hs = neighbor_hs;
+                        } else if neighbor_hs > second_max_hs {
+                            second_max_hs = neighbor_hs;
+                        }
                     }
                 }
-            }
 
-            // Only donate if this is a spike
-            if second_max_hs != i64::MIN && hs[v] - second_max_hs > margin_s {
+                // Only donate if this is a spike
+                if second_max_hs != i64::MIN && hs[v] - second_max_hs > margin_s {
+                    for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
+                        let nx = x as i64 + dx;
+                        let nz = z as i64 + dz;
+                        if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                            continue;
+                        }
+                        let u = linear_index(nx as usize, nz as usize, dim);
+                        let drop = hs[v] - hs[u];
+                        if drop > 0 {
+                            outflows[dir] = (drop.saturating_sub(margin_s)) / 2 / 8;
+                        }
+                    }
+                }
+
+                outflows
+            }).collect()
+        } else {
+            // Serial fallback for dim < PAR_MIN_DIM
+            let mut send_out = vec![vec![0i64; 8]; n];
+            for v in 0..n {
+                let mut outflows = vec![0i64; 8];
+                let z = v / dim;
+                let x = v % dim;
+
+                // Classify as spike: hs - second_max(neighbors) > margin_s
+                let mut max_hs = i64::MIN;
+                let mut second_max_hs = i64::MIN;
+                for &(dx, dz) in &D8_OFFSETS {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
+                        let u = linear_index(nx as usize, nz as usize, dim);
+                        let neighbor_hs = hs[u];
+                        if neighbor_hs > max_hs {
+                            second_max_hs = max_hs;
+                            max_hs = neighbor_hs;
+                        } else if neighbor_hs > second_max_hs {
+                            second_max_hs = neighbor_hs;
+                        }
+                    }
+                }
+
+                // Only donate if this is a spike
+                if second_max_hs != i64::MIN && hs[v] - second_max_hs > margin_s {
+                    for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
+                        let nx = x as i64 + dx;
+                        let nz = z as i64 + dz;
+                        if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                            continue;
+                        }
+                        let u = linear_index(nx as usize, nz as usize, dim);
+                        let drop = hs[v] - hs[u];
+                        if drop > 0 {
+                            outflows[dir] = (drop.saturating_sub(margin_s)) / 2 / 8;
+                        }
+                    }
+                }
+
+                send_out[v] = outflows;
+            }
+            send_out
+        };
+
+        // Pass 2: apply changes (gather) — M2 (W-17): par_iter per-cell (Jacobi), PAR_MIN_DIM gated
+        let hs_new: Vec<i64> = if dim >= PAR_MIN_DIM {
+            // Parallel path: par_iter per-cell
+            (0..n).into_par_iter().map(|v| {
+                let z = v / dim;
+                let x = v % dim;
+
+                let mut sum_in = 0i64;
+                let mut sum_out = 0i64;
+
                 for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
                     let nx = x as i64 + dx;
                     let nz = z as i64 + dz;
@@ -499,44 +705,51 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
                         continue;
                     }
                     let u = linear_index(nx as usize, nz as usize, dim);
-                    let drop = hs[v] - hs[u];
-                    if drop > 0 {
-                        outflows[dir] = (drop.saturating_sub(margin_s)) / 2 / 8;
+
+                    sum_out += send_out[v][dir];
+
+                    for (opposite_dir, &(ox, oz)) in D8_OFFSETS.iter().enumerate() {
+                        if ox == -dx && oz == -dz {
+                            sum_in += send_out[u][opposite_dir];
+                            break;
+                        }
                     }
                 }
-            }
 
-            outflows
-        }).collect();
+                hs[v] - sum_out + sum_in
+            }).collect()
+        } else {
+            // Serial fallback for dim < PAR_MIN_DIM
+            let mut hs_new = vec![0i64; n];
+            for v in 0..n {
+                let z = v / dim;
+                let x = v % dim;
 
-        // Pass 2: apply changes (gather) — M2 (W-17): par_iter per-cell (Jacobi)
-        let hs_new: Vec<i64> = (0..n).into_par_iter().map(|v| {
-            let z = v / dim;
-            let x = v % dim;
+                let mut sum_in = 0i64;
+                let mut sum_out = 0i64;
 
-            let mut sum_in = 0i64;
-            let mut sum_out = 0i64;
+                for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                        continue;
+                    }
+                    let u = linear_index(nx as usize, nz as usize, dim);
 
-            for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
-                let nx = x as i64 + dx;
-                let nz = z as i64 + dz;
-                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
-                    continue;
-                }
-                let u = linear_index(nx as usize, nz as usize, dim);
+                    sum_out += send_out[v][dir];
 
-                sum_out += send_out[v][dir];
-
-                for (opposite_dir, &(ox, oz)) in D8_OFFSETS.iter().enumerate() {
-                    if ox == -dx && oz == -dz {
-                        sum_in += send_out[u][opposite_dir];
-                        break;
+                    for (opposite_dir, &(ox, oz)) in D8_OFFSETS.iter().enumerate() {
+                        if ox == -dx && oz == -dz {
+                            sum_in += send_out[u][opposite_dir];
+                            break;
+                        }
                     }
                 }
-            }
 
-            hs[v] - sum_out + sum_in
-        }).collect();
+                hs_new[v] = hs[v] - sum_out + sum_in;
+            }
+            hs_new
+        };
 
         hs = hs_new;
     }
@@ -661,7 +874,7 @@ fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, res
         let area = kahn_accumulate(dim, &downstream);
 
         // 2. Stream-power incision, routed to export (detachment-limited, no mid-network deposit).
-        let incision_delta = incision_step(&height, &downstream, &area, &resistance);
+        let incision_delta = incision_step(dim, &height, &downstream, &area, &resistance);
         let (_accum, export_this_iter) = accumulate_and_export(dim, &downstream, &incision_delta);
         for v in 0..n {
             height[v] -= incision_delta[v];
@@ -1272,32 +1485,44 @@ mod tests {
 
     #[test]
     fn incision_step_is_zero_without_a_receiver() {
-        let height = vec![10i64, 20, 30];
-        let downstream = vec![None, None, None];
-        let area = vec![1i64, 1, 1];
-        let resistance = vec![0i64, 0, 0];
-        let delta = incision_step(&height, &downstream, &area, &resistance);
-        assert_eq!(delta, vec![0, 0, 0]);
+        // Use 3x3 grid (9 cells) to satisfy dim*dim == height.len()
+        let n = 9;
+        let height = vec![10i64; n];
+        let downstream = vec![None; n];
+        let area = vec![1i64; n];
+        let resistance = vec![0i64; n];
+        let delta = incision_step(3, &height, &downstream, &area, &resistance);
+        assert_eq!(delta, vec![0; n]);
     }
 
     #[test]
     fn incision_step_never_drives_height_negative() {
         // Huge area/slope, softest resistance — delta must clamp to height[v] exactly, not overshoot.
-        let height = vec![5i64, 0];
-        let downstream = vec![Some(1), None];
-        let area = vec![1_000_000i64, 1];
-        let resistance = vec![0i64, 0];
-        let delta = incision_step(&height, &downstream, &area, &resistance);
+        // Use 2x2 grid to satisfy dim*dim == height.len()
+        let n = 4;
+        let mut height = vec![0i64; n];
+        let mut downstream = vec![None; n];
+        height[0] = 5i64;
+        height[1] = 0i64;
+        downstream[0] = Some(1);
+        let area = vec![1_000_000i64, 1, 1, 1];
+        let resistance = vec![0i64, 0, 0, 0];
+        let delta = incision_step(2, &height, &downstream, &area, &resistance);
         assert_eq!(delta[0], 5, "delta must clamp to the cell's own height, never exceed it");
     }
 
     #[test]
     fn incision_step_is_slower_on_harder_resistance() {
-        let height = vec![100i64, 0];
-        let downstream = vec![Some(1), None];
-        let area = vec![64i64, 1];
-        let soft = incision_step(&height, &downstream, &area, &[0, 0]);
-        let hard = incision_step(&height, &downstream, &area, &[3, 0]);
+        // Use 2x2 grid to satisfy dim*dim == height.len()
+        let n = 4;
+        let mut height = vec![0i64; n];
+        let mut downstream = vec![None; n];
+        height[0] = 100i64;
+        height[1] = 0i64;
+        downstream[0] = Some(1);
+        let area = vec![64i64, 1, 1, 1];
+        let soft = incision_step(2, &height, &downstream, &area, &[0, 0, 0, 0]);
+        let hard = incision_step(2, &height, &downstream, &area, &[3, 0, 0, 0]);
         assert!(hard[0] < soft[0], "harder resistance (class 3) must erode less than softest (class 0)");
     }
 

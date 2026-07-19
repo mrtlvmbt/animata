@@ -6,55 +6,45 @@
 fn w17_byte_equiv_cross_invocation() {
     use std::process::{Command, Stdio};
 
-    // Find the compiled example binary
-    let example_path = if cfg!(debug_assertions) {
-        "target/debug/examples/w17_byte_equiv"
-    } else {
-        "target/release/examples/w17_byte_equiv"
-    };
+    // Use CARGO_BIN_EXE_w17_byte_equiv macro to get the built binary path.
+    // This is resolved by cargo at compile time and is the canonical robust way
+    // to reference a [[bin]] target from an integration test.
+    let binary_path = env!("CARGO_BIN_EXE_w17_byte_equiv");
 
-    // Ensure example is built
-    let status = Command::new("cargo")
-        .args(&["build", "--release", "--example", "w17_byte_equiv"])
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .status()
-        .expect("Failed to build example");
-    assert!(status.success(), "Failed to compile w17_byte_equiv example");
+    // Note: cargo automatically builds bins needed by integration tests,
+    // so no explicit build step is required.
 
     let mut checksums = Vec::new();
 
     // Run with RAYON_NUM_THREADS=1
     println!("Running with RAYON_NUM_THREADS=1...");
-    let output1 = Command::new(example_path)
+    let output1 = Command::new(binary_path)
         .env("RAYON_NUM_THREADS", "1")
         .stdout(Stdio::piped())
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to run w17_byte_equiv");
-    assert!(output1.status.success(), "Example failed with RAYON_NUM_THREADS=1:\n{}", String::from_utf8_lossy(&output1.stderr));
+    assert!(output1.status.success(), "Binary failed with RAYON_NUM_THREADS=1:\n{}", String::from_utf8_lossy(&output1.stderr));
     checksums.push((1, String::from_utf8_lossy(&output1.stdout).to_string()));
 
     // Run with RAYON_NUM_THREADS=2
     println!("Running with RAYON_NUM_THREADS=2...");
-    let output2 = Command::new(example_path)
+    let output2 = Command::new(binary_path)
         .env("RAYON_NUM_THREADS", "2")
         .stdout(Stdio::piped())
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to run w17_byte_equiv");
-    assert!(output2.status.success(), "Example failed with RAYON_NUM_THREADS=2:\n{}", String::from_utf8_lossy(&output2.stderr));
+    assert!(output2.status.success(), "Binary failed with RAYON_NUM_THREADS=2:\n{}", String::from_utf8_lossy(&output2.stderr));
     checksums.push((2, String::from_utf8_lossy(&output2.stdout).to_string()));
 
     // Run with default (unset RAYON_NUM_THREADS)
     println!("Running with default thread pool...");
-    let mut cmd = Command::new(example_path);
+    let mut cmd = Command::new(binary_path);
     cmd.env_remove("RAYON_NUM_THREADS");
     let output3 = cmd
         .stdout(Stdio::piped())
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .expect("Failed to run w17_byte_equiv");
-    assert!(output3.status.success(), "Example failed with default threads:\n{}", String::from_utf8_lossy(&output3.stderr));
+    assert!(output3.status.success(), "Binary failed with default threads:\n{}", String::from_utf8_lossy(&output3.stderr));
     checksums.push((0, String::from_utf8_lossy(&output3.stdout).to_string()));
 
     // Extract and compare checksums from outputs
