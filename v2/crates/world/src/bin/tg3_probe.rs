@@ -464,49 +464,62 @@ fn compute_drainage_density_hex(hex_count: usize, hex_height: &[i64], hex_coords
     }
 
     // For each hex, find steepest descent among its D6 neighbors
+    // FALLBACK: if no downslope neighbor exists, flow to lowest neighbor (handles flats)
     for idx in 0..hex_count {
         let (q, r) = hex_coords[idx];
         let h = hex_height[idx];
         let mut steepest_neighbor = None;
         let mut max_drop = 0i64;
+        let mut lowest_neighbor = None;
+        let mut min_height = i64::MAX;
+        let mut neighbor_count = 0i32;
 
         // Check D6 neighbors
         for &(dq, dr) in &d6_offsets {
             let nq = q + dq;
             let nr = r + dr;
             if let Some(&nidx) = coord_to_idx.get(&(nq, nr)) {
-                let drop = h - hex_height[nidx];
+                neighbor_count += 1;
+                let nh = hex_height[nidx];
+                let drop = h - nh;
+
+                // Track steepest descent
                 if drop > max_drop {
                     max_drop = drop;
                     steepest_neighbor = Some(nidx);
                 }
+
+                // Track lowest neighbor (for flat/uphill handling)
+                if nh < min_height {
+                    min_height = nh;
+                    lowest_neighbor = Some(nidx);
+                }
             }
         }
 
-        downstream[idx] = steepest_neighbor;
+        // If steepest_neighbor is Some, use it (there's a downslope)
+        // Otherwise, if there's a lower neighbor, flow to it
+        // This handles flat regions by flowing toward lower areas
+        let flow_target = steepest_neighbor.or_else(|| {
+            if lowest_neighbor.is_some() && min_height < h {
+                lowest_neighbor
+            } else {
+                None
+            }
+        });
+
+        downstream[idx] = flow_target;
     }
 
-    // Topological sort: visit all hexes and build order
-    let mut visited = vec![false; hex_count];
-    let mut order = Vec::new();
+    // Height-descending sort: process HIGH hexes FIRST so they pass area downstream
+    let mut sorted_indices: Vec<usize> = (0..hex_count).collect();
+    sorted_indices.sort_by(|&a, &b| {
+        // Sort by height DESCENDING (higher first)
+        hex_height[b].cmp(&hex_height[a])
+    });
 
-    fn visit(idx: usize, downstream: &[Option<usize>], visited: &mut [bool], order: &mut Vec<usize>) {
-        if visited[idx] {
-            return;
-        }
-        visited[idx] = true;
-        if let Some(next_idx) = downstream[idx] {
-            visit(next_idx, downstream, visited, order);
-        }
-        order.push(idx);
-    }
-
-    for i in 0..hex_count {
-        visit(i, &downstream, &mut visited, &mut order);
-    }
-
-    // Accumulate area down the flow graph in reverse topological order
-    for &idx in order.iter().rev() {
+    // Accumulate area down the flow graph in height-descending order
+    for &idx in &sorted_indices {
         if let Some(next_idx) = downstream[idx] {
             area[next_idx] += area[idx];
         }
@@ -603,33 +616,34 @@ fn build_hex_grid(
     let bin_size = bin_size.max(1);
 
     // Build list of valid hex (q, r) positions using concentric ring layout
-    // Ring 0: center at (0, 0)
-    // Ring k: all hexes at distance k from center
+    // Use axial distance from center: distance = max(|q|, |r|, |q+r|)
+    // This guarantees no duplicates and correct ring structure
     let mut valid_hexes = Vec::new();
-    valid_hexes.push((0i64, 0i64)); // Center
 
-    for ring in 1..hex_grid_size {
-        // Ring k contains 6k hexes
-        // Standard enumeration: start at (k, -k) and spiral outward
-        let mut q = ring;
-        let mut r = -ring;
-
-        // Direction vectors for moving around the ring
-        let dirs = vec![
-            (-1, 0),
-            (0, 1),
-            (1, 1),
-            (1, 0),
-            (0, -1),
-            (-1, -1),
-        ];
-
-        for &(dq, dr) in &dirs {
-            for _ in 0..ring {
-                valid_hexes.push((q, r));
-                q += dq;
-                r += dr;
+    for distance in 0..hex_grid_size {
+        // Generate all hexes at this distance from center
+        if distance == 0 {
+            valid_hexes.push((0i64, 0i64));
+        } else {
+            // Iterate over all possible (q, r) at this distance
+            for q in -distance..=distance {
+                for r in -distance..=distance {
+                    // Axial distance: max(|q|, |r|, |-q-r|) where s = -q-r
+                    let s = -q - r;
+                    let dist = q.abs().max(r.abs()).max(s.abs());
+                    if dist == distance {
+                        valid_hexes.push((q, r));
+                    }
+                }
             }
+        }
+    }
+
+    // Verify no duplicates and correct count
+    let mut seen = std::collections::HashSet::new();
+    for &(q, r) in &valid_hexes {
+        if !seen.insert((q, r)) {
+            eprintln!("ERROR: Duplicate hex coordinate ({}, {})!", q, r);
         }
     }
 
@@ -747,7 +761,7 @@ fn compute_resample_fidelity(
     _hex_grid_size: usize,
 ) -> (i64, i64, i64, i64, bool) {
     // Build proper hexagon grid with full assignment
-    let (hex_dim, hex_height, hex_coords, pooled_cell_count) = build_hex_grid(dim, height_internal);
+    let (hex_dim, hex_height, hex_coords, _pooled_cell_count) = build_hex_grid(dim, height_internal);
 
     // Mean pooled cells per hex
     let mean_pooled: i64 = if hex_dim > 0 {
@@ -841,6 +855,212 @@ fn write_ppm(path: &str, dim: usize, rgb: &[u8]) -> std::io::Result<()> {
     write!(file, "P6\n{} {}\n255\n", dim, dim)?;
     file.write_all(rgb)?;
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Unit Tests for D6 Accumulation (Tiny Cases)
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test case 1: Straight line of hexes (linear cascade)
+    /// Heights: 3 → 2 → 1 (descending)
+    /// Expected: accumulation grows monotonically [pool, 2*pool, 3*pool]
+    #[test]
+    fn test_d6_linear_cascade() {
+        let hex_count = 3;
+        let hex_height = vec![3i64, 2i64, 1i64]; // High to low
+        let hex_coords = vec![(0i64, 0i64), (1i64, 0i64), (2i64, 0i64)]; // Linear in q-axis
+        let mean_pooled = 10i64;
+        let threshold_cells = 15i64; // Only 2-pool and 3-pool hexes are channels
+
+        // Build flow: 0→1, 1→2, 2→None
+        let d6_offsets = [
+            (1i64, 0i64), (-1i64, 0i64),     // ±q
+            (0i64, 1i64), (0i64, -1i64),     // ±r
+            (1i64, -1i64), (-1i64, 1i64),    // Diagonal
+        ];
+
+        let mut coord_to_idx = std::collections::HashMap::new();
+        for (idx, &coord) in hex_coords.iter().enumerate() {
+            coord_to_idx.insert(coord, idx);
+        }
+
+        let mut downstream = vec![None; hex_count];
+        for idx in 0..hex_count {
+            let (q, r) = hex_coords[idx];
+            let h = hex_height[idx];
+            let mut steepest_neighbor = None;
+            let mut max_drop = 0i64;
+
+            for &(dq, dr) in &d6_offsets {
+                let nq = q + dq;
+                let nr = r + dr;
+                if let Some(&nidx) = coord_to_idx.get(&(nq, nr)) {
+                    let drop = h - hex_height[nidx];
+                    if drop > max_drop {
+                        max_drop = drop;
+                        steepest_neighbor = Some(nidx);
+                    }
+                }
+            }
+            downstream[idx] = steepest_neighbor;
+        }
+
+        // Accumulation
+        let mut area = vec![mean_pooled; hex_count];
+        let mut sorted_indices: Vec<usize> = (0..hex_count).collect();
+        sorted_indices.sort_by(|&a, &b| hex_height[b].cmp(&hex_height[a]));
+
+        for &idx in &sorted_indices {
+            if let Some(next_idx) = downstream[idx] {
+                area[next_idx] += area[idx];
+            }
+        }
+
+        // Expected: [10, 20, 30]
+        assert_eq!(area[0], 10, "Hex 0 should have area=pool");
+        assert_eq!(area[1], 20, "Hex 1 should have area=2*pool (from self + hex 0)");
+        assert_eq!(area[2], 30, "Hex 2 should have area=3*pool (from self + hex 1 + hex 0)");
+
+        // Channel count: only hex 1 (20) and hex 2 (30) exceed threshold (15)
+        let channel_count = area.iter().filter(|&&a| a >= threshold_cells).count();
+        assert_eq!(channel_count, 2, "Exactly 2 hexes should be channels");
+    }
+
+    /// Test case 2: Y-junction (two branches merge)
+    /// Layout:
+    ///   0(h=3)     1(h=3)
+    ///       \     /
+    ///        2(h=1)
+    /// Heights: 0→2 and 1→2 (both high to low)
+    /// Expected: hex 2 accumulates from both: area[2] = pool + area[0] + area[1]
+    #[test]
+    fn test_d6_y_junction() {
+        let hex_count = 3;
+        let hex_height = vec![3i64, 3i64, 1i64];
+        // Arrange in Y shape: 0 and 1 at high level, 2 at low level
+        // Using axial coords where 0 and 1 flow to 2
+        let hex_coords = vec![(-1i64, 0i64), (1i64, 0i64), (0i64, 1i64)];
+        let mean_pooled = 10i64;
+
+        let d6_offsets = [
+            (1i64, 0i64), (-1i64, 0i64),
+            (0i64, 1i64), (0i64, -1i64),
+            (1i64, -1i64), (-1i64, 1i64),
+        ];
+
+        let mut coord_to_idx = std::collections::HashMap::new();
+        for (idx, &coord) in hex_coords.iter().enumerate() {
+            coord_to_idx.insert(coord, idx);
+        }
+
+        let mut downstream = vec![None; hex_count];
+        for idx in 0..hex_count {
+            let (q, r) = hex_coords[idx];
+            let h = hex_height[idx];
+            let mut steepest_neighbor = None;
+            let mut max_drop = 0i64;
+
+            for &(dq, dr) in &d6_offsets {
+                let nq = q + dq;
+                let nr = r + dr;
+                if let Some(&nidx) = coord_to_idx.get(&(nq, nr)) {
+                    let drop = h - hex_height[nidx];
+                    if drop > max_drop {
+                        max_drop = drop;
+                        steepest_neighbor = Some(nidx);
+                    }
+                }
+            }
+            downstream[idx] = steepest_neighbor;
+        }
+
+        // Both 0 and 1 should flow to 2
+        assert_eq!(downstream[0], Some(2), "Hex 0 should flow to hex 2");
+        assert_eq!(downstream[1], Some(2), "Hex 1 should flow to hex 2");
+        assert_eq!(downstream[2], None, "Hex 2 is a sink");
+
+        // Accumulation
+        let mut area = vec![mean_pooled; hex_count];
+        let mut sorted_indices: Vec<usize> = (0..hex_count).collect();
+        sorted_indices.sort_by(|&a, &b| hex_height[b].cmp(&hex_height[a]));
+
+        for &idx in &sorted_indices {
+            if let Some(next_idx) = downstream[idx] {
+                area[next_idx] += area[idx];
+            }
+        }
+
+        // Expected: area[0]=10, area[1]=10, area[2]=30 (10 + 10 + 10)
+        assert_eq!(area[0], 10, "Hex 0: pool only");
+        assert_eq!(area[1], 10, "Hex 1: pool only");
+        assert_eq!(area[2], 30, "Hex 2: pool + area[0] + area[1]");
+    }
+
+    /// Test case 3: Sink pair (two equal-height hexes, no flow)
+    /// Heights: 1, 1 (equal)
+    /// Expected: no flow between them, each keeps only pool area; no infinite loops
+    #[test]
+    fn test_d6_sink_pair() {
+        let hex_count = 2;
+        let hex_height = vec![1i64, 1i64]; // Equal heights
+        let hex_coords = vec![(0i64, 0i64), (1i64, 0i64)];
+        let mean_pooled = 10i64;
+
+        let d6_offsets = [
+            (1i64, 0i64), (-1i64, 0i64),
+            (0i64, 1i64), (0i64, -1i64),
+            (1i64, -1i64), (-1i64, 1i64),
+        ];
+
+        let mut coord_to_idx = std::collections::HashMap::new();
+        for (idx, &coord) in hex_coords.iter().enumerate() {
+            coord_to_idx.insert(coord, idx);
+        }
+
+        let mut downstream = vec![None; hex_count];
+        for idx in 0..hex_count {
+            let (q, r) = hex_coords[idx];
+            let h = hex_height[idx];
+            let mut steepest_neighbor = None;
+            let mut max_drop = 0i64;
+
+            for &(dq, dr) in &d6_offsets {
+                let nq = q + dq;
+                let nr = r + dr;
+                if let Some(&nidx) = coord_to_idx.get(&(nq, nr)) {
+                    let drop = h - hex_height[nidx];
+                    if drop > max_drop {
+                        max_drop = drop;
+                        steepest_neighbor = Some(nidx);
+                    }
+                }
+            }
+            downstream[idx] = steepest_neighbor;
+        }
+
+        // Both should have no downstream (equal heights, no flow)
+        assert_eq!(downstream[0], None, "Hex 0: no flow (equal height)");
+        assert_eq!(downstream[1], None, "Hex 1: no flow (equal height)");
+
+        // Accumulation
+        let mut area = vec![mean_pooled; hex_count];
+        let mut sorted_indices: Vec<usize> = (0..hex_count).collect();
+        sorted_indices.sort_by(|&a, &b| hex_height[b].cmp(&hex_height[a]));
+
+        for &idx in &sorted_indices {
+            if let Some(next_idx) = downstream[idx] {
+                area[next_idx] += area[idx];
+            }
+        }
+
+        // Expected: both stay at pool (no propagation)
+        assert_eq!(area[0], 10, "Hex 0: pool only (no downstream)");
+        assert_eq!(area[1], 10, "Hex 1: pool only (no downstream)");
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
