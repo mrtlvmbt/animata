@@ -257,34 +257,36 @@ pub fn emplace_edifices(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<i64> {
 /// substrate by the caller (`caps.rs`, mirroring aeolian's sand reconciliation) — RnD 15 §8.
 /// W-16b amendment: cone crater floors (r <= caldera_r) get Basalt; cone flanks get Tuff.
 pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Option<MaterialId>> {
+    use rayon::prelude::*;
+
     let n = dim * dim;
-    let mut mask = vec![None; n];
-    let mut best_contribution = vec![0i64; n];
     let geom = EdificeGeom::derive(dim, hmax);
-    for vent in vents {
-        for z in 0..dim {
-            for x in 0..dim {
-                let dx = x as i64 - vent.x;
-                let dz = z as i64 - vent.z;
-                let contribution = vent_height_at(vent, dx, dz, &geom);
-                if contribution <= 0 {
-                    continue;
-                }
-                let idx = linear_index(x, z, dim);
-                if contribution > best_contribution[idx] {
-                    best_contribution[idx] = contribution;
-                    // Cone crater floors are Basalt (dark pit); flanks are Tuff. Shields all Basalt.
-                    let r = isqrt(dx * dx + dz * dz);
-                    let material = match vent.class {
-                        SlopeClass::Cone if r <= geom.caldera_r => MaterialId::Basalt,
-                        SlopeClass::Cone => MaterialId::Tuff,
-                        SlopeClass::Shield => MaterialId::Basalt,
-                    };
-                    mask[idx] = Some(material);
-                }
+    // M3 (W-17): per-cell scatter-to-mask par_iter (immutable read over vents, write to disjoint output).
+    // Each cell computes the max-contribution vent and derives material independently.
+    let mask: Vec<Option<MaterialId>> = (0..n).into_par_iter().map(|idx| {
+        let x = idx % dim;
+        let z = idx / dim;
+        let mut best_contribution = 0i64;
+        let mut best_material = None;
+
+        for vent in vents {
+            let dx = x as i64 - vent.x;
+            let dz = z as i64 - vent.z;
+            let contribution = vent_height_at(vent, dx, dz, &geom);
+            if contribution > best_contribution {
+                best_contribution = contribution;
+                // Cone crater floors are Basalt (dark pit); flanks are Tuff. Shields all Basalt.
+                let r = isqrt(dx * dx + dz * dz);
+                let material = match vent.class {
+                    SlopeClass::Cone if r <= geom.caldera_r => MaterialId::Basalt,
+                    SlopeClass::Cone => MaterialId::Tuff,
+                    SlopeClass::Shield => MaterialId::Basalt,
+                };
+                best_material = Some(material);
             }
         }
-    }
+        best_material
+    }).collect();
     mask
 }
 

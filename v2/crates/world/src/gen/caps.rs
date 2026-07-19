@@ -1173,17 +1173,27 @@ pub fn classify_and_caps_staged_with_callback(
         cb(11); // Classify = 11
     }
 
-    for z in 0..dim {
-        for x in 0..dim {
-            let idx = z * dim + x;
+    use rayon::prelude::*;
+    // M3 (W-17): par_iter classify loop — per-cell scatter into final_biome, caps, surface_material.
+    // Reads immutable post_deneedle_height (immutable gather for west-neighbor), erosion, masks, etc.
+    #[derive(Clone)]
+    struct ClassifyResult {
+        biome: FinalBiome,
+        cap: i64,
+        material: u8,
+    }
 
-            if submerged[idx] {
-                final_biome.push(FinalBiome::Ocean);
-                surface_material.push(MaterialId::Water as u8);
-                caps[idx] = 0;
-                continue;
+    let classify_results: Vec<ClassifyResult> = (0..n).into_par_iter().map(|idx| {
+        let z = idx / dim;
+        let x = idx % dim;
+
+        if submerged[idx] {
+            ClassifyResult {
+                biome: FinalBiome::Ocean,
+                cap: 0,
+                material: MaterialId::Water as u8,
             }
-
+        } else {
             let h_cell = post_deneedle_height[idx];
             let x_src = (x as i64 - WIND_DX).max(0) as usize;
             let h_west = post_deneedle_height[z * dim + x_src];
@@ -1203,8 +1213,6 @@ pub fn classify_and_caps_staged_with_callback(
             });
 
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
-            final_biome.push(final_b);
-
             let cap_base = caps_from(final_b, moisture, material);
             let cap_final = if enable_patchiness {
                 let patch_scale = patchiness_at(x as i64, z as i64, seed, hmax);
@@ -1212,7 +1220,6 @@ pub fn classify_and_caps_staged_with_callback(
             } else {
                 cap_base
             };
-            caps[idx] = cap_final;
 
             // Presentation byte emission — a fixed priority cascade (plan §W-12):
             // (1) Bedrock-outcrop rule (W-10) → highest priority, steep cells.
@@ -1244,8 +1251,19 @@ pub fn classify_and_caps_staged_with_callback(
                 }
             }
 
-            surface_material.push(presentation_byte);
+            ClassifyResult {
+                biome: final_b,
+                cap: cap_final,
+                material: presentation_byte,
+            }
         }
+    }).collect();
+
+    // Write results into output vectors in order
+    for (idx, result) in classify_results.into_iter().enumerate() {
+        final_biome.push(result.biome);
+        surface_material.push(result.material);
+        caps[idx] = result.cap;
     }
 
     let world_fields = WorldFields { dim, height: post_deneedle_height, final_biome, caps, surface_material };

@@ -910,19 +910,22 @@ pub fn erode_with_tectonics(
     enable_erosion: bool,
     erosion_strength: i64,
 ) -> ErosionState {
+    use rayon::prelude::*;
+
     let n = dim * dim;
-    let mut height = vec![0i64; n];
     // W-18: when base=false, initialize with FLAT_DATUM; when base=true, use fBm (byte-identical default)
     let base_height = if enable_base { None } else { Some(flat_datum(hmax)) };
-    for z in 0..dim {
-        for x in 0..dim {
-            height[linear_index(x, z, dim)] = if let Some(datum) = base_height {
-                datum
-            } else {
-                height_at(x as i64, z as i64, seed, hmax)
-            };
+    // M3 (W-17): par_iter height fBm fill loop — pure map-into-slice, byte-safe.
+    let height: Vec<i64> = (0..n).into_par_iter().map(|idx| {
+        if let Some(datum) = base_height {
+            datum
+        } else {
+            let x = idx % dim;
+            let z = idx / dim;
+            height_at(x as i64, z as i64, seed, hmax)
         }
-    }
+    }).collect();
+    let mut height = height;
 
     let mut resistance = resistance_field(dim, seed, hmax);
 

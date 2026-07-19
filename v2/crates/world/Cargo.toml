@@ -7,3 +7,4 @@ description = "animata v2 world backend — WorldView CPU heightmap (M1)"
 
 [dependencies]
 sim-core.workspace = true
+rayon.workspace = true
