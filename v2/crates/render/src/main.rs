@@ -615,6 +615,9 @@ async fn main() {
         explicit_landform_flags: explicit_flags,
     };
 
+    // W-15b: Compute effective height scale for terrain and creatures (default ×1.0)
+    let effective_height_scale = cli_args.height_scale_override.unwrap_or(hex::HEIGHT_SCALE);
+
     // U-2: For harnesses (screenshot/bench/screenshot-ui), build world inline before their loops
     // For app path, we'll spawn a worker thread and initialize from recv
     let is_harness = cli_args.screenshot.is_some() || cli_args.bench || cli_args.screenshot_ui.is_some();
@@ -622,7 +625,7 @@ async fn main() {
     let (mut hex_terrain_chunks, mut cube_terrain_chunks, mut world_dim, mut world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
         // Harnesses: build_world inline (synchronous, no loader)
         let mut on_stage = |_stage: Stage| true;  // No-op callback for harnesses
-        let built = world_builder::build_world(&spec, on_stage).expect("build_world failed");
+        let built = world_builder::build_world(&spec, on_stage, cli_args.height_scale_override).expect("build_world failed");
         let world_dim = built.dim;
         let world = built.world;
         let hex_chunks = convert_raw_chunks(built.hex);
@@ -666,7 +669,7 @@ async fn main() {
     let (span_x, _) = hex::hex_center(world_dim, 0);
     let (_, span_z) = hex::hex_center(0, world_dim);
     let world_span = span_x.max(span_z).max(1.0);
-    let center = Vec3::new(span_x * 0.5, hex::HEIGHT_SCALE * cli::HMAX as f32 * 0.5, span_z * 0.5);
+    let center = Vec3::new(span_x * 0.5, effective_height_scale * cli::HMAX as f32 * 0.5, span_z * 0.5);
     let mut camera = IsoCam::new(center, 0.0, world_span * 1.5);
 
     // R-8: standalone mode spawns NO sim worker — `handle` stays `None` for the run, so `snap` below
@@ -721,6 +724,7 @@ async fn main() {
         let load_state = LoadState::new(cli_args.seed);
         let spec_worker = spec.clone();
         let slow_load_flag = cli_args.slow_load;
+        let height_scale = cli_args.height_scale_override;
 
         let (tx, rx) = mpsc::channel();
 
@@ -734,7 +738,7 @@ async fn main() {
                 }
                 true
             };
-            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage) {
+            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage, height_scale) {
                 load_clone.mark_done();
                 let _ = tx.send(built);
             }
@@ -764,6 +768,7 @@ async fn main() {
             harness_regen_load_state = Some(load_state.clone());
             let (tx, rx) = mpsc::channel();
             let slow_load_flag = cli_args.slow_load;  // Capture for thread
+            let height_scale = cli_args.height_scale_override;  // Capture for thread
             let _ = std::thread::spawn(move || {
                 let load_clone = load_state.clone();
                 let mut on_stage = |stage: Stage| {
@@ -777,7 +782,7 @@ async fn main() {
                     }
                     true
                 };
-                if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
                     let _ = tx.send(built);
                 }
             });
@@ -879,7 +884,7 @@ async fn main() {
                     cli_args.retained,
                 );
 
-                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
                 set_default_camera();
                 ui::draw();  // Render the chip UI
 
@@ -960,7 +965,7 @@ async fn main() {
                     cli_args.retained,
                 );
 
-                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
                 set_default_camera();
 
                 // R-13 F-B5: Capture on final frame
@@ -1010,7 +1015,7 @@ async fn main() {
                 cli_args.retained,
             );
 
-            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
             set_default_camera();
 
             // Draw UI panels (including minimap)
@@ -1119,7 +1124,7 @@ async fn main() {
                 cli_args.retained,
             );
 
-            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
             set_default_camera();
 
             next_frame().await;
@@ -1186,7 +1191,7 @@ async fn main() {
             chunk_count = draw_stats.chunks_drawn;
             vert_count = draw_stats.verts_drawn;
 
-            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+            creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
             set_default_camera();
 
             let cpu_elapsed = cpu_start.elapsed().as_secs_f32() * 1000.0;
@@ -1267,7 +1272,7 @@ async fn main() {
                     let (span_x, _) = hex::hex_center(world_dim, 0);
                     let (_, span_z) = hex::hex_center(0, world_dim);
                     let world_span = span_x.max(span_z).max(1.0);
-                    let center = Vec3::new(span_x * 0.5, hex::HEIGHT_SCALE * cli::HMAX as f32 * 0.5, span_z * 0.5);
+                    let center = Vec3::new(span_x * 0.5, effective_height_scale * cli::HMAX as f32 * 0.5, span_z * 0.5);
                     camera = IsoCam::new(center, 0.0, world_span * 1.5);
 
                     // U-2/D5: GPU upload if --retained (GL-thread-only work)
@@ -1458,6 +1463,7 @@ async fn main() {
                                 regen_load_state = Some(load_state.clone());
                                 let (tx, rx) = mpsc::channel();
                                 let slow_load_flag = cli_args.slow_load;  // Capture for thread
+                                let height_scale = cli_args.height_scale_override;  // Capture for thread
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
@@ -1471,7 +1477,7 @@ async fn main() {
                                         }
                                         true
                                     };
-                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
                                         let _ = tx.send(built);
                                     }
                                 });
@@ -1492,6 +1498,7 @@ async fn main() {
                                 regen_load_state = Some(load_state.clone());
                                 let (tx, rx) = mpsc::channel();
                                 let slow_load_flag = cli_args.slow_load;
+                                let height_scale = cli_args.height_scale_override;
                                 let _ = std::thread::spawn(move || {
                                     let load_clone = load_state.clone();
                                     let mut on_stage = |stage: Stage| {
@@ -1504,7 +1511,7 @@ async fn main() {
                                         }
                                         true
                                     };
-                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage) {
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
                                         let _ = tx.send(built);
                                     }
                                 });
@@ -1563,7 +1570,7 @@ async fn main() {
                     cli_args.retained,
                 );
 
-                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain);
+                creatures::render_creatures_lod(&snap, &camera, world.as_ref(), use_cube_terrain, effective_height_scale);
                 set_default_camera();
 
                 ui::draw();

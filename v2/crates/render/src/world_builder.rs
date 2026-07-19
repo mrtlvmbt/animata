@@ -25,9 +25,10 @@ use world::ProcgenWorld;
 /// This is the single, unified build path for all contexts (app worker + harnesses).
 /// The callback is called at stage boundaries; it receives Stage and can inject delays
 /// (e.g., --slow-load). Callback returns true to continue, false to abort (not used yet).
+/// `height_scale_override` is an optional multiplier for the height→prism mapping (default ×1.0).
 ///
 /// Returns a Send-safe BuiltWorld with OUTPUT dim (not the input spec.dim_request).
-pub fn build_world<F>(spec: &WorldSpec, mut on_stage: F) -> Result<BuiltWorld, BuildError>
+pub fn build_world<F>(spec: &WorldSpec, mut on_stage: F, height_scale_override: Option<f32>) -> Result<BuiltWorld, BuildError>
 where
     F: FnMut(Stage) -> bool,
 {
@@ -100,8 +101,8 @@ where
     on_stage(Stage::BuildMeshes);
 
     // Step 4: Build hex and cube terrain (raw buffers; no GPU calls here)
-    let hex = build_raw_hex_terrain(effective_dim, world.as_ref(), spec.seed, spec.bare_mode)?;
-    let cube = build_raw_cube_terrain(effective_dim, world.as_ref(), spec.seed, spec.bare_mode)?;
+    let hex = build_raw_hex_terrain(effective_dim, world.as_ref(), spec.seed, spec.bare_mode, height_scale_override)?;
+    let cube = build_raw_cube_terrain(effective_dim, world.as_ref(), spec.seed, spec.bare_mode, height_scale_override)?;
 
     // D4: Done
     on_stage(Stage::Done);

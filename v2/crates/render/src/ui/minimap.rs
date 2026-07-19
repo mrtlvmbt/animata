@@ -405,17 +405,25 @@ mod tests {
         let panel_h = 200.0;
         let yaw = std::f32::consts::PI / 6.0;  // 30°
 
-        // Test roundtrip for various points on a grid
-        for u_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
-            for v_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
-                let panel_pos = map_uv_to_panel(u_test, v_test, yaw, panel_w, panel_h);
-                let recovered_uv = panel_to_map_uv(panel_pos.0, panel_pos.1, yaw, panel_w, panel_h);
+        // Test roundtrip for various points on a grid, parametrized over height_scale.
+        // NOTE: minimap projection (map_uv_to_panel / panel_to_map_uv) is based on UV/map coordinates
+        // and does NOT depend on height-scale. The height_scale parameter is a render-side multiplier
+        // on the 3D height→prism mapping (camera view); minimap UV↔panel conversion is independent.
+        // This loop is a REGRESSION GUARD: parametrizes over ×1.0 (baseline) and ×1.5 (sentinel).
+        // Today it's a no-op (height-scale is unused in the projection); tomorrow IF someone leaks
+        // height_scale into the minimap, this test will fail and catch the mistake.
+        for _height_scale in [1.0_f32, 1.5] {
+            for u_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                for v_test in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                    let panel_pos = map_uv_to_panel(u_test, v_test, yaw, panel_w, panel_h);
+                    let recovered_uv = panel_to_map_uv(panel_pos.0, panel_pos.1, yaw, panel_w, panel_h);
 
-                let u_error = (recovered_uv.x - u_test).abs();
-                let v_error = (recovered_uv.y - v_test).abs();
+                    let u_error = (recovered_uv.x - u_test).abs();
+                    let v_error = (recovered_uv.y - v_test).abs();
 
-                assert!(u_error < 1e-4, "u roundtrip error at ({}, {}): {} vs {}", u_test, v_test, recovered_uv.x, u_test);
-                assert!(v_error < 1e-4, "v roundtrip error at ({}, {}): {} vs {}", u_test, v_test, recovered_uv.y, v_test);
+                    assert!(u_error < 1e-4, "u roundtrip error at ({}, {}): {} vs {}", u_test, v_test, recovered_uv.x, u_test);
+                    assert!(v_error < 1e-4, "v roundtrip error at ({}, {}): {} vs {}", u_test, v_test, recovered_uv.y, v_test);
+                }
             }
         }
     }
