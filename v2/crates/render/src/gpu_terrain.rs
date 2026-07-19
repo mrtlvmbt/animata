@@ -7,8 +7,8 @@
 
 use macroquad::prelude::*;
 use macroquad::miniquad::{
-    Bindings, BlendFactor, BlendState, BlendValue, BufferSource, BufferType, BufferUsage,
-    Comparison, CullFace, Equation, FrontFaceOrder, Pipeline, PipelineParams,
+    Bindings, BufferSource, BufferType, BufferUsage,
+    Comparison, CullFace, FrontFaceOrder, Pipeline, PipelineParams,
     RenderingBackend, ShaderMeta, ShaderSource, UniformBlockLayout, UniformDesc, UniformType,
     VertexAttribute, VertexFormat,
 };
