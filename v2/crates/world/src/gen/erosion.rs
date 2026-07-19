@@ -764,7 +764,7 @@ pub fn ridge_delta_compute_modulated(
     // Apply ridge height with crest modulation:
     // delta = (RIDGE_AMP * mountainness * (2*r - MAX) * crest_mod) / (SCALE * 128)
     // ridged is already in [0, 32768], so (2*ridged - MAX) ranges [-32768, +32768]
-    // crest_mod ∈ [51, 166], representing 40%..130% modulation
+    // crest_mod ∈ [115, 141], representing 90%..110% modulation (W-15a narrowed to keep delta step <4 units)
     // Single last division: (num * fold * crest_mod) / (den * SCALE * 128)
     let fold = 2 * ridged - MAX;
     let ridge_delta = (ridge_amp_num * mountainness * fold * crest_mod) / (ridge_amp_den * RIDGE_SCALE * 128);
