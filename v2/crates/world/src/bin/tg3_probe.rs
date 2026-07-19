@@ -128,46 +128,6 @@ fn generate_uplift(dim: usize, shape: &str, _seed: u64, roughness_seed: u64) -> 
 // Hexagon Grid Utilities (D6 flat-top axial neighbors)
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-/// Get D6 neighbors (flat-top hexagon axial coordinates) for a cell in row-major grid
-/// For a flat-top hex at (x, z):
-///   - Even rows (z even): neighbors at offsets (±1,0), (0,±1), (±1,±1) in D6 reduction
-///   - Odd rows (z odd): similar but shifted
-/// We use a simple linear indexing scheme (hex_dim × hex_dim grid)
-fn get_hex_d6_neighbors(x: usize, z: usize, hex_dim: usize) -> Vec<(usize, usize)> {
-    let mut neighbors = Vec::new();
-    // D6 offsets for flat-top hexagons (row-major, even/odd row adjusted)
-    let offsets = if z % 2 == 0 {
-        // Even row
-        vec![
-            (1i64, 0i64),   // E
-            (-1i64, 0i64),  // W
-            (0i64, 1i64),   // SE
-            (0i64, -1i64),  // NW
-            (1i64, 1i64),   // SW (adjusted for even row)
-            (1i64, -1i64),  // NE (adjusted for even row)
-        ]
-    } else {
-        // Odd row
-        vec![
-            (1i64, 0i64),   // E
-            (-1i64, 0i64),  // W
-            (0i64, 1i64),   // SE
-            (0i64, -1i64),  // NW
-            (-1i64, 1i64),  // SW (adjusted for odd row)
-            (-1i64, -1i64), // NE (adjusted for odd row)
-        ]
-    };
-
-    for (dx, dz) in offsets {
-        let nx = (x as i64 + dx) as usize;
-        let nz = (z as i64 + dz) as usize;
-        if nx < hex_dim && nz < hex_dim {
-            neighbors.push((nx, nz));
-        }
-    }
-    neighbors
-}
-
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Metric Computation
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -472,14 +432,12 @@ fn compute_drainage_density_hex(hex_count: usize, hex_height: &[i64], hex_coords
         let mut max_drop = 0i64;
         let mut lowest_neighbor = None;
         let mut min_height = i64::MAX;
-        let mut neighbor_count = 0i32;
 
         // Check D6 neighbors
         for &(dq, dr) in &d6_offsets {
             let nq = q + dq;
             let nr = r + dr;
             if let Some(&nidx) = coord_to_idx.get(&(nq, nr)) {
-                neighbor_count += 1;
                 let nh = hex_height[nidx];
                 let drop = h - nh;
 
