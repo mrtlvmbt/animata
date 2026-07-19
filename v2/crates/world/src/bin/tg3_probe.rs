@@ -60,7 +60,7 @@ const ROUGHNESS_SEEDS: &[u64] = &[0x1234_5678_9ABC_DEF0, 0xFEDC_BA98_7654_3210];
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 /// Generate synthetic uplift field with selected shape
-fn generate_uplift(dim: usize, shape: &str, seed: u64, roughness_seed: u64) -> Vec<i64> {
+fn generate_uplift(dim: usize, shape: &str, _seed: u64, roughness_seed: u64) -> Vec<i64> {
     let mut height = vec![0i64; dim * dim];
     let hmax = HMAX;
     let center = (dim as i64) / 2;
@@ -314,7 +314,7 @@ fn compute_anti_spike_test(dim: usize, height: &[i64]) -> bool {
 /// Simplified version: checks if structure survives binning by comparing relief preservation
 fn compute_resample_fidelity(
     dim: usize,
-    area_internal: &[i64],
+    _area_internal: &[i64],
     height_internal: &[i64],
     hex_grid_size: usize,
 ) -> f64 {
@@ -436,6 +436,7 @@ fn write_ppm(path: &str, dim: usize, rgb: &[u8]) -> std::io::Result<()> {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct ProbeResult {
     dim: usize,
     shape: String,
@@ -490,7 +491,7 @@ fn main() {
 
                     let height = &erosion_result.height;
                     let area = &erosion_result.drainage.area;
-                    let downstream = &erosion_result.drainage.downstream;
+                    let _downstream = &erosion_result.drainage.downstream;
 
                     // Compute metrics
                     let drainage_density = compute_drainage_density(tier_dim, area);

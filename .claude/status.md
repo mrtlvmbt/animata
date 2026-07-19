@@ -1,5 +1,5 @@
-task: #502 W-15b wire --height-scale
-phase: F1 critical fix applied + FINAL review in progress
-blocked_on: code-critic FINAL (agent ad447307e8701451f) + ci-report.sh (run #29661467332)
-next: critic PASS → post to PR; CI green → STATUS done
-updated: 2026-07-19 00:03
+task: #516 terragen-v3 Probe: synthetic uplift+incision dendritic-structure gate
+phase: code complete + CI pending
+blocked_on: CI run (test/bin-only probe, should be <60s local, CI timing unknown)
+next: review CI output → if green, create PR on terragen-v3 base and pre-ready with code-critic
+updated: 2026-07-19 18:45
