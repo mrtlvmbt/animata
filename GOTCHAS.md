@@ -166,3 +166,5 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   `git diff <that-sha>..<head>` lists ONLY gated paths (status.md/docs/.claude). If it does, the world content
   is byte-identical and validated; if not, force a fresh full run (push a no-op touching a world file, or
   re-dispatch). Never merge sim-relevant code on a skipped-sim run without this identical-tree proof.
+
+- **A perf pass parallelizes a gen loop and the golden checksum moves** → Cause: RNG-consumption/topo-order/budget-order is load-bearing in five serial sections (Priority-Flood heap tie-break, Kahn FIFO accumulation, aeolian deposit_roll RNG iteration order, beach budget counter, and macro-loop iteration structures for erosion/glacial/coastal) → What to do: grep `DO NOT PARALLELIZE (W-17)` before touching gen loops; those five categories stay serial by design. Any perf pass that parallelizes one of those sections will produce different byte output due to changed ordering — the fix is to revert to serial or restructure around the order-critical section.
