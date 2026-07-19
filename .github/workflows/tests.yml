@@ -29,19 +29,21 @@ jobs:
         id: filter
         run: |
           # Get the base for comparison.
-          # For PR events, use the pull request base SHA directly (more reliable on first push).
-          # For push events, use the previous commit (event.before).
+          # For push events (the only trigger this workflow has), use event.before.
+          # If event.before is the zero-SHA (new branch first push), compute the merge-base.
           # Fail-closed: if anything is missing/broken, assume sim-relevant.
-          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
-            BASE="${{ github.event.pull_request.base.sha }}"
-          elif [ -n "${{ github.base_ref }}" ]; then
-            BASE="origin/${{ github.base_ref }}"
-          else
-            BASE="${{ github.event.before }}"
+          BASE="${{ github.event.before }}"
+
+          # If BASE is the zero-SHA (first push of new branch), compute merge-base to origin/main
+          if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            if ! BASE=$(git merge-base HEAD origin/main 2>/dev/null); then
+              echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
-          # If BASE is missing/empty (initial commit), treat as sim-relevant
-          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+          # If BASE is still empty or missing (initial commit on repo), treat as sim-relevant
+          if [ -z "$BASE" ]; then
             echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
