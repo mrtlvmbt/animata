@@ -4,9 +4,9 @@
 
 use world::gen::caps::{
     classify_and_caps, classify_and_caps_staged, landform_amplitudes, measure_needles, measure_max_local_step,
-    measure_de_needle_clip_count, count_spikes_exceeding, AMPLITUDE_FLOOR,
+    count_spikes_exceeding, AMPLITUDE_FLOOR,
 };
-use world::gen::erosion::{de_needle_pass, talus_step_final};
+use world::gen::erosion::talus_step_final;
 use world::gen::LandformFlags;
 use std::io::Write;
 

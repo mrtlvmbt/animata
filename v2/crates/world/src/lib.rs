@@ -212,7 +212,7 @@ impl ProcgenWorld {
         enable_beaches: bool,
         erosion_strength: i64,
         glacial_strength: i64,
-        mut progress_callback: Option<Box<dyn FnMut(u8)>>,
+        progress_callback: Option<Box<dyn FnMut(u8)>>,
     ) -> Self {
         // W-7 gate: patchiness defaults OFF for acceptance corridors (homogeneous baseline).
         // Specific scenarios (map-gen, visualization) can opt-in by calling with enable_patchiness=true.
@@ -312,7 +312,7 @@ impl ProcgenWorld {
         // (each prod call site disables all landforms, preserving acceptance-corridor economy).
         let any_landform = enable_tectonics || enable_aeolian || enable_volcanic || enable_glacial || enable_coastal || enable_ridges || enable_beaches;
         let solid_count = fields.height.iter().filter(|&&h| h >= solid_level).count();
-        let solid_frac = solid_count as f64 / n as f64;
+        let _solid_frac = solid_count as f64 / n as f64;
         let (band_min, band_max, band_desc) = if any_landform {
             (0.15, 0.75, "landform-on (15–75%)")
         } else {
