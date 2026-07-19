@@ -232,6 +232,7 @@ fn cliff_iteration(dim: usize, height: &[i64], sea_level: i64, resistance: &[i64
 /// height (every cell `<=` its input value — single-signed, monotone, module doc).
 fn cliff_retreat_pass(dim: usize, mut height: Vec<i64>, sea_level: i64, resistance: &[i64]) -> Vec<i64> {
     let n = dim * dim;
+    // DO NOT PARALLELIZE (W-17): coastal iteration order is load-bearing (state accumulation)
     for _ in 0..N_CLIFF_ITERATIONS {
         let delta = cliff_iteration(dim, &height, sea_level, resistance);
         for v in 0..n {
@@ -332,13 +333,13 @@ mod tests {
     const DIM: usize = 64;
 
     fn base_fixture() -> Vec<i64> {
-        erode(SEED, HMAX, DIM, false, false).height
+        erode(SEED, HMAX, DIM, true, false, false, false, true, 100).height
     }
 
     #[test]
     fn sea_level_is_deterministic_and_bounded_away_from_extremes_across_seeds() {
         for seed in [SEED, SEED ^ 1, SEED ^ 2, SEED ^ 0xDEAD_BEEF] {
-            let height = erode(seed, HMAX, DIM, false, false).height;
+            let height = erode(seed, HMAX, DIM, true, false, false, false, true, 100).height;
             let a = sea_level(&height);
             let b = sea_level(&height);
             assert_eq!(a, b, "sea_level must be byte-identical across repeated calls");

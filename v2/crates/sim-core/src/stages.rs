@@ -298,7 +298,7 @@ pub fn stage_metabolism(
         } else {
             0
         };
-        let mut cost = base_cost + photo_cost + aerobe_cost;
+        let cost = base_cost + photo_cost + aerobe_cost;
         // Can only dissipate what it has — energy never goes negative; death (energy 0) is in stage 7.
         let actual = cost.min(e.0.max(0));
         e.0 -= actual;
@@ -699,6 +699,7 @@ pub fn stage_interactions(
         layer: usize,
         demand: i64,
         bonded: bool,      // ENV-0a'-a1: true if Σ module_cell_count > 1 (multicellular body)
+        #[allow(dead_code)]
         is_footprint: bool,  // EXT-0a/R30-1.1: true if this is not the entity's own anchor contestant
     }
     let mut contestants: Vec<Contestant> = q.iter().flat_map(|(e, pos, _g, ph, _)| {
@@ -1206,7 +1207,7 @@ pub fn stage_predation(
                 { wc.birth_death_iters += 1; }
 
                 // Read entity's energy and body size.
-                let (energy_val, body_size, refuge_mass) = match q.get(entity) {
+                let (energy_val, _body_size, refuge_mass) = match q.get(entity) {
                     Ok((_, _, energy, _, ph)) => {
                         let body = ph.graph.module_cell_count.iter().map(|&c| c as i64).sum::<i64>().max(1);
                         let refuge_mass = if econ.division_of_labor {
