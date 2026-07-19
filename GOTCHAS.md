@@ -140,3 +140,17 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   `cargo build --release` of the render bin before claiming green; PM intake of a two-lane slice
   must rebuild the render bin even when CI is 4/4 — CI proves the world lane only.
 - **Critic flags "signature mismatch / won't compile" on a branch diff, but the branch's CI compiles green** → read-only critic agents resolve file reads against the PM checkout's WORKING TREE (main-based), while the diff targets the integration branch — the "current code" they cite is an older reality (three false-FAIL rounds on one day: W-18-HF, CI-1 F2, W-16 coder round) → Give critics branch-extracted file contents (`git show <branch>:<path>` dumps) or an explicit caveat "the working tree is OLDER than the diff — trust the patch hunks"; a green compile-check/CI on the branch empirically refutes any cannot-compile finding. Coder-side: a critic verdict you believe is tree-desynced still gets a RE-RUN with corrected inputs, never a self-declared override.
+
+- **A coder-authored PR is merged and it silently drags the whole integration stack into protected `main`** →
+  the PR's branch was cut from the integration head (`render-r12-terragen-preview`), but its **base was set to
+  `main`** (coder mistake), so the squash diff is `merge-base(branch, main)..branch` = the ENTIRE unmerged
+  integration render+world stack, not the one slice (observed: W-15b PR #504 → +11662/−712 across ~120 files
+  onto protected `main`, a D2 violation). ROOT of the *merge*: PM ran `gh pr merge` WITHOUT first checking
+  `baseRefName` (the R-14-era "PM checks baseRefName pre-merge" rule was skipped). → **Before EVERY `gh pr
+  merge`, verify `gh pr view <n> --json baseRefName` == the intended base** (for the hex-diorama program that is
+  ALWAYS `render-r12-terragen-preview`, NEVER `main`); dispatch prompts must pin the PR base explicitly and the
+  coder must not default it. RECOVERY if it already landed: (1) `git revert <squash-sha>` on a branch off `main`
+  → PR base=main → admin-merge (the revert tree is byte-identical to the pre-mismerge `main`, verify with
+  `gh api compare/<prev>...main` → 0 files changed); (2) re-land the real slice via a fresh PR whose base IS the
+  integration branch, cut from the SAME verified sha (it stays reachable by sha even after `--delete-branch`).
+  No work is lost and sim goldens are untouched (landforms default-off).
