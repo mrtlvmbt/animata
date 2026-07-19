@@ -176,6 +176,11 @@ fn get_hex_d6_neighbors(x: usize, z: usize, hex_dim: usize) -> Vec<(usize, usize
 /// Metric #1: Drainage density — count channels (flow accumulation ≥ threshold) per 100 cells
 fn compute_drainage_density(dim: usize, area: &[i64]) -> f64 {
     let threshold = (dim as i64 * dim as i64 / 13000).max(CHANNEL_THRESHOLD_BASE);
+    compute_drainage_density_with_threshold(dim, area, threshold)
+}
+
+/// Metric #1 (custom threshold): Drainage density with explicit threshold (used for #5 resample fidelity)
+fn compute_drainage_density_with_threshold(dim: usize, area: &[i64], threshold: i64) -> f64 {
     let channel_cells: i64 = area.iter().filter(|&&a| a >= threshold).count() as i64;
     (channel_cells as f64 * 100.0) / (dim * dim) as f64
 }
@@ -381,7 +386,7 @@ fn compute_anti_spike_test_synthetic(dim: usize) -> bool {
             let idx = z * dim + x;
             if !is_protected[idx] && height[idx] > 25 {
                 // Check if this is isolated (surrounded by much lower terrain)
-                let mut max_neighbor = height[idx];
+                let mut max_neighbor = i64::MIN;
                 for dz in -1i64..=1i64 {
                     for dx in -1i64..=1i64 {
                         if dx == 0 && dz == 0 {
@@ -439,8 +444,9 @@ fn compute_anti_spike_test_synthetic(dim: usize) -> bool {
 }
 
 /// Compute drainage density on a hex grid using D6 flow accumulation
-/// Returns channels-per-100-cells (same units as raster version)
-fn compute_drainage_density_hex(hex_dim: usize, hex_height: &[i64], pooled_cell_count: i64, threshold_raster: i64) -> i64 {
+/// Returns channels-per-100-RASTER-CELLS (same units as raster version for direct comparison)
+/// threshold_cells: threshold in raster-cell units for channel detection
+fn compute_drainage_density_hex(hex_dim: usize, hex_height: &[i64], pooled_cell_count: i64, threshold_cells: i64) -> i64 {
     // D6 steepest-descent flow: each hex flows to lowest neighbor
     let mut area = vec![0i64; hex_dim * hex_dim];
 
@@ -499,12 +505,13 @@ fn compute_drainage_density_hex(hex_dim: usize, hex_height: &[i64], pooled_cell_
         }
     }
 
-    // Count channel hexes: accumulated area ≥ SAME threshold (in raster-cell units)
-    let channel_hexes: i64 = area.iter().filter(|&&a| a >= threshold_raster).count() as i64;
+    // Count channel hexes: accumulated area ≥ threshold (in raster-cell units)
+    let channel_hexes: i64 = area.iter().filter(|&&a| a >= threshold_cells).count() as i64;
 
-    // Density = channels per 100 hex cells, normalized to raster-cell area
-    // Total area = hex_dim² × pooled_cell_count raster cells
-    (channel_hexes * 100) / (hex_dim as i64 * hex_dim as i64)
+    // Density = channels per 100 RASTER cells (same denominator as raster version)
+    // Total raster cells = hex_dim² × pooled_cell_count
+    let total_raster_cells = hex_dim as i64 * hex_dim as i64 * pooled_cell_count;
+    (channel_hexes * 100) / total_raster_cells
 }
 
 /// Compute valley relief on hex grid using D6 neighborhoods
@@ -572,19 +579,17 @@ fn compute_valley_relief_hex(hex_dim: usize, hex_height: &[i64]) -> (i64, i64) {
 }
 
 /// Metric #5: Resample fidelity — area-normalized metric retention through hex pooling
-/// Computes #1 (drainage density) and #3 (valley relief) PRE and POST resample
+/// Computes #1 (drainage density) and #3 (valley relief) PRE and POST resample using COMMON_THRESHOLD
 /// PASS iff: for each metric m_post × 100 ≥ m_pre × 90
+/// COMMON_THRESHOLD ensures both grids measure comparable channel populations (same upstream area threshold)
+/// COMMON_THRESHOLD = max(CHANNEL_THRESHOLD(dim), pooled_cells_per_hex) ≈ 42 raster-cells at 43:1 ratio
 fn compute_resample_fidelity(
     dim: usize,
     area_internal: &[i64],
     height_internal: &[i64],
     hex_grid_size: usize,
 ) -> (i64, i64, i64, i64, bool) {
-    // Pre-resample: compute #1 and #3 on internal raster
-    let pre_dd = compute_drainage_density(dim, area_internal);
-    let (pre_p10, pre_p90) = compute_valley_relief(dim, height_internal);
-
-    // Compute threshold in raster-cell units (used for both pre and post)
+    // Compute standard threshold for this dimension (used for metric #1)
     let threshold_raster = (dim as i64 * dim as i64 / 13000).max(CHANNEL_THRESHOLD_BASE);
 
     // Simulate hex pooling via mean binning
@@ -595,6 +600,14 @@ fn compute_resample_fidelity(
 
     let hex_dim = (dim + bin_size - 1) / bin_size;
     let pooled_cell_count = (bin_size * bin_size) as i64;
+
+    // COMMON_THRESHOLD: max(raster_threshold, pooled_cells_per_hex)
+    // This makes both grids count channels with upstream area ≥ same raster-cell threshold
+    let common_threshold = threshold_raster.max(pooled_cell_count);
+
+    // Pre-resample: compute #1 and #3 on internal raster using COMMON_THRESHOLD
+    let pre_dd = compute_drainage_density_with_threshold(dim, area_internal, common_threshold);
+    let (pre_p10, pre_p90) = compute_valley_relief(dim, height_internal);
 
     let mut hex_height = Vec::new();
     for hz in 0..hex_dim {
@@ -621,12 +634,13 @@ fn compute_resample_fidelity(
         return (0, 0, 0, 0, true);
     }
 
-    // Post-resample: compute #1 and #3 on hex grid using D6
-    let post_dd = compute_drainage_density_hex(hex_dim, &hex_height, pooled_cell_count, threshold_raster);
+    // Post-resample: compute #1 and #3 on hex grid using D6 with COMMON_THRESHOLD
+    // Density is normalized per RASTER-CELL AREA: (channels / total_raster_cells) × 100
+    let post_dd = compute_drainage_density_hex(hex_dim, &hex_height, pooled_cell_count, common_threshold);
     let (post_p10, post_p90) = compute_valley_relief_hex(hex_dim, &hex_height);
 
     // PASS iff: m_post × 100 ≥ m_pre × 90 for BOTH metrics
-    // Convert pre_dd (f64) to i64 × 100 for comparison
+    // Both pre_dd and post_dd are already in density-per-100-raster-cells units
     let pre_dd_i64 = (pre_dd * 100.0) as i64;
     let dd_pass = post_dd * 100 >= pre_dd_i64 * 90;
 
@@ -636,6 +650,9 @@ fn compute_resample_fidelity(
     let fidelity_pass = dd_pass && vr_pass;
 
     // Report pre/post metrics as i64 (convert pre_dd)
+    // DOCUMENTED RESOLUTION: This comparison uses COMMON_THRESHOLD on both grids to ensure
+    // scale-comparable channel populations. Metric #1 (per-raster gate) uses the original
+    // CHANNEL_THRESHOLD alone. Only metric #5 comparison uses COMMON_THRESHOLD on both sides.
     (pre_dd_i64, post_dd, pre_p10, post_p10, fidelity_pass)
 }
 
