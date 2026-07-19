@@ -633,8 +633,8 @@ fn compute_resample_fidelity(
 
     // PASS iff: m_post × 100 ≥ m_pre × 90 for BOTH metrics
     // Both pre_dd and post_dd are already in density-per-100-raster-cells units
-    let pre_dd_i64 = (pre_dd * 100.0) as i64;
-    let dd_pass = post_dd * 100 >= pre_dd_i64 * 90;
+    let pre_dd_i64 = (pre_dd * 100.0) as i64;  // For printing (per-10k-cells)
+    let dd_pass = post_dd * 100 >= (pre_dd * 90.0) as i64;  // For comparison (per-100-cells)
 
     let vr_pass = post_p10 * 100 >= (pre_p10 * 90).max(1) &&
                   post_p90 * 100 >= (pre_p90 * 90).max(1);
