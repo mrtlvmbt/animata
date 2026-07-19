@@ -48,6 +48,7 @@ pub mod glacial;
 pub mod height;
 pub mod material;
 pub mod moisture;
+pub mod orogeny;
 pub mod plate;
 pub mod tectonics;
 pub mod volcanic;
