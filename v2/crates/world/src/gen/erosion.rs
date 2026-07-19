@@ -212,7 +212,6 @@ const RIDGE_AMP_DEN: i64 = RIDGE_AMP_CANDIDATES[ACTIVE_RIDGE_AMP_INDEX].1;
 /// value_noise_octave ∈ [0, 65536), giving max=(8+4+2+1)*65536=983040. The ridged-field fold
 /// expects input in [0, MAX=32768]; exceeding this saturates the fold to zero (all ridges carved
 /// away). FBM_MAX rescales the raw field to [0, 32768] BEFORE the fold.
-const FBM_MAX: i64 = 15 * 65536;  // 983040: (8+4+2+1) * HASH_SCALE
 
 /// W-11: Ridge field scaling denominator. Derived to keep |ridge_delta| in tens of units, not hmax.
 /// Fold term (2*ridged - MAX) ranges [−32768, +32768]; with RIDGE_AMP * mountainness,
@@ -1012,23 +1011,6 @@ fn ridge_warp_at(x: i64, z: i64, seed: u64) -> (i64, i64) {
 /// W-13: Analytic band-ramp mask (O(1) per cell, kills O(dim⁴) defect).
 /// Returns ramp value in [0, 256] (fixed-point 256 = 1.0). Computes integer distance from the
 /// warped point to the NEAREST fault line using the analytic point-to-line formula (via
-/// tectonics::fault_min_distance). Linear ramp: 256 at dist=0, 0 at dist=BELT_HALF_WIDTH.
-/// **D2 change:** replaces O(dim²) grid scan with O(1) per-cell distance calculation.
-/// All three fault consumers (scarp delta, resistance band, ridge belt distance) evaluate at the
-/// WARPED coordinates (passed by the caller in erosion.rs).
-fn band_ramp_at(x: i64, z: i64, faults: &[crate::gen::tectonics::Fault]) -> i64 {
-    let min_dist = crate::gen::tectonics::fault_min_distance(x, z, faults);
-
-    if min_dist == 0 {
-        256
-    } else if min_dist > BELT_HALF_WIDTH {
-        0
-    } else {
-        // Linear ramp: 256 at dist=0, 0 at dist=BELT_HALF_WIDTH
-        (256 * (BELT_HALF_WIDTH - min_dist)) / BELT_HALF_WIDTH
-    }
-}
-
 /// W-15a: Compute the along-fault arclength parameter t for a point's perpendicular foot on a fault.
 /// The foot is the point on the infinite fault line closest to (x, z).
 /// Parameter t: the foot point is at (px + t*dx, pz + t*dz).
@@ -1075,8 +1057,6 @@ pub fn crest_modulation(t: i64, fault_index: u32, base_period: i64, seed: u64) -
 /// W-15a: Find the nearest fault to a point and return (fault_index, projection parameter t).
 /// Returns (fault_index, t) for the closest fault, or (0, 0) if no faults.
 fn nearest_fault_and_parameter(x: i64, z: i64, faults: &[crate::gen::tectonics::Fault]) -> (usize, i64) {
-    use sim_core::isqrt;
-
     let mut min_dist_sq = i64::MAX;
     let mut nearest_idx = 0;
     let mut nearest_t = 0i64;

@@ -81,17 +81,6 @@ pub enum SlopeClass {
     Cone,
 }
 
-impl SlopeClass {
-    /// The primary substrate material this class emplaces (RnD 15 §8: basalt for effusive
-    /// low-viscosity flows, tuff for the higher-viscosity/fragmenting style).
-    fn material(self) -> MaterialId {
-        match self {
-            SlopeClass::Shield => MaterialId::Basalt,
-            SlopeClass::Cone => MaterialId::Tuff,
-        }
-    }
-}
-
 /// Edifice geometry derived from `(dim, hmax)` — ALL radii and heights that scale with map size
 /// and height ceiling. W-16 consensus-locked formulas: integer-only, multiply-first divide-last.
 /// Bounds: dim ≤ 4096, hmax ≤ 10⁴ ⇒ products < 2^41 (no i64 overflow).

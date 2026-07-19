@@ -13,7 +13,6 @@
 
 use std::io::Write;
 use world::gen::caps::classify_and_caps;
-use world::gen::material::MaterialId;
 use world::gen::LandformFlags;
 use world::palette::MATERIAL_COLORS;
 
