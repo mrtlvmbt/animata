@@ -35,9 +35,9 @@ SHARD2=$(
   cargo nextest list -p world -p sim-core -p brain -p fields -p telemetry --release --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null | grep "::" | sort -u || true
 )
 
-echo "  Shard 3 (release cli, excluding work_counter perf)..."
+echo "  Shard 3 (release cli, including work_counter in release)..."
 SHARD3=$(
-  cargo nextest list -p cli --release --locked -E 'not test(v2_golden)' -E 'not test(work_counter)' --list-type grouped 2>/dev/null | grep "::" | sort -u || true
+  cargo nextest list -p cli --release --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null | grep "::" | sort -u || true
 )
 
 # Combine all shards
