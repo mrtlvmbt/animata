@@ -60,13 +60,13 @@ jobs:
 
           # Check each file: if ALL files match render-only patterns, sim_relevant=false; else true
           # Render-only patterns: v2/crates/render/**, **.md, .claude/**, pm/**, .claude-dev-kit (exact + contents),
-          # .github/workflows/sim-run.yml, .github/workflows/evo-stats.yml, etc. (but NOT tests.yml itself).
+          # .github/workflows/sim-run.yml (but NOT tests.yml itself).
           SIM_RELEVANT=false
           while IFS= read -r FILE; do
             [ -z "$FILE" ] && continue
             # Use case for robust pattern matching
             case "$FILE" in
-              v2/crates/render/*|*.md|.claude/*|pm/*|.claude-dev-kit|.claude-dev-kit/*|.github/workflows/sim-run.yml|.github/workflows/evo-stats.yml)
+              v2/crates/render/*|*.md|.claude/*|pm/*|.claude-dev-kit|.claude-dev-kit/*|.github/workflows/sim-run.yml)
                 # This file is render-only, continue checking
                 ;;
               *)
