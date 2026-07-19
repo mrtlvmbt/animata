@@ -22,6 +22,7 @@ pub struct UiOut {
 
 /// Panel: a renderable UI element with a draw callback.
 pub trait Panel {
+    #[allow(dead_code)]
     fn id(&self) -> &'static str;
     fn draw(&mut self, ctx: &egui::Context, ui_ctx: &mut UiCtx);
 }
@@ -35,11 +36,13 @@ pub struct UiCtx<'a> {
     pub verts: usize,
     pub snap: Option<&'a RenderSnapshot>,
     pub standalone_mode: bool,
+    #[allow(dead_code)]
     pub terrain_chunks_total: usize,
     pub actions: &'a mut Vec<UiAction>,
     /// U-3: true if source is Procgen (needed for reseed button gating per F12)
     pub is_procgen: bool,
     /// U-3: optional LoadState for in-flight reseed progress tracking
+    #[allow(dead_code)]
     pub regen_load_state: Option<&'a crate::loader_state::LoadState>,
     /// U-5: reference to the world for minimap rendering
     pub world: Option<&'a (dyn sim_core::WorldView + Sync)>,
@@ -77,6 +80,7 @@ pub enum UiAction {
     /// U-9: H key toggle — hide/show all panels
     ToggleUiVisibility,
     /// U-9: Display a toast message (e.g., "World ready — seed 0x5")
+    #[allow(dead_code)]
     PushToast(String),
 }
 

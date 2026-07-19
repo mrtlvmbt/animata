@@ -80,7 +80,7 @@ pub enum WorldSource {
     /// the sim worker's world).
     Procgen { dim_request: Option<i64> },
     /// Load a v1-format world dump from a file (carries its own dim).
-    Dump(PathBuf),
+    Dump(#[allow(dead_code)] PathBuf),
 }
 
 /// Specification for world building (single source of truth for app + harnesses).

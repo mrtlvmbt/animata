@@ -45,6 +45,7 @@ impl SimHandle {
         self.snapshot.load_full()
     }
 
+    #[allow(dead_code)]
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Relaxed)
     }

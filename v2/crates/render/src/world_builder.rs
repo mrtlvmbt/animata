@@ -67,7 +67,7 @@ where
                 None, // U-11: No callback — progress reported via on_stage() below
             ))
         }
-        WorldSource::Dump(path) => {
+        WorldSource::Dump(_) => {
             // Load v1 dump (carries its own dim; deferred: out of U-3 scope)
             // TODO: implement DumpWorld::load(path) to actually load the dump file
             // For now, fallback to Procgen (this makes --v1-dump flag non-functional as of U-3)
