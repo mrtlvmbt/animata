@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Verify that v2-sim sharding covers all tests exactly once: no gaps, no overlaps, deterministic.
 # Shard partition:
-#   - Shard 1 (debug): all packages (world, sim-core, brain, cli, fields, telemetry)
+#   - Shard 1a (debug): cli
+#   - Shard 1b (debug): world, sim-core, brain, fields, telemetry + perf gate
 #   - Shard 2 (release): world, sim-core, brain, fields, telemetry
 #   - Shard 3 (release): cli
 # Run from the v2 directory during CI.
@@ -22,10 +23,15 @@ BASELINE=$(
 )
 
 # List tests from each shard
-echo "  Shard 1 (debug + perf)..."
-SHARD1=$(
+echo "  Shard 1a (debug cli)..."
+SHARD1A=$(
+  cargo nextest list -p cli --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null | grep "::" | sort -u || true
+)
+
+echo "  Shard 1b (debug world/sim-core/brain/fields/telemetry + perf)..."
+SHARD1B=$(
   {
-    cargo nextest list --workspace --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null || true
+    cargo nextest list -p world -p sim-core -p brain -p fields -p telemetry --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null || true
     # Perf tests don't add new test names, they're the same tests run with different feature
   } | grep "::" | sort -u
 )
@@ -41,7 +47,7 @@ SHARD3=$(
 )
 
 # Combine all shards
-COMBINED=$(printf "%s\n%s\n%s\n" "$SHARD1" "$SHARD2" "$SHARD3" | grep -v "^$" | sort -u)
+COMBINED=$(printf "%s\n%s\n%s\n%s\n" "$SHARD1A" "$SHARD1B" "$SHARD2" "$SHARD3" | grep -v "^$" | sort -u)
 
 # Compare baseline vs combined
 BASELINE_SORTED=$(printf "%s" "$BASELINE" | sort -u)
@@ -84,7 +90,7 @@ fi
 # Final verdict
 if [ "$MISSING_COUNT" -eq 0 ] && [ "$EXTRA_COUNT" -eq 0 ]; then
   echo "✓ Shard coverage is complete and deterministic"
-  echo "  All $BASELINE_COUNT baseline tests covered across 3 shards"
+  echo "  All $BASELINE_COUNT baseline tests covered across 4 shards"
   exit 0
 else
   echo "✗ SHARD COVERAGE FAILURE"
