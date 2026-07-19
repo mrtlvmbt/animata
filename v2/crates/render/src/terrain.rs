@@ -24,6 +24,7 @@ const BEVEL_FRAC: f32 = 0.08;
 /// Per-mesh-kind vertex count maximum. Hex with bevel: ~54 verts/cell worst case.
 /// Cube: ~30 verts/cell. Used for adaptive rows_per_chunk and capacity assertions.
 const HEX_WITH_BEVEL_VERTS_PER_CELL: usize = 54;
+#[allow(dead_code)]
 const CUBE_VERTS_PER_CELL: usize = 30;
 
 /// Hard capacity limits (macroquad buffer)
@@ -81,6 +82,7 @@ pub(crate) fn hypsometric_range(world_dim: i64, world: &dyn WorldView) -> (i64, 
 /// Each chunk carries its own AABB (computed once at build).
 /// `seed`: used for per-column palette v2 jitter and determinism.
 /// `bare_mode`: if true, water renders as dry-bed sand tint.
+#[allow(dead_code)]
 pub fn build_hex_terrain(
     world_dim: i64,
     world: &dyn WorldView,
@@ -126,6 +128,7 @@ fn calculate_vertex_ao(col: i64, row: i64, corner_idx: usize, world_dim: i64, wo
     ao_factor
 }
 
+#[allow(dead_code)]
 fn build_chunk(
     world_dim: i64,
     world: &dyn WorldView,

@@ -24,6 +24,7 @@ use sim_core::{Vec2Fixed, WorldView};
 /// u16 index space macroquad batches with — see `terrain::rows_per_chunk` + `main.rs`.
 /// `seed`: used for per-column palette v2 jitter and determinism.
 /// `bare_mode`: if true, water renders as dry-bed sand tint.
+#[allow(dead_code)]
 pub fn build_cube_terrain(
     world_dim: i64,
     world: &dyn WorldView,

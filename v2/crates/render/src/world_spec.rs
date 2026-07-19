@@ -251,6 +251,7 @@ impl Stage {
     /// Used by loader.rs to compare stages by execution order, not display order.
     /// For example, ApplyVolcanic (ordinal 5) comes BEFORE ApplyAeolian (ordinal 4)
     /// in execution, so this returns exec_pos(5)=4 < exec_pos(4)=6.
+    #[allow(dead_code)]
     pub fn exec_pos(self) -> u8 {
         let ord = self.as_u8();
         EXEC_ORDER.iter()

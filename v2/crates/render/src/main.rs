@@ -99,99 +99,96 @@ fn convert_raw_chunks(raw_chunks: Vec<RawChunk>) -> Vec<TerrainChunk> {
     raw_chunks.into_iter().map(raw_chunk_to_terrain_chunk).collect()
 }
 
+// ── R-15: Shared CLI validation constants (single source of truth) ───────────────────────────────────
+const VALID_FLAGS: &[&str] = &[
+    "--standalone", "--no-sim", "--v1-dump", "--seed", "--dim", "--screenshot",
+    "--screenshot-warmup", "--bench", "--cam", "--retained", "--no-retained",
+    "--water", "--bare", "--height-scale", "--slow-load", "--screenshot-loader",
+    "--regen-to", "--jump-to", "--screenshot-ui", "--yaw", "--ui-state",
+    "--landforms", "--transform",
+];
+
+const VALUE_REQUIRING_FLAGS: &[&str] = &[
+    "--v1-dump", "--seed", "--dim", "--screenshot", "--screenshot-warmup",
+    "--cam", "--height-scale", "--screenshot-loader", "--regen-to", "--jump-to",
+    "--screenshot-ui", "--yaw", "--ui-state", "--landforms", "--transform",
+];
+
+/// Check if a flag requires a value
+fn flag_requires_value(flag: &str) -> bool {
+    VALUE_REQUIRING_FLAGS.contains(&flag)
+}
+
+/// Validate a flag's value against its expected type. Returns error message if invalid, or None if OK.
+fn validate_flag_value(flag: &str, value: &str) -> Option<String> {
+    match flag {
+        "--seed" | "--regen-to" => {
+            if value.parse::<u64>().is_err() {
+                return Some(format!("render: {flag} expects a u64, got {value:?}"));
+            }
+        }
+        "--dim" => {
+            if value.parse::<i64>().is_err() {
+                return Some(format!("render: {flag} expects an integer, got {value:?}"));
+            }
+        }
+        "--screenshot-warmup" => {
+            if value.parse::<u32>().is_err() {
+                return Some(format!("render: {flag} expects a u32, got {value:?}"));
+            }
+        }
+        "--cam" => {
+            if !["iso-default", "iso-zoom-close", "iso-zoom-far"].contains(&value) {
+                return Some(format!("render: unknown camera preset: {value:?}"));
+            }
+        }
+        "--height-scale" | "--yaw" => {
+            if value.parse::<f32>().is_err() {
+                return Some(format!("render: {flag} expects f32, got {value:?}"));
+            }
+        }
+        "--jump-to" => {
+            let parts: Vec<&str> = value.split(',').collect();
+            if parts.len() != 2 {
+                return Some("render: --jump-to requires <x>,<z> format".to_string());
+            }
+            if parts[0].parse::<f32>().is_err() {
+                return Some(format!("render: --jump-to x must be f32, got {:?}", parts[0]));
+            }
+            if parts[1].parse::<f32>().is_err() {
+                return Some(format!("render: --jump-to z must be f32, got {:?}", parts[1]));
+            }
+        }
+        _ => {}  // Other flags' values are accepted as-is
+    }
+    None
+}
+
 /// R-15: Pre-window CLI validation — exits with code 2 if any argument is invalid, before the window is created.
 /// This ensures no visible window flashes for bad invocations.
 fn validate_cli_args() {
     let mut args_iter = std::env::args().skip(1).peekable();
-    let valid_flags = [
-        "--standalone", "--no-sim", "--v1-dump", "--seed", "--dim", "--screenshot",
-        "--screenshot-warmup", "--bench", "--cam", "--retained", "--no-retained",
-        "--water", "--bare", "--height-scale", "--slow-load", "--screenshot-loader",
-        "--regen-to", "--jump-to", "--screenshot-ui", "--yaw", "--ui-state",
-        "--landforms", "--transform",
-    ];
 
     while let Some(arg) = args_iter.next() {
         if arg.starts_with("--") {
-            if !valid_flags.contains(&arg.as_str()) {
+            if !VALID_FLAGS.contains(&arg.as_str()) {
                 eprintln!("render: unknown argument {arg:?}");
                 std::process::exit(2);
             }
 
             // Check for value-requiring flags
-            match arg.as_str() {
-                "--v1-dump" | "--seed" | "--dim" | "--screenshot" | "--screenshot-warmup" |
-                "--cam" | "--height-scale" | "--screenshot-loader" | "--regen-to" | "--jump-to" |
-                "--screenshot-ui" | "--yaw" | "--ui-state" | "--landforms" | "--transform" => {
-                    if args_iter.peek().is_none() {
-                        eprintln!("render: {arg} requires a value");
-                        std::process::exit(2);
-                    }
-                    let val = args_iter.next().unwrap();
-
-                    // Validate value types
-                    match arg.as_str() {
-                        "--seed" => {
-                            if val.parse::<u64>().is_err() {
-                                eprintln!("render: --seed expects a u64, got {val:?}");
-                                std::process::exit(2);
-                            }
-                        }
-                        "--dim" => {
-                            if val.parse::<i64>().is_err() {
-                                eprintln!("render: --dim expects an integer, got {val:?}");
-                                std::process::exit(2);
-                            }
-                        }
-                        "--screenshot-warmup" => {
-                            if val.parse::<u32>().is_err() {
-                                eprintln!("render: --screenshot-warmup expects a u32, got {val:?}");
-                                std::process::exit(2);
-                            }
-                        }
-                        "--cam" => {
-                            if !["iso-default", "iso-zoom-close", "iso-zoom-far"].contains(&val.as_str()) {
-                                eprintln!("render: unknown camera preset: {val:?}");
-                                std::process::exit(2);
-                            }
-                        }
-                        "--height-scale" => {
-                            if val.parse::<f32>().is_err() {
-                                eprintln!("render: --height-scale expects f32, got {val:?}");
-                                std::process::exit(2);
-                            }
-                        }
-                        "--yaw" => {
-                            if val.parse::<f32>().is_err() {
-                                eprintln!("render: --yaw expects f32 degrees, got {val:?}");
-                                std::process::exit(2);
-                            }
-                        }
-                        "--regen-to" => {
-                            if val.parse::<u64>().is_err() {
-                                eprintln!("render: --regen-to expects a u64, got {val:?}");
-                                std::process::exit(2);
-                            }
-                        }
-                        "--jump-to" => {
-                            let parts: Vec<&str> = val.split(',').collect();
-                            if parts.len() != 2 {
-                                eprintln!("render: --jump-to requires <x>,<z> format");
-                                std::process::exit(2);
-                            }
-                            if parts[0].parse::<f32>().is_err() {
-                                eprintln!("render: --jump-to x must be f32, got {:?}", parts[0]);
-                                std::process::exit(2);
-                            }
-                            if parts[1].parse::<f32>().is_err() {
-                                eprintln!("render: --jump-to z must be f32, got {:?}", parts[1]);
-                                std::process::exit(2);
-                            }
-                        }
-                        _ => {}  // Other flags' values are accepted as-is
-                    }
+            if flag_requires_value(&arg) {
+                if args_iter.peek().is_none() {
+                    eprintln!("render: {arg} requires a value");
+                    std::process::exit(2);
                 }
-                _ => {}  // Flags that don't require values
+                let val = args_iter.next().unwrap();
+
+                // Validate value type
+                if let Some(err_msg) = validate_flag_value(&arg, &val) {
+                    eprintln!("{err_msg}");
+                    std::process::exit(2);
+                }
             }
         }
     }
@@ -273,7 +270,7 @@ struct CliArgs {
     bench: bool,
     /// R-13: camera preset (default: iso-default).
     cam_preset: CamPreset,
-    /// R-15a: `--retained`: use retained-buffer GPU rendering for terrain (default OFF).
+    /// R-15a: `--retained`/`--no-retained`: use/disable retained-buffer GPU rendering for terrain (default ON).
     retained: bool,
     /// W-14: `--water`: restore water submerged tint (debug opt-in; default is dry-bed sand).
     show_water: bool,
@@ -305,6 +302,22 @@ struct CliArgs {
 }
 
 fn parse_args() -> CliArgs {
+    // R-15: Validate all flags against the shared list to prevent drift
+    let mut args_iter = std::env::args().skip(1).peekable();
+    while let Some(arg) = args_iter.next() {
+        if arg.starts_with("--") && !VALID_FLAGS.contains(&arg.as_str()) {
+            eprintln!("render: unknown argument {arg:?}");
+            std::process::exit(2);
+        }
+        if flag_requires_value(&arg) && args_iter.peek().is_some() {
+            let val = args_iter.next().unwrap();
+            if let Some(err_msg) = validate_flag_value(&arg, &val) {
+                eprintln!("{err_msg}");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let mut standalone = false;
     let mut seed = SEED;
     let mut dim_override = None;
@@ -1772,7 +1785,7 @@ async fn main() {
                 let cam3d = camera.to_camera3d();
                 set_camera(&cam3d);
 
-                let draw_stats = draw::draw_terrain(
+                let _draw_stats = draw::draw_terrain(
                     &hex_terrain_chunks,
                     &cube_terrain_chunks,
                     &gpu_hex_chunks,

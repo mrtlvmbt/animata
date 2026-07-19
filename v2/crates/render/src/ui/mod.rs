@@ -10,7 +10,6 @@ pub mod legend;
 use macroquad::prelude::*;
 use sim_core::RenderSnapshot;
 use std::collections::HashMap;
-use sim_core::WorldView;
 use egui::{Color32, RichText, Stroke};
 
 /// UiOut: egui's pointer/keyboard wants from this frame.
@@ -83,6 +82,7 @@ pub enum UiAction {
 
 /// HudCache: texture caches and other UI-layer resources (for minimap, etc.).
 pub struct HudCache {
+    #[allow(dead_code)]
     pub textures: HashMap<&'static str, egui::TextureHandle>,
     /// Minimap texture cache: (seed, dim, bare_mode) → (key_tuple, texture_handle)
     pub minimap: Option<((u64, i64, bool), egui::TextureHandle)>,
@@ -264,7 +264,7 @@ fn clip_quad_to_rect(quad: &[egui::Pos2], bounds: egui::Rect) -> Vec<egui::Pos2>
         let mut clipped = Vec::new();
 
         // Determine which edge we're clipping against
-        let (edge_fn, edge_name): (fn(egui::Pos2, egui::Rect) -> bool, &str) = match edge {
+        let (edge_fn, _edge_name): (fn(egui::Pos2, egui::Rect) -> bool, &str) = match edge {
             0 => (|p, r| p.x >= r.left(), "left"),     // left edge
             1 => (|p, r| p.x <= r.right(), "right"),   // right edge
             2 => (|p, r| p.y >= r.top(), "top"),       // top edge
