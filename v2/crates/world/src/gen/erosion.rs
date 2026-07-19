@@ -1741,8 +1741,8 @@ mod tests {
 
     #[test]
     fn erode_with_tectonics_is_deterministic_across_repeated_calls() {
-        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, true, false, false, true, 100, false, 100);
-        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, true, false, false, true, 100, false, 100);
+        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100, false, 100);
+        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100, false, 100);
         assert_eq!(a, b, "erode_with_tectonics must be byte-identical across repeated calls");
     }
 
@@ -1831,7 +1831,7 @@ mod tests {
         const STEEP_THRESHOLD: i64 = 4;
 
         let a = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false, false, true, 100, false, 100);
-        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100, false, 100);
+        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, false, false, false, true, 100, false, 100);
         let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100, false, 100);
 
         let a_count = steep_edge_count(&a.height, DIM, STEEP_THRESHOLD);

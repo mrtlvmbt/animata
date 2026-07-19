@@ -1,8 +1,6 @@
 //! F6 carve-metric test for Slice-1b: plate uplift through erosion + dendritic carving.
 //! Tests whether production erosion K-constants carve sharp plate peaks into dendritic valleys.
 
-use std::collections::VecDeque;
-
 fn main() {
     const HMAX: i64 = 200;
     const DIM: usize = 64;
