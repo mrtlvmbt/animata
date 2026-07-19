@@ -358,14 +358,19 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
 /// as needle towers on the 3D render; `30` also clips those (~17 cells) while staying above the
 /// continuum of real relief texture (excess <30). Below ~25 it starts smoothing genuine roughness.
 pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
+    use rayon::prelude::*;
+
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
 
-    // Pass 1: identify each cell's clipping intention and its D8 receiver (lowest neighbor).
-    let mut send_out = vec![0i64; n];
-    let mut receiver = vec![None; n];
+    // Pass 1: identify each cell's clipping intention and receiver — M2 (W-17): par_iter per-cell
+    #[derive(Clone)]
+    struct NeedleResult {
+        send_out: i64,
+        receiver: Option<usize>,
+    }
 
-    for v in 0..n {
+    let needle_results: Vec<NeedleResult> = (0..n).into_par_iter().map(|v| {
         let z = v / dim;
         let x = v % dim;
 
@@ -381,13 +386,14 @@ pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
             nmax = nmax.max(height[u]);
         }
 
-        // If this cell is a spike, compute the excess to clip.
-        if height[v] > nmax + NEEDLE_MARGIN {
-            send_out[v] = height[v] - (nmax + NEEDLE_MARGIN);
-        }
+        // Compute send_out if this is a spike
+        let send_out = if height[v] > nmax + NEEDLE_MARGIN {
+            height[v] - (nmax + NEEDLE_MARGIN)
+        } else {
+            0
+        };
 
-        // Find the lowest D8 neighbor (deterministic tie-break: lowest linear index).
-        // Start with self as a fallback if no in-grid neighbor is lower or equal.
+        // Find the lowest D8 neighbor (deterministic tie-break: lowest linear index)
         let mut lowest_height = height[v];
         let mut lowest_idx: Option<usize> = None;
         for &(dx, dz) in &D8_OFFSETS {
@@ -397,24 +403,31 @@ pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
                 continue;
             }
             let u = linear_index(nx as usize, nz as usize, dim);
-            // Update if u is strictly lower, or if u equals the current lowest and has a lower linear index.
             if height[u] < lowest_height || (height[u] == lowest_height && lowest_idx.map_or(true, |idx| u < idx)) {
                 lowest_height = height[u];
                 lowest_idx = Some(u);
             }
         }
-        receiver[v] = lowest_idx;
-    }
 
-    // Pass 2: gather — each cell v reads its own send_out plus its neighbors' send_out where that
-    // neighbor's D8 receiver IS v. Never writes into a neighbor's slot.
-    let mut new_height = height.to_vec();
-    for v in 0..n {
-        new_height[v] -= send_out[v];
-        if let Some(rec) = receiver[v] {
-            new_height[rec] += send_out[v];
+        NeedleResult { send_out, receiver: lowest_idx }
+    }).collect();
+
+    // Pass 2: gather — M2 (W-17): par_iter per-cell
+    // Each cell v subtracts its send_out and adds all send_out from cells whose receiver is v
+    let send_out: Vec<i64> = needle_results.iter().map(|r| r.send_out).collect();
+    let receiver: Vec<Option<usize>> = needle_results.iter().map(|r| r.receiver).collect();
+
+    let new_height: Vec<i64> = (0..n).into_par_iter().map(|v| {
+        let mut h = height[v] - send_out[v];
+        // Gather from all cells whose receiver is v
+        for u in 0..n {
+            if receiver[u] == Some(v) {
+                h += send_out[u];
+            }
         }
-    }
+        h
+    }).collect();
+
     new_height
 }
 
@@ -441,6 +454,8 @@ pub fn de_needle_pass(dim: usize, height: &[i64]) -> Vec<i64> {
 /// Returns: new height buffer (unscaled), same length as input.
 /// Made public to support sweep/measurement utilities (w9_sweep bin).
 pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: usize) -> Vec<i64> {
+    use rayon::prelude::*;
+
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
     debug_assert!(n_iters > 0);
@@ -449,19 +464,15 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
     let mut hs = height.iter().map(|&h| h * 64).collect::<Vec<i64>>();
     let margin_s = spike_margin * 64;
 
-    // Jacobi iterations
+    // Jacobi iterations (macro-loop stays serial, internal passes parallelized)
     for _ in 0..n_iters {
-        let mut hs_new = hs.clone();
-
-        // Pass 1: compute outflows based on SELECTIVE DONOR RULE (second-max based)
-        let mut send_out = vec![vec![0i64; 8]; n];
-        for v in 0..n {
+        // Pass 1: compute outflows — M2 (W-17): par_iter per-cell
+        let send_out: Vec<Vec<i64>> = (0..n).into_par_iter().map(|v| {
+            let mut outflows = vec![0i64; 8];
             let z = v / dim;
             let x = v % dim;
 
             // Classify as spike: hs - second_max(neighbors) > margin_s
-            // Needles donate (second_max=ground); ridges don't (second_max=ridge)
-            // Use the OLD frame (hs) from this iteration for consistency.
             let mut max_hs = i64::MIN;
             let mut second_max_hs = i64::MIN;
             for &(dx, dz) in &D8_OFFSETS {
@@ -469,7 +480,7 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
                 let nz = z as i64 + dz;
                 if nx >= 0 && nz >= 0 && (nx as usize) < dim && (nz as usize) < dim {
                     let u = linear_index(nx as usize, nz as usize, dim);
-                    let neighbor_hs = hs[u]; // Classify on scaled frame (old frame of current iteration)
+                    let neighbor_hs = hs[u];
                     if neighbor_hs > max_hs {
                         second_max_hs = max_hs;
                         max_hs = neighbor_hs;
@@ -479,29 +490,27 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
                 }
             }
 
-            // Only donate if this is a spike: hs - second_max > margin_s
-            if second_max_hs == i64::MIN || hs[v] - second_max_hs <= margin_s {
-                continue; // Not a spike, don't donate
-            }
-
-            // This is a spike; compute transfers to D8 neighbors
-            for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
-                let nx = x as i64 + dx;
-                let nz = z as i64 + dz;
-                if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
-                    continue;
-                }
-                let u = linear_index(nx as usize, nz as usize, dim);
-                let drop = hs[v] - hs[u];
-                if drop > 0 {
-                    // Transfer: (drop - spike_margin) / 2 / 8
-                    send_out[v][dir] = (drop.saturating_sub(margin_s)) / 2 / 8;
+            // Only donate if this is a spike
+            if second_max_hs != i64::MIN && hs[v] - second_max_hs > margin_s {
+                for (dir, &(dx, dz)) in D8_OFFSETS.iter().enumerate() {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx < 0 || nz < 0 || nx as usize >= dim || nz as usize >= dim {
+                        continue;
+                    }
+                    let u = linear_index(nx as usize, nz as usize, dim);
+                    let drop = hs[v] - hs[u];
+                    if drop > 0 {
+                        outflows[dir] = (drop.saturating_sub(margin_s)) / 2 / 8;
+                    }
                 }
             }
-        }
 
-        // Pass 2: apply changes (gather: each cell pulls from neighbors)
-        for v in 0..n {
+            outflows
+        }).collect();
+
+        // Pass 2: apply changes (gather) — M2 (W-17): par_iter per-cell (Jacobi)
+        let hs_new: Vec<i64> = (0..n).into_par_iter().map(|v| {
             let z = v / dim;
             let x = v % dim;
 
@@ -516,10 +525,8 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
                 }
                 let u = linear_index(nx as usize, nz as usize, dim);
 
-                // Outflow from v in direction (dx, dz) goes to u
                 sum_out += send_out[v][dir];
 
-                // Inflow into v from u's opposite direction
                 for (opposite_dir, &(ox, oz)) in D8_OFFSETS.iter().enumerate() {
                     if ox == -dx && oz == -dz {
                         sum_in += send_out[u][opposite_dir];
@@ -528,8 +535,8 @@ pub fn talus_step_final(dim: usize, height: &[i64], spike_margin: i64, n_iters: 
                 }
             }
 
-            hs_new[v] = hs[v] - sum_out + sum_in;
-        }
+            hs[v] - sum_out + sum_in
+        }).collect();
 
         hs = hs_new;
     }
