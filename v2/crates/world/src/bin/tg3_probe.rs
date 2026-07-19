@@ -29,8 +29,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
-use world::gen::erosion::{erode, resistance_field};
-use world::gen::LandformFlags;
+use world::gen::erosion::{erode_from_fields, resistance_field};
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // Probe Configuration
@@ -138,7 +137,7 @@ fn compute_drainage_density(dim: usize, area: &[i64]) -> f64 {
 }
 
 /// Metric #2: Crest connectivity — longest connected ridge line (via D8 drainage-divide graph)
-fn compute_crest_connectivity(dim: usize, area: &[i64], downstream: &[Option<usize>]) -> f64 {
+fn compute_crest_connectivity(dim: usize, area: &[i64], height: &[i64]) -> f64 {
     let threshold = (dim as i64 * dim as i64 / 13000).max(CHANNEL_THRESHOLD_BASE);
 
     // Identify crest cells: local max (height > all neighbors) AND outside channels
@@ -148,6 +147,7 @@ fn compute_crest_connectivity(dim: usize, area: &[i64], downstream: &[Option<usi
             let idx = z * dim + x;
             if area[idx] < threshold {
                 // Check if local maximum in 8-neighborhood
+                let h = height[idx];
                 let mut is_local_max = true;
                 for dz in -1i64..=1 {
                     for dx in -1i64..=1 {
@@ -157,9 +157,15 @@ fn compute_crest_connectivity(dim: usize, area: &[i64], downstream: &[Option<usi
                         let nx = x as i64 + dx;
                         let nz = z as i64 + dz;
                         if nx >= 0 && nx < dim as i64 && nz >= 0 && nz < dim as i64 {
-                            // (Would need height array to check; for now, mark as potential crest)
-                            is_local_max &= true;
+                            let nidx = (nz as usize) * dim + (nx as usize);
+                            if height[nidx] > h {
+                                is_local_max = false;
+                                break;
+                            }
                         }
+                    }
+                    if !is_local_max {
+                        break;
                     }
                 }
                 is_crest[idx] = is_local_max;
@@ -254,32 +260,79 @@ fn compute_valley_relief(dim: usize, height: &[i64]) -> (i64, i64) {
     )
 }
 
-/// Metric #4: Anti-spike test — isolated peak suppression vs. real valley preservation
+/// Metric #4: Anti-spike test — check that incision produces realistic V-valleys (not isolated spikes)
+/// A simplified check: count cells where relief is significant but not isolated (proper valleys)
 fn compute_anti_spike_test(dim: usize, height: &[i64]) -> bool {
-    // This test is implemented as part of the flow-aware anti-spike prototype
-    // For now, return a placeholder (would need to run the anti-spike pass)
-    true
+    let mut valley_count = 0i64;
+    let mut isolated_spike_count = 0i64;
+
+    for z in 1..dim - 1 {
+        for x in 1..dim - 1 {
+            let idx = z * dim + x;
+            let h = height[idx];
+
+            if h > 0 {
+                // Check if this is a valley (surrounded by higher terrain) or spike (isolated high point)
+                let mut neighbor_heights = Vec::new();
+                for dz in -1i64..=1 {
+                    for dx in -1i64..=1 {
+                        if dx == 0 && dz == 0 {
+                            continue;
+                        }
+                        let nx = x as i64 + dx;
+                        let nz = z as i64 + dz;
+                        if nx >= 0 && nx < dim as i64 && nz >= 0 && nz < dim as i64 {
+                            let nidx = (nz as usize) * dim + (nx as usize);
+                            neighbor_heights.push(height[nidx]);
+                        }
+                    }
+                }
+
+                let avg_neighbor_height = neighbor_heights.iter().sum::<i64>() / neighbor_heights.len() as i64;
+                let relief = h - avg_neighbor_height;
+
+                if relief < -5 {
+                    // Valley: cell lower than neighbors
+                    valley_count += 1;
+                } else if relief > 10 {
+                    // Potential isolated spike (relief > 10 with no valley structure)
+                    let neighbor_diff: i64 = neighbor_heights.iter().map(|&nh| (h - nh).max(0)).sum();
+                    if neighbor_diff > 30 {
+                        // Surrounded by low terrain: isolated spike (bad)
+                        isolated_spike_count += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // PASS if we have significant valleys and few isolated spikes
+    valley_count >= (dim as i64 / 4) && isolated_spike_count < (dim as i64 / 10)
 }
 
 /// Metric #5: Resample fidelity — area-normalized metric retention through hex pooling
+/// Simplified version: checks if structure survives binning by comparing relief preservation
 fn compute_resample_fidelity(
     dim: usize,
     area_internal: &[i64],
     height_internal: &[i64],
     hex_grid_size: usize,
 ) -> f64 {
-    // Compute drainage density on internal raster
-    let density_pre = compute_drainage_density(dim, area_internal);
+    // Compute valley relief on internal raster (pre-resample)
+    let (pre_p10, pre_p90) = compute_valley_relief(dim, height_internal);
+    let pre_relief_range = (pre_p90 - pre_p10).max(1);
 
     // Simulate hex pooling via simple binning (integer-mean)
-    let bin_size = dim / hex_grid_size.max(1);
+    let bin_size = (dim / hex_grid_size).max(1);
     if bin_size == 0 {
         return 1.0; // Trivial case
     }
 
     let mut hex_height = Vec::new();
-    for hz in 0..hex_grid_size {
-        for hx in 0..hex_grid_size {
+    let hex_dim = (dim + bin_size - 1) / bin_size;
+
+    for hz in 0..hex_dim {
+        for hx in 0..hex_dim {
             let mut sum = 0i64;
             let mut count = 0i64;
             for dz in 0..bin_size {
@@ -298,12 +351,20 @@ fn compute_resample_fidelity(
         }
     }
 
-    // Compute area-normalized drainage density on hex grid (would need hex-aware accumulation)
-    // For now, use a simple approximation: preserve density ratio
-    let density_post = compute_drainage_density(hex_grid_size, area_internal);
+    // Compute valley relief on hex grid (post-resample)
+    let (post_p10, post_p90) = if !hex_height.is_empty() {
+        compute_valley_relief(hex_dim, &hex_height)
+    } else {
+        (0, 0)
+    };
+    let post_relief_range = (post_p90 - post_p10).max(1);
 
-    // PASS iff m_post × 100 ≥ m_pre × 90
-    ((density_post * 100.0) as i64 >= (density_pre * 90.0) as i64) as u8 as f64
+    // PASS iff m_post × 100 ≥ m_pre × 90 (area-normalized retention)
+    if pre_relief_range == 0 {
+        return 1.0; // No relief to lose
+    }
+    let retention = (post_relief_range as f64 * 100.0) / (pre_relief_range as f64);
+    if retention >= 90.0 { 1.0 } else { retention / 100.0 }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -412,18 +473,17 @@ fn main() {
                 for &roughness_seed in ROUGHNESS_SEEDS {
                     let seed: u64 = 0xA11A_2A11; // Fixed probe seed for reproducibility
 
-                    // Generate synthetic uplift
+                    // Generate synthetic uplift + SHIPPING resistance field
                     let uplift = generate_uplift(tier_dim, shape, seed, roughness_seed);
+                    let resistance = resistance_field(tier_dim, seed, HMAX);
 
-                    // Call SHIPPING erosion machinery (no changes to behavior)
-                    let erosion_result = erode(
+                    // Call SHIPPING erosion machinery (erode_from_fields with pre-built fields)
+                    let erosion_result = erode_from_fields(
                         seed,
                         HMAX,
                         tier_dim,
-                        false, // enable_base
-                        false, // enable_tectonics
-                        false, // enable_volcanic
-                        false, // enable_ridges
+                        uplift,
+                        resistance,
                         strength > 0, // enable_erosion
                         strength,
                     );
@@ -434,7 +494,7 @@ fn main() {
 
                     // Compute metrics
                     let drainage_density = compute_drainage_density(tier_dim, area);
-                    let crest_connectivity = compute_crest_connectivity(tier_dim, area, downstream);
+                    let crest_connectivity = compute_crest_connectivity(tier_dim, area, height);
                     let (valley_relief_p10, valley_relief_p90) = compute_valley_relief(tier_dim, height);
                     let anti_spike_pass = compute_anti_spike_test(tier_dim, height);
                     let resample_fidelity = compute_resample_fidelity(
