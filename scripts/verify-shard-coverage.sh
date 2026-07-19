@@ -12,13 +12,15 @@ echo "→ Collecting test names from all shards..."
 
 # List all tests from the current v2-sim-x86 setup (the golden set we're sharding)
 # This is what SHOULD be covered by the shards.
-echo "  Baseline (all non-golden in both debug and release)..."
+echo "  Baseline (all non-golden in both debug and release, including perf-gated)..."
 BASELINE=$(
   {
     # Debug: all non-golden (all packages)
     cargo nextest list --workspace --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null || true
     # Release: all non-golden (all packages)
     cargo nextest list --workspace --release --locked -E 'not test(v2_golden)' --list-type grouped 2>/dev/null || true
+    # Release + perf: perf-gated tests (work_counter, etc.)
+    cargo nextest list --workspace --release --locked --features perf -E 'not test(v2_golden)' --list-type grouped 2>/dev/null || true
   } | grep "::" | sort -u
 )
 
