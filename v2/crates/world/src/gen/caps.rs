@@ -57,7 +57,7 @@ use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::coastal::{run_coastal, is_submerged};
 use crate::gen::drainage::is_river;
-use crate::gen::erosion::{erode, de_needle_pass, talus_step_final, MAX_SPIKE_FINAL, SPIKE_MARGIN_FINAL, N_ITERS_FINAL, NEEDLE_MARGIN};
+use crate::gen::erosion::{erode, de_needle_pass, talus_step_final, MAX_SPIKE_FINAL, SPIKE_MARGIN_FINAL, N_ITERS_FINAL, NEEDLE_MARGIN, PAR_MIN_DIM};
 use crate::gen::height::height_at;
 use crate::gen::material::MaterialId;
 use crate::gen::moisture::moisture_at;
@@ -320,6 +320,7 @@ fn beach_deposit(dim: usize, height: &[i64], sea_level: i64, submerged: &[bool])
             let h_post_deposit = h_relaxed.max(sea_level + 1);
 
             // Budget check: only apply if we have budget left.
+            // DO NOT PARALLELIZE (W-17): beach budget running counter is load-bearing
             let actual_delta = h - h_post_deposit;
             if total_deposit + actual_delta <= budget_max {
                 post_deposit_height[idx] = h_post_deposit;
@@ -1173,17 +1174,30 @@ pub fn classify_and_caps_staged_with_callback(
         cb(11); // Classify = 11
     }
 
-    for z in 0..dim {
-        for x in 0..dim {
-            let idx = z * dim + x;
+    use rayon::prelude::*;
+    // M3 (W-17): par_iter classify loop — per-cell scatter into final_biome, caps, surface_material.
+    // Reads immutable post_deneedle_height (immutable gather for west-neighbor), erosion, masks, etc.
+    // PAR_MIN_DIM gate: dim-64 shows regression; parallel only when dim≥128.
+    #[derive(Clone)]
+    struct ClassifyResult {
+        biome: FinalBiome,
+        cap: i64,
+        material: u8,
+    }
 
-            if submerged[idx] {
-                final_biome.push(FinalBiome::Ocean);
-                surface_material.push(MaterialId::Water as u8);
-                caps[idx] = 0;
-                continue;
+    let classify_results: Vec<ClassifyResult> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|idx| {
+        let z = idx / dim;
+        let x = idx % dim;
+
+        if submerged[idx] {
+            ClassifyResult {
+                biome: FinalBiome::Ocean,
+                cap: 0,
+                material: MaterialId::Water as u8,
             }
-
+        } else {
             let h_cell = post_deneedle_height[idx];
             let x_src = (x as i64 - WIND_DX).max(0) as usize;
             let h_west = post_deneedle_height[z * dim + x_src];
@@ -1203,8 +1217,6 @@ pub fn classify_and_caps_staged_with_callback(
             });
 
             let final_b = override_biome(zonal, moisture, material, slope, riparian);
-            final_biome.push(final_b);
-
             let cap_base = caps_from(final_b, moisture, material);
             let cap_final = if enable_patchiness {
                 let patch_scale = patchiness_at(x as i64, z as i64, seed, hmax);
@@ -1212,7 +1224,6 @@ pub fn classify_and_caps_staged_with_callback(
             } else {
                 cap_base
             };
-            caps[idx] = cap_final;
 
             // Presentation byte emission — a fixed priority cascade (plan §W-12):
             // (1) Bedrock-outcrop rule (W-10) → highest priority, steep cells.
@@ -1244,8 +1255,85 @@ pub fn classify_and_caps_staged_with_callback(
                 }
             }
 
-            surface_material.push(presentation_byte);
+            ClassifyResult {
+                biome: final_b,
+                cap: cap_final,
+                material: presentation_byte,
+            }
         }
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut classify_results = Vec::with_capacity(n);
+        for idx in 0..n {
+            let z = idx / dim;
+            let x = idx % dim;
+
+            if submerged[idx] {
+                classify_results.push(ClassifyResult {
+                    biome: FinalBiome::Ocean,
+                    cap: 0,
+                    material: MaterialId::Water as u8,
+                });
+            } else {
+                let h_cell = post_deneedle_height[idx];
+                let x_src = (x as i64 - WIND_DX).max(0) as usize;
+                let h_west = post_deneedle_height[z * dim + x_src];
+                let (t, p) = climate_from_height(h_cell, h_west, x as i64, z as i64, seed);
+                let zonal = biome_at(t, p);
+
+                let area = erosion.drainage.area[idx];
+                let moisture = moisture_at(area);
+                let riparian = is_river(area);
+                let slope = match erosion.drainage.downstream[idx] {
+                    Some(d) => (post_deneedle_height[idx] - post_deneedle_height[d]).max(0),
+                    None => 0,
+                };
+
+                let material = volcanic_mask[idx].or(glacial_mask[idx]).unwrap_or_else(|| {
+                    reconcile_primary_material(flags.aeolian, erosion.surface_material[idx], sand_depth[idx])
+                });
+
+                let final_b = override_biome(zonal, moisture, material, slope, riparian);
+                let cap_base = caps_from(final_b, moisture, material);
+                let cap_final = if enable_patchiness {
+                    let patch_scale = patchiness_at(x as i64, z as i64, seed, hmax);
+                    ((cap_base * patch_scale + 128) / 256).clamp(0, CAP_MAX)
+                } else {
+                    cap_base
+                };
+
+                let any_landform_on = flags.tect || flags.aeolian || flags.volcanic || flags.glacial || flags.coastal || flags.ridges || flags.beaches;
+                let is_beach_final = flags.beaches && beach_mask_candidate[idx] && !submerged_final[idx];
+                let mut presentation_byte = material as u8;
+
+                if enable_w10_diversity && any_landform_on && material == MaterialId::Soil && slope >= OUTCROP_SLOPE_THRESHOLD {
+                    presentation_byte = MaterialId::Bedrock as u8;
+                } else if is_beach_final {
+                    presentation_byte = 11;
+                } else if enable_w10_diversity && any_landform_on && material == MaterialId::Soil {
+                    if moisture < SOILDRY_THRESHOLD {
+                        presentation_byte = SOILDRY_BYTE;
+                    } else if moisture >= SOILWET_THRESHOLD {
+                        presentation_byte = SOILWET_BYTE;
+                    }
+                }
+
+                classify_results.push(ClassifyResult {
+                    biome: final_b,
+                    cap: cap_final,
+                    material: presentation_byte,
+                });
+            }
+        }
+        classify_results
+    };
+
+    // Write results into output vectors in order
+    for (idx, result) in classify_results.into_iter().enumerate() {
+        final_biome.push(result.biome);
+        surface_material.push(result.material);
+        caps[idx] = result.cap;
     }
 
     let world_fields = WorldFields { dim, height: post_deneedle_height, final_biome, caps, surface_material };

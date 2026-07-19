@@ -56,6 +56,7 @@
 use sim_core::{isqrt, seed_fold};
 
 use crate::gen::material::MaterialId;
+use crate::gen::erosion::PAR_MIN_DIM;
 
 /// Number of vents per world (implementer's call, mirrors `tectonics::N_FAULTS`'s "a handful is
 /// enough to produce a visibly non-isotropic network" reasoning). Documented, locked by the
@@ -257,34 +258,67 @@ pub fn emplace_edifices(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<i64> {
 /// substrate by the caller (`caps.rs`, mirroring aeolian's sand reconciliation) — RnD 15 §8.
 /// W-16b amendment: cone crater floors (r <= caldera_r) get Basalt; cone flanks get Tuff.
 pub fn edifice_material_mask(dim: usize, hmax: i64, vents: &[Vent]) -> Vec<Option<MaterialId>> {
+    use rayon::prelude::*;
+
     let n = dim * dim;
-    let mut mask = vec![None; n];
-    let mut best_contribution = vec![0i64; n];
     let geom = EdificeGeom::derive(dim, hmax);
-    for vent in vents {
-        for z in 0..dim {
-            for x in 0..dim {
+    // M3 (W-17): per-cell scatter-to-mask par_iter (immutable read over vents, write to disjoint output).
+    // Each cell computes the max-contribution vent and derives material independently.
+    // PAR_MIN_DIM gate: dim-64 shows regression; parallel only when dim≥128.
+    let mask: Vec<Option<MaterialId>> = if dim >= PAR_MIN_DIM {
+        // Parallel path: par_iter per-cell
+        (0..n).into_par_iter().map(|idx| {
+        let x = idx % dim;
+        let z = idx / dim;
+        let mut best_contribution = 0i64;
+        let mut best_material = None;
+
+        for vent in vents {
+            let dx = x as i64 - vent.x;
+            let dz = z as i64 - vent.z;
+            let contribution = vent_height_at(vent, dx, dz, &geom);
+            if contribution > best_contribution {
+                best_contribution = contribution;
+                // Cone crater floors are Basalt (dark pit); flanks are Tuff. Shields all Basalt.
+                let r = isqrt(dx * dx + dz * dz);
+                let material = match vent.class {
+                    SlopeClass::Cone if r <= geom.caldera_r => MaterialId::Basalt,
+                    SlopeClass::Cone => MaterialId::Tuff,
+                    SlopeClass::Shield => MaterialId::Basalt,
+                };
+                best_material = Some(material);
+            }
+        }
+        best_material
+        }).collect()
+    } else {
+        // Serial fallback for dim < PAR_MIN_DIM
+        let mut mask = Vec::with_capacity(n);
+        for idx in 0..n {
+            let x = idx % dim;
+            let z = idx / dim;
+            let mut best_contribution = 0i64;
+            let mut best_material = None;
+
+            for vent in vents {
                 let dx = x as i64 - vent.x;
                 let dz = z as i64 - vent.z;
                 let contribution = vent_height_at(vent, dx, dz, &geom);
-                if contribution <= 0 {
-                    continue;
-                }
-                let idx = linear_index(x, z, dim);
-                if contribution > best_contribution[idx] {
-                    best_contribution[idx] = contribution;
-                    // Cone crater floors are Basalt (dark pit); flanks are Tuff. Shields all Basalt.
+                if contribution > best_contribution {
+                    best_contribution = contribution;
                     let r = isqrt(dx * dx + dz * dz);
                     let material = match vent.class {
                         SlopeClass::Cone if r <= geom.caldera_r => MaterialId::Basalt,
                         SlopeClass::Cone => MaterialId::Tuff,
                         SlopeClass::Shield => MaterialId::Basalt,
                     };
-                    mask[idx] = Some(material);
+                    best_material = Some(material);
                 }
             }
+            mask.push(best_material);
         }
-    }
+        mask
+    };
     mask
 }
 

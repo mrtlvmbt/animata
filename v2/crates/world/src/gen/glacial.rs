@@ -284,6 +284,7 @@ fn ice_incision_pass(dim: usize, mut height: Vec<i64>, ice_mask: &[bool], interi
     let n = dim * dim;
     let mut excavated_total = 0i64;
     let n_iters = ((N_GLACIAL_ITERATIONS as i64 * glacial_strength) / 100) as usize;
+    // DO NOT PARALLELIZE (W-17): glacial iteration order is load-bearing (state accumulation)
     for _ in 0..n_iters {
         let delta = ice_incision_iteration(dim, &height, ice_mask);
         for v in 0..n {
