@@ -1117,6 +1117,8 @@ pub fn erode_with_tectonics(
     enable_ridges: bool,
     enable_erosion: bool,
     erosion_strength: i64,
+    enable_plate_sim: bool,
+    plate_strength: i64,
 ) -> ErosionState {
     use rayon::prelude::*;
 
@@ -1341,6 +1343,19 @@ pub fn erode_with_tectonics(
         }
     }
 
+    // **Slice-1b: Plate uplift (Stage 4 orogeny).** Gated on enable_plate_sim (default false).
+    // When false, this block is never executed ⇒ v2_golden_conserved_* byte-identical (merge gate).
+    // When true, compute plate fields and generate orogeny uplift, added to height BEFORE erosion.
+    if enable_plate_sim {
+        let plate_count = 15u32; // Default plate count (parameterizable in Slice-1c)
+        let plate_count_clamped = crate::gen::plate::clamp_plate_count(plate_count, dim as i64);
+        let plate_fields = crate::gen::plate::compute_plate_fields(seed, dim as i64, plate_count_clamped);
+        let plate_uplift = crate::gen::orogeny::generate_plate_uplift_field(&plate_fields, dim as i64, hmax, plate_strength);
+        for idx in 0..n {
+            height[idx] = (height[idx] + plate_uplift[idx]).clamp(0, hmax);
+        }
+    }
+
     erode_from_fields(seed, hmax, dim, height, resistance, enable_erosion, erosion_strength)
 }
 
@@ -1365,7 +1380,8 @@ pub fn erode_with_tectonics(
 pub fn erode(seed: u64, hmax: i64, dim: usize, enable_base: bool, enable_tectonics: bool, enable_volcanic: bool, enable_ridges: bool, enable_erosion: bool, erosion_strength: i64) -> ErosionState {
     // Clamp strength to valid range [0, 400]
     let clamped_strength = erosion_strength.clamp(0, 400);
-    erode_with_tectonics(seed, hmax, dim, enable_base, enable_tectonics, enable_tectonics, enable_volcanic, enable_ridges, enable_erosion, clamped_strength)
+    // Slice-1b: plate sim defaults to false (byte-identical); pass through enable_tectonics for enable_fault_resistance symmetry
+    erode_with_tectonics(seed, hmax, dim, enable_base, enable_tectonics, enable_tectonics, enable_volcanic, enable_ridges, enable_erosion, clamped_strength, false, 100)
 }
 
 #[cfg(test)]
@@ -1725,8 +1741,8 @@ mod tests {
 
     #[test]
     fn erode_with_tectonics_is_deterministic_across_repeated_calls() {
-        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100);
-        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100);
+        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, true, false, false, true, 100, false, 100);
+        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, true, false, false, true, 100, false, 100);
         assert_eq!(a, b, "erode_with_tectonics must be byte-identical across repeated calls");
     }
 
@@ -1735,7 +1751,7 @@ mod tests {
         // Both flags false must be IDENTICAL to erode()'s pre-#396 body (this is a pure structural
         // refactor into erode_from_fields/erode_with_tectonics — no behavior change when off).
         let via_erode = erode(SEED, HMAX, 16, true, false, false, false, true, 100);
-        let via_flags = erode_with_tectonics(SEED, HMAX, 16, true, false, false, false, false, true, 100);
+        let via_flags = erode_with_tectonics(SEED, HMAX, 16, true, false, false, false, false, true, 100, false, 100);
         assert_eq!(via_erode, via_flags, "erode(..,false) must equal erode_with_tectonics(..,false,false)");
     }
 
@@ -1814,9 +1830,9 @@ mod tests {
         // `K_INCISE_DEN`'s doc) — mirrors `caps.rs`'s `ROCK_SLOPE_THRESHOLD`.
         const STEEP_THRESHOLD: i64 = 4;
 
-        let a = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false, false, true, 100);
-        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, false, false, false, true, 100);
-        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100);
+        let a = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false, false, true, 100, false, 100);
+        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100, false, 100);
+        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100, false, 100);
 
         let a_count = steep_edge_count(&a.height, DIM, STEEP_THRESHOLD);
         let c_count = steep_edge_count(&c.height, DIM, STEEP_THRESHOLD);
