@@ -28,15 +28,22 @@ jobs:
       - name: Check if sim-relevant files changed
         id: filter
         run: |
-          # Get the base for comparison. On PR, use base ref; on push to a branch, use previous commit.
-          if [ -n "${{ github.base_ref }}" ]; then
-            BASE="origin/${{ github.base_ref }}"
-          else
-            BASE="${{ github.event.before }}"
+          # Get the base for comparison.
+          # For push events (the only trigger this workflow has), use event.before.
+          # If event.before is the zero-SHA (new branch first push), compute the merge-base.
+          # Fail-closed: if anything is missing/broken, assume sim-relevant.
+          BASE="${{ github.event.before }}"
+
+          # If BASE is the zero-SHA (first push of new branch), compute merge-base to origin/main
+          if [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            if ! BASE=$(git merge-base HEAD origin/main 2>/dev/null); then
+              echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
-          # If BASE is missing/empty (initial commit), treat as sim-relevant
-          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+          # If BASE is still empty or missing (initial commit on repo), treat as sim-relevant
+          if [ -z "$BASE" ]; then
             echo "sim_relevant=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -54,7 +61,8 @@ jobs:
           fi
 
           # Check each file: if ALL files match render-only patterns, sim_relevant=false; else true
-          # Render-only patterns: v2/crates/render/**, **.md, .claude/**, pm/**, .claude-dev-kit (exact + contents), .github/workflows/sim-run.yml
+          # Render-only patterns: v2/crates/render/**, **.md, .claude/**, pm/**, .claude-dev-kit (exact + contents),
+          # .github/workflows/sim-run.yml (but NOT tests.yml itself).
           SIM_RELEVANT=false
           while IFS= read -r FILE; do
             [ -z "$FILE" ] && continue
@@ -155,10 +163,74 @@ jobs:
   #   * the R14 1-vs-N CONSERVED test (integer, a RELATIVE comparison) + two-run + energy/NaN-Inf
   #     guards sit OUTSIDE the `v2_golden_*` namespace → they run on BOTH arches, with a REAL N>1 sim
   #     thread pool (the sim builds its own pool; the test runner is orthogonal).
+  #
+  # Sharding (CI-2): v2-sim-x86 is split into 4 parallel shards via matrix.shard:
+  #   1a. x86-1a: debug invariants (cli)
+  #   1b. x86-1b: debug invariants (world, sim-core, brain, fields, telemetry) + perf gate
+  #   2.  x86-2: release invariants (world, sim-core, brain, fields, telemetry)
+  #   3.  x86-3: release invariants (cli)
+  # Each shard runs a deterministic subset. Completeness check verifies no test is missed.
   v2-sim-x86:
-    name: v2 sim (M2, x86 — invariants + R14 1-vs-N, no golden)
-    needs: changes
+    name: v2 sim shard ${{ matrix.shard }} (M2, x86)
+    needs: [changes, v2-shard-completeness]
     if: needs.changes.outputs.sim_relevant == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: v2
+    strategy:
+      matrix:
+        shard: [1a, 1b, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: v2-sim-x86
+          workspaces: v2
+
+      - name: v2 shard ${{ matrix.shard }}
+        run: |
+          case ${{ matrix.shard }} in
+            1a)
+              # Shard 1a: debug invariants (cli)
+              cargo nextest run -p cli --locked -E 'not test(v2_golden)'
+              ;;
+            1b)
+              # Shard 1b: debug invariants (world, sim-core, brain, fields, telemetry) + perf gate
+              cargo nextest run -p world -p sim-core -p brain -p fields -p telemetry --locked -E 'not test(v2_golden)'
+              cargo nextest run --workspace --release --locked --features perf -E 'test(work_counter)'
+              ;;
+            2)
+              # Shard 2: release invariants (world, sim-core, brain, fields, telemetry — small crates)
+              cargo nextest run -p world -p sim-core -p brain -p fields -p telemetry --release --locked -E 'not test(v2_golden)'
+              ;;
+            3)
+              # Shard 3: release invariants (cli — large crate; work_counter runs here in release,
+              # not in shard 1b's perf variant which is release+perf feature)
+              cargo nextest run -p cli --release --locked -E 'not test(v2_golden)'
+              ;;
+          esac
+
+      - name: Append summary
+        if: always()
+        run: |
+          echo "### v2 shard ${{ matrix.shard }} for \`${GITHUB_SHA::8}\`" >> "$GITHUB_STEP_SUMMARY"
+          test -f target/nextest/ci/junit.xml \
+            && echo '```xml' >> "$GITHUB_STEP_SUMMARY" \
+            && cat target/nextest/ci/junit.xml >> "$GITHUB_STEP_SUMMARY" \
+            && echo '```' >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report-v2-shard-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
+
+  v2-shard-completeness:
+    name: v2 shard coverage check
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -172,19 +244,8 @@ jobs:
           shared-key: v2-sim-x86
           workspaces: v2
 
-      # Everything EXCEPT the arch-bound golden — the integer invariants (R14 1-vs-N conserved + its
-      # negative teeth test, two-run-same-seed, exact energy conservation, NaN/Inf, bounded
-      # population) + unit tests, in both profiles. The R14 test spins a real N>1 sim pool here.
-      - name: v2 invariants (debug, x86)
-        run: cargo nextest run --workspace --locked -E 'not test(v2_golden)'
-      - name: v2 invariants (release, x86)
-        run: cargo nextest run --workspace --release --locked -E 'not test(v2_golden)'
-
-      # M4 perf-regression gate (R26 / D1b): work-counter complexity bounds (O(N) tripwire).
-      # Runs ONLY here (x86, release, --features perf). NOT in v2-golden-arm64 (R19 — golden untouched).
-      # Selects only work_counter tests to avoid running the full suite twice under the perf feature.
-      - name: v2 perf gate (release, x86)
-        run: cargo nextest run --workspace --release --locked --features perf -E 'test(work_counter)'
+      - name: Verify shard coverage is complete and deterministic
+        run: bash ../scripts/verify-shard-coverage.sh
 
   v2-golden-arm64:
     name: v2 golden (M2, arm64 matched arch)
