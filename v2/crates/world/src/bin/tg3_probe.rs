@@ -436,9 +436,9 @@ fn compute_anti_spike_test_synthetic(dim: usize) -> bool {
 
 /// Compute drainage density on a hex grid using D6 flow accumulation
 /// Returns drainage-density in per-10k-RASTER-CELLS units (same as raster version for direct comparison)
-/// threshold_cells: threshold in raster-cell units for channel detection
-/// mean_pooled: mean number of raster cells per hex (used for total_raster_cells calculation)
-/// hex_coords: axial (q, r) coordinates for each hex
+/// NOTE: This function is superseded by inline D6 accumulation in compute_resample_fidelity.
+/// Kept for reference but unused in current flow.
+#[allow(dead_code)]
 fn compute_drainage_density_hex(hex_count: usize, hex_height: &[i64], hex_coords: &[(i64, i64)], mean_pooled: i64, threshold_cells: i64) -> i64 {
     if hex_count == 0 || hex_height.len() != hex_count || hex_coords.len() != hex_count {
         return 0;
@@ -998,8 +998,8 @@ mod tests {
         let hex_count = 3;
         let hex_height = vec![3i64, 3i64, 1i64];
         // Arrange in Y shape: 0 and 1 at high level, 2 at low level
-        // Using axial coords where 0 and 1 flow to 2
-        let hex_coords = vec![(-1i64, 0i64), (1i64, 0i64), (0i64, 1i64)];
+        // Using axial coords where 0 and 1 flow to 2 (origin)
+        let hex_coords = vec![(-1i64, 0i64), (1i64, 0i64), (0i64, 0i64)];
         let mean_pooled = 10i64;
 
         let d6_offsets = [
