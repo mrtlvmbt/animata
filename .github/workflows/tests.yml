@@ -238,7 +238,7 @@ jobs:
           workspaces: v2
 
       - name: Verify shard coverage is complete and deterministic
-        run: bash ../../scripts/verify-shard-coverage.sh
+        run: bash ../scripts/verify-shard-coverage.sh
 
   v2-golden-arm64:
     name: v2 golden (M2, arm64 matched arch)
