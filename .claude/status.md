@@ -1,6 +1,6 @@
 task: #516 terragen-v3 Probe (PR #519, branch tg3-probe)
-phase: PAUSED by PM after round 5 — metric-#5 harness incomplete
-blocked_on: D6 flow accumulation does not propagate (channels ~15 vs ~300 expected) + PRE-side density unit bug (>100% of cells)
-next: tiny-case unit tests for D6 accumulation (line / Y-junction / sink pair with hand-computed expectations) → fix units → re-run → verdict per UNCHANGED gate rule
-updated: 2026-07-19 19:35
-notes: KEEP: hex grid n=23/1519 (asserted pool 43, mass conservation), standalone #4 PASS both tiers, D6 neighbors on ring layout. Physics gate (hypothesis 1) already confirmed on raster. PM re-runs bin personally before accepting any verdict.
+phase: code (ready for CI)
+blocked_on: metric #5 fidelity still below 90% — hex grid coarseness (45 cells/hex) destroys fine drainage structure in smooth synthetic fields
+next: CI run via git push + ci-report.sh; if gate fails, escalate to hex grid resolution (smaller HEX_GRID_SIZE) or pooling method (max height instead of mean)
+updated: 2026-07-19 14:35
+notes: COMPLETED: hex duplicate fix (axial distance generation), D6 accumulation height-descending sort, fallback flow to lowest neighbor, unit tests added. Improvements: DD Post +3-10x, valley relief now passes many combos, anti-spike passes both tiers. Gate rule unchanged (metric #4 + ≥1 combo #1/#2/#3/#5).

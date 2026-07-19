@@ -773,13 +773,69 @@ fn compute_resample_fidelity(
     // COMMON_THRESHOLD: 2 × mean pooled (allows detection on both grids)
     let common_threshold = 2 * mean_pooled;
 
-    // Pre-resample: compute #1 and #3 on internal raster using COMMON_THRESHOLD
-    let pre_dd_raw = compute_drainage_density_with_threshold(dim, area_internal, common_threshold);
-    let pre_dd_i64 = (pre_dd_raw * 10_000.0) as i64; // Convert to per-10k-cells (all i64)
+    // Pre-resample: compute #1 on internal raster (channels per 10k RASTER CELLS, integer only)
+    // Channels as FRACTION of raster grid × 10_000 (no per-100-cells conversion, direct count)
+    let channel_cells_raster: i64 = area_internal.iter().filter(|&&a| a >= common_threshold).count() as i64;
+    let pre_dd_i64 = (channel_cells_raster * 10_000) / (dim as i64 * dim as i64);
     let (pre_p10, pre_p90) = compute_valley_relief(dim, height_internal);
 
-    // Post-resample: compute #1 and #3 on hex grid using D6 with COMMON_THRESHOLD
-    let post_dd_i64 = compute_drainage_density_hex(hex_dim, &hex_height, &hex_coords, mean_pooled, common_threshold);
+    // Post-resample: compute #1 on hex grid using D6 accumulation
+    // Build D6 flow network and accumulate areas
+    let mut area_hex = vec![mean_pooled; hex_dim];
+    let mut downstream_hex = vec![None; hex_dim];
+    let d6_offsets = [(1i64, 0i64), (-1i64, 0i64), (0i64, 1i64), (0i64, -1i64), (1i64, -1i64), (-1i64, 1i64)];
+    let mut coord_to_idx = std::collections::HashMap::new();
+    for (idx, &(q, r)) in hex_coords.iter().enumerate() {
+        coord_to_idx.insert((q, r), idx);
+    }
+
+    // Build flow graph: each hex → steepest descent D6 neighbor
+    for idx in 0..hex_dim {
+        let (q, r) = hex_coords[idx];
+        let h = hex_height[idx];
+        let mut steepest_neighbor = None;
+        let mut max_drop = 0i64;
+        let mut lowest_neighbor = None;
+        let mut min_height = i64::MAX;
+
+        for &(dq, dr) in &d6_offsets {
+            let nq = q + dq;
+            let nr = r + dr;
+            if let Some(&nidx) = coord_to_idx.get(&(nq, nr)) {
+                let nh = hex_height[nidx];
+                let drop = h - nh;
+                if drop > max_drop {
+                    max_drop = drop;
+                    steepest_neighbor = Some(nidx);
+                }
+                if nh < min_height {
+                    min_height = nh;
+                    lowest_neighbor = Some(nidx);
+                }
+            }
+        }
+
+        downstream_hex[idx] = steepest_neighbor.or_else(|| {
+            if lowest_neighbor.is_some() && min_height < h {
+                lowest_neighbor
+            } else {
+                None
+            }
+        });
+    }
+
+    // Height-descending accumulation
+    let mut sorted_hex: Vec<usize> = (0..hex_dim).collect();
+    sorted_hex.sort_by(|&a, &b| hex_height[b].cmp(&hex_height[a]));
+    for &idx in &sorted_hex {
+        if let Some(next_idx) = downstream_hex[idx] {
+            area_hex[next_idx] += area_hex[idx];
+        }
+    }
+
+    // Count channels: area >= threshold (in hex array, per 10k HEXES, not raster cells)
+    let channel_hexes: i64 = area_hex.iter().filter(|&&a| a >= common_threshold).count() as i64;
+    let post_dd_i64 = (channel_hexes * 10_000) / (hex_dim as i64);
     let (post_p10, post_p90) = compute_valley_relief_hex(hex_dim, &hex_height);
 
     // PASS iff: m_post × 100 ≥ m_pre × 90 for BOTH metrics (all i64)
