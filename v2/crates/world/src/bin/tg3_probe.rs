@@ -853,7 +853,7 @@ fn main() {
     for result in &all_results {
         let dd_pass = result.resample_dd_post_i64 * 100 >= result.resample_dd_pre_i64 * 90;
         let vr_pass = result.resample_vr_p10_post * 100 >= (result.resample_vr_p10_pre * 90).max(1);
-        println!("{:3}x{:3} {:15} | {:13} | {:13} | {:3} | {:8} | {:11} | {:11} | {}",
+        println!("{:3}x{:3} | {:13} | {:13} | {:3} | {:10} | {:11} | {:3} | {:15}",
             result.dim, result.dim,
             result.resample_dd_pre_i64,
             result.resample_dd_post_i64,
