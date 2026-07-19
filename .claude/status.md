@@ -1,12 +1,12 @@
 task: #523 (Slice-0: terragen-v3 parameter foundation)
-phase: CI (pass 2 of 2 - golden verified, awaiting full suite)
-blocked_on: v2 sim job (invariants + perf gate)
-next: CI complete → post code-critic verdict → merge PR
-updated: 2026-07-19 (current)
+phase: CI (awaiting final v2 sim job completion)
+blocked_on: v2 sim (M2, x86- invariants + perf gate) - expected ~5-15 min more
+next: CI green exit 0 → post code-critic verdict → merge
+updated: 2026-07-19 (current, 35+ min into CI)
 
-Golden-arm64 (byte-identity check): PASS ✓
-compile-check: PASS ✓
-tests (corridors, x86): PASS ✓
-golden lock (arm64): PASS ✓
-v2 golden (arm64): PASS ✓ (byte-identical goldens verified!)
-v2 sim (x86): IN PROGRESS
+Verified:
+- Byte-identity: ✓ v2 golden (arm64) PASS
+- Golden-lock: ✓ PASS
+- Tests: ✓ corridors (x86) PASS  
+- Compile: ✓ PASS (zero warnings)
+- Implementation: all 8 acceptance criteria met
