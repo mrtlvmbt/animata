@@ -37,7 +37,7 @@ fn phase0_measurement(dim: usize) {
 
     for seed in [1u64, 42] {
         let (_, staged, masks) = classify_and_caps_staged(
-            seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, true  // All landforms ON, talus OFF, enable_w10=true
+            seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, true, false  // All landforms ON, talus OFF, enable_w10=true, enable_plate_sim=false
         );
 
         println!("\nSeed {} (all landforms ON, dim={})", seed, dim);
@@ -67,7 +67,7 @@ fn sweep_measurement(dim: usize) {
 
     // Generate base map once (with all landforms ON, talus OFF to get post-coastal)
     let (_, staged, masks) = classify_and_caps_staged(
-        seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, true  // enable_w10=true
+        seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, true, false  // enable_w10=true, enable_plate_sim=false
     );
 
     // BASELINE: Measure counts for talus-OFF (post-coastal only)
@@ -117,7 +117,7 @@ fn export_candidates(dim: usize) {
 
     // Generate base map once for staged heights
     let (_, staged, _) = classify_and_caps_staged(
-        seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, true  // enable_w10=true
+        seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, true, false  // enable_w10=true, enable_plate_sim=false
     );
 
     // Get production materials from baseline (talus OFF) — materials don't change with talus smoothing
