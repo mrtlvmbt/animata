@@ -231,7 +231,8 @@ const PLATE_ROUGHNESS_SALT: u64 = 0x504C_4154_4552_4F55; // "PLATEROU" (ASCII, f
 /// Slice-1M: Plate micro-roughness amplitude (±N units, integer symmetry-breaker, not a relief source).
 /// Small enough to be erased by de_needle_pass/talus_step_final if ≥ their margins.
 /// Tuned to give weak initial signal for incision nucleation without overshadowing physics relief.
-const PLATE_ROUGHNESS_AMP: i64 = 2;
+/// Increased from ±2 to ±4 for stronger drainage nucleation on wide (hw=16) belts.
+const PLATE_ROUGHNESS_AMP: i64 = 4;
 
 /// Slice-1M: Plate fractional-carry magnitude per iteration (for low-area cells with truncated incision).
 /// Retained remainder per belt cell across macro-iterations, un-floors weak incision without over-driving crests.
@@ -403,6 +404,7 @@ pub fn incision_step(
 /// On belt cells (belt_distance ≤ belt_hw), retains fractional remainder across iterations:
 /// raw_carry = raw + carry[v]; dz = integer_part; carry[v] = remainder.
 /// This un-floors the weak low-area/low-slope cells without over-driving high-slope crests (where remainder ≈ 0).
+/// **ALWAYS uses serial path when belt_distance/belt_hw are provided** — carry update requires mutable access.
 pub fn incision_step_with_carry(
     dim: usize,
     height: &[i64],
@@ -413,8 +415,6 @@ pub fn incision_step_with_carry(
     belt_distance: Option<&[i64]>,
     belt_hw: Option<i64>,
 ) -> Vec<i64> {
-    use rayon::prelude::*;
-
     let n = dim * dim;
     debug_assert_eq!(height.len(), n);
     debug_assert_eq!(downstream.len(), n);
@@ -425,62 +425,33 @@ pub fn incision_step_with_carry(
     let bd_ref = belt_distance;
     let hw = belt_hw.unwrap_or(i64::MAX); // If not provided, no carry (all cells treated as non-belt)
 
-    // M1 (W-17): par_iter per-cell incision delta — PAR_MIN_DIM gate (dim-64 shows +25% regression).
-    if dim >= PAR_MIN_DIM {
-        // Parallel path: par_iter per-cell
-        let delta: Vec<i64> = (0..n).into_par_iter().map(|v| {
-            let Some(d) = downstream[v] else { return 0i64 };
-            let s = (height[v] - height[d]).max(0);
-            let a_isqrt = isqrt(area[v]);
-            let divisor = RESIST_DIVISOR[resistance[v] as usize];
-            let raw = K_INCISE_NUM * a_isqrt * s;
+    // Slice-1M: Serial path only (required for mutable carry updates on belt cells).
+    // Even when dim >= PAR_MIN_DIM, we use serial to ensure carry accuracy on plate path.
+    let mut delta = vec![0i64; n];
+    for v in 0..n {
+        let Some(d) = downstream[v] else { continue };
+        let s = (height[v] - height[d]).max(0);
+        let a_isqrt = isqrt(area[v]);
+        let divisor = RESIST_DIVISOR[resistance[v] as usize];
+        let raw = K_INCISE_NUM * a_isqrt * s;
 
-            // Check if this cell is on the plate belt (use carry logic) or off-belt (standard truncation)
-            let is_on_belt = bd_ref.map_or(false, |bd| bd[v] <= hw && bd[v] != i64::MAX);
-            if is_on_belt {
-                // Fractional-carry: accumulate raw, divide, keep remainder
-                let denominator = K_INCISE_DEN * divisor;
-                let with_carry = raw + carry[v];
-                let dz = (with_carry / denominator).clamp(0, height[v]);
-                // Update carry for next iteration (note: not thread-safe, but this is the intended logic,
-                // which we handle via serial fallback below or per-cell atomic in a future version)
-                // For now, parallel path must use a synchronized update. We'll use the serial path for accurate carry.
-                dz
-            } else {
-                // Standard path (no carry)
-                let dz = (raw / (K_INCISE_DEN * divisor)).clamp(0, height[v]);
-                dz
-            }
-        }).collect();
-        delta
-    } else {
-        // Serial fallback for dim < PAR_MIN_DIM (rayon overhead not worth it)
-        let mut delta = vec![0i64; n];
-        for v in 0..n {
-            let Some(d) = downstream[v] else { continue };
-            let s = (height[v] - height[d]).max(0);
-            let a_isqrt = isqrt(area[v]);
-            let divisor = RESIST_DIVISOR[resistance[v] as usize];
-            let raw = K_INCISE_NUM * a_isqrt * s;
-
-            // Check if this cell is on the plate belt (use carry logic) or off-belt (standard truncation)
-            let is_on_belt = bd_ref.map_or(false, |bd| bd[v] <= hw && bd[v] != i64::MAX);
-            if is_on_belt {
-                // Fractional-carry: accumulate raw, divide, keep remainder
-                let denominator = K_INCISE_DEN * divisor;
-                let with_carry = raw + carry[v];
-                let dz = (with_carry / denominator).clamp(0, height[v]);
-                let remainder = with_carry % denominator;
-                carry[v] = remainder;
-                delta[v] = dz;
-            } else {
-                // Standard path (no carry)
-                let dz = (raw / (K_INCISE_DEN * divisor)).clamp(0, height[v]);
-                delta[v] = dz;
-            }
+        // Check if this cell is on the plate belt (use carry logic) or off-belt (standard truncation)
+        let is_on_belt = bd_ref.map_or(false, |bd| bd[v] <= hw && bd[v] != i64::MAX);
+        if is_on_belt {
+            // Fractional-carry: accumulate raw, divide, keep remainder
+            let denominator = K_INCISE_DEN * divisor;
+            let with_carry = raw + carry[v];
+            let dz = (with_carry / denominator).clamp(0, height[v]);
+            let remainder = with_carry % denominator;
+            carry[v] = remainder;
+            delta[v] = dz;
+        } else {
+            // Standard path (no carry)
+            let dz = (raw / (K_INCISE_DEN * divisor)).clamp(0, height[v]);
+            delta[v] = dz;
         }
-        delta
     }
+    delta
 }
 
 /// Thermal talus relaxation: GATHER formulation (`[erosion]` non-negotiable — never a scatter).
