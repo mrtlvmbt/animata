@@ -320,11 +320,9 @@ pub fn incision_step(
     }
 }
 
-/// Thermal talus relaxation: GATHER formulation (`[erosion]` non-negotiable — never a scatter).
-/// Pass 1 computes each cell's own outflow intention (`send_out`, purely local). Pass 2 has every
-/// cell PULL its neighbors' intentions that target it — no cell ever writes into another's slot.
-/// Returns the NEW height buffer (Jacobi: reads only `height`/`downstream`, the OLD frame).
-pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> Vec<i64> {
+/// Thermal talus relaxation with parameterized repose threshold.
+/// Probe-only variant for testing different repose values.
+pub fn talus_step_with_repose(dim: usize, height: &[i64], downstream: &[Option<usize>], repose_threshold: i64) -> Vec<i64> {
     use rayon::prelude::*;
 
     let n = dim * dim;
@@ -337,8 +335,8 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
         (0..n).into_par_iter().map(|v| {
             let Some(d) = downstream[v] else { return 0i64 };
             let slope = (height[v] - height[d]).max(0);
-            if slope > REPOSE_THRESHOLD {
-                (slope - REPOSE_THRESHOLD) * TALUS_FRAC_NUM / TALUS_FRAC_DEN
+            if slope > repose_threshold {
+                (slope - repose_threshold) * TALUS_FRAC_NUM / TALUS_FRAC_DEN
             } else {
                 0
             }
@@ -349,8 +347,8 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
         for v in 0..n {
             let Some(d) = downstream[v] else { continue };
             let slope = (height[v] - height[d]).max(0);
-            if slope > REPOSE_THRESHOLD {
-                send_out[v] = (slope - REPOSE_THRESHOLD) * TALUS_FRAC_NUM / TALUS_FRAC_DEN;
+            if slope > repose_threshold {
+                send_out[v] = (slope - repose_threshold) * TALUS_FRAC_NUM / TALUS_FRAC_DEN;
             }
         }
         send_out
@@ -401,6 +399,14 @@ pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> V
         new_height
     };
     new_height
+}
+
+/// Thermal talus relaxation: GATHER formulation (`[erosion]` non-negotiable — never a scatter).
+/// Pass 1 computes each cell's own outflow intention (`send_out`, purely local). Pass 2 has every
+/// cell PULL its neighbors' intentions that target it — no cell ever writes into another's slot.
+/// Returns the NEW height buffer (Jacobi: reads only `height`/`downstream`, the OLD frame).
+pub fn talus_step(dim: usize, height: &[i64], downstream: &[Option<usize>]) -> Vec<i64> {
+    talus_step_with_repose(dim, height, downstream, REPOSE_THRESHOLD)
 }
 
 /// W-8: De-needle pass — remove isolated 1-cell height spikes. GATHER formulation (Jacobi, like
@@ -856,7 +862,23 @@ pub struct ErosionState {
 /// W-18: added enable_erosion parameter. When false, skips the erosion macro-loop but still
 /// computes drainage and surface materials, preserving the accumulated source field (base+tect+volcanic).
 /// W-19: erosion_strength (percent, default 100) scales the iteration count via: effective_iters = (MACRO_ITERATIONS * strength) / 100.
-pub fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, resistance: Vec<i64>, enable_erosion: bool, erosion_strength: i64) -> ErosionState {
+/// PROBE: enable_talus and talus_repose_threshold for diagnostic testing of talus impact.
+pub fn erode_from_fields(seed: u64, hmax: i64, dim: usize, height: Vec<i64>, resistance: Vec<i64>, enable_erosion: bool, erosion_strength: i64) -> ErosionState {
+    erode_from_fields_with_talus_control(seed, hmax, dim, height, resistance, enable_erosion, erosion_strength, true, None)
+}
+
+/// PROBE-ONLY: erode_from_fields with talus control (enable/disable talus, custom repose threshold).
+pub fn erode_from_fields_with_talus_control(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    mut height: Vec<i64>,
+    resistance: Vec<i64>,
+    enable_erosion: bool,
+    erosion_strength: i64,
+    enable_talus: bool,
+    talus_repose_threshold: Option<i64>,
+) -> ErosionState {
     let n = dim * dim;
     let initial_height = height.clone();
 
@@ -882,7 +904,14 @@ pub fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>,
         export_total += export_this_iter;
 
         // 3. Thermal talus relaxation (Jacobi gather, internal zero-sum redistribution).
-        height = talus_step(dim, &height, &downstream);
+        // PROBE: conditionally apply talus with optional custom repose threshold.
+        if enable_talus {
+            if let Some(repose) = talus_repose_threshold {
+                height = talus_step_with_repose(dim, &height, &downstream, repose);
+            } else {
+                height = talus_step(dim, &height, &downstream);
+            }
+        }
         }
     }
 

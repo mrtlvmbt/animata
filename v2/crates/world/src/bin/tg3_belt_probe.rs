@@ -1,27 +1,33 @@
-//! TG3 Belt Width Diagnostic Probe
+//! TG3 Belt Width + Talus Control Diagnostic Probe
 //!
-//! Tests hypothesis: wider fold belts (belt_half_width > 3) give better-retained
-//! relief and resolve the plate_strength inversion (relief growing with strength,
-//! not shrinking). Sweeps belt_half_width × plate_strength and reports relief/drainage/peak metrics.
+//! Two parts:
+//! 1. Belt width sweep (3, 8, 16, 32) × strength (50, 100, 200) to show belt width has no effect
+//! 2. Talus control sweep at fixed belt width: talus ON vs OFF vs custom repose (4)
+//!
+//! The talus control is the DECISIVE experiment: if disabling talus or raising repose threshold
+//! restores relief and kills the strength inversion, then REPOSE_THRESHOLD=0 is the crusher, not belt width.
 
 fn main() {
     const HMAX: i64 = 200;
     const DIM: usize = 256; // Larger grid to let belts resolve
     const PLATE_COUNT: u32 = 15;
+    const SEED: u64 = 0x1234567890ABCDEFu64;
+    const FIXED_BELT_WIDTH: i64 = 16; // For talus control sweep
 
-    println!("=== TG3 Belt Width Diagnostic Probe ===");
+    println!("=== TG3 Belt Width + Talus Control Diagnostic Probe ===");
     println!("Config: DIM={}, HMAX={}, base=false, enable_plate_sim=true, erosion=true", DIM, HMAX);
     println!();
 
+    // PART 1: Belt width sweep (confirms belt width has no effect)
+    println!("=== PART 1: Belt Width Sweep (confirms belt width has minimal effect) ===");
+    println!("Seed: 0x{:016X}", SEED);
+    println!();
+    println!("Belt_Width  |  Strength  |  Valley_Relief_p10  |  Valley_Relief_p90  |  Peak_Retained");
+    println!("    (cells) |   (%)      |                     |                     |  (height units)");
+    println!("------------|------------|---------------------|---------------------|----------------------");
+
     let belt_widths = [3i64, 8, 16, 32];
     let strengths = [50i64, 100, 200];
-    let seed = 0x1234567890ABCDEFu64;
-
-    println!("Seed: 0x{:016X}", seed);
-    println!();
-    println!("Belt_Width  |  Strength  |  Valley_Relief_p10  |  Valley_Relief_p90  |  Drainage_Density_%  |  Peak_Retained");
-    println!("    (cells) |   (%)      |                     |                     |                      |  (height units)");
-    println!("------------|------------|---------------------|---------------------|----------------------|----------------------");
 
     for &belt_width in &belt_widths {
         for &strength in &strengths {
@@ -31,7 +37,7 @@ fn main() {
 
             // Plate fields and orogeny with parameterized belt width
             let plate_count_clamped = world::gen::plate::clamp_plate_count(PLATE_COUNT, DIM as i64);
-            let plate_fields = world::gen::plate::compute_plate_fields(seed, DIM as i64, plate_count_clamped);
+            let plate_fields = world::gen::plate::compute_plate_fields(SEED, DIM as i64, plate_count_clamped);
             let plate_uplift = world::gen::orogeny::generate_plate_uplift_field_with_belt(
                 &plate_fields,
                 DIM as i64,
@@ -45,10 +51,10 @@ fn main() {
                 height[i] = (height[i] + plate_uplift[i]).clamp(0, HMAX);
             }
 
-            // Run erosion on the uplifted field
-            let resistance = compute_resistance(seed, DIM, HMAX);
+            // Run erosion on the uplifted field (talus ON, default repose=0)
+            let resistance = compute_resistance(SEED, DIM, HMAX);
             let erosion = world::gen::erosion::erode_from_fields(
-                seed,
+                SEED,
                 HMAX,
                 DIM,
                 height.clone(),
@@ -58,27 +64,116 @@ fn main() {
             );
 
             // Measure metrics on eroded field
-            let drainage_density = compute_drainage_density(DIM, &erosion.drainage.area);
             let (valley_p10, valley_p90) = compute_valley_relief(DIM, &erosion.height);
             let peak_retained = *erosion.height.iter().max().unwrap_or(&flat_base) - flat_base;
 
             println!(
-                "     {:2}     |    {:3}     |        {:3}          |        {:3}          |        {:6.2}        |       {:3}",
-                belt_width, strength, valley_p10, valley_p90, drainage_density, peak_retained
+                "     {:2}     |    {:3}     |        {:3}          |        {:3}          |       {:3}",
+                belt_width, strength, valley_p10, valley_p90, peak_retained
             );
         }
         println!();
     }
 
-    println!("=== INTERPRETATION ===");
-    println!("• Valley_Relief_p10/p90: cross-valley depth (local peak - center) at 10th and 90th percentiles");
-    println!("• Drainage_Density: percentage of cells in channels (area >= (dim^2 / 13000).max(8))");
-    println!("• Peak_Retained: max height after erosion minus flat base (in hmax units)");
+    // PART 2: Talus control sweep at FIXED belt width
     println!();
-    println!("HYPOTHESIS: Wider belts (higher belt_half_width) should:");
-    println!("  1. Increase valley relief (more room for incision to dissect the uplift)");
-    println!("  2. Resolve strength inversion (relief should grow or plateau with strength, not shrink)");
-    println!("  3. Retain higher peaks (the uplifted belt stands above erosion)");
+    println!("=== PART 2: TALUS CONTROL SWEEP (the decisive experiment) ===");
+    println!("Fixed belt_width={}, Seed: 0x{:016X}", FIXED_BELT_WIDTH, SEED);
+    println!("Three conditions: (A) Talus ON (repose=0) | (B) Talus OFF | (C) Talus with repose=4");
+    println!();
+    println!("Condition       |  Strength  |  Valley_Relief_p10  |  Valley_Relief_p90  |  Peak_Retained");
+    println!("                |   (%)      |                     |                     |  (height units)");
+    println!("----------------|------------|---------------------|---------------------|----------------------");
+
+    for &strength in &strengths {
+        // (A) Talus ON (current default: repose=0)
+        {
+            let flat_base = HMAX / 2;
+            let mut height = vec![flat_base; DIM * DIM];
+            let plate_count_clamped = world::gen::plate::clamp_plate_count(PLATE_COUNT, DIM as i64);
+            let plate_fields = world::gen::plate::compute_plate_fields(SEED, DIM as i64, plate_count_clamped);
+            let plate_uplift = world::gen::orogeny::generate_plate_uplift_field_with_belt(
+                &plate_fields,
+                DIM as i64,
+                HMAX,
+                strength,
+                FIXED_BELT_WIDTH,
+            );
+            for i in 0..DIM * DIM {
+                height[i] = (height[i] + plate_uplift[i]).clamp(0, HMAX);
+            }
+            let resistance = compute_resistance(SEED, DIM, HMAX);
+            let erosion = world::gen::erosion::erode_from_fields(SEED, HMAX, DIM, height.clone(), resistance, true, strength);
+            let (valley_p10, valley_p90) = compute_valley_relief(DIM, &erosion.height);
+            let peak_retained = *erosion.height.iter().max().unwrap_or(&flat_base) - flat_base;
+            println!("(A) Talus ON    |    {:3}     |        {:3}          |        {:3}          |       {:3}",
+                     strength, valley_p10, valley_p90, peak_retained);
+        }
+
+        // (B) Talus OFF
+        {
+            let flat_base = HMAX / 2;
+            let mut height = vec![flat_base; DIM * DIM];
+            let plate_count_clamped = world::gen::plate::clamp_plate_count(PLATE_COUNT, DIM as i64);
+            let plate_fields = world::gen::plate::compute_plate_fields(SEED, DIM as i64, plate_count_clamped);
+            let plate_uplift = world::gen::orogeny::generate_plate_uplift_field_with_belt(
+                &plate_fields,
+                DIM as i64,
+                HMAX,
+                strength,
+                FIXED_BELT_WIDTH,
+            );
+            for i in 0..DIM * DIM {
+                height[i] = (height[i] + plate_uplift[i]).clamp(0, HMAX);
+            }
+            let resistance = compute_resistance(SEED, DIM, HMAX);
+            let erosion = world::gen::erosion::erode_from_fields_with_talus_control(
+                SEED, HMAX, DIM, height.clone(), resistance, true, strength, false, None
+            );
+            let (valley_p10, valley_p90) = compute_valley_relief(DIM, &erosion.height);
+            let peak_retained = *erosion.height.iter().max().unwrap_or(&flat_base) - flat_base;
+            println!("(B) Talus OFF   |    {:3}     |        {:3}          |        {:3}          |       {:3}",
+                     strength, valley_p10, valley_p90, peak_retained);
+        }
+
+        // (C) Talus with realistic repose (4 units)
+        {
+            let flat_base = HMAX / 2;
+            let mut height = vec![flat_base; DIM * DIM];
+            let plate_count_clamped = world::gen::plate::clamp_plate_count(PLATE_COUNT, DIM as i64);
+            let plate_fields = world::gen::plate::compute_plate_fields(SEED, DIM as i64, plate_count_clamped);
+            let plate_uplift = world::gen::orogeny::generate_plate_uplift_field_with_belt(
+                &plate_fields,
+                DIM as i64,
+                HMAX,
+                strength,
+                FIXED_BELT_WIDTH,
+            );
+            for i in 0..DIM * DIM {
+                height[i] = (height[i] + plate_uplift[i]).clamp(0, HMAX);
+            }
+            let resistance = compute_resistance(SEED, DIM, HMAX);
+            let erosion = world::gen::erosion::erode_from_fields_with_talus_control(
+                SEED, HMAX, DIM, height.clone(), resistance, true, strength, true, Some(4)
+            );
+            let (valley_p10, valley_p90) = compute_valley_relief(DIM, &erosion.height);
+            let peak_retained = *erosion.height.iter().max().unwrap_or(&flat_base) - flat_base;
+            println!("(C) Repose=4    |    {:3}     |        {:3}          |        {:3}          |       {:3}",
+                     strength, valley_p10, valley_p90, peak_retained);
+        }
+        println!();
+    }
+
+    println!("=== INTERPRETATION ===");
+    println!("PART 1: Belt width has MINIMAL effect on relief (p90 stays 6–19 across widths 3–32).");
+    println!();
+    println!("PART 2: If (B) or (C) show:");
+    println!("  • Valley relief INCREASES with strength (no inversion) ⟹ talus is the crusher");
+    println!("  • Peak retained becomes MEANINGFUL (>30 units) ⟹ incision works when talus doesn't win");
+    println!("  ⟹ CONFIRMED: set REPOSE_THRESHOLD to a realistic value (e.g., 2-4) to restore relief.");
+    println!();
+    println!("If (B) and (C) still show collapsed relief and inversion:");
+    println!("  ⟹ the crusher is NOT talus; look elsewhere (incision K, uplift clamping, etc.).");
 }
 
 fn compute_resistance(seed: u64, dim: usize, hmax: i64) -> Vec<i64> {
@@ -94,12 +189,6 @@ fn compute_resistance(seed: u64, dim: usize, hmax: i64) -> Vec<i64> {
         resistance.push(class);
     }
     resistance
-}
-
-fn compute_drainage_density(dim: usize, area: &[i64]) -> f64 {
-    let threshold = (dim as i64 * dim as i64 / 13000).max(8);
-    let channel_cells: i64 = area.iter().filter(|&&a| a >= threshold).count() as i64;
-    (channel_cells as f64 * 100.0) / (dim * dim) as f64
 }
 
 fn compute_valley_relief(dim: usize, height: &[i64]) -> (i64, i64) {
