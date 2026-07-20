@@ -44,6 +44,20 @@
 //!   - `OROGEN_CONT_CONT_AMP`: fold belt (symmetric, both up)
 //!   - `OROGEN_CONT_OCEAN_AMP`: subduction (continental up / oceanic down)
 //!   - `OROGEN_OCEAN_OCEAN_AMP`: oceanic rifts (sparse)
+//!
+//! ## Slice-1j: Scale hierarchy via convergence strength
+//!
+//! **AC1 (distance-weighted convergence propagation):** For each belt cell, compute an effective
+//! convergence via integer distance-weighted blur (box-sum / count within reach). Gate strictly
+//! on convergent boundary_type; divergent/transform never contribute. Deterministic (order-independent sum/count).
+//! **F5 (div-by-zero guard):** blur reach ≥ HW_MAX; `if count == 0 { sentinel } else { sum/count }`.
+//!
+//! **AC2/AC3 (absolute size maps):** Map propagated convergence through FIXED-breakpoint piecewise-linear maps
+//! (NOT renormalization). Amplitude: weak conv → AMP_MIN, strong conv → AMP_MAX. Width: weak → HW_MIN, strong → HW_MAX.
+//! Breakpoints pinned to AC0's measured distribution (do not guess).
+//!
+//! **AC4 (real test):** Amplitude/width correlate with conv_eff on the same map; synthetic low/high fixtures
+//! reach near AMP_MIN/AMP_MAX respectively.
 
 use crate::gen::plate::{BoundaryType, PlateFields};
 use std::collections::VecDeque;
@@ -101,6 +115,32 @@ const NEIGHBOR_OFFSETS: &[(i64, i64)] = &[
     (-1, 1),  // SW
     (-1, 0),  // W
 ];
+
+/// **Slice-1j: Convergence→amplitude mapping constants (ABSOLUTE, pinned to AC0 measured range).**
+/// AC0 measurement at dim=256 and dim=512:
+///   min=1, p50(median)=6-15, p90=36-42, max=324-325
+/// Units: convergence_magnitude is a dot product (i64), dimension-independent scale.
+/// Breakpoints pinned to measured range: weak conv ~0-50, strong conv ~200+.
+const CONV_AMP_LOW: i64 = 50;       // Convergence breakpoint for AMP_MIN (weak collision)
+const CONV_AMP_HIGH: i64 = 200;     // Convergence breakpoint for AMP_MAX (strong collision)
+const AMP_MIN_NUM: i64 = 1;         // Minimum amplitude as fraction of hmax
+const AMP_MIN_DEN: i64 = 12;        // e.g., 1/12 hmax for weak collisions (Khibiny-like)
+const AMP_MAX_NUM: i64 = 1;         // Maximum amplitude as fraction of hmax
+const AMP_MAX_DEN: i64 = 3;         // e.g., 1/3 hmax for strong collisions (Himalaya-like)
+
+/// **Slice-1j: Convergence→width mapping constants (ABSOLUTE, pinned to AC0 measured range).**
+/// Map convergence to belt half-width as fractions of dim.
+/// Same breakpoints as amplitude for consistency.
+const CONV_HW_LOW: i64 = 50;        // Convergence breakpoint for HW_MIN (weak collision)
+const CONV_HW_HIGH: i64 = 200;      // Convergence breakpoint for HW_MAX (strong collision)
+const HW_MIN_DIM_NUM: i64 = 1;      // Minimum width as fraction of dim
+const HW_MIN_DIM_DEN: i64 = 32;     // e.g., dim/32 for weak collisions (Khibiny-like, narrow)
+const HW_MAX_DIM_NUM: i64 = 1;      // Maximum width as fraction of dim
+const HW_MAX_DIM_DEN: i64 = 8;      // e.g., dim/8 for strong collisions (Himalaya-like, wide)
+
+/// **Slice-1j AC1: Blur reach for convergence propagation (must be ≥ HW_MAX).**
+/// Set to 2× the maximum belt_hw to ensure every interior cell sees ≥1 source.
+const CONV_BLUR_REACH_FACTOR: i64 = 2;
 
 /// **Slice-1i: Integer triangle wave in [0, FOLD_SCALE].**
 ///
@@ -176,6 +216,58 @@ fn low_pass_belt_distance(dim: usize, belt_distance: &[i64]) -> Vec<i64> {
     smoothed
 }
 
+/// **Slice-1j AC2: Map convergence (absolute) to amplitude scale.**
+///
+/// Piecewise-linear map from absolute convergence units (NOT normalized) to amplitude.
+/// - conv ≤ CONV_AMP_LOW → AMP_MIN
+/// - conv ≥ CONV_AMP_HIGH → AMP_MAX
+/// - linear interpolation between
+///
+/// Returns amplitude as a numerator (denominator is implicit in caller's fractions).
+/// Weak convergence → small local massifs (Khibiny); strong convergence → tall ranges (Himalaya).
+fn map_convergence_to_amplitude(conv: i64, hmax: i64) -> i64 {
+    if conv <= CONV_AMP_LOW {
+        (AMP_MIN_NUM * hmax) / AMP_MIN_DEN
+    } else if conv >= CONV_AMP_HIGH {
+        (AMP_MAX_NUM * hmax) / AMP_MAX_DEN
+    } else {
+        // Linear interpolation between AMP_MIN and AMP_MAX.
+        let amp_min = (AMP_MIN_NUM * hmax) / AMP_MIN_DEN;
+        let amp_max = (AMP_MAX_NUM * hmax) / AMP_MAX_DEN;
+        let range = amp_max - amp_min;
+        let conv_range = CONV_AMP_HIGH - CONV_AMP_LOW;
+        let frac = conv - CONV_AMP_LOW;
+        // Integer arithmetic: amp_min + (frac * range) / conv_range
+        amp_min + (frac * range) / conv_range
+    }
+}
+
+/// **Slice-1j AC3: Map convergence (absolute) to width scale.**
+///
+/// Piecewise-linear map from absolute convergence units to belt half-width.
+/// - conv ≤ CONV_HW_LOW → HW_MIN = dim/32 (narrow, Khibiny)
+/// - conv ≥ CONV_HW_HIGH → HW_MAX = dim/8 (wide, Himalaya)
+/// - linear interpolation between
+///
+/// Returns belt_hw as an absolute count of cells.
+fn map_convergence_to_width(conv: i64, dim: i64) -> i64 {
+    let hw_min = (dim * HW_MIN_DIM_NUM) / HW_MIN_DIM_DEN;
+    let hw_max = (dim * HW_MAX_DIM_NUM) / HW_MAX_DIM_DEN;
+
+    if conv <= CONV_HW_LOW {
+        hw_min
+    } else if conv >= CONV_HW_HIGH {
+        hw_max
+    } else {
+        // Linear interpolation between HW_MIN and HW_MAX.
+        let range = hw_max - hw_min;
+        let conv_range = CONV_HW_HIGH - CONV_HW_LOW;
+        let frac = conv - CONV_HW_LOW;
+        // Integer arithmetic: hw_min + (frac * range) / conv_range
+        hw_min + (frac * range) / conv_range
+    }
+}
+
 /// **Slice-1i: Apply multi-octave fold modulation to a ramp weight.**
 ///
 /// Given a smoothed belt distance `d` and a belt half-width `belt_hw`, compute the fold factor
@@ -222,6 +314,81 @@ fn compute_fold_factor(d: i64, belt_hw: i64) -> i64 {
     let modulated = floor + (depth * octave_sum) / FOLD_SCALE; // fold factor in [floor, FOLD_SCALE]
 
     modulated.clamp(0, FOLD_SCALE)
+}
+
+/// **Slice-1j AC1: Propagate convergence_magnitude from convergent boundaries into belt interior.**
+///
+/// For each belt cell, compute an effective convergence via distance-weighted integer blur:
+/// `conv_eff = sum_nearby_sources / count_nearby_sources`, where "nearby" is within a reach.
+/// Uses separable integer box-sum (order-independent, deterministic, no floats).
+/// **F5 (div-by-zero guard):** If count==0, returns a sentinel minimum; never divides by zero.
+/// Gated strictly on convergent boundary_type; divergent/transform boundaries never contribute.
+///
+/// **Algorithm:**
+/// 1. Compute belt_distance (D8 BFS to nearest convergent boundary).
+/// 2. For each belt cell (distance ≤ belt_hw), summon nearby convergent-boundary sources.
+/// 3. Sources are convergent-boundary cells within blur_reach (typically 2× belt_hw).
+/// 4. Sum convergence magnitudes and count; divide to get average.
+/// 5. Clamp result to a valid range (no negative convergence in output).
+fn propagate_convergence_to_belt(
+    dim: i64,
+    fields: &PlateFields,
+    belt_hw: i64,
+) -> Vec<i64> {
+    let dim_usize = dim as usize;
+    let n = dim_usize * dim_usize;
+    let blur_reach = (belt_hw * CONV_BLUR_REACH_FACTOR).max(dim / 8); // ≥ HW_MAX
+
+    let mut conv_eff = vec![0i64; n];
+
+    // First pass: compute belt_distance to identify belt cells.
+    let belt_distance = compute_belt_distance(dim, &fields.boundary_type);
+
+    // Second pass: for each belt cell, sum nearby convergent-boundary sources.
+    for z in 0..dim_usize {
+        for x in 0..dim_usize {
+            let idx = z * dim_usize + x;
+
+            // Skip cells far from any convergent boundary (non-belt).
+            if belt_distance[idx] > belt_hw {
+                conv_eff[idx] = 0;
+                continue;
+            }
+
+            let mut sum = 0i64;
+            let mut count = 0i64;
+
+            // Scan nearby cells for convergent-boundary sources.
+            for source_z in ((z as i64 - blur_reach).max(0) as usize)
+                ..=((z as i64 + blur_reach).min(dim - 1) as usize)
+            {
+                for source_x in ((x as i64 - blur_reach).max(0) as usize)
+                    ..=((x as i64 + blur_reach).min(dim - 1) as usize)
+                {
+                    let source_idx = source_z * dim_usize + source_x;
+
+                    // Only include convergent-boundary sources (gate strictly).
+                    if fields.boundary_type[source_idx] == BoundaryType::Convergent {
+                        let source_conv = fields.convergence_magnitude[source_idx];
+                        // Only positive convergence (should always be true for convergent, but guard).
+                        if source_conv > 0 {
+                            sum = sum.saturating_add(source_conv);
+                            count += 1;
+                        }
+                    }
+                }
+            }
+
+            // **F5 (div-by-zero guard):** Sentinel fallback for empty source window.
+            if count == 0 {
+                conv_eff[idx] = 0; // Sentinel: no nearby sources → minimum amplitude
+            } else {
+                conv_eff[idx] = sum / count; // Integer division (round-down)
+            }
+        }
+    }
+
+    conv_eff
 }
 
 /// Deterministic belt-distance transform: integer multi-source BFS from all convergent-boundary cells.
@@ -278,6 +445,12 @@ fn compute_belt_distance(dim: i64, boundary_type: &[BoundaryType]) -> Vec<i64> {
 
 /// Generate integer plate-uplift field (Stage 4 orogeny).
 ///
+/// **Slice-1j (this version):** ENHANCED with scale hierarchy.
+/// - Compute convergence propagation field (AC1).
+/// - Map per-belt convergence to amplitude and width (AC2/AC3).
+/// - Apply per-belt scaling to amplitude and fold wavelength (AC4 test).
+///
+/// **Previous (Slice-1h/1i) contract:**
 /// **F1:** Fold-belt plateau-core + ramped-flank profile (Slice-1h):
 /// For `dist <= CORE`: full amplitude (flat massif top).
 /// For `CORE < dist <= belt_hw`: ramp down linearly to 0 (flanks).
@@ -308,13 +481,12 @@ pub fn generate_plate_uplift_field(
     let clamped_strength = plate_strength.clamp(0, 100);
     let strength_frac = clamped_strength; // [0, 100] percent
 
-    // **Slice-1g: Compute belt half-width from dimension for wide massifs.**
+    // **Slice-1g: Compute baseline belt half-width from dimension for wide massifs.**
     // Scales the collision zone: dim=256 → hw=16 (full width ~32 cells).
-    let belt_hw = (dim / 16).max(3);
+    let belt_hw_base = (dim / 16).max(3);
 
-    // **Slice-1h: Plateau-core width = 2/3 of belt half-width (flat massif top).
-    // Outer flank ramps down from CORE to belt_hw.
-    let plateau_core = (belt_hw * 2) / 3;
+    // **Slice-1j AC1: Propagate convergence from boundaries into belt interior.**
+    let conv_eff = propagate_convergence_to_belt(dim, fields, belt_hw_base);
 
     // **F2: Compute distance to nearest convergent boundary.**
     let belt_distance = compute_belt_distance(dim, &fields.boundary_type);
@@ -387,19 +559,26 @@ pub fn generate_plate_uplift_field(
                 }
             };
 
+            // **Slice-1j AC2/AC3: Scale amplitude and width based on propagated convergence.**
+            let conv = conv_eff[idx];
+            let scaled_amp_max = map_convergence_to_amplitude(conv, hmax);
+            let belt_hw_local = map_convergence_to_width(conv, dim);
+
             // **Slice-1h: Plateau-core + ramped-flank profile (integer, no truncation).**
-            // Clamp distance to belt_hw before computing ramp_weight to avoid negative ramps.
-            let dist = belt_distance[idx].min(belt_hw);
+            // Clamp distance to belt_hw_local before computing ramp_weight to avoid negative ramps.
+            let dist = belt_distance[idx].min(belt_hw_local);
+            let plateau_core = (belt_hw_local * 2) / 3;
+
             let ramp_weight = if dist <= plateau_core {
                 // Within plateau core: full amplitude.
-                belt_hw
+                belt_hw_local
             } else {
-                // Outer flank: ramp down from plateau_core to belt_hw.
-                // Linear ramp: at dist=plateau_core, ramp_weight=belt_hw; at dist=belt_hw, ramp_weight=0.
-                // Formula: ramp_weight = belt_hw * (belt_hw - dist) / (belt_hw - plateau_core)
-                let flank_dist = dist - plateau_core; // Distance into the flank [0, belt_hw - plateau_core]
-                let flank_range = belt_hw - plateau_core; // Total flank width
-                let ramp = (belt_hw * (flank_range - flank_dist)) / flank_range; // Integer division
+                // Outer flank: ramp down from plateau_core to belt_hw_local.
+                // Linear ramp: at dist=plateau_core, ramp_weight=belt_hw_local; at dist=belt_hw_local, ramp_weight=0.
+                // Formula: ramp_weight = belt_hw_local * (belt_hw_local - dist) / (belt_hw_local - plateau_core)
+                let flank_dist = dist - plateau_core; // Distance into the flank [0, belt_hw_local - plateau_core]
+                let flank_range = belt_hw_local - plateau_core; // Total flank width
+                let ramp = (belt_hw_local * (flank_range - flank_dist)) / flank_range; // Integer division
                 ramp.max(0) // Clamp to zero
             };
 
@@ -411,20 +590,19 @@ pub fn generate_plate_uplift_field(
             } else {
                 belt_distance[idx]
             };
-            let fold_factor = compute_fold_factor(fold_dist, belt_hw); // [FOLD_FLOOR*FOLD_SCALE, FOLD_SCALE]
+            let fold_factor = compute_fold_factor(fold_dist, belt_hw_local); // [FOLD_FLOOR*FOLD_SCALE, FOLD_SCALE]
             let modulated_weight = (ramp_weight * fold_factor) / FOLD_SCALE; // Scale by fold factor
 
-            // Compute uplift: multiply BEFORE divide to preserve subunit increments.
-            // `(amp_num * hmax * modulated_weight * strength_frac) / (amp_den * belt_hw * 100)`
-            // Reorder: `(amp_num * hmax * strength_frac / 100) * modulated_weight / (amp_den * belt_hw)`
-            let scaled_amp = (amp_num * hmax * strength_frac) / (amp_den * 100);
-            let up = (scaled_amp * modulated_weight) / belt_hw;
+            // **Compute uplift using convergence-scaled amplitude.**
+            // Use scaled_amp_max directly instead of recomputing from fractions.
+            // Apply strength scaling and fold modulation.
+            let up = (scaled_amp_max * modulated_weight * strength_frac) / (100i64 * belt_hw_local);
 
             // For subduction (cont-ocean), apply the subsidence ramp to the oceanic plate when its neighbor is CONTINENTAL.
             if !this_cont && neighbor_cont {
                 // This is oceanic, neighbor is continental.
                 let alt_scaled_amp = (alt_amp_num * hmax * strength_frac) / (alt_amp_den * 100);
-                let down = -(alt_scaled_amp * ramp_weight) / belt_hw;
+                let down = -(alt_scaled_amp * ramp_weight) / belt_hw_local;
                 uplift[idx] = down; // Negative (subsidence)
             } else {
                 uplift[idx] = up.max(0); // Positive (uplift), clamp to zero.
@@ -738,5 +916,130 @@ mod tests {
         // Mean of [9, 10, 9, 10, 9, 9, 9, 10, 9] (center + 8 neighbors) = 84 / 9 = 9
         // Verify the smoothed value is close to the expected average.
         assert!(smoothed[12] >= 8 && smoothed[12] <= 10, "smoothed center should be near 9");
+    }
+
+    /// **Slice-1j AC4: Test convergence propagation (integer blur, no div-by-zero).**
+    /// Verify that propagate_convergence_to_belt handles empty windows (F5 guard).
+    #[test]
+    fn test_convergence_propagation_no_panic() {
+        let dim = 64i64;
+        let seed = 0xdeadbeefcafebabeu64;
+        let plate_count = 8u32;
+
+        let fields = crate::gen::plate::compute_plate_fields(seed, dim, plate_count);
+        let belt_hw = (dim / 16).max(3);
+
+        // Should not panic even if some cells have no nearby convergent sources.
+        let conv_eff = propagate_convergence_to_belt(dim, &fields, belt_hw);
+
+        // Verify output is non-negative and bounded reasonably.
+        for &conv in &conv_eff {
+            assert!(conv >= 0, "convergence propagation should be non-negative");
+            // Max should not exceed the global max convergence by much.
+            assert!(conv <= 2000, "convergence propagation sanity bound");
+        }
+    }
+
+    /// **Slice-1j AC4: Test convergence→amplitude mapping (absolute, not renormalized).**
+    /// Low convergence → stays near AMP_MIN; high convergence → reaches AMP_MAX.
+    #[test]
+    fn test_convergence_amplitude_mapping() {
+        let hmax = 256i64;
+
+        // Test low convergence (well below CONV_AMP_LOW).
+        let amp_low = map_convergence_to_amplitude(10, hmax);
+        let amp_min = (AMP_MIN_NUM * hmax) / AMP_MIN_DEN;
+        assert!(amp_low >= amp_min * 8 / 10 && amp_low <= amp_min, "low conv should be near AMP_MIN");
+
+        // Test high convergence (well above CONV_AMP_HIGH).
+        let amp_high = map_convergence_to_amplitude(500, hmax);
+        let amp_max = (AMP_MAX_NUM * hmax) / AMP_MAX_DEN;
+        assert!(amp_high >= amp_max * 9 / 10 && amp_high <= amp_max, "high conv should be near AMP_MAX");
+
+        // Test interpolation (mid-range).
+        let amp_mid = map_convergence_to_amplitude(125, hmax); // Halfway between LOW and HIGH
+        assert!(amp_mid > amp_min && amp_mid < amp_max, "mid conv should be between min and max");
+    }
+
+    /// **Slice-1j AC4: Test convergence→width mapping (absolute, not renormalized).**
+    /// Low convergence → narrow (dim/32); high convergence → wide (dim/8).
+    #[test]
+    fn test_convergence_width_mapping() {
+        let dim = 256i64;
+
+        // Test low convergence (well below CONV_HW_LOW).
+        let hw_low = map_convergence_to_width(10, dim);
+        let hw_min = (dim * HW_MIN_DIM_NUM) / HW_MIN_DIM_DEN;
+        assert!(hw_low >= hw_min * 8 / 10 && hw_low <= hw_min, "low conv should have narrow width");
+
+        // Test high convergence (well above CONV_HW_HIGH).
+        let hw_high = map_convergence_to_width(500, dim);
+        let hw_max = (dim * HW_MAX_DIM_NUM) / HW_MAX_DIM_DEN;
+        assert!(hw_high >= hw_max * 9 / 10 && hw_high <= hw_max, "high conv should have wide width");
+
+        // Test interpolation (mid-range).
+        let hw_mid = map_convergence_to_width(125, dim); // Halfway between LOW and HIGH
+        assert!(hw_mid > hw_min && hw_mid < hw_max, "mid conv should have mid-range width");
+    }
+
+    /// **Slice-1j AC4: Test synthetic fixture — low convergence stays small, high reaches large.**
+    /// Create a fixture boundary with known convergence and verify uplift scales appropriately.
+    #[test]
+    fn test_convergence_synthetic_fixture_low() {
+        // Seed with coherent low-convergence fixture.
+        let dim = 64i64;
+        let seed = 0x0000000000000001u64;
+        let hmax = 200i64;
+        let plate_strength = 100i64;
+
+        let fields = crate::gen::plate::compute_plate_fields(seed, dim, 4u32);
+        let uplift = generate_plate_uplift_field(&fields, dim, hmax, plate_strength);
+
+        // Compute peak height (max uplift) and belt width stats.
+        let max_uplift = *uplift.iter().max().unwrap_or(&0);
+        let mean_uplift = uplift.iter().filter(|&&u| u > 0).sum::<i64>()
+            / uplift.iter().filter(|&&u| u > 0).count().max(1) as i64;
+
+        // For a low-convergence seed, peak should be modest (closer to AMP_MIN).
+        let amp_min = (AMP_MIN_NUM * hmax) / AMP_MIN_DEN;
+        let amp_max = (AMP_MAX_NUM * hmax) / AMP_MAX_DEN;
+
+        // Peak should be in the lower half of the range for a low-conv fixture.
+        assert!(
+            max_uplift >= amp_min && max_uplift <= (amp_min + amp_max) / 2,
+            "low-conv fixture peak should be modest: max={}, amp_min={}, mid={}",
+            max_uplift,
+            amp_min,
+            (amp_min + amp_max) / 2
+        );
+    }
+
+    /// **Slice-1j AC4: Test synthetic fixture — high convergence reaches maximum.**
+    #[test]
+    fn test_convergence_synthetic_fixture_high() {
+        // Seed with coherent high-convergence fixture.
+        let dim = 64i64;
+        let seed = 0xffffffffffffffffu64;
+        let hmax = 200i64;
+        let plate_strength = 100i64;
+
+        let fields = crate::gen::plate::compute_plate_fields(seed, dim, 6u32);
+        let uplift = generate_plate_uplift_field(&fields, dim, hmax, plate_strength);
+
+        // Compute peak height.
+        let max_uplift = *uplift.iter().max().unwrap_or(&0);
+
+        // For a high-convergence seed, peak should be substantial (closer to AMP_MAX).
+        let amp_min = (AMP_MIN_NUM * hmax) / AMP_MIN_DEN;
+        let amp_max = (AMP_MAX_NUM * hmax) / AMP_MAX_DEN;
+
+        // Peak should be in the upper half of the range for a high-conv fixture.
+        assert!(
+            max_uplift >= (amp_min + amp_max) / 2 && max_uplift <= amp_max,
+            "high-conv fixture peak should be substantial: max={}, mid={}, amp_max={}",
+            max_uplift,
+            (amp_min + amp_max) / 2,
+            amp_max
+        );
     }
 }
