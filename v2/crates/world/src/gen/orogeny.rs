@@ -138,7 +138,15 @@ fn low_pass_belt_distance(dim: usize, belt_distance: &[i64]) -> Vec<i64> {
     for z in 0..dim {
         for x in 0..dim {
             let idx = z * dim + x;
-            let mut sum = belt_distance[idx];
+            let center_val = belt_distance[idx];
+
+            // If center is unbounded, result is unbounded (no averaging).
+            if center_val == i64::MAX {
+                smoothed[idx] = i64::MAX;
+                continue;
+            }
+
+            let mut sum = center_val;
             let mut count = 1i64;
 
             // Sum D8 neighbors (3×3 neighborhood, center already counted).
@@ -161,7 +169,7 @@ fn low_pass_belt_distance(dim: usize, belt_distance: &[i64]) -> Vec<i64> {
             }
 
             // Integer mean: sum / count (round-down).
-            smoothed[idx] = if sum != i64::MAX { sum / count } else { i64::MAX };
+            smoothed[idx] = sum / count;
         }
     }
 
