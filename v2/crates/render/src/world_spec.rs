@@ -107,6 +107,8 @@ pub struct WorldSpec {
     /// U-10: Explicit landform flags override. If Some, use these instead of deriving from seed.
     /// If None, compute flags from seed via landform_flags(seed, standalone).
     pub explicit_landform_flags: Option<LandformFlags>,
+    /// Slice-1e: enable plate tectonics relief (if true, pass enable_plate_sim=true to ProcgenWorld).
+    pub enable_plate_sim: bool,
 }
 
 /// Real execution order of stages in the worldgen pipeline.
