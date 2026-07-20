@@ -126,24 +126,25 @@ fn compute_belt_distance(dim: i64, boundary_type: &[BoundaryType]) -> Vec<i64> {
     distance
 }
 
-/// Generate integer plate-uplift field (Stage 4 orogeny).
+/// Generate integer plate-uplift field with parameterized belt width (Stage 4 orogeny).
 ///
 /// **F1:** Fold-belt ramp formula without truncation:
 /// `uplift = OROGEN_AMP * (belt_hw - clamp(dist, belt_hw)) / belt_hw`
 /// Multiply before divide to preserve subunit increments in integer arithmetic.
 ///
 /// **F10:** Collision-pair routing determines the formula per boundary type.
-/// **F11:** `belt_hw` is a pinned constant (3 cells, architecture-anchored).
+/// **F11:** `belt_hw` is the parameterized belt half-width (integer cells).
 /// **F6/amplitude:** Fractions of `hmax`, scaled by `plate_strength` percent (0 ⇒ all zero).
 ///
 /// **Return:** `Vec<i64>` of uplift per cell, suitable for adding to the base height field
 /// (before depression-fill and erosion). Non-boundary cells are zero; boundary cells ramp down
-/// from the belt center to zero over BELT_HALF_WIDTH cells.
-pub fn generate_plate_uplift_field(
+/// from the belt center to zero over belt_half_width cells.
+pub fn generate_plate_uplift_field_with_belt(
     fields: &PlateFields,
     dim: i64,
     hmax: i64,
     plate_strength: i64,
+    belt_half_width: i64,
 ) -> Vec<i64> {
     let dim_usize = dim as usize;
     let n = dim_usize * dim_usize;
@@ -227,14 +228,14 @@ pub fn generate_plate_uplift_field(
             // **F1: Ramp formula (integer, no truncation).**
             // `uplift = (amp_frac * hmax * (belt_hw - clamp(dist, belt_hw))) / belt_hw`
             // Clamp distance to belt_hw before subtraction to avoid negative ramps.
-            let dist = belt_distance[idx].min(BELT_HALF_WIDTH);
-            let ramp_weight = BELT_HALF_WIDTH - dist; // [0, belt_hw]
+            let dist = belt_distance[idx].min(belt_half_width);
+            let ramp_weight = belt_half_width - dist; // [0, belt_hw]
 
             // Compute uplift: multiply BEFORE divide to preserve subunit increments.
             // `(amp_num * hmax * ramp_weight * strength_frac) / (amp_den * belt_hw * 100)`
             // Reorder: `(amp_num * hmax * strength_frac / 100) * ramp_weight / (amp_den * belt_hw)`
             let scaled_amp = (amp_num * hmax * strength_frac) / (amp_den * 100);
-            let up = (scaled_amp * ramp_weight) / BELT_HALF_WIDTH;
+            let up = (scaled_amp * ramp_weight) / belt_half_width;
 
             // For subduction (cont-ocean), apply the subsidence ramp to the oceanic plate when its neighbor is CONTINENTAL.
             if !this_cont && neighbor_cont {
@@ -249,6 +250,18 @@ pub fn generate_plate_uplift_field(
     }
 
     uplift
+}
+
+/// Generate integer plate-uplift field (Stage 4 orogeny).
+/// **Wrapper for byte-identity:** calls `generate_plate_uplift_field_with_belt` with BELT_HALF_WIDTH=3.
+/// This maintains golden-test byte-identity (production uses this function).
+pub fn generate_plate_uplift_field(
+    fields: &PlateFields,
+    dim: i64,
+    hmax: i64,
+    plate_strength: i64,
+) -> Vec<i64> {
+    generate_plate_uplift_field_with_belt(fields, dim, hmax, plate_strength, BELT_HALF_WIDTH)
 }
 
 #[cfg(test)]
