@@ -12,7 +12,7 @@ fn main() {
     let dim: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(512);
     let seed: u64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1);
 
-    let f = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true));
+    let f = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, 100);
     let h = &f.height;
     assert_eq!(h.len(), dim * dim);
 
