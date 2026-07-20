@@ -309,7 +309,6 @@ pub fn apply_plate_anti_spike(
 
             // Compute D8 neighbors and their median.
             let mut neighbors = Vec::new();
-            let mut raised_count = 0i64; // Count of D8 neighbors >= median
 
             for dz in -1i64..=1 {
                 for dx in -1i64..=1 {
@@ -342,7 +341,6 @@ pub fn apply_plate_anti_spike(
 
             // **F3: Use NON-STRICT >= for crest test** — cells at/above median are crests (protected).
             if h >= median {
-                raised_count += 1; // Count this cell as a raised neighbor for its neighbors' tests
                 let local_step = h - median;
 
                 // **Isolate detection:** count raised D8 neighbors (>= median).
