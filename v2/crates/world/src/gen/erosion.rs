@@ -890,7 +890,7 @@ pub fn transport_limited_deposition(
     }
 
     // Per-cell sediment flux tracking
-    let mut Q_s = vec![0i64; n];  // sediment flux at each cell
+    let mut q_s = vec![0i64; n];  // sediment flux at each cell
     let mut height_delta = vec![0i64; n];  // applied height delta per cell
     let mut export: i64 = 0;
 
@@ -905,40 +905,40 @@ pub fn transport_limited_deposition(
         } else {
             0
         };
-        let Q_cap_base = a_isqrt * slope;
+        let q_cap_base = a_isqrt * slope;
         // Scale capacity by resistance: higher resistance → lower capacity (flows slower, deposits more)
         let divisor = RESIST_DIVISOR[resistance[v] as usize];
-        let Q_cap = Q_cap_base / divisor;
+        let q_cap = q_cap_base / divisor;
 
         // Determine erosion or deposition
-        if Q_s[v] < Q_cap {
+        if q_s[v] < q_cap {
             // ERODE: pick up sediment up to capacity
-            let erode_deficit = Q_cap - Q_s[v];
+            let erode_deficit = q_cap - q_s[v];
             // Clamp by height ≥ 0 and resistance
             let max_erode = height[v]; // cannot erode below 0
             let erode_amount = erode_deficit.min(max_erode);
-            Q_s[v] += erode_amount;
+            q_s[v] += erode_amount;
             height_delta[v] -= erode_amount;
-        } else if Q_s[v] > Q_cap {
+        } else if q_s[v] > q_cap {
             // DEPOSIT: drop sediment when carrying too much
-            let deposit_excess = Q_s[v] - Q_cap;
-            // Bounded EXACTLY by incoming Q_s
-            let deposit_amount = deposit_excess.min(Q_s[v]);
-            Q_s[v] -= deposit_amount;
+            let deposit_excess = q_s[v] - q_cap;
+            // Bounded EXACTLY by incoming q_s
+            let deposit_amount = deposit_excess.min(q_s[v]);
+            q_s[v] -= deposit_amount;
             height_delta[v] += deposit_amount;
         }
 
-        // Pass Q_s to downstream or export
+        // Pass q_s to downstream or export
         match downstream[v] {
             Some(d) => {
-                Q_s[d] += Q_s[v];
+                q_s[d] += q_s[v];
                 in_degree[d] -= 1;
                 if in_degree[d] == 0 {
                     kahn_queue.push_back(d);
                 }
             }
             None => {
-                export += Q_s[v];
+                export += q_s[v];
             }
         }
     }
