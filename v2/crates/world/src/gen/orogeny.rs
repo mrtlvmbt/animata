@@ -128,17 +128,19 @@ fn compute_belt_distance(dim: i64, boundary_type: &[BoundaryType]) -> Vec<i64> {
 
 /// Generate integer plate-uplift field (Stage 4 orogeny).
 ///
-/// **F1:** Fold-belt ramp formula without truncation:
-/// `uplift = OROGEN_AMP * (belt_hw - clamp(dist, belt_hw)) / belt_hw`
+/// **F1:** Fold-belt plateau-core + ramped-flank profile (Slice-1h):
+/// For `dist <= CORE`: full amplitude (flat massif top).
+/// For `CORE < dist <= belt_hw`: ramp down linearly to 0 (flanks).
+/// where `CORE = belt_hw * 2 / 3` (plateau occupies 2/3 of belt width).
 /// Multiply before divide to preserve subunit increments in integer arithmetic.
 ///
 /// **F10:** Collision-pair routing determines the formula per boundary type.
-/// **F11:** `belt_hw` is a pinned constant (3 cells, architecture-anchored).
+/// **F11:** `belt_hw` is dimension-scaled (Slice-1g: `max(3, dim/16)`).
 /// **F6/amplitude:** Fractions of `hmax`, scaled by `plate_strength` percent (0 ⇒ all zero).
 ///
 /// **Return:** `Vec<i64>` of uplift per cell, suitable for adding to the base height field
-/// (before depression-fill and erosion). Non-boundary cells are zero; boundary cells ramp down
-/// from the belt center to zero over BELT_HALF_WIDTH cells.
+/// (before depression-fill and erosion). Non-boundary cells are zero; boundary cells are
+/// raised at full amplitude across the plateau core, then ramp down over the outer flank.
 pub fn generate_plate_uplift_field(
     fields: &PlateFields,
     dim: i64,
@@ -159,6 +161,10 @@ pub fn generate_plate_uplift_field(
     // **Slice-1g: Compute belt half-width from dimension for wide massifs.**
     // Scales the collision zone: dim=256 → hw=16 (full width ~32 cells).
     let belt_hw = (dim / 16).max(3);
+
+    // **Slice-1h: Plateau-core width = 2/3 of belt half-width (flat massif top).
+    // Outer flank ramps down from CORE to belt_hw.
+    let plateau_core = (belt_hw * 2) / 3;
 
     // **F2: Compute distance to nearest convergent boundary.**
     let belt_distance = compute_belt_distance(dim, &fields.boundary_type);
@@ -228,11 +234,21 @@ pub fn generate_plate_uplift_field(
                 }
             };
 
-            // **F1: Ramp formula (integer, no truncation).**
-            // `uplift = (amp_frac * hmax * (belt_hw - clamp(dist, belt_hw))) / belt_hw`
-            // Clamp distance to belt_hw before subtraction to avoid negative ramps.
+            // **Slice-1h: Plateau-core + ramped-flank profile (integer, no truncation).**
+            // Clamp distance to belt_hw before computing ramp_weight to avoid negative ramps.
             let dist = belt_distance[idx].min(belt_hw);
-            let ramp_weight = belt_hw - dist; // [0, belt_hw]
+            let ramp_weight = if dist <= plateau_core {
+                // Within plateau core: full amplitude.
+                belt_hw
+            } else {
+                // Outer flank: ramp down from plateau_core to belt_hw.
+                // Linear ramp: at dist=plateau_core, ramp_weight=belt_hw; at dist=belt_hw, ramp_weight=0.
+                // Formula: ramp_weight = belt_hw * (belt_hw - dist) / (belt_hw - plateau_core)
+                let flank_dist = dist - plateau_core; // Distance into the flank [0, belt_hw - plateau_core]
+                let flank_range = belt_hw - plateau_core; // Total flank width
+                let ramp = (belt_hw * (flank_range - flank_dist)) / flank_range; // Integer division
+                ramp.max(0) // Clamp to zero
+            };
 
             // Compute uplift: multiply BEFORE divide to preserve subunit increments.
             // `(amp_num * hmax * ramp_weight * strength_frac) / (amp_den * belt_hw * 100)`
@@ -253,6 +269,103 @@ pub fn generate_plate_uplift_field(
     }
 
     uplift
+}
+
+/// **Slice-1h: Flow-aware anti-spike on plate-path heights.**
+///
+/// Clamps isolated needle spikes (raised cells whose local step over their D8 median
+/// exceeds a bound AND are not flow-organized) while protecting genuine wide massif crests
+/// and drainage channels.
+///
+/// **Algorithm:**
+/// For each cell with height above D8 median:
+/// 1. Compute local step = height - median_d8_neighbors (using non-strict >= for crest test).
+/// 2. Identify crests (cells >= their D8 median) and isolated spikes.
+/// 3. A spike is isolated if it's a local max (>= its D8 median) AND its local step exceeds SPIKE_BOUND.
+/// 4. To protect genuine wide massifs + channels: check if the cell is part of a wider structure
+///    by counting raised D8 neighbors (>= the cell's median). If >= 2 raised neighbors, it's
+///    part of a ridge/crest, not isolated. If 0 raised neighbors, it's a 1-cell spike.
+/// 5. Clamp 1-cell spikes to the median + SPIKE_BOUND.
+///
+/// **Parameters:**
+/// - `SPIKE_BOUND = 6`: maximum allowed local step for an isolated spike (units of height).
+///   Spikes exceeding this are clamped. Genuine crests (multiple raised neighbors) are protected.
+/// - `belt_hw`: belt half-width, used to set spike tolerance proportional to massif size.
+///
+/// **Gate:** Gated strictly on `enable_plate_sim` (called only from plate-path erosion).
+pub fn apply_plate_anti_spike(
+    dim: usize,
+    belt_hw: i64,
+    height: &mut [i64],
+) {
+    let dim_i64 = dim as i64;
+    let spike_bound = 6i64; // Max local step for isolated spike before clamping
+    let mut height_post = height.to_vec();
+
+    for z in 0..dim {
+        for x in 0..dim {
+            let idx = z * dim + x;
+            let h = height[idx];
+
+            // Compute D8 neighbors and their median.
+            let mut neighbors = Vec::new();
+            let mut raised_count = 0i64; // Count of D8 neighbors >= median
+
+            for dz in -1i64..=1 {
+                for dx in -1i64..=1 {
+                    if dx == 0 && dz == 0 {
+                        continue;
+                    }
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+                    if nx >= 0 && nz >= 0 && nx < dim_i64 && nz < dim_i64 {
+                        let nidx = (nz as usize) * dim + (nx as usize);
+                        neighbors.push(height[nidx]);
+                    }
+                }
+            }
+
+            if neighbors.is_empty() {
+                continue;
+            }
+
+            // Compute median D8 neighbor height.
+            neighbors.sort();
+            let mid = neighbors.len() / 2;
+            let median = if neighbors.len() % 2 == 1 {
+                neighbors[mid]
+            } else if mid > 0 {
+                (neighbors[mid - 1] + neighbors[mid]) / 2
+            } else {
+                neighbors[0]
+            };
+
+            // **F3: Use NON-STRICT >= for crest test** — cells at/above median are crests (protected).
+            if h >= median {
+                raised_count += 1; // Count this cell as a raised neighbor for its neighbors' tests
+                let local_step = h - median;
+
+                // **Isolate detection:** count raised D8 neighbors (>= median).
+                let mut raised_neighbors = 0i64;
+                for &nh in &neighbors {
+                    if nh >= median {
+                        raised_neighbors += 1;
+                    }
+                }
+
+                // **Spike criterion:** isolated (0 raised neighbors) AND local step exceeds bound.
+                if raised_neighbors == 0 && local_step > spike_bound {
+                    // This is a 1-cell isolated spike — clamp to median + spike_bound.
+                    height_post[idx] = (median + spike_bound).min(height[idx]);
+                }
+            }
+        }
+    }
+
+    // Copy clamped heights back.
+    for idx in 0..dim * dim {
+        height[idx] = height_post[idx];
+    }
 }
 
 #[cfg(test)]
