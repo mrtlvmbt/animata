@@ -104,7 +104,7 @@ const VALID_FLAGS: &[&str] = &[
     "--screenshot-warmup", "--bench", "--cam", "--retained", "--no-retained",
     "--water", "--bare", "--height-scale", "--slow-load", "--screenshot-loader",
     "--regen-to", "--jump-to", "--screenshot-ui", "--yaw", "--ui-state",
-    "--landforms", "--transform", "--plate-sim",
+    "--landforms", "--transform", "--plate-sim", "--legacy-fbm",
 ];
 
 const VALUE_REQUIRING_FLAGS: &[&str] = &[
@@ -300,6 +300,9 @@ struct CliArgs {
     transforms: Option<String>,
     /// Slice-1e: `--plate-sim`: enable plate tectonics relief (enable_plate_sim=true, base=false, erosion=true).
     plate_sim: bool,
+    /// Slice-4a: `--legacy-fbm`: restore old fBm default (base=true, enable_plate_sim=false).
+    /// Default is physics relief (base=false, erosion=true).
+    legacy_fbm: bool,
 }
 
 fn parse_args() -> CliArgs {
@@ -340,6 +343,7 @@ fn parse_args() -> CliArgs {
     let mut landforms: Option<String> = None;  // W-18: explicit SOURCES flags
     let mut transforms: Option<String> = None;  // W-18: explicit TRANSFORMS flags
     let mut plate_sim = false;  // Slice-1e: enable plate tectonics relief
+    let mut legacy_fbm = false;  // Slice-4a: restore fBm default
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -497,13 +501,14 @@ fn parse_args() -> CliArgs {
                 }
             }
             "--plate-sim" => plate_sim = true,
+            "--legacy-fbm" => legacy_fbm = true,
             other => {
                 eprintln!("render: unknown argument {other:?}");
                 std::process::exit(2);
             }
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms, transforms, plate_sim }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms, transforms, plate_sim, legacy_fbm }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -756,9 +761,26 @@ async fn main() {
 
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
     // W-18: Parse --landforms (sources) and --transform (transforms) CLI flags if provided
-    // Slice-1e: if --plate-sim, override with base=false, erosion=true
-    let explicit_flags = if cli_args.plate_sim {
-        // Slice-1e: plate-sim relief — base OFF (fBm), erosion ON, all others default
+    // Slice-4a: Default is physics relief (base=false, erosion=true); --legacy-fbm restores old fBm
+    // Slice-1e: --plate-sim is now a deprecated alias for the new default (physics relief)
+    let enable_plate_sim = !cli_args.legacy_fbm;  // Physics by default, fBm only with --legacy-fbm
+    let explicit_flags = if cli_args.legacy_fbm {
+        // Slice-4a: legacy fBm default — base ON, plate-sim OFF
+        Some(world_spec::LandformFlags {
+            base: true,
+            tect: false,
+            aeolian: false,
+            volcanic: false,
+            glacial: false,
+            coastal: false,
+            erosion: false,
+            ridges: false,
+            beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
+        })
+    } else if cli_args.plate_sim {
+        // Slice-1e: --plate-sim (now redundant alias for new default) — physics relief
         Some(world_spec::LandformFlags {
             base: false,
             tect: false,
@@ -791,7 +813,22 @@ async fn main() {
                 let sources = world_spec::LandformFlags::new(true, false, false, false, false, false, true, false, false);
                 Some(merge_sources_and_transforms(sources, transforms))
             }
-            (None, None) => None,  // No explicit flags: use seed-derived defaults
+            (None, None) => {
+                // Slice-4a: No explicit flags — use physics relief by default (base=false, erosion=true)
+                Some(world_spec::LandformFlags {
+                    base: false,
+                    tect: false,
+                    aeolian: false,
+                    volcanic: false,
+                    glacial: false,
+                    coastal: false,
+                    erosion: true,
+                    ridges: false,
+                    beaches: false,
+                    erosion_strength: 100,
+                    glacial_strength: 100,
+                })
+            }
         }
     };
 
@@ -806,7 +843,7 @@ async fn main() {
             WorldSource::Procgen { dim_request: cli_args.dim_override }
         },
         explicit_landform_flags: explicit_flags,
-        enable_plate_sim: cli_args.plate_sim,
+        enable_plate_sim,  // Slice-4a: physics relief by default (true unless --legacy-fbm)
     };
 
     // W-15b: Compute effective height scale for terrain and creatures (default ×1.0)

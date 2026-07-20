@@ -434,6 +434,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Procgen { dim_request: None },
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should be reseedable: Procgen + standalone
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -448,6 +449,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Procgen { dim_request: None },
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should NOT be reseedable: Procgen but sim mode
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -462,6 +464,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should NOT be reseedable: Dump source (even though standalone)
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -476,6 +479,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should NOT be reseedable: Dump + sim mode
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
