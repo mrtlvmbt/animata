@@ -15,16 +15,20 @@
 //!   - Pass/fail verdict on 60% threshold
 
 use std::collections::HashSet;
+use std::env;
 
 fn main() {
     const HMAX: i64 = 200;
-    const DIM: usize = 256;
     const PLATE_STRENGTH: i64 = 100; // Standard strength
+
+    // Parse dimension from command line; default 256.
+    let dim_str = env::args().nth(1).unwrap_or_else(|| "256".to_string());
+    let dim: usize = dim_str.parse().expect("Invalid dimension");
 
     let seeds = [1234567890u64, 9876543210u64];
 
     println!("=== Fold-Chain Corrugation Threshold Measurement ===");
-    println!("Config: dim={}, hmax={}, enable_plate_sim=true, erosion=true", DIM, HMAX);
+    println!("Config: dim={}, hmax={}, enable_plate_sim=true, erosion=true", dim, HMAX);
     println!("Plate strength: {}", PLATE_STRENGTH);
     println!();
 
@@ -35,28 +39,28 @@ fn main() {
 
         // Compute plate fields and uplift
         let plate_count = 15u32;
-        let plate_count_clamped = world::gen::plate::clamp_plate_count(plate_count, DIM as i64);
+        let plate_count_clamped = world::gen::plate::clamp_plate_count(plate_count, dim as i64);
         let plate_fields =
-            world::gen::plate::compute_plate_fields(seed, DIM as i64, plate_count_clamped);
+            world::gen::plate::compute_plate_fields(seed, dim as i64, plate_count_clamped);
         let plate_uplift =
-            world::gen::orogeny::generate_plate_uplift_field(&plate_fields, DIM as i64, HMAX, PLATE_STRENGTH);
+            world::gen::orogeny::generate_plate_uplift_field(&plate_fields, dim as i64, HMAX, PLATE_STRENGTH);
 
         // Create flat base + uplift
         let flat_base = HMAX / 2;
-        let mut height = vec![flat_base; DIM * DIM];
-        for i in 0..DIM * DIM {
+        let mut height = vec![flat_base; dim * dim];
+        for i in 0..dim * dim {
             height[i] = (height[i] + plate_uplift[i]).clamp(0, HMAX);
         }
 
         // Apply erosion (with fold structures intact before erosion)
-        let resistance = compute_resistance(seed, DIM, HMAX);
+        let resistance = compute_resistance(seed, dim, HMAX);
         let erosion = world::gen::erosion::erode_from_fields(
-            seed, HMAX, DIM, height, resistance, true, PLATE_STRENGTH, 0,
+            seed, HMAX, dim, height, resistance, true, PLATE_STRENGTH, 0,
         );
 
         // Measure crests along multiple transects (across the belt)
         let (crest_count, expected_count, fraction_pass) =
-            measure_corrugation_threshold(DIM, &erosion.height, &plate_fields);
+            measure_corrugation_threshold(dim, &erosion.height, &plate_fields);
 
         let pass = fraction_pass >= 0.6;
         all_pass &= pass;
