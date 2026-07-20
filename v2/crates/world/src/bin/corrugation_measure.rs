@@ -55,7 +55,7 @@ fn main() {
         // Apply erosion (with fold structures intact before erosion)
         let resistance = compute_resistance(seed, dim, HMAX);
         let erosion = world::gen::erosion::erode_from_fields(
-            seed, HMAX, dim, height, resistance, true, PLATE_STRENGTH, 0, None, None, None,
+            seed, HMAX, dim, height, resistance, true, PLATE_STRENGTH, 0, true, None, None, None,
         );
 
         // Measure crests along multiple transects (across the belt)

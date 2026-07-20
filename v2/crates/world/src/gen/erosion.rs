@@ -843,6 +843,114 @@ pub fn accumulate_and_export(dim: usize, downstream: &[Option<usize>], source: &
     (accum, export)
 }
 
+/// Slice-1N: Transport-limited erosion with sediment deposition. Deterministic Kahn-ordered pass
+/// carrying per-cell sediment flux `Q_s`. Processes cells upstream→downstream in the EXACT same
+/// Kahn FIFO order `accumulate_and_export` uses — no HashMap iteration, no tie-break — so the pass
+/// is structurally deterministic despite its in-place Gauss-Seidel mutation.
+///
+/// For each cell v (in Kahn order):
+///   - Compute transport CAPACITY: `Q_cap = isqrt(area[v]) * slope[v]`
+///   - slope = max(0, height[v] - height[downstream[v]]) — RAW surface, not filled
+///   - if Q_s < Q_cap: ERODE — detach up to the deficit, Δz DOWN (bounded by height ≥ 0 + resistance)
+///   - if Q_s > Q_cap: DEPOSIT — excess, Δz UP (bounded EXACTLY by incoming Q_s)
+///   - Pass updated Q_s to downstream (or export if no receiver)
+///
+/// Returns (height_delta, export): `height_delta[v]` is the net Δz applied to cell v;
+/// `export` is the sediment that leaves the map at sinks. By conservation:
+/// `Σ(eroded) - Σ(deposited) = export` (integer-exact, booked on APPLIED Δz, not capacity).
+///
+/// **Gates:** only called when `enable_plate_sim=true`. Default path (enable_plate_sim=false)
+/// retains detachment-limited incision → byte-identical.
+pub fn transport_limited_deposition(
+    dim: usize,
+    height: &[i64],
+    downstream: &[Option<usize>],
+    area: &[i64],
+    resistance: &[i64],
+) -> (Vec<i64>, i64) {
+    let n = dim * dim;
+    debug_assert_eq!(height.len(), n);
+    debug_assert_eq!(downstream.len(), n);
+    debug_assert_eq!(area.len(), n);
+    debug_assert_eq!(resistance.len(), n);
+
+    // Build Kahn order: same as accumulate_and_export
+    let mut in_degree = vec![0u32; n];
+    for &d in downstream {
+        if let Some(d) = d {
+            in_degree[d] += 1;
+        }
+    }
+
+    let mut kahn_queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for (idx, &deg) in in_degree.iter().enumerate() {
+        if deg == 0 {
+            kahn_queue.push_back(idx);
+        }
+    }
+
+    // Per-cell sediment flux tracking
+    let mut Q_s = vec![0i64; n];  // sediment flux at each cell
+    let mut height_delta = vec![0i64; n];  // applied height delta per cell
+    let mut export: i64 = 0;
+
+    let mut processed = 0usize;
+    while let Some(v) = kahn_queue.pop_front() {
+        processed += 1;
+
+        // Compute capacity at this cell
+        let a_isqrt = isqrt(area[v]);
+        let slope = if let Some(d) = downstream[v] {
+            (height[v] - height[d]).max(0)
+        } else {
+            0
+        };
+        let Q_cap_base = a_isqrt * slope;
+        // Scale capacity by resistance: higher resistance → lower capacity (flows slower, deposits more)
+        let divisor = RESIST_DIVISOR[resistance[v] as usize];
+        let Q_cap = Q_cap_base / divisor;
+
+        // Determine erosion or deposition
+        if Q_s[v] < Q_cap {
+            // ERODE: pick up sediment up to capacity
+            let erode_deficit = Q_cap - Q_s[v];
+            // Clamp by height ≥ 0 and resistance
+            let max_erode = height[v]; // cannot erode below 0
+            let erode_amount = erode_deficit.min(max_erode);
+            Q_s[v] += erode_amount;
+            height_delta[v] -= erode_amount;
+        } else if Q_s[v] > Q_cap {
+            // DEPOSIT: drop sediment when carrying too much
+            let deposit_excess = Q_s[v] - Q_cap;
+            // Bounded EXACTLY by incoming Q_s
+            let deposit_amount = deposit_excess.min(Q_s[v]);
+            Q_s[v] -= deposit_amount;
+            height_delta[v] += deposit_amount;
+        }
+
+        // Pass Q_s to downstream or export
+        match downstream[v] {
+            Some(d) => {
+                Q_s[d] += Q_s[v];
+                in_degree[d] -= 1;
+                if in_degree[d] == 0 {
+                    kahn_queue.push_back(d);
+                }
+            }
+            None => {
+                export += Q_s[v];
+            }
+        }
+    }
+
+    assert_eq!(
+        processed, n,
+        "transport-limited DAG has a cycle (processed {processed}/{n}) — should be impossible by construction"
+    );
+
+    (height_delta, export)
+}
+
 /// Biome-derived surface material for the erosion-untouched case (net delta within the "no
 /// significant change" band) — the SAME mapping `gen/material.rs`'s private `surface_material_for_biome`
 /// uses, intentionally duplicated here (not imported) so W-2's `material.rs` stays byte-for-byte
@@ -883,15 +991,16 @@ pub struct ErosionState {
 }
 
 /// Run the scaled erosion macro-loop (recompute drainage → stream-power incision
-/// → thermal talus, each iteration) over an ALREADY-BUILT initial `height`/`resistance` pair. Shared
-/// by [`erode_with_tectonics`]'s tectonics-on and tectonics-off paths so the macro-loop itself is
-/// never duplicated: the tectonic scarp/lineament overlay (if any) has already been folded into
-/// `height`/`resistance` by the caller, before this function ever runs — this function has no
-/// tectonics-awareness of its own.
+/// → [Slice-1N: transport-limited deposition (plate-path only)] → thermal talus, each iteration)
+/// over an ALREADY-BUILT initial `height`/`resistance` pair. Shared by [`erode_with_tectonics`]'s
+/// tectonics-on and tectonics-off paths so the macro-loop itself is never duplicated: the tectonic
+/// scarp/lineament overlay (if any) has already been folded into `height`/`resistance` by the caller,
+/// before this function ever runs — this function has no tectonics-awareness of its own.
 /// W-18: added enable_erosion parameter. When false, skips the erosion macro-loop but still
 /// computes drainage and surface materials, preserving the accumulated source field (base+tect+volcanic).
 /// W-19: erosion_strength (percent, default 100) scales the iteration count via: effective_iters = (MACRO_ITERATIONS * strength) / 100.
 /// Slice-1d: repose_threshold (integer height-difference threshold on the grid) — thermal talus relaxation angle of repose.
+/// Slice-1N: enable_plate_sim — when true, adds transport-limited deposition pass after incision.
 pub fn erode_from_fields(
     seed: u64,
     hmax: i64,
@@ -901,6 +1010,7 @@ pub fn erode_from_fields(
     enable_erosion: bool,
     erosion_strength: i64,
     repose_threshold: i64,
+    enable_plate_sim: bool,
     belt_distance: Option<&[i64]>,
     belt_hw: Option<i64>,
     mut stats_sink: Option<&mut dyn StatsSink>,
@@ -928,6 +1038,19 @@ pub fn erode_from_fields(
             height[v] -= incision_delta[v];
         }
         export_total += export_this_iter;
+
+        // Slice-1N: Transport-limited deposition (plate-path only, gated on enable_plate_sim).
+        // This replaces detachment-limited export with transport-limited scheme: sediment is routed
+        // downstream and deposited where capacity drops, building valley floors and fans.
+        if enable_plate_sim {
+            let (deposition_delta, deposition_export) = transport_limited_deposition(
+                dim, &height, &downstream, &area, &resistance
+            );
+            for v in 0..n {
+                height[v] += deposition_delta[v];
+            }
+            export_total += deposition_export;
+        }
 
         // 3. Thermal talus relaxation (Jacobi gather, internal zero-sum redistribution).
         let height_before_talus = height.clone();
@@ -1429,7 +1552,7 @@ pub fn erode_with_tectonics(
         REPOSE_THRESHOLD
     };
 
-    erode_from_fields(seed, hmax, dim, height, resistance, enable_erosion, erosion_strength, repose_threshold, belt_distance, belt_hw, stats_sink)
+    erode_from_fields(seed, hmax, dim, height, resistance, enable_erosion, erosion_strength, repose_threshold, enable_plate_sim, belt_distance, belt_hw, stats_sink)
 }
 
 /// Sample `height_at` + `resistance_field` over a `dim × dim` grid and run the fixed
