@@ -690,24 +690,24 @@ mod tests {
     }
 
     /// **Slice-1i: Fold factor golden vector — pinned fold values at key distances.**
-    /// NOTE: Multi-octave interference affects expected values at specific distances.
+    /// Multi-octave interference creates complex phase interactions; values computed deterministically.
     #[test]
     fn test_fold_factor_golden_vector() {
         let belt_hw = 20i64; // Produces primary wavelength = 10
-        let floor_scaled = (FOLD_FLOOR_NUM * FOLD_SCALE) / FOLD_FLOOR_DEN; // = 512
 
-        // Fold factor at a few key distances (accounting for multi-octave fractal interference).
-        // At d=0: all octaves at rising edge start (tri=0) ⇒ octave_sum=0 ⇒ fold = floor = 512
-        assert_eq!(compute_fold_factor(0, belt_hw), floor_scaled, "fold(0)");
+        // Pinned fold values with multi-octave interference included:
+        // d=0: all octaves at rising edge start (tri=0) ⇒ octave_sum=0 ⇒ fold = floor = 512
+        assert_eq!(compute_fold_factor(0, belt_hw), 512, "fold(0)");
 
-        // At d=5: octave 0 at 1/2, octaves 1&2 at various phases ⇒ multi-octave sum ∈ (0, 1024)
-        let fold_5 = compute_fold_factor(5, belt_hw);
-        assert!(fold_5 > floor_scaled && fold_5 < FOLD_SCALE, "fold(5) in range");
+        // d=5: octave 0 tri=512 (1/2 wave), octave 1 tri=1024 (peak), octave 2 tri=512 (1/2 wave)
+        // ⇒ octave_sum = 512*4/8 + 1024*2/8 + 512*1/8 = 256 + 256 + 64 = 576
+        // ⇒ fold = 512 + (512*576)/1024 = 512 + 288 = 800
+        assert_eq!(compute_fold_factor(5, belt_hw), 800, "fold(5)");
 
-        // At d=10: octave 0 at peak (tri=1024), octave 1 at valley (tri=0), octave 2 at peak (tri=1024)
+        // d=10: octave 0 tri=1024 (peak), octave 1 tri=0 (valley), octave 2 tri=1024 (peak)
         // ⇒ octave_sum = 1024*4/8 + 0*2/8 + 1024*1/8 = 512 + 0 + 128 = 640
         // ⇒ fold = 512 + (512*640)/1024 = 512 + 320 = 832
-        assert_eq!(compute_fold_factor(10, belt_hw), 832, "fold(10) with octave interference");
+        assert_eq!(compute_fold_factor(10, belt_hw), 832, "fold(10)");
     }
 
     /// **Slice-1i: Test low_pass_belt_distance smoothing effect.**
