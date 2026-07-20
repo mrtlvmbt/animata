@@ -401,7 +401,7 @@ fn propagate_convergence_to_belt(
 ///
 /// **Algorithm:** Seeded from all convergent-boundary cells simultaneously; spreads outward via
 /// deterministic FIFO + ordered neighbor scan. Cost O(dim²).
-fn compute_belt_distance(dim: i64, boundary_type: &[BoundaryType]) -> Vec<i64> {
+pub fn compute_belt_distance(dim: i64, boundary_type: &[BoundaryType]) -> Vec<i64> {
     let dim_usize = dim as usize;
     let n = dim_usize * dim_usize;
     let mut distance = vec![i64::MAX; n];
