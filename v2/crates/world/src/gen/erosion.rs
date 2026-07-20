@@ -1355,6 +1355,7 @@ pub fn erode_with_tectonics(
     // **Slice-1b: Plate uplift (Stage 4 orogeny).** Gated on enable_plate_sim (default false).
     // When false, this block is never executed ⇒ v2_golden_conserved_* byte-identical (merge gate).
     // When true, compute plate fields and generate orogeny uplift, added to height BEFORE erosion.
+    // **Slice-1h: Apply flow-aware anti-spike to remove isolated needle spikes.**
     if enable_plate_sim {
         let plate_count = 15u32; // Default plate count (parameterizable in Slice-1c)
         let plate_count_clamped = crate::gen::plate::clamp_plate_count(plate_count, dim as i64);
@@ -1363,6 +1364,9 @@ pub fn erode_with_tectonics(
         for idx in 0..n {
             height[idx] = (height[idx] + plate_uplift[idx]).clamp(0, hmax);
         }
+        // Slice-1h: Apply flow-aware anti-spike to remove isolated needle spikes (gated on enable_plate_sim).
+        let belt_hw = (dim as i64 / 16).max(3);
+        crate::gen::orogeny::apply_plate_anti_spike(dim, belt_hw, &mut height);
     }
 
     // Slice-1d: Gate repose threshold on plate sim. Default (enable_plate_sim=false) uses 0 (unchanged).
