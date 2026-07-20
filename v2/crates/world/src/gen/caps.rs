@@ -1032,7 +1032,7 @@ pub fn classify_and_caps_staged_with_callback(
         cb(2); // ApplyErosion = 2
     }
     // Slice-1f: Thread enable_plate_sim and plate_strength into erode call. Clamp strength per W-19.
-    let erosion = crate::gen::erosion::erode_with_tectonics(seed, hmax, dim, flags.base, flags.tect, flags.tect, flags.volcanic, flags.ridges, flags.erosion, flags.erosion_strength.clamp(0, 400), enable_plate_sim, plate_strength, 0);
+    let erosion = crate::gen::erosion::erode_with_tectonics(seed, hmax, dim, flags.base, flags.tect, flags.tect, flags.volcanic, flags.ridges, flags.erosion, flags.erosion_strength.clamp(0, 400), enable_plate_sim, plate_strength, 0, None, None, None);
     let n = dim * dim;
 
     // Stage 3: ApplyRidges (optional, injected into erode; report completion after erode)

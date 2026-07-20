@@ -137,6 +137,34 @@ const TALUS_FRAC_NUM: i64 = 1;
 const TALUS_FRAC_DEN: i64 = 2;
 
 /// W-9: De-needle and final-surface thermal relaxation constants.
+
+/// Optional per-iteration erosion statistics sink (Slice-1L: probe instrumentation).
+/// Passed as `None` at all production call-sites ⇒ dead code ⇒ zero-cost.
+/// Concrete impl in throwaway probe bins; ignored by production erosion.
+pub trait StatsSink {
+    /// Record stats for one macro-iteration on the belt cell set.
+    /// Called once per iteration after both incision and talus steps.
+    /// `iteration`: 0-indexed iteration number
+    /// `belt_distance`: distance field from convergent boundaries
+    /// `belt_hw`: belt half-width
+    /// `height`: post-iteration height field
+    /// `downstream`: D8 receiver field
+    /// `area`: drainage area field
+    /// `incision_delta`: Δz from incision step this iteration
+    /// `talus_delta`: Δz from talus step this iteration (net change from talus_step)
+    fn record_iteration(
+        &mut self,
+        iteration: usize,
+        belt_distance: &[i64],
+        belt_hw: i64,
+        height: &[i64],
+        downstream: &[Option<usize>],
+        area: &[i64],
+        incision_delta: &[i64],
+        talus_delta_net: &[i64],
+        dim: usize,
+    );
+}
 /// `NEEDLE_MARGIN`: an isolated-spike artifact filter (integer height units), not a physical
 /// talus angle. Cells exceeding their neighbors by at most this much are preserved (no smoothing).
 /// Calibrated to the measured relief's 1-cell overhangs (`hmax=200`): the census on seed=1/512 shows
@@ -864,7 +892,19 @@ pub struct ErosionState {
 /// computes drainage and surface materials, preserving the accumulated source field (base+tect+volcanic).
 /// W-19: erosion_strength (percent, default 100) scales the iteration count via: effective_iters = (MACRO_ITERATIONS * strength) / 100.
 /// Slice-1d: repose_threshold (integer height-difference threshold on the grid) — thermal talus relaxation angle of repose.
-pub fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>, resistance: Vec<i64>, enable_erosion: bool, erosion_strength: i64, repose_threshold: i64) -> ErosionState {
+pub fn erode_from_fields(
+    seed: u64,
+    hmax: i64,
+    dim: usize,
+    mut height: Vec<i64>,
+    resistance: Vec<i64>,
+    enable_erosion: bool,
+    erosion_strength: i64,
+    repose_threshold: i64,
+    belt_distance: Option<&[i64]>,
+    belt_hw: Option<i64>,
+    mut stats_sink: Option<&mut dyn StatsSink>,
+) -> ErosionState {
     let n = dim * dim;
     let initial_height = height.clone();
 
@@ -875,7 +915,7 @@ pub fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>,
     if enable_erosion {
         let n_iters = ((MACRO_ITERATIONS as i64 * erosion_strength) / 100) as usize;
         // DO NOT PARALLELIZE (W-17): macro-loop iteration count is load-bearing (sequential state updates)
-        for _ in 0..n_iters {
+        for iter_idx in 0..n_iters {
         // 1. Recompute drainage on the CURRENT eroding surface (reused verbatim from gen::drainage).
         let filled = priority_flood_fill(dim, &height);
         let downstream = d8_directions(dim, &filled);
@@ -890,7 +930,16 @@ pub fn erode_from_fields(seed: u64, hmax: i64, dim: usize, mut height: Vec<i64>,
         export_total += export_this_iter;
 
         // 3. Thermal talus relaxation (Jacobi gather, internal zero-sum redistribution).
+        let height_before_talus = height.clone();
         height = talus_step(dim, &height, &downstream, repose_threshold);
+        let talus_delta_net: Vec<i64> = height.iter().zip(height_before_talus.iter()).map(|(h, hb)| h - hb).collect();
+
+        // Slice-1L: record iteration stats if sink is present.
+        if let Some(sink) = stats_sink.as_mut() {
+            if let (Some(bd), Some(bhw)) = (belt_distance, belt_hw) {
+                sink.record_iteration(iter_idx, bd, bhw, &height, &downstream, &area, &incision_delta, &talus_delta_net, dim);
+            }
+        }
         }
     }
 
@@ -1128,6 +1177,9 @@ pub fn erode_with_tectonics(
     enable_plate_sim: bool,
     plate_strength: i64,
     _plate_repose_threshold: i64,
+    belt_distance: Option<&[i64]>,
+    belt_hw: Option<i64>,
+    mut stats_sink: Option<&mut dyn StatsSink>,
 ) -> ErosionState {
     use rayon::prelude::*;
 
@@ -1377,7 +1429,7 @@ pub fn erode_with_tectonics(
         REPOSE_THRESHOLD
     };
 
-    erode_from_fields(seed, hmax, dim, height, resistance, enable_erosion, erosion_strength, repose_threshold)
+    erode_from_fields(seed, hmax, dim, height, resistance, enable_erosion, erosion_strength, repose_threshold, belt_distance, belt_hw, stats_sink)
 }
 
 /// Sample `height_at` + `resistance_field` over a `dim × dim` grid and run the fixed
@@ -1403,7 +1455,7 @@ pub fn erode(seed: u64, hmax: i64, dim: usize, enable_base: bool, enable_tectoni
     let clamped_strength = erosion_strength.clamp(0, 400);
     // Slice-1b: plate sim defaults to false (byte-identical); pass through enable_tectonics for enable_fault_resistance symmetry
     // Slice-1d: default plate_repose_threshold=0 (unchanged for fBm path)
-    erode_with_tectonics(seed, hmax, dim, enable_base, enable_tectonics, enable_tectonics, enable_volcanic, enable_ridges, enable_erosion, clamped_strength, false, 100, 0)
+    erode_with_tectonics(seed, hmax, dim, enable_base, enable_tectonics, enable_tectonics, enable_volcanic, enable_ridges, enable_erosion, clamped_strength, false, 100, 0, None, None, None)
 }
 
 #[cfg(test)]
@@ -1763,8 +1815,8 @@ mod tests {
 
     #[test]
     fn erode_with_tectonics_is_deterministic_across_repeated_calls() {
-        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100, false, 100, 0);
-        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100, false, 100, 0);
+        let a = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100, false, 100, 0, None, None, None);
+        let b = erode_with_tectonics(SEED, HMAX, 16, true, true, false, false, false, true, 100, false, 100, 0, None, None, None);
         assert_eq!(a, b, "erode_with_tectonics must be byte-identical across repeated calls");
     }
 
@@ -1773,7 +1825,7 @@ mod tests {
         // Both flags false must be IDENTICAL to erode()'s pre-#396 body (this is a pure structural
         // refactor into erode_from_fields/erode_with_tectonics — no behavior change when off).
         let via_erode = erode(SEED, HMAX, 16, true, false, false, false, true, 100);
-        let via_flags = erode_with_tectonics(SEED, HMAX, 16, true, false, false, false, false, true, 100, false, 100, 0);
+        let via_flags = erode_with_tectonics(SEED, HMAX, 16, true, false, false, false, false, true, 100, false, 100, 0, None, None, None);
         assert_eq!(via_erode, via_flags, "erode(..,false) must equal erode_with_tectonics(..,false,false)");
     }
 
@@ -1852,9 +1904,9 @@ mod tests {
         // `K_INCISE_DEN`'s doc) — mirrors `caps.rs`'s `ROCK_SLOPE_THRESHOLD`.
         const STEEP_THRESHOLD: i64 = 4;
 
-        let a = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false, false, true, 100, false, 100, 0);
-        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, false, false, false, true, 100, false, 100, 0);
-        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100, false, 100, 0);
+        let a = erode_with_tectonics(SEED, HMAX, DIM, true, false, false, false, false, true, 100, false, 100, 0, None, None, None);
+        let b = erode_with_tectonics(SEED, HMAX, DIM, true, true, false, false, false, true, 100, false, 100, 0, None, None, None);
+        let c = erode_with_tectonics(SEED, HMAX, DIM, true, true, true, false, false, true, 100, false, 100, 0, None, None, None);
 
         let a_count = steep_edge_count(&a.height, DIM, STEEP_THRESHOLD);
         let c_count = steep_edge_count(&c.height, DIM, STEEP_THRESHOLD);

@@ -46,7 +46,7 @@ fn main() {
 
                 // Run erosion on the plate field with the given repose threshold
                 let resistance = compute_resistance(seed, DIM, HMAX);
-                let erosion = world::gen::erosion::erode_from_fields(seed, HMAX, DIM, height.clone(), resistance, true, strength, repose);
+                let erosion = world::gen::erosion::erode_from_fields(seed, HMAX, DIM, height.clone(), resistance, true, strength, repose, None, None, None);
 
                 // Measure metrics on eroded field
                 let drainage_density = compute_drainage_density(DIM, &erosion.drainage.area);
