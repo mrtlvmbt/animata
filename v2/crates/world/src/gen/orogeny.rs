@@ -991,8 +991,8 @@ mod tests {
         let amp_max = (AMP_MAX_NUM * hmax) / AMP_MAX_DEN;
         assert!(amp_high >= amp_max * 9 / 10 && amp_high <= amp_max, "high conv should be near AMP_MAX");
 
-        // Test interpolation (mid-range).
-        let amp_mid = map_convergence_to_amplitude(125, hmax); // Halfway between LOW and HIGH
+        // Test interpolation (mid-range). True midpoint of [CONV_AMP_LOW=10, CONV_AMP_HIGH=40] is 25.
+        let amp_mid = map_convergence_to_amplitude(25, hmax);
         assert!(amp_mid > amp_min && amp_mid < amp_max, "mid conv should be between min and max");
     }
 
@@ -1012,8 +1012,8 @@ mod tests {
         let hw_max = (dim * HW_MAX_DIM_NUM) / HW_MAX_DIM_DEN;
         assert!(hw_high >= hw_max * 9 / 10 && hw_high <= hw_max, "high conv should have wide width");
 
-        // Test interpolation (mid-range).
-        let hw_mid = map_convergence_to_width(125, dim); // Halfway between LOW and HIGH
+        // Test interpolation (mid-range). True midpoint of [CONV_HW_LOW=10, CONV_HW_HIGH=40] is 25.
+        let hw_mid = map_convergence_to_width(25, dim);
         assert!(hw_mid > hw_min && hw_mid < hw_max, "mid conv should have mid-range width");
     }
 
