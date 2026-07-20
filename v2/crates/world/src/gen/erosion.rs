@@ -2230,4 +2230,114 @@ mod tests {
         let actual: [i64; 4] = std::array::from_fn(|i| state.height[INDICES[i]]);
         assert_eq!(actual, EXPECTED, "golden drift (or placeholder awaiting CI pin) at indices {INDICES:?}");
     }
+
+    /// Slice-1N: Transport-limited deposition on synthetic slope-then-flat profile.
+    /// Core mechanism test: sediment erodes on steep slope, deposits on flat floor.
+    /// A single slope from one side to a flat base verifies:
+    /// - Erosion on slope (Q_s < Q_cap initially, erodes to pick up load)
+    /// - Deposition on flat (Q_s > Q_cap when slope drops, deposits excess)
+    #[test]
+    fn transport_limited_deposition_on_synthetic_slope_profile() {
+        const DIM: usize = 8;
+        // Create a simple 8x8 slope→flat profile: left column at height 50,
+        // middle columns linearly slope down, right column at height 10 (flat floor).
+        let mut height = vec![10i64; DIM * DIM];
+        for z in 0..DIM {
+            // Left edge: high (slope start)
+            height[linear_index(0, z, DIM)] = 50;
+            // Linear transition: slope from x=0 to x=DIM-2
+            for x in 1..DIM-1 {
+                let h = 50 - ((50 - 10) * x as i64 / (DIM - 1) as i64);
+                height[linear_index(x, z, DIM)] = h;
+            }
+            // Right edge: low (flat floor)
+            height[linear_index(DIM - 1, z, DIM)] = 10;
+        }
+
+        let resistance = vec![0i64; DIM * DIM]; // Uniform resistance
+        let filled = priority_flood_fill(DIM, &height);
+        let downstream = d8_directions(DIM, &filled);
+        let area = kahn_accumulate(DIM, &downstream);
+
+        let (deposition_delta, _export) = transport_limited_deposition(DIM, &height, &downstream, &area, &resistance);
+
+        // Check: left side (slope) should have some erosion (negative delta)
+        let left_deltas: Vec<i64> = (0..DIM)
+            .map(|z| deposition_delta[linear_index(0, z, DIM)])
+            .collect();
+        let left_avg = left_deltas.iter().sum::<i64>() / DIM as i64;
+        assert!(left_avg < 0, "left (slope) should erode, got avg delta {}", left_avg);
+
+        // Check: right side (flat floor) should have some deposition (positive delta)
+        let right_deltas: Vec<i64> = (0..DIM)
+            .map(|z| deposition_delta[linear_index(DIM - 1, z, DIM)])
+            .collect();
+        let right_avg = right_deltas.iter().sum::<i64>() / DIM as i64;
+        assert!(right_avg > 0, "right (flat floor) should deposit, got avg delta {}", right_avg);
+    }
+
+    /// Slice-1N: Mass conservation for transport-limited deposition.
+    /// Verify that Σ(eroded) - Σ(deposited) = export (integer-exact, booked on applied Δz).
+    /// On a bounded grid (no off-map sink), most sediment should deposit back → low export.
+    #[test]
+    fn transport_limited_deposition_conserves_mass() {
+        const SEED: u64 = 0x1234_5678;
+        const HMAX: i64 = 200;
+        const DIM: usize = 16;
+
+        // Generate a realistic height field
+        let mut height = vec![0i64; DIM * DIM];
+        for z in 0..DIM {
+            for x in 0..DIM {
+                height[linear_index(x, z, DIM)] = height_at(x as i64, z as i64, SEED, HMAX);
+            }
+        }
+
+        let resistance = resistance_field(DIM, SEED, HMAX);
+        let filled = priority_flood_fill(DIM, &height);
+        let downstream = d8_directions(DIM, &filled);
+        let area = kahn_accumulate(DIM, &downstream);
+
+        let (deposition_delta, export) = transport_limited_deposition(DIM, &height, &downstream, &area, &resistance);
+
+        // Compute total eroded and deposited (by sign of delta)
+        let total_eroded: i64 = deposition_delta.iter().filter(|&&d| d < 0).map(|d| -d).sum();
+        let total_deposited: i64 = deposition_delta.iter().filter(|&&d| d > 0).map(|d| *d).sum();
+
+        // By conservation: eroded = deposited + export (exactly)
+        let expected_export = total_eroded - total_deposited;
+        assert_eq!(
+            expected_export, export,
+            "mass conservation violation: eroded - deposited = {}, but export = {}",
+            expected_export, export
+        );
+    }
+
+    /// Slice-1N: Determinism of transport-limited deposition across repeated calls.
+    /// Same height/drainage fields must produce byte-identical output.
+    #[test]
+    fn transport_limited_deposition_is_deterministic() {
+        const SEED: u64 = 0xDEAD_BEEF;
+        const HMAX: i64 = 200;
+        const DIM: usize = 16;
+
+        let mut height = vec![0i64; DIM * DIM];
+        for z in 0..DIM {
+            for x in 0..DIM {
+                height[linear_index(x, z, DIM)] = height_at(x as i64, z as i64, SEED, HMAX);
+            }
+        }
+
+        let resistance = resistance_field(DIM, SEED, HMAX);
+        let filled = priority_flood_fill(DIM, &height);
+        let downstream = d8_directions(DIM, &filled);
+        let area = kahn_accumulate(DIM, &downstream);
+
+        // Run twice and compare
+        let (delta1, export1) = transport_limited_deposition(DIM, &height, &downstream, &area, &resistance);
+        let (delta2, export2) = transport_limited_deposition(DIM, &height, &downstream, &area, &resistance);
+
+        assert_eq!(delta1, delta2, "height delta must be byte-identical across runs");
+        assert_eq!(export1, export2, "export must be byte-identical across runs");
+    }
 }
