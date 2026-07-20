@@ -1149,6 +1149,7 @@ fn main() {
                         resistance,
                         strength > 0, // enable_erosion
                         strength,
+                        0, // repose_threshold (Slice-1d: default 0 for this probe)
                     );
 
                     let height = &erosion_result.height;
