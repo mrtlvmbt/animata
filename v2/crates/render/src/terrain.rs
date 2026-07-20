@@ -149,8 +149,20 @@ fn build_chunk(
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
 
+            // Compute steepness from height gradient (central difference)
+            let h_center = world.height(col, row) as f32;
+            let h_east = if col + 1 < world_dim { world.height(col + 1, row) as f32 } else { h_center };
+            let h_west = if col > 0 { world.height(col - 1, row) as f32 } else { h_center };
+            let h_south = if row + 1 < world_dim { world.height(col, row + 1) as f32 } else { h_center };
+            let h_north = if row > 0 { world.height(col, row - 1) as f32 } else { h_center };
+
+            let grad_col = (h_east - h_west) / 2.0;
+            let grad_row = (h_south - h_north) / 2.0;
+            let grad_mag = (grad_col * grad_col + grad_row * grad_row).sqrt();
+            let steepness = (grad_mag / 2.0).clamp(0.0, 1.0);
+
             // Compute top color (palette v2 for visual quality, with bare_mode water substitution)
-            let top_color_bare = cell_color(material, height_val, h_lo, h_hi, col, row, seed, bare_mode);
+            let top_color_bare = cell_color(material, height_val, h_lo, h_hi, col, row, seed, steepness, bare_mode);
 
             // Bevel: shrink the top hexagon by BEVEL_FRAC toward center. These inner corners form the
             // TOP FACE of the shrunk hexagon; the OUTER corners drop by BEVEL_DROP to form the chamfer ring.
@@ -349,8 +361,20 @@ fn build_raw_chunk(
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
 
+            // Compute steepness from height gradient (central difference)
+            let h_center = world.height(col, row) as f32;
+            let h_east = if col + 1 < world_dim { world.height(col + 1, row) as f32 } else { h_center };
+            let h_west = if col > 0 { world.height(col - 1, row) as f32 } else { h_center };
+            let h_south = if row + 1 < world_dim { world.height(col, row + 1) as f32 } else { h_center };
+            let h_north = if row > 0 { world.height(col, row - 1) as f32 } else { h_center };
+
+            let grad_col = (h_east - h_west) / 2.0;
+            let grad_row = (h_south - h_north) / 2.0;
+            let grad_mag = (grad_col * grad_col + grad_row * grad_row).sqrt();
+            let steepness = (grad_mag / 2.0).clamp(0.0, 1.0);
+
             // Compute top color (palette v2 for visual quality, with bare_mode water substitution)
-            let top_color_bare = cell_color(material, height_val, h_lo, h_hi, col, row, seed, bare_mode);
+            let top_color_bare = cell_color(material, height_val, h_lo, h_hi, col, row, seed, steepness, bare_mode);
 
             // Bevel: shrink the top hexagon by BEVEL_FRAC toward center. These inner corners form the
             // TOP FACE of the shrunk hexagon; the OUTER corners drop by BEVEL_DROP to form the chamfer ring.
