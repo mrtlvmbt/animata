@@ -1,11 +1,25 @@
 //! terragen-v3 Slice-1a: Deterministic plate-tectonic FIELDS (Stages 1–3, F5, F7).
+//! **Slice-1k: Coherent boundary normal smoothing (fixed-point Jacobi denoising along strike).**
 //!
 //! Pure integer-seeded functions computing:
 //! - `plate_id[dim × dim]`: Voronoi partition over extended domain (F1 tie-break: smallest plate_id).
 //! - `velocity[plate]`: per-plate integer (vx, vz) velocities (Stage 2, N_PLATE_STEPS=8).
 //! - `is_continental[plate]`: 60% continental, 40% oceanic crust type (Stage 2b).
 //! - `boundary_type[dim × dim]` + `convergence_magnitude[dim × dim]`: boundary classification
-//!   (Stage 3, F2 tie-break: 8-neighbor scan in fixed order, THRESHOLD=0).
+//!   (Stage 3, F2/F3 tie-break: 8-neighbor scan in fixed order, smoothed-normal classification).
+//!
+//! **Slice-1k — coherent convergent belts via along-strike smoothing:**
+//! Each boundary cell's local offset (the neighbor direction to the best-fit plate boundary normal)
+//! is scaled to fixed-point (×NORMAL_FP=256) and smoothed via Jacobi iteration over same-pair
+//! boundary neighbors. This denoises the high-frequency wobble of the local normal on curved arcs,
+//! producing coherent convergent/divergent belts while preserving slow along-strike variation.
+//! No global collapse (which would cancel on curved arcs).
+//! - `NORMAL_FP = 256`: fixed-point scale to preserve magnitude through averaging.
+//! - `JACOBI_ITER = 4`: number of Jacobi double-buffered smoothing passes.
+//! - `TRANSFORM_K = 100`: k parameter for near-parallel TRANSFORM detection (int-exact ratio).
+//! - Orientation: `v_rel = v_a - v_b`; `closing = v_rel · smoothed_normal`; `closing > 0` ⇒ convergent.
+//! - Rounding: single truncation at read from fixed-point; products bound to i64 (max 1e12 ≪ i64::MAX).
+//! - Junction tie-break: first neighbor in NEIGHBOR_OFFSETS order (reused from F2).
 //!
 //! **F5 — re-roll on all-convergent:** If a seed's boundaries are all convergent (no divergent),
 //! re-roll velocities with an incremented retry salt; repeat up to 5 retries.
@@ -134,7 +148,7 @@ fn stage_2b_crust_type(plate_count: u32, seed: u64) -> Vec<bool> {
 }
 
 /// 8 neighbor offsets in fixed order: NW, N, NE, E, SE, S, SW, W.
-/// This is the PINNED order for F2 tie-break (first-max wins).
+/// This is the PINNED order for F2 tie-break (first-max wins) and F3 junction tie-break.
 const NEIGHBOR_OFFSETS: &[(i64, i64)] = &[
     (-1, -1), // NW
     (0, -1),  // N
@@ -146,37 +160,63 @@ const NEIGHBOR_OFFSETS: &[(i64, i64)] = &[
     (-1, 0),  // W
 ];
 
-/// Stage 3: Boundary classification (convergent/divergent/transform).
-/// For each cell on a plate boundary, compute boundary normal (8-neighbor with max |dot|, F2 tie-break),
-/// then classify by convergence_magnitude = relative_velocity · boundary_normal.
-fn stage_3_boundary_classification(
+/// Fixed-point scale for boundary normals (Slice-1k).
+/// Raw offsets are unit-scale (±1, ±0); multiplying by 256 preserves magnitude through Jacobi averaging.
+/// Prevents truncation-to-zero degeneracy when averaging small rotating normals on curved arcs.
+const NORMAL_FP: i64 = 256;
+
+/// Number of Jacobi double-buffered smoothing iterations (Slice-1k).
+/// Smooths high-frequency cell-to-cell jitter of the local normal along the plate-pair strike.
+const JACOBI_ITER: usize = 4;
+
+/// Parameter k for near-parallel TRANSFORM detection (Slice-1k).
+/// `closing² · k < (v_rel·v_rel) · (normal·normal)` ⇒ TRANSFORM (within ~±5.7° of parallel).
+/// Integer ratio, avoids float/sqrt. Bound check: max products ≲ 1e12 ≪ i64::MAX.
+const TRANSFORM_K: i64 = 100;
+
+/// Plate pair identifier: (min(plate_a, plate_b), max(plate_a, plate_b)).
+/// Normalized order ensures junction cells with the same pair always smooth together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct PlatePair(u32, u32);
+
+impl PlatePair {
+    fn new(plate_a: u32, plate_b: u32) -> Self {
+        if plate_a <= plate_b {
+            PlatePair(plate_a, plate_b)
+        } else {
+            PlatePair(plate_b, plate_a)
+        }
+    }
+}
+
+/// Compute raw scaled boundary normals (offset to best neighbor, × NORMAL_FP).
+/// For each boundary cell, returns (scaled_offset, plate_pair, is_boundary).
+/// Offset is the cell's local direction (from 8-neighbor scan) toward the best-fit plate boundary.
+/// Scale by NORMAL_FP to preserve magnitude through Jacobi averaging.
+fn compute_raw_scaled_normals(
     plate_id: &[u32],
     plate_centers: &[(i64, i64)],
-    velocity_x: &[i32],
-    velocity_z: &[i32],
     dim: i64,
-) -> (Vec<BoundaryType>, Vec<i64>) {
+) -> (Vec<(i64, i64)>, Vec<Option<PlatePair>>) {
     let dim = dim as i64;
-    let mut boundary_type = vec![BoundaryType::Transform; (dim * dim) as usize];
-    let mut convergence_magnitude = vec![0i64; (dim * dim) as usize];
-
-    const THRESHOLD: i64 = 0;
+    let mut scaled_offsets = vec![(0i64, 0i64); (dim * dim) as usize];
+    let mut plate_pairs = vec![None; (dim * dim) as usize];
 
     for z in 0..dim {
         for x in 0..dim {
             let idx = (z * dim + x) as usize;
             let this_plate = plate_id[idx] as usize;
 
-            // Check if this cell is on a boundary (has a neighbor with different plate).
-            let mut is_boundary = false;
+            // Find best neighbor (max |dot| with center_diff).
             let mut best_neighbor_plate = this_plate;
             let mut best_dot_magnitude = -1i64;
+            let mut best_offset = (0i64, 0i64);
+            let mut is_boundary = false;
 
             for &(dx, dz) in NEIGHBOR_OFFSETS {
                 let nx = x + dx;
                 let nz = z + dz;
 
-                // Clamp to grid bounds.
                 if nx < 0 || nx >= dim || nz < 0 || nz >= dim {
                     continue;
                 }
@@ -187,54 +227,205 @@ fn stage_3_boundary_classification(
                 if neighbor_plate != this_plate {
                     is_boundary = true;
 
-                    // Compute |center_diff · offset| to find steepest plate-ID transition (F2 tie-break).
                     let (this_cx, this_cz) = plate_centers[this_plate];
                     let (neighbor_cx, neighbor_cz) = plate_centers[neighbor_plate];
-
                     let center_diff_x = this_cx - neighbor_cx;
                     let center_diff_z = this_cz - neighbor_cz;
-
                     let dot = center_diff_x * dx + center_diff_z * dz;
                     let dot_magnitude = dot.abs();
 
-                    // F2: first neighbor achieving max |dot| wins (scan in fixed order).
                     if dot_magnitude > best_dot_magnitude {
                         best_dot_magnitude = dot_magnitude;
                         best_neighbor_plate = neighbor_plate;
+                        best_offset = (dx, dz);
                     }
                 }
             }
 
             if is_boundary {
-                // Compute convergence_magnitude using the best neighbor.
-                let rel_vx = velocity_x[this_plate] as i64 - velocity_x[best_neighbor_plate] as i64;
-                let rel_vz = velocity_z[this_plate] as i64 - velocity_z[best_neighbor_plate] as i64;
+                // Scale offset by NORMAL_FP to preserve magnitude through averaging.
+                scaled_offsets[idx] = (best_offset.0 * NORMAL_FP, best_offset.1 * NORMAL_FP);
+                plate_pairs[idx] = Some(PlatePair::new(this_plate as u32, best_neighbor_plate as u32));
+            }
+        }
+    }
 
-                // Find the offset to the best neighbor (for use as the boundary normal).
-                let (this_cx, this_cz) = plate_centers[this_plate];
-                let (neighbor_cx, neighbor_cz) = plate_centers[best_neighbor_plate];
-                let center_diff_x = this_cx - neighbor_cx;
-                let center_diff_z = this_cz - neighbor_cz;
+    (scaled_offsets, plate_pairs)
+}
 
-                let mut best_offset = (0i64, 0i64);
+/// Accumulated sums for Jacobi smoothing (Slice-1k).
+/// Stores the accumulated normals and neighbor counts for final truncation at read-time.
+#[derive(Clone)]
+struct SmoothedNormal {
+    sum_x: i64,
+    sum_z: i64,
+    count: i64,
+}
+
+/// Jacobi double-buffered smoothing of boundary normals (Slice-1k).
+/// For each boundary cell, accumulate its scaled normal over same-pair neighbors in 8-neighborhood.
+/// Returns sums and counts (NOT truncated); classification code divides to get final normal (single trunc at read).
+/// Result: `smoothed_sums[idx]` contains accumulated (sum_x, sum_z, count) after JACOBI_ITER iterations.
+/// If a cell's neighborhood is empty/degenerate after smoothing, fallback code uses raw scaled offset.
+///
+/// **Rounding contract (ТЗ-critical):** Keeps sums in full i64 precision through all JACOBI_ITER passes.
+/// Division (truncation) happens only once per cell at read-time in classification, not during iteration.
+/// This prevents cumulative truncation bias on curved arcs with rotating neighbors.
+fn smooth_normals_jacobi(
+    scaled_offsets: &[(i64, i64)],
+    plate_pairs: &[Option<PlatePair>],
+    dim: i64,
+) -> Vec<SmoothedNormal> {
+    let dim = dim as i64;
+    let size = (dim * dim) as usize;
+
+    // Initialize sums: each boundary cell starts as itself (count=1), non-boundaries get empty sums.
+    let mut current: Vec<SmoothedNormal> = (0..size)
+        .map(|idx| {
+            if plate_pairs[idx].is_some() {
+                let (ox, oz) = scaled_offsets[idx];
+                SmoothedNormal { sum_x: ox, sum_z: oz, count: 1 }
+            } else {
+                SmoothedNormal { sum_x: 0, sum_z: 0, count: 0 }
+            }
+        })
+        .collect();
+
+    // Jacobi iterations: accumulate sums from same-pair neighbors.
+    for _iter in 0..JACOBI_ITER {
+        let mut next = current.clone();
+
+        for z in 0..dim {
+            for x in 0..dim {
+                let idx = (z * dim + x) as usize;
+                let my_pair = plate_pairs[idx];
+
+                // Only smooth boundary cells.
+                if my_pair.is_none() {
+                    continue;
+                }
+                let my_pair = my_pair.unwrap();
+
+                // Accumulate sums from same-pair neighbors (full precision, no truncation).
+                let mut sum_x = 0i64;
+                let mut sum_z = 0i64;
+                let mut count = 0i64;
+
                 for &(dx, dz) in NEIGHBOR_OFFSETS {
-                    let dot = center_diff_x * dx + center_diff_z * dz;
-                    if dot.abs() == best_dot_magnitude {
-                        best_offset = (dx, dz);
-                        break; // F2: first offset achieving max wins.
+                    let nx = x + dx;
+                    let nz = z + dz;
+
+                    if nx < 0 || nx >= dim || nz < 0 || nz >= dim {
+                        continue;
+                    }
+
+                    let neighbor_idx = (nz * dim + nx) as usize;
+                    if let Some(neighbor_pair) = plate_pairs[neighbor_idx] {
+                        if neighbor_pair == my_pair {
+                            sum_x += current[neighbor_idx].sum_x;
+                            sum_z += current[neighbor_idx].sum_z;
+                            count += current[neighbor_idx].count;
+                        }
                     }
                 }
 
-                let conv_mag = rel_vx * best_offset.0 + rel_vz * best_offset.1;
+                // Update with accumulated sums (NO division, NO truncation during iteration).
+                // Next iteration reads these un-divided sums and re-accumulates.
+                if count > 0 {
+                    next[idx] = SmoothedNormal { sum_x, sum_z, count };
+                }
+                // Otherwise keep current value (no same-pair neighbors).
+            }
+        }
 
-                convergence_magnitude[idx] = conv_mag;
+        current = next;
+    }
 
-                boundary_type[idx] = if conv_mag > THRESHOLD {
-                    BoundaryType::Convergent
-                } else if conv_mag < -THRESHOLD {
-                    BoundaryType::Divergent
+    current
+}
+
+/// Stage 3: Boundary classification (convergent/divergent/transform) with smoothed normals (Slice-1k).
+/// For each cell on a plate boundary, compute smoothed boundary normal via Jacobi along-strike averaging,
+/// then classify by convergence_magnitude = relative_velocity · smoothed_normal.
+fn stage_3_boundary_classification(
+    plate_id: &[u32],
+    plate_centers: &[(i64, i64)],
+    velocity_x: &[i32],
+    velocity_z: &[i32],
+    dim: i64,
+) -> (Vec<BoundaryType>, Vec<i64>) {
+    let dim = dim as i64;
+    let size = (dim * dim) as usize;
+    let mut boundary_type = vec![BoundaryType::Transform; size];
+    let mut convergence_magnitude = vec![0i64; size];
+
+    // Step 1: Compute raw scaled offsets and identify boundary cells + their plate pairs.
+    let (scaled_offsets, plate_pairs) = compute_raw_scaled_normals(plate_id, plate_centers, dim);
+
+    // Step 2: Smooth normals via Jacobi iteration along the strike (same plate pair).
+    let smoothed_normals = smooth_normals_jacobi(&scaled_offsets, &plate_pairs, dim);
+
+    // Step 3: Classify each boundary cell using smoothed normal.
+    for z in 0..dim {
+        for x in 0..dim {
+            let idx = (z * dim + x) as usize;
+
+            if let Some(plate_pair) = plate_pairs[idx] {
+                // This is a boundary cell. Identify the two plates and their velocities.
+                // Plate pair is normalized (min, max), so we need to find which plate is "this" cell's plate
+                // and which is the neighbor.
+                let this_plate = plate_id[idx] as usize;
+                let neighbor_plate = if plate_pair.0 == this_plate as u32 {
+                    plate_pair.1 as usize
                 } else {
+                    plate_pair.0 as usize
+                };
+
+                // Relative velocity: v_a - v_b (oriented toward neighbor plate).
+                let rel_vx = velocity_x[this_plate] as i64 - velocity_x[neighbor_plate] as i64;
+                let rel_vz = velocity_z[this_plate] as i64 - velocity_z[neighbor_plate] as i64;
+
+                // READ-TIME TRUNCATION (single trunc, per ТЗ):
+                // Divide accumulated sums by count to get the smoothed normal (fixed-point scaled).
+                // This is the only truncation during the entire process.
+                let smoothed = &smoothed_normals[idx];
+                let norm_x = if smoothed.count > 0 {
+                    smoothed.sum_x / smoothed.count
+                } else {
+                    // Fallback: use raw scaled offset if smoothing produced no result.
+                    scaled_offsets[idx].0
+                };
+                let norm_z = if smoothed.count > 0 {
+                    smoothed.sum_z / smoothed.count
+                } else {
+                    scaled_offsets[idx].1
+                };
+
+                // Convergence magnitude: v_rel · smoothed_normal (fixed-point dot product).
+                let closing = rel_vx * norm_x + rel_vz * norm_z;
+
+                convergence_magnitude[idx] = closing;
+
+                // Classification: convergent if closing > 0, divergent if closing < 0, transform if near-parallel.
+                // Near-parallel check: closing² · k < (v_rel·v_rel) · (normal·normal) ⇒ TRANSFORM.
+                // All integer arithmetic; products bounded to i64 (max ~1e12).
+                let is_transform = {
+                    let closing_sq = closing.saturating_mul(closing);
+                    let vel_sq = rel_vx.saturating_mul(rel_vx)
+                        .saturating_add(rel_vz.saturating_mul(rel_vz));
+                    let norm_sq = norm_x.saturating_mul(norm_x)
+                        .saturating_add(norm_z.saturating_mul(norm_z));
+                    let lhs = closing_sq.saturating_mul(TRANSFORM_K);
+                    let rhs = vel_sq.saturating_mul(norm_sq);
+                    lhs < rhs
+                };
+
+                boundary_type[idx] = if is_transform {
                     BoundaryType::Transform
+                } else if closing > 0 {
+                    BoundaryType::Convergent
+                } else {
+                    BoundaryType::Divergent
                 };
             }
         }
