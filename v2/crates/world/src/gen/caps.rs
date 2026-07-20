@@ -47,7 +47,7 @@
 //!
 //! ## Public output shape for W-6
 //!
-//! [`classify_and_caps(seed, hmax, dim)`] returns a [`WorldFields`] with `final_biome` + `caps` —
+//! [`classify_and_caps(seed, hmax, dim, false, 100)`] returns a [`WorldFields`] with `final_biome` + `caps` —
 //! the shape W-6 wires into `WorldView::biome`/`resource`. `hmax` threads into `erode` (which needs
 //! it for `height_at`); `climate_from_height` takes no `hmax` (it consumes explicit eroded heights
 //! already in the `[0,hmax]` range).
@@ -57,7 +57,7 @@ use crate::gen::biome::{biome_at, BiomeId};
 use crate::gen::climate::{climate_from_height, WIND_DX};
 use crate::gen::coastal::{run_coastal, is_submerged};
 use crate::gen::drainage::is_river;
-use crate::gen::erosion::{erode, de_needle_pass, talus_step_final, MAX_SPIKE_FINAL, SPIKE_MARGIN_FINAL, N_ITERS_FINAL, NEEDLE_MARGIN, PAR_MIN_DIM};
+use crate::gen::erosion::{de_needle_pass, talus_step_final, MAX_SPIKE_FINAL, SPIKE_MARGIN_FINAL, N_ITERS_FINAL, NEEDLE_MARGIN, PAR_MIN_DIM};
 use crate::gen::height::height_at;
 use crate::gen::material::MaterialId;
 use crate::gen::moisture::moisture_at;
@@ -991,8 +991,10 @@ pub fn classify_and_caps_staged(
     flags: crate::gen::LandformFlags,
     enable_talus_final: bool,
     enable_w10_diversity: bool,
+    enable_plate_sim: bool,
+    plate_strength: i64,
 ) -> (WorldFields, StagedHeights, LandformMasks) {
-    classify_and_caps_staged_with_callback(seed, hmax, dim, enable_patchiness, flags, enable_talus_final, enable_w10_diversity, None)
+    classify_and_caps_staged_with_callback(seed, hmax, dim, enable_patchiness, flags, enable_talus_final, enable_w10_diversity, None, enable_plate_sim, plate_strength)
 }
 
 /// U-11: Staged pipeline with progress callback (observation-only).
@@ -1008,6 +1010,8 @@ pub fn classify_and_caps_staged_with_callback(
     enable_talus_final: bool,
     enable_w10_diversity: bool,
     mut progress_callback: Option<&mut dyn FnMut(u8)>,
+    enable_plate_sim: bool,
+    plate_strength: i64,
 ) -> (WorldFields, StagedHeights, LandformMasks) {
     // U-11: Report all stages in order for monotone progress bar.
     // Stages that happen inside erode (tectonics/ridges) are reported before/after erode calls.
@@ -1027,7 +1031,8 @@ pub fn classify_and_caps_staged_with_callback(
     if let Some(ref mut cb) = progress_callback {
         cb(2); // ApplyErosion = 2
     }
-    let erosion = erode(seed, hmax, dim, flags.base, flags.tect, flags.volcanic, flags.ridges, flags.erosion, flags.erosion_strength);
+    // Slice-1f: Thread enable_plate_sim and plate_strength into erode call. Clamp strength per W-19.
+    let erosion = crate::gen::erosion::erode_with_tectonics(seed, hmax, dim, flags.base, flags.tect, flags.tect, flags.volcanic, flags.ridges, flags.erosion, flags.erosion_strength.clamp(0, 400), enable_plate_sim, plate_strength, 0);
     let n = dim * dim;
 
     // Stage 3: ApplyRidges (optional, injected into erode; report completion after erode)
@@ -1346,8 +1351,10 @@ pub fn classify_and_caps(
     dim: usize,
     enable_patchiness: bool,
     flags: crate::gen::LandformFlags,
+    enable_plate_sim: bool,
+    plate_strength: i64,
 ) -> WorldFields {
-    classify_and_caps_with_callback(seed, hmax, dim, enable_patchiness, flags, None)
+    classify_and_caps_with_callback(seed, hmax, dim, enable_patchiness, flags, None, enable_plate_sim, plate_strength)
 }
 
 /// U-11: Wrapper that threads a progress callback through the worldgen pipeline.
@@ -1360,6 +1367,8 @@ pub fn classify_and_caps_with_callback(
     enable_patchiness: bool,
     flags: crate::gen::LandformFlags,
     mut progress_callback: Option<Box<dyn FnMut(u8)>>,
+    enable_plate_sim: bool,
+    plate_strength: i64,
 ) -> WorldFields {
     // W-9: Thin wrapper — talus_step_final is gated the SAME as de_needle: any_landform_on
     // Production output CHANGES when landforms are enabled (exactly why two-pass golden re-pin is prescribed).
@@ -1370,7 +1379,7 @@ pub fn classify_and_caps_with_callback(
     let callback_ref = progress_callback.as_mut().map(|b| b.as_mut() as &mut dyn FnMut(u8));
     let (world_fields, _, _) = classify_and_caps_staged_with_callback(
         seed, hmax, dim, enable_patchiness, flags, enable_talus_final, true, // enable_w10_diversity
-        callback_ref,
+        callback_ref, enable_plate_sim, plate_strength,
     );
     world_fields
 }
@@ -1495,8 +1504,8 @@ mod tests {
 
     #[test]
     fn classify_and_caps_is_deterministic_across_repeated_calls() {
-        let a = classify_and_caps(SEED, HMAX, 16, false, LandformFlags::from_five(false, false, false, false, false));
-        let b = classify_and_caps(SEED, HMAX, 16, false, LandformFlags::from_five(false, false, false, false, false));
+        let a = classify_and_caps(SEED, HMAX, 16, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let b = classify_and_caps(SEED, HMAX, 16, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
         assert_eq!(a, b, "classify_and_caps must be byte-identical across repeated calls");
     }
 
@@ -1505,7 +1514,7 @@ mod tests {
     #[test]
     fn classify_and_caps_is_well_defined_grid_wide() {
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
+        let fields = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
         assert_eq!(fields.final_biome.len(), DIM * DIM);
         assert_eq!(fields.caps.len(), DIM * DIM);
         for &c in &fields.caps {
@@ -1518,7 +1527,7 @@ mod tests {
         const GOLDEN_SEED: u64 = 0xA11A_2A11;
         const GOLDEN_HMAX: i64 = 200;
         const DIM: usize = 16;
-        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
+        let fields = classify_and_caps(GOLDEN_SEED, GOLDEN_HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
 
         // W-7 gate (patchiness default-off): caps are byte-identical to pre-W-7 (no patchiness applied).
         // Height/biome/material fields unchanged. These are the canonical pre-W-7 values.
@@ -1545,7 +1554,7 @@ mod tests {
         const HMAX: i64 = 200;
         const DIM: usize = 64;
         // With patchiness ON to verify bounds and clamping behavior of the modulation
-        let fields = classify_and_caps(SEED, HMAX, DIM, true, LandformFlags::from_five(false, false, false, false, false));
+        let fields = classify_and_caps(SEED, HMAX, DIM, true, LandformFlags::from_five(false, false, false, false, false, false, 100));
 
         // Count cells hitting bounds (ceiling at CAP_MAX, floor at 1 via rescale_cap).
         let mut clamp_low = 0usize;
@@ -1605,7 +1614,7 @@ mod tests {
         const SEED: u64 = 0xA11A_2A11;
         const HMAX: i64 = 200;
         const DIM: usize = 64;
-        let fields = classify_and_caps(SEED, HMAX, DIM, true, LandformFlags::from_five(false, false, false, false, false));
+        let fields = classify_and_caps(SEED, HMAX, DIM, true, LandformFlags::from_five(false, false, false, false, false, false, 100));
 
         // Adjacent-cell differences: sum of absolute differences for cells one step apart.
         let mut same_neighbor_sum = 0i64;
@@ -1663,13 +1672,13 @@ mod tests {
         const GRID_SIZE: i64 = (DIM * DIM) as i64;
 
         // Compute world WITH patchiness active (gated ON)
-        let with_patch = classify_and_caps(SEED, HMAX, DIM, true, LandformFlags::from_five(false, false, false, false, false));
+        let with_patch = classify_and_caps(SEED, HMAX, DIM, true, LandformFlags::from_five(false, false, false, false, false, false, 100));
         let sum_with: i64 = with_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_with_times_1000 = (sum_with * 1000) / GRID_SIZE;
 
         // Compute world WITHOUT patchiness (gated OFF) — byte-identical to homogeneous baseline
-        let without_patch = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
+        let without_patch = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
         let sum_without: i64 = without_patch.caps.iter().sum();
         // Integer-only mean: multiply first to preserve precision, then divide
         let mean_without_times_1000 = (sum_without * 1000) / GRID_SIZE;
@@ -1736,8 +1745,8 @@ mod tests {
     #[test]
     fn classify_and_caps_tectonics_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(true, false, false, false, false));
+        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(true, false, false, false, false, false, 100));
         assert_ne!(off.height, on.height, "enable_tectonics=true must change the height field — else the gate is dead code");
     }
 
@@ -1746,9 +1755,9 @@ mod tests {
     #[test]
     fn classify_and_caps_tectonics_off_is_deterministic_and_matches_baseline() {
         const DIM: usize = 16;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        assert_eq!(a, b, "classify_and_caps(..,false,false,false,false,false) must be byte-identical across repeated calls");
+        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        assert_eq!(a, b, "classify_and_caps(..,false,false,false,false,false, false, 100) must be byte-identical across repeated calls");
     }
 
     // ── W-SIM-3a: aeolian gate threading (#403) ──────────────────────────────────────────────────
@@ -1759,8 +1768,8 @@ mod tests {
     #[test]
     fn classify_and_caps_aeolian_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, true, false, false, false));
+        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, true, false, false, false, false, 100));
         assert_ne!(off.height, on.height, "enable_aeolian=true must change the height field — else the gate is dead code");
     }
 
@@ -1774,9 +1783,9 @@ mod tests {
     #[test]
     fn classify_and_caps_aeolian_off_matches_baseline_including_dune_cells() {
         const DIM: usize = 64;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        assert_eq!(a, b, "classify_and_caps(..,enable_aeolian=false) must be byte-identical across repeated calls");
+        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        assert_eq!(a, b, "classify_and_caps(..,enable_aeolian=false, false, 100) must be byte-identical across repeated calls");
 
         // Direct unit coverage of the BIOME/MATERIAL reconciliation on a Sand cell specifically
         // (#403 ТЗ) — via `reconcile_primary_material` rather than hoping the full pipeline
@@ -1802,8 +1811,8 @@ mod tests {
     #[test]
     fn classify_and_caps_volcanic_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, true, false, false));
+        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, true, false, false, false, 100));
         assert_ne!(off.height, on.height, "enable_volcanic=true must change the height field — else the gate is dead code");
     }
 
@@ -1816,9 +1825,9 @@ mod tests {
     #[test]
     fn classify_and_caps_volcanic_off_matches_baseline_and_never_emits_volcanic_material() {
         const DIM: usize = 64;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        assert_eq!(a, b, "classify_and_caps(..,enable_volcanic=false) must be byte-identical across repeated calls");
+        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        assert_eq!(a, b, "classify_and_caps(..,enable_volcanic=false, false, 100) must be byte-identical across repeated calls");
 
         let has_volcanic_material = a
             .surface_material
@@ -1832,7 +1841,7 @@ mod tests {
     #[test]
     fn classify_and_caps_volcanic_on_emits_basalt_or_tuff() {
         const DIM: usize = 64;
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, true, false, false));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, true, false, false, false, 100));
         let has_volcanic_material = on
             .surface_material
             .iter()
@@ -1848,8 +1857,8 @@ mod tests {
     #[test]
     fn classify_and_caps_glacial_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, true, false));
+        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, true, false, false, 100));
         assert_ne!(off.height, on.height, "enable_glacial=true must change the height field — else the gate is dead code");
     }
 
@@ -1862,9 +1871,9 @@ mod tests {
     #[test]
     fn classify_and_caps_glacial_off_matches_baseline_and_never_emits_till() {
         const DIM: usize = 64;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        assert_eq!(a, b, "classify_and_caps(..,enable_glacial=false) must be byte-identical across repeated calls");
+        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        assert_eq!(a, b, "classify_and_caps(..,enable_glacial=false, false, 100) must be byte-identical across repeated calls");
 
         let has_till = a.surface_material.iter().any(|&m| m == MaterialId::Till as u8);
         assert!(!has_till, "OFF path: Till must never be emitted with enable_glacial=false");
@@ -1875,7 +1884,7 @@ mod tests {
     #[test]
     fn classify_and_caps_glacial_on_emits_till() {
         const DIM: usize = 64;
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, true, false));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, true, false, false, 100));
         let has_till = on.surface_material.iter().any(|&m| m == MaterialId::Till as u8);
         assert!(has_till, "enable_glacial=true must emit at least one Till cell on this fixture");
     }
@@ -1887,8 +1896,8 @@ mod tests {
     #[test]
     fn classify_and_caps_coastal_gate_actually_changes_height() {
         const DIM: usize = 64;
-        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, true));
+        let off = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, true, false, 100));
         assert_ne!(off.height, on.height, "enable_coastal=true must change the height field — else the gate is dead code");
     }
 
@@ -1902,9 +1911,9 @@ mod tests {
     #[test]
     fn classify_and_caps_coastal_off_matches_baseline_and_never_emits_water() {
         const DIM: usize = 64;
-        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false));
-        assert_eq!(a, b, "classify_and_caps(..,enable_coastal=false) must be byte-identical across repeated calls");
+        let a = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        let b = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100));
+        assert_eq!(a, b, "classify_and_caps(..,enable_coastal=false, false, 100) must be byte-identical across repeated calls");
 
         let has_water = a.surface_material.iter().any(|&m| m == MaterialId::Water as u8);
         assert!(!has_water, "OFF path: Water must never be emitted with enable_coastal=false");
@@ -1918,7 +1927,7 @@ mod tests {
     #[test]
     fn classify_and_caps_coastal_on_emits_water_and_ocean_never_terrestrial() {
         const DIM: usize = 64;
-        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, true));
+        let on = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, true, false, 100));
         let has_water = on.surface_material.iter().any(|&m| m == MaterialId::Water as u8);
         assert!(has_water, "enable_coastal=true must emit at least one Water cell on this fixture");
 
@@ -1947,7 +1956,7 @@ mod tests {
                 for volcanic in [false, true] {
                     for glacial in [false, true] {
                         for coastal in [false, true] {
-                            let fields = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::new(true, tectonics, aeolian, volcanic, glacial, coastal, true, false, false, 100, 100));
+                            let fields = classify_and_caps(SEED, HMAX, DIM, false, LandformFlags::new(true, tectonics, aeolian, volcanic, glacial, coastal, true, false, false, 100, 100, false, 100));
                             assert_eq!(fields.height.len(), DIM * DIM);
                             assert_eq!(fields.final_biome.len(), DIM * DIM);
                             assert_eq!(fields.caps.len(), DIM * DIM);
@@ -1971,7 +1980,7 @@ mod tests {
     fn talus_step_final_produces_valid_output() {
         const DIM: usize = 64;
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false), true, true  // enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100), true, true  // enable_w10=true
         );
         // Verify all heights are in valid range
         for &h in &world.height {
@@ -1985,10 +1994,10 @@ mod tests {
     fn classify_and_caps_staged_off_path_is_byte_identical() {
         const DIM: usize = 64;
         let (staged, _, masks) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false), false, false  // enable_w10=false for OFF-path test
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100), false, false  // enable_w10=false for OFF-path test
         );
         let non_staged = classify_and_caps(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false)
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100)
         );
         assert_eq!(staged.height, non_staged.height, "staged OFF-path must match non-staged output");
         assert_eq!(staged.final_biome, non_staged.final_biome);
@@ -2053,7 +2062,7 @@ mod tests {
 
         // Generate a basic relief with coastal enabled (to get spikes that need smoothing)
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, true), true, true  // enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, true, false, 100), true, true  // enable_w10=true
         );
 
         // Get the pre/post stages from the result (post_coastal is the input to talus_step_final)
@@ -2124,11 +2133,11 @@ mod tests {
 
         // Generate world with aeolian (dune mask for testing)
         let (world_pre, staged, masks) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, true, false, false, false), false, true  // aeolian ON, enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, true, false, false, false, false, 100), false, true  // aeolian ON, enable_w10=true
         );
 
         let (world_post, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, true, false, false, false), true, true  // aeolian ON, talus ON, enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, true, false, false, false, false, 100), true, true  // aeolian ON, talus ON, enable_w10=true
         );
 
         let n = DIM * DIM;
@@ -2179,7 +2188,7 @@ mod tests {
 
         // Baseline (talus OFF, all landforms ON): measure de_needle clip count
         let (baseline, _staged_off, _masks_off) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true), false, true  // talus OFF, enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true, false, 100), false, true  // talus OFF, enable_w10=true
         );
         let baseline_clipped = de_needle_pass(DIM, &baseline.height);
         let baseline_clip_count = measure_de_needle_clip_count(DIM, &baseline.height, &baseline_clipped);
@@ -2209,11 +2218,11 @@ mod tests {
         const DIM: usize = 64;
         // WITH W-10 enabled
         let (world_with, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true), false, true  // landforms ON, enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true, false, 100), false, true  // landforms ON, enable_w10=true
         );
         // WITHOUT W-10 (same landforms ON, but W-10 pass skipped)
         let (world_without, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true), false, false  // landforms ON, enable_w10=false
+            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true, false, 100), false, false  // landforms ON, enable_w10=false
         );
         // Invariant: biome and caps must be byte-identical (W-10 only touches surface_material)
         assert_eq!(world_with.final_biome, world_without.final_biome, "final_biome must be byte-identical with vs without W-10");
@@ -2227,11 +2236,11 @@ mod tests {
         const DIM: usize = 64;
         // All landforms OFF: W-10 gate is false, so W-10 pass never applies.
         let world_off = classify_and_caps(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false)
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100)
         );
         // Same with staged version.
         let (world_staged, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false), false, false  // landforms OFF, enable_w10=false
+            SEED, HMAX, DIM, false, LandformFlags::from_five(false, false, false, false, false, false, 100), false, false  // landforms OFF, enable_w10=false
         );
         assert_eq!(world_off.height, world_staged.height, "height must be identical OFF-path");
         assert_eq!(world_off.final_biome, world_staged.final_biome, "final_biome must be identical OFF-path");
@@ -2246,7 +2255,7 @@ mod tests {
     fn w10_presentation_bytes_are_valid_discriminants() {
         const DIM: usize = 64;
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true), false, true  // Landforms ON, enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true, false, 100), false, true  // Landforms ON, enable_w10=true
         );
         for (i, &byte) in world.surface_material.iter().enumerate() {
             assert!(
@@ -2267,7 +2276,7 @@ mod tests {
     fn w10_patch_coherence_smoke_test() {
         const DIM: usize = 64;  // Use a smaller grid for the smoke test
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true), false, true  // Landforms ON, enable_w10=true
+            SEED, HMAX, DIM, false, LandformFlags::from_five(true, true, true, true, true, false, 100), false, true  // Landforms ON, enable_w10=true
         );
 
         // Find 4-connected components for SoilDry (9) — the dominant class
@@ -2326,11 +2335,11 @@ mod tests {
         const BEACH_TEST_SEED: u64 = 113;
         // WITH beaches ON (coastal+tectonic: beach_deposit can run)
         let (world_beaches_on, _, _) = classify_and_caps_staged(
-            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true, 100, 100), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true, 100, 100, false, 100), true, true
         );
         // WITH beaches OFF (same landforms but beaches gate prevents beach_deposit)
         let (world_beaches_off, _, _) = classify_and_caps_staged(
-            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100, false, 100), true, true
         );
         // When beaches=true with suitable coastal geography, beach_deposit modifies height.
         // When beaches=false, it doesn't. So we expect DIFFERENT output.
@@ -2352,11 +2361,11 @@ mod tests {
         const DIM: usize = 64;
         // Run 1: coastal=true, beaches=false
         let (world1, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100, false, 100), true, true
         );
         // Run 2: same fixture, should be byte-identical
         let (world2, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, false, 100, 100, false, 100), true, true
         );
         assert_eq!(world1.height, world2.height,
             "beaches=false must be deterministic (same fixture, same seed → identical height)");
@@ -2378,7 +2387,7 @@ mod tests {
         // Fixture seed picked by PM 64²-scan on W-13 field (beach11=5); beaches occupy ~0.02% of cells so pin is seed-sensitive.
         const BEACH_TEST_SEED: u64 = 113;
         let (world, _, _) = classify_and_caps_staged(
-            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true, 100, 100), true, true
+            BEACH_TEST_SEED, HMAX, DIM, false, LandformFlags::new(true, true, false, false, false, true, true, false, true, 100, 100, false, 100), true, true
         );
         let beach_count = world.surface_material.iter().filter(|&&b| b == 11).count();
         assert!(
@@ -2398,7 +2407,7 @@ mod tests {
     fn w12_beach_sand_cells_are_never_submerged() {
         const DIM: usize = 64;
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true, 100, 100), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true, 100, 100, false, 100), true, true
         );
         // Verify: every BeachSand cell must be LAND (not submerged). We check this by re-deriving
         // submerged_final using the same logic as the pipeline (is_submerged at sea_level).
@@ -2509,7 +2518,7 @@ mod tests {
     fn w12_beach_deposition_never_saturates() {
         const DIM: usize = 64;
         let (world, _, _) = classify_and_caps_staged(
-            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true, 100, 100), true, true
+            SEED, HMAX, DIM, false, LandformFlags::new(true, false, false, false, false, true, true, false, true, 100, 100, false, 100), true, true
         );
         let n = DIM * DIM;
         for idx in 0..n {
@@ -2556,12 +2565,13 @@ mod tests {
 
         // Generate world WITHOUT callback
         let flags = LandformFlags::new(true, true, true, true, true, true, true, true, true, 100, 100);
-        let without_cb = classify_and_caps(SEED, HMAX, DIM, false, flags);
+        let without_cb = classify_and_caps(SEED, HMAX, DIM, false, flags, false, 100);
 
         // Generate world WITH a no-op callback
         let with_cb = classify_and_caps_with_callback(
             SEED, HMAX, DIM, false, flags,
-            Some(Box::new(|_stage: u8| { /* no-op callback */ }))
+            Some(Box::new(|_stage: u8| { /* no-op callback */ })),
+            false, 100
         );
 
         // Verify byte-identical output
@@ -2579,7 +2589,7 @@ mod tests {
         // All SOURCES off: base=false, tect=false, volcanic=false
         // All TRANSFORMS off: erosion=false, aeolian=false, glacial=false, coastal=false
         let flags = LandformFlags::new(false, false, false, false, false, false, false, false, false, 100, 100);
-        let fields = classify_and_caps(SEED, HMAX, DIM, false, flags);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false, flags, false, 100);
         let expected_height = flat_datum(HMAX);
         for &h in &fields.height {
             assert_eq!(h, expected_height, "flat invariant: height must be FLAT_DATUM when all sources off");
@@ -2594,7 +2604,7 @@ mod tests {
         const DIM: usize = 16;
         // All sources off, all transforms on
         let flags = LandformFlags::new(false, false, false, false, false, false, true, false, false, 100, 100);
-        let fields = classify_and_caps(SEED, HMAX, DIM, false, flags);
+        let fields = classify_and_caps(SEED, HMAX, DIM, false, flags, false, 100);
         let expected_height = flat_datum(HMAX);
         for &h in &fields.height {
             assert_eq!(h, expected_height, "flat invariant: transforms must noop on constant field");

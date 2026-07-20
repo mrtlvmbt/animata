@@ -300,7 +300,7 @@ impl ProcgenWorld {
             erosion_strength,
             glacial_strength,
         );
-        let fields = classify_and_caps_with_callback(seed, hmax, dim as usize, false, flags, progress_callback);
+        let fields = classify_and_caps_with_callback(seed, hmax, dim as usize, false, flags, progress_callback, enable_plate_sim, plate_strength);
         // W-6b Phase A: DECOUPLE resource from solid_level (RnD 01 §40,43: is_solid=movement,
         // resource=food are SEPARATE queries). solid_level → ONLY movement/collision (is_solid).
         // resource() → DIRECT rescale_cap(caps[idx]), independent of height.
