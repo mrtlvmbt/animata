@@ -295,9 +295,10 @@ fn simulate_droplet_at(
 }
 
 /// Count needle spikes: cells exceeding their 8-neighbor max by > 30 units.
-/// (In float [0,1] field, 30 units is nonsensical; scale to [0, 1000] and use 30/1000.)
+/// Production constant NEEDLE_MARGIN=30 calibrated to hmax=200.
+/// For normalized [0,1] field from [0,200]: 30/200 = 0.15.
 fn count_needles(elev: &[f32], dim: usize) -> usize {
-    const NEEDLE_MARGIN: f32 = 0.03; // 30/1000 in float range
+    const NEEDLE_MARGIN: f32 = 0.15; // 30/200 = 0.15 (matches hmax=200 normalization)
     let mut count = 0;
 
     for y in 0..dim {
