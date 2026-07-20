@@ -43,6 +43,10 @@ pub struct ProcgenWorld {
     /// during world-gen. Immutable post-gen (R27); read-only access via `temp_at()` trait method.
     /// Range: [−3000, +5000] (−30°C to +50°C). Each cell's temperature is constant per biome.
     temp_grid: Vec<i32>,
+    /// Slice-0 (terragen-v3): aggregated terrain process parameters (plate sim, sea level, per-process strengths).
+    /// Threaded through construction from `caps.rs`; read by stages via `self.params` in Slice-1+.
+    /// Inert this slice (all params default to reproduce current behavior exactly).
+    pub params: gen::TerrainProcessParams,
 }
 
 /// Rescale a W-5 cap (`[0, CAP_MAX]`) into the SAME magnitude range the legacy `NoiseWorld` fed the
@@ -165,6 +169,7 @@ impl ProcgenWorld {
         erosion_strength: i64,
         glacial_strength: i64,
     ) -> Self {
+        let params = gen::TerrainProcessParams::default();
         Self::new_with_callback(
             dim,
             hmax,
@@ -183,6 +188,64 @@ impl ProcgenWorld {
             erosion_strength,
             glacial_strength,
             None,
+            params.enable_plate_sim,
+            params.plate_count,
+            params.plate_strength,
+            params.ela_threshold_percent,
+            params.sea_level,
+            params.volcanic_strength,
+            params.aeolian_strength,
+            params.coastal_strength,
+        )
+    }
+
+    /// Construct with explicit terrain process parameters (Slice-0 terragen-v3).
+    /// For testing: allows overriding the plate sim, sea-level, and per-process strength params.
+    pub fn new_with_process_params(
+        dim: i64,
+        hmax: i64,
+        resource_base: i64,
+        seed: u64,
+        thermal_verdict_temps: Option<[i32; 14]>,
+        enable_base: bool,
+        enable_tectonics: bool,
+        enable_aeolian: bool,
+        enable_volcanic: bool,
+        enable_glacial: bool,
+        enable_coastal: bool,
+        enable_erosion: bool,
+        enable_ridges: bool,
+        enable_beaches: bool,
+        erosion_strength: i64,
+        glacial_strength: i64,
+        params: gen::TerrainProcessParams,
+    ) -> Self {
+        Self::new_with_callback(
+            dim,
+            hmax,
+            resource_base,
+            seed,
+            thermal_verdict_temps,
+            enable_base,
+            enable_tectonics,
+            enable_aeolian,
+            enable_volcanic,
+            enable_glacial,
+            enable_coastal,
+            enable_erosion,
+            enable_ridges,
+            enable_beaches,
+            erosion_strength,
+            glacial_strength,
+            None,
+            params.enable_plate_sim,
+            params.plate_count,
+            params.plate_strength,
+            params.ela_threshold_percent,
+            params.sea_level,
+            params.volcanic_strength,
+            params.aeolian_strength,
+            params.coastal_strength,
         )
     }
 
@@ -213,6 +276,14 @@ impl ProcgenWorld {
         erosion_strength: i64,
         glacial_strength: i64,
         progress_callback: Option<Box<dyn FnMut(u8)>>,
+        enable_plate_sim: bool,
+        plate_count: i64,
+        plate_strength: i64,
+        ela_threshold_percent: i64,
+        sea_level: i64,
+        volcanic_strength: i64,
+        aeolian_strength: i64,
+        coastal_strength: i64,
     ) -> Self {
         // W-7 gate: patchiness defaults OFF for acceptance corridors (homogeneous baseline).
         // Specific scenarios (map-gen, visualization) can opt-in by calling with enable_patchiness=true.
@@ -229,7 +300,7 @@ impl ProcgenWorld {
             erosion_strength,
             glacial_strength,
         );
-        let fields = classify_and_caps_with_callback(seed, hmax, dim as usize, false, flags, progress_callback);
+        let fields = classify_and_caps_with_callback(seed, hmax, dim as usize, false, flags, progress_callback, enable_plate_sim, plate_strength);
         // W-6b Phase A: DECOUPLE resource from solid_level (RnD 01 §40,43: is_solid=movement,
         // resource=food are SEPARATE queries). solid_level → ONLY movement/collision (is_solid).
         // resource() → DIRECT rescale_cap(caps[idx]), independent of height.
@@ -338,7 +409,18 @@ impl ProcgenWorld {
             );
         }
 
-        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, nitrate_resource, surface_material: fields.surface_material, temp_grid }
+        let params = gen::TerrainProcessParams {
+            enable_plate_sim,
+            plate_count,
+            plate_strength,
+            ela_threshold_percent,
+            sea_level,
+            volcanic_strength,
+            aeolian_strength,
+            coastal_strength,
+        };
+
+        ProcgenWorld { dim, solid_level, height: fields.height, final_biome: fields.final_biome, resource, oxygen_resource, nitrate_resource, surface_material: fields.surface_material, temp_grid, params }
     }
 
     fn wrap(&self, v: i64) -> i64 {
@@ -570,7 +652,8 @@ mod tests {
             dim, hmax, resource_base, seed, None,
             true, false, false, false, false, false, true, false, false,
             100, 100,
-            Some(Box::new(callback))
+            Some(Box::new(callback)),
+            false, 15, 100, 60, -1, 100, 100, 100
         );
 
         // Verify byte-identity: heights, biomes, caps, materials, temps
@@ -704,5 +787,52 @@ mod tests {
             saw_height_variation,
             "Expected some height variation above FLAT_DATUM with volcanic enabled; all cells are at base_height"
         );
+    }
+
+    // Slice-0 (terragen-v3) tests: terrain process parameters
+
+    #[test]
+    fn terrain_process_params_defaults_are_correct() {
+        let params = gen::TerrainProcessParams::default();
+        assert_eq!(params.enable_plate_sim, false, "enable_plate_sim default");
+        assert_eq!(params.plate_count, 15, "plate_count default");
+        assert_eq!(params.plate_strength, 100, "plate_strength default");
+        assert_eq!(params.ela_threshold_percent, 60, "ela_threshold_percent default");
+        assert_eq!(params.sea_level, -1, "sea_level default (sentinel -1)");
+        assert_eq!(params.volcanic_strength, 100, "volcanic_strength default");
+        assert_eq!(params.aeolian_strength, 100, "aeolian_strength default");
+        assert_eq!(params.coastal_strength, 100, "coastal_strength default");
+    }
+
+    #[test]
+    fn procgen_world_carries_process_params_through_construction() {
+        // Construct with non-default params to verify threading.
+        let custom_params = gen::TerrainProcessParams {
+            enable_plate_sim: true,
+            plate_count: 20,
+            plate_strength: 150,
+            ela_threshold_percent: 70,
+            sea_level: 50,
+            volcanic_strength: 120,
+            aeolian_strength: 110,
+            coastal_strength: 90,
+        };
+
+        let w = ProcgenWorld::new_with_process_params(
+            DIM, HMAX, 120, SEED, None,
+            true, false, false, false, false, false, true, false, false,
+            100, 100,
+            custom_params,
+        );
+
+        // Verify all fields carry through unchanged.
+        assert_eq!(w.params.enable_plate_sim, true, "enable_plate_sim threaded");
+        assert_eq!(w.params.plate_count, 20, "plate_count threaded");
+        assert_eq!(w.params.plate_strength, 150, "plate_strength threaded");
+        assert_eq!(w.params.ela_threshold_percent, 70, "ela_threshold_percent threaded");
+        assert_eq!(w.params.sea_level, 50, "sea_level threaded");
+        assert_eq!(w.params.volcanic_strength, 120, "volcanic_strength threaded");
+        assert_eq!(w.params.aeolian_strength, 110, "aeolian_strength threaded");
+        assert_eq!(w.params.coastal_strength, 90, "coastal_strength threaded");
     }
 }

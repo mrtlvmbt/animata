@@ -28,7 +28,7 @@ use world::ProcgenWorld;
 /// `height_scale_override` is an optional multiplier for the height→prism mapping (default ×1.0).
 ///
 /// Returns a Send-safe BuiltWorld with OUTPUT dim (not the input spec.dim_request).
-pub fn build_world<F>(spec: &WorldSpec, mut on_stage: F, height_scale_override: Option<f32>) -> Result<BuiltWorld, BuildError>
+pub fn build_world<F>(spec: &WorldSpec, mut on_stage: F, height_scale_override: Option<f32>, enable_plate_sim: bool) -> Result<BuiltWorld, BuildError>
 where
     F: FnMut(Stage) -> bool,
 {
@@ -65,6 +65,14 @@ where
                 flags.erosion_strength,
                 flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
+                enable_plate_sim, // Slice-1e: threaded from CLI --plate-sim flag
+                15, // plate_count
+                100, // plate_strength
+                60, // ela_threshold_percent
+                -1, // sea_level (sentinel: -1 = unset)
+                100, // volcanic_strength
+                100, // aeolian_strength
+                100, // coastal_strength
             ))
         }
         WorldSource::Dump(_) => {
@@ -93,6 +101,14 @@ where
                 flags.erosion_strength,
                 flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
+                enable_plate_sim, // Slice-1e: threaded from CLI --plate-sim flag
+                15, // plate_count
+                100, // plate_strength
+                60, // ela_threshold_percent
+                -1, // sea_level (sentinel: -1 = unset)
+                100, // volcanic_strength
+                100, // aeolian_strength
+                100, // coastal_strength
             ))
         }
     };

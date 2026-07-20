@@ -26,6 +26,7 @@ fn w11_ridges_flag_off_byte_identical_to_baseline() {
         W11_DIM,
         false,
         LandformFlags::from_five(true, true, true, true, true),
+        false, 100
     );
 
     // Post-W-11 with ridges explicitly OFF: should be byte-identical
@@ -35,6 +36,7 @@ fn w11_ridges_flag_off_byte_identical_to_baseline() {
         W11_DIM,
         false,
         LandformFlags::new(true, true, true, true, true, true, true, false, false, 100, 100),
+        false, 100
     );
 
     assert_eq!(baseline.height, ridges_off.height, "height must be byte-identical with ridges=false");
@@ -55,6 +57,7 @@ fn w11_struct_refactor_byte_identical_to_tuple_era() {
         W11_DIM,
         false,
         LandformFlags::from_five(true, true, true, true, true),
+        false, 100
     );
 
     // Struct path: new (explicit all-flags, with ridges/beaches false)
@@ -64,6 +67,7 @@ fn w11_struct_refactor_byte_identical_to_tuple_era() {
         W11_DIM,
         false,
         LandformFlags::new(true, true, true, true, true, true, true, false, false, 100, 100),
+        false, 100
     );
 
     assert_eq!(via_from_five.height, via_new.height, "from_five and new must produce byte-identical height");
@@ -80,6 +84,7 @@ fn w11_ridge_application_respects_bounds() {
         W11_DIM,
         false,
         LandformFlags::new(true, true, true, true, true, true, true, true, false, 100, 100), // ridges ON
+        false, 100
     );
 
     for (i, &h) in fields.height.iter().enumerate() {
@@ -103,6 +108,7 @@ fn w11_ridge_field_has_effect_via_salt() {
         W11_DIM,
         false,
         LandformFlags::new(true, true, false, false, false, false, true, true, false, 100, 100), // tect+ridges ON, others OFF
+        false, 100
     );
 
     // Ridge OFF: same setup but ridges disabled
@@ -112,6 +118,7 @@ fn w11_ridge_field_has_effect_via_salt() {
         W11_DIM,
         false,
         LandformFlags::new(true, true, false, false, false, false, true, false, false, 100, 100), // tect ON, ridges OFF
+        false, 100
     );
 
     // With RIDGE_SEED_SALT decorrelating the ridge field from base noise,
@@ -408,6 +415,7 @@ fn w15a_ridges_flag_off_byte_identical_to_baseline() {
         W11_DIM,
         false,
         LandformFlags::new(true, true, true, true, true, true, true, false, false, 100, 100),
+        false, 100
     );
 
     // After W-15a with ridges still OFF: must be byte-identical
@@ -417,6 +425,7 @@ fn w15a_ridges_flag_off_byte_identical_to_baseline() {
         W11_DIM,
         false,
         LandformFlags::new(true, true, true, true, true, true, true, false, false, 100, 100),
+        false, 100
     );
 
     assert_eq!(

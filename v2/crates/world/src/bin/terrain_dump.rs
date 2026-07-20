@@ -38,8 +38,8 @@ fn main() {
     let seed: u64 = args.get(2).map_or(1, |s| parse_seed(s));
     let out = args.get(3).cloned().unwrap_or_else(|| format!("terrain_{dim}_{seed:#x}.bin"));
 
-    // patchiness=false, then all five landforms ON.
-    let f = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true));
+    // patchiness=false, then all five landforms ON. Plate sim defaults to off (false) for byte-identity.
+    let f = classify_and_caps(seed, HMAX, dim, false, LandformFlags::from_five(true, true, true, true, true), false, 100);
     assert_eq!(f.height.len(), dim * dim, "height must be dim*dim");
     assert_eq!(f.surface_material.len(), dim * dim, "surface_material must be dim*dim");
 

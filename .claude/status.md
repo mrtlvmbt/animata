@@ -1,5 +1,5 @@
-task: #502 W-15b wire --height-scale
-phase: F1 critical fix applied + FINAL review in progress
-blocked_on: code-critic FINAL (agent ad447307e8701451f) + ci-report.sh (run #29661467332)
-next: critic PASS → post to PR; CI green → STATUS done
-updated: 2026-07-19 00:03
+task: Slice-1i (#542) Fold-chain ridges on plate belts
+phase: awaiting CI (pass 2 of 2)
+blocked_on: CI runs for commits b2602d5, ca6d85a, a65dbca not yet found by ci-report.sh (timing lag or API rate-limit)
+next: ci-report.sh exit 0 → corrugation_measure run in CI → final STATUS
+updated: 2026-07-20 11:42

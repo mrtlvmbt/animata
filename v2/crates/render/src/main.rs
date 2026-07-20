@@ -104,7 +104,7 @@ const VALID_FLAGS: &[&str] = &[
     "--screenshot-warmup", "--bench", "--cam", "--retained", "--no-retained",
     "--water", "--bare", "--height-scale", "--slow-load", "--screenshot-loader",
     "--regen-to", "--jump-to", "--screenshot-ui", "--yaw", "--ui-state",
-    "--landforms", "--transform",
+    "--landforms", "--transform", "--plate-sim",
 ];
 
 const VALUE_REQUIRING_FLAGS: &[&str] = &[
@@ -298,6 +298,8 @@ struct CliArgs {
     /// W-19: Strength via `erosion=50`, `glacial=200` (percent, default 100, range [0, 400]).
     /// If set, overrides seed-derived flags for determinism testing.
     transforms: Option<String>,
+    /// Slice-1e: `--plate-sim`: enable plate tectonics relief (enable_plate_sim=true, base=false, erosion=true).
+    plate_sim: bool,
 }
 
 fn parse_args() -> CliArgs {
@@ -337,6 +339,7 @@ fn parse_args() -> CliArgs {
     let mut ui_state_value = "visible".to_string();  // Default: panels visible
     let mut landforms: Option<String> = None;  // W-18: explicit SOURCES flags
     let mut transforms: Option<String> = None;  // W-18: explicit TRANSFORMS flags
+    let mut plate_sim = false;  // Slice-1e: enable plate tectonics relief
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -493,13 +496,14 @@ fn parse_args() -> CliArgs {
                     }
                 }
             }
+            "--plate-sim" => plate_sim = true,
             other => {
                 eprintln!("render: unknown argument {other:?}");
                 std::process::exit(2);
             }
         }
     }
-    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms, transforms }
+    CliArgs { standalone, seed, dim_override, v1_dump, screenshot, screenshot_warmup, bench, cam_preset, retained, show_water, height_scale_override, slow_load, screenshot_loader, regen_to, jump_to, screenshot_ui, yaw_degrees, ui_state_value, landforms, transforms, plate_sim }
 }
 
 // ── R-15a: Retained-buffer GPU rendering helpers ──────────────────────────────────────────────────
@@ -752,25 +756,43 @@ async fn main() {
 
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
     // W-18: Parse --landforms (sources) and --transform (transforms) CLI flags if provided
-    let explicit_flags = match (&cli_args.landforms, &cli_args.transforms) {
-        (Some(sources_csv), Some(transforms_csv)) => {
-            let sources = parse_sources_flags(sources_csv);
-            let transforms = parse_transforms_flags(transforms_csv);
-            Some(merge_sources_and_transforms(sources, transforms))
+    // Slice-1e: if --plate-sim, override with base=false, erosion=true
+    let explicit_flags = if cli_args.plate_sim {
+        // Slice-1e: plate-sim relief — base OFF (fBm), erosion ON, all others default
+        Some(world_spec::LandformFlags {
+            base: false,
+            tect: false,
+            aeolian: false,
+            volcanic: false,
+            glacial: false,
+            coastal: false,
+            erosion: true,
+            ridges: false,
+            beaches: false,
+            erosion_strength: 100,
+            glacial_strength: 100,
+        })
+    } else {
+        match (&cli_args.landforms, &cli_args.transforms) {
+            (Some(sources_csv), Some(transforms_csv)) => {
+                let sources = parse_sources_flags(sources_csv);
+                let transforms = parse_transforms_flags(transforms_csv);
+                Some(merge_sources_and_transforms(sources, transforms))
+            }
+            (Some(sources_csv), None) => {
+                let sources = parse_sources_flags(sources_csv);
+                // No transforms specified: use defaults (erosion=true, others=false)
+                let transforms = world_spec::LandformFlags::new(true, false, false, false, false, false, true, false, false);
+                Some(merge_sources_and_transforms(sources, transforms))
+            }
+            (None, Some(transforms_csv)) => {
+                let transforms = parse_transforms_flags(transforms_csv);
+                // No sources specified: use defaults (base=true, tect=false, volcanic=false, ridges=false)
+                let sources = world_spec::LandformFlags::new(true, false, false, false, false, false, true, false, false);
+                Some(merge_sources_and_transforms(sources, transforms))
+            }
+            (None, None) => None,  // No explicit flags: use seed-derived defaults
         }
-        (Some(sources_csv), None) => {
-            let sources = parse_sources_flags(sources_csv);
-            // No transforms specified: use defaults (erosion=true, others=false)
-            let transforms = world_spec::LandformFlags::new(true, false, false, false, false, false, true, false, false);
-            Some(merge_sources_and_transforms(sources, transforms))
-        }
-        (None, Some(transforms_csv)) => {
-            let transforms = parse_transforms_flags(transforms_csv);
-            // No sources specified: use defaults (base=true, tect=false, volcanic=false, ridges=false)
-            let sources = world_spec::LandformFlags::new(true, false, false, false, false, false, true, false, false);
-            Some(merge_sources_and_transforms(sources, transforms))
-        }
-        (None, None) => None,  // No explicit flags: use seed-derived defaults
     };
 
     let mut spec = WorldSpec {
@@ -784,6 +806,7 @@ async fn main() {
             WorldSource::Procgen { dim_request: cli_args.dim_override }
         },
         explicit_landform_flags: explicit_flags,
+        enable_plate_sim: cli_args.plate_sim,
     };
 
     // W-15b: Compute effective height scale for terrain and creatures (default ×1.0)
@@ -796,7 +819,7 @@ async fn main() {
     let (mut hex_terrain_chunks, mut cube_terrain_chunks, mut world_dim, mut world): (Vec<TerrainChunk>, Vec<TerrainChunk>, i64, Box<dyn WorldView>) = if is_harness {
         // Harnesses: build_world inline (synchronous, no loader)
         let on_stage = |_stage: Stage| true;  // No-op callback for harnesses
-        let built = world_builder::build_world(&spec, on_stage, cli_args.height_scale_override).expect("build_world failed");
+        let built = world_builder::build_world(&spec, on_stage, cli_args.height_scale_override, spec.enable_plate_sim).expect("build_world failed");
         let world_dim = built.dim;
         let world = built.world;
         let hex_chunks = convert_raw_chunks(built.hex);
@@ -921,7 +944,7 @@ async fn main() {
                 }
                 true
             };
-            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage, height_scale) {
+            if let Ok(built) = world_builder::build_world(&spec_worker, on_stage, height_scale, spec_worker.enable_plate_sim) {
                 load_clone.mark_done();
                 let _ = tx.send(built);
             }
@@ -946,6 +969,7 @@ async fn main() {
                 bare_mode: spec.bare_mode,
                 source: spec.source.clone(),
                 explicit_landform_flags: explicit_flags,
+                enable_plate_sim: spec.enable_plate_sim,
             };
             let load_state = LoadState::new(target_seed);
             harness_regen_load_state = Some(load_state.clone());
@@ -965,7 +989,7 @@ async fn main() {
                     }
                     true
                 };
-                if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
+                if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale, regen_spec.enable_plate_sim) {
                     let _ = tx.send(built);
                 }
             });
@@ -1671,6 +1695,7 @@ async fn main() {
                                     bare_mode: spec.bare_mode,
                                     source: spec.source.clone(),
                                     explicit_landform_flags: spec.explicit_landform_flags,
+                                    enable_plate_sim: spec.enable_plate_sim,
                                 };
                                 let load_state = LoadState::new(target_seed);
                                 regen_load_state = Some(load_state.clone());
@@ -1690,7 +1715,7 @@ async fn main() {
                                         }
                                         true
                                     };
-                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale, regen_spec.enable_plate_sim) {
                                         let _ = tx.send(built);
                                     }
                                 });
@@ -1706,6 +1731,7 @@ async fn main() {
                                     bare_mode: spec.bare_mode,
                                     source: spec.source.clone(),
                                     explicit_landform_flags: Some(flags),
+                                    enable_plate_sim: spec.enable_plate_sim,
                                 };
                                 let load_state = LoadState::new(target_seed);
                                 regen_load_state = Some(load_state.clone());
@@ -1724,7 +1750,7 @@ async fn main() {
                                         }
                                         true
                                     };
-                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale) {
+                                    if let Ok(built) = world_builder::build_world(&regen_spec, on_stage, height_scale, regen_spec.enable_plate_sim) {
                                         let _ = tx.send(built);
                                     }
                                 });
