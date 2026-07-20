@@ -177,3 +177,12 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   deliverable is a bin (probe/harness/tool) must quote `cargo build --release -p <crate> --bin <name>`
   (clean tail) as its build proof; PM intake of a bin-deliverable slice rebuilds the bin, and the RUN
   output — not the code — is the deliverable (an unexecuted probe is an unfinished probe).
+
+- **Symptom:** `gh pr merge <N> --admin` printed empty output while CI was RED; assumed "did not merge",
+  kept working — later found the PR already merged with the BROKEN commit on the protected integration
+  branch, leaving it red. **Cause:** `--admin` BYPASSES failing required checks and merges immediately; a
+  successful `gh pr merge` is often SILENT (no stdout). Empty output ≠ no-op. **What to do:** never
+  `--admin`-merge until CI is confirmed GREEN on the PR HEAD (`gh run view <id> --json conclusion` ==
+  success) — admin is for bypassing branch-protection PROCESS, not red TESTS. After ANY merge, verify what
+  actually landed (`git show origin/<branch>:<file>`). If a broken commit lands, hotfix the branch directly
+  (branch→PR→merge on GREEN). (terragen-v3 Slice-1j #547, 2026-07-20.)
