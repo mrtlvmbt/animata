@@ -253,19 +253,45 @@ fn compute_raw_scaled_normals(
     (scaled_offsets, plate_pairs)
 }
 
+/// Accumulated sums for Jacobi smoothing (Slice-1k).
+/// Stores the accumulated normals and neighbor counts for final truncation at read-time.
+#[derive(Clone)]
+struct SmoothedNormal {
+    sum_x: i64,
+    sum_z: i64,
+    count: i64,
+}
+
 /// Jacobi double-buffered smoothing of boundary normals (Slice-1k).
-/// For each boundary cell, average its scaled normal over same-pair neighbors in its 8-neighborhood.
-/// `smoothed_normals[idx]` is the result after JACOBI_ITER iterations.
-/// If a cell's neighborhood is empty/degenerate and result is (0,0), keeps raw scaled offset.
+/// For each boundary cell, accumulate its scaled normal over same-pair neighbors in 8-neighborhood.
+/// Returns sums and counts (NOT truncated); classification code divides to get final normal (single trunc at read).
+/// Result: `smoothed_sums[idx]` contains accumulated (sum_x, sum_z, count) after JACOBI_ITER iterations.
+/// If a cell's neighborhood is empty/degenerate after smoothing, fallback code uses raw scaled offset.
+///
+/// **Rounding contract (ТЗ-critical):** Keeps sums in full i64 precision through all JACOBI_ITER passes.
+/// Division (truncation) happens only once per cell at read-time in classification, not during iteration.
+/// This prevents cumulative truncation bias on curved arcs with rotating neighbors.
 fn smooth_normals_jacobi(
     scaled_offsets: &[(i64, i64)],
     plate_pairs: &[Option<PlatePair>],
     dim: i64,
-) -> Vec<(i64, i64)> {
+) -> Vec<SmoothedNormal> {
     let dim = dim as i64;
     let size = (dim * dim) as usize;
-    let mut current = scaled_offsets.to_vec();
 
+    // Initialize sums: each boundary cell starts as itself (count=1), non-boundaries get empty sums.
+    let mut current: Vec<SmoothedNormal> = (0..size)
+        .map(|idx| {
+            if plate_pairs[idx].is_some() {
+                let (ox, oz) = scaled_offsets[idx];
+                SmoothedNormal { sum_x: ox, sum_z: oz, count: 1 }
+            } else {
+                SmoothedNormal { sum_x: 0, sum_z: 0, count: 0 }
+            }
+        })
+        .collect();
+
+    // Jacobi iterations: accumulate sums from same-pair neighbors.
     for _iter in 0..JACOBI_ITER {
         let mut next = current.clone();
 
@@ -280,7 +306,7 @@ fn smooth_normals_jacobi(
                 }
                 let my_pair = my_pair.unwrap();
 
-                // Accumulate scaled normals from same-pair neighbors.
+                // Accumulate sums from same-pair neighbors (full precision, no truncation).
                 let mut sum_x = 0i64;
                 let mut sum_z = 0i64;
                 let mut count = 0i64;
@@ -296,29 +322,23 @@ fn smooth_normals_jacobi(
                     let neighbor_idx = (nz * dim + nx) as usize;
                     if let Some(neighbor_pair) = plate_pairs[neighbor_idx] {
                         if neighbor_pair == my_pair {
-                            sum_x += current[neighbor_idx].0;
-                            sum_z += current[neighbor_idx].1;
-                            count += 1;
+                            sum_x += current[neighbor_idx].sum_x;
+                            sum_z += current[neighbor_idx].sum_z;
+                            count += current[neighbor_idx].count;
                         }
                     }
                 }
 
-                // Update with average if neighborhood exists.
+                // Update with accumulated sums (NO division, NO truncation during iteration).
+                // Next iteration reads these un-divided sums and re-accumulates.
                 if count > 0 {
-                    next[idx] = (sum_x / count, sum_z / count);
+                    next[idx] = SmoothedNormal { sum_x, sum_z, count };
                 }
-                // Otherwise keep current value (no same-pair neighbors to smooth with).
+                // Otherwise keep current value (no same-pair neighbors).
             }
         }
 
         current = next;
-    }
-
-    // Post-processing: if a boundary cell's smoothed normal is still (0,0), fall back to raw scaled offset.
-    for idx in 0..size {
-        if plate_pairs[idx].is_some() && current[idx] == (0i64, 0i64) {
-            current[idx] = scaled_offsets[idx];
-        }
     }
 
     current
@@ -365,8 +385,21 @@ fn stage_3_boundary_classification(
                 let rel_vx = velocity_x[this_plate] as i64 - velocity_x[neighbor_plate] as i64;
                 let rel_vz = velocity_z[this_plate] as i64 - velocity_z[neighbor_plate] as i64;
 
-                // Smoothed normal (still fixed-point scaled).
-                let (norm_x, norm_z) = smoothed_normals[idx];
+                // READ-TIME TRUNCATION (single trunc, per ТЗ):
+                // Divide accumulated sums by count to get the smoothed normal (fixed-point scaled).
+                // This is the only truncation during the entire process.
+                let smoothed = &smoothed_normals[idx];
+                let norm_x = if smoothed.count > 0 {
+                    smoothed.sum_x / smoothed.count
+                } else {
+                    // Fallback: use raw scaled offset if smoothing produced no result.
+                    scaled_offsets[idx].0
+                };
+                let norm_z = if smoothed.count > 0 {
+                    smoothed.sum_z / smoothed.count
+                } else {
+                    scaled_offsets[idx].1
+                };
 
                 // Convergence magnitude: v_rel · smoothed_normal (fixed-point dot product).
                 let closing = rel_vx * norm_x + rel_vz * norm_z;

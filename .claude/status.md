@@ -1,5 +1,5 @@
-task: Slice-1i (#542) Fold-chain ridges on plate belts
-phase: awaiting CI (pass 2 of 2)
-blocked_on: CI runs for commits b2602d5, ca6d85a, a65dbca not yet found by ci-report.sh (timing lag or API rate-limit)
-next: ci-report.sh exit 0 → corrugation_measure run in CI → final STATUS
-updated: 2026-07-20 11:42
+task: Slice-1k (#544) — Coherent convergent belts via boundary-normal smoothing (fixed-point Jacobi)
+phase: CI testing (awaiting completion)
+blocked_on: GitHub Actions CI (test-x86, golden-arm64, v2-sim-x86, v2-golden-arm64)
+next: (post-CI) Verify golden re-pins, convergent fractions, corrugation_measure output, re-render to gallery
+updated: 2026-07-20 12:30
