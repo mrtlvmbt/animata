@@ -116,23 +116,26 @@ const NEIGHBOR_OFFSETS: &[(i64, i64)] = &[
     (-1, 0),  // W
 ];
 
-/// **Slice-1j: Convergence→amplitude mapping constants (ABSOLUTE, pinned to AC0 measured range).**
-/// AC0 measurement at dim=256 and dim=512:
-///   min=1, p50(median)=6-15, p90=36-42, max=324-325
-/// Units: convergence_magnitude is a dot product (i64), dimension-independent scale.
-/// Breakpoints pinned to measured range: weak conv ~0-50, strong conv ~200+.
-const CONV_AMP_LOW: i64 = 50;       // Convergence breakpoint for AMP_MIN (weak collision)
-const CONV_AMP_HIGH: i64 = 200;     // Convergence breakpoint for AMP_MAX (strong collision)
+/// **Slice-1j: Convergence→amplitude mapping constants (ABSOLUTE, pinned to PROPAGATED distribution).**
+/// AC0 measured RAW boundary convergence (1–324), but PROPAGATION via distance-weighted blur attenuates significantly.
+/// ACTUAL PROPAGATED conv_eff consumed by this mapping:
+///   dim=256: min=1, p50=10, p75=17, p90=26, max=51
+///   dim=512: min=2, p50=19, p75=24, p90=42, max=107
+/// Breakpoints pinned to PROPAGATED range (not the raw boundary max):
+/// - ≤10 (p50) → AMP_MIN (majority weak, Khibiny-like)
+/// - ≥40 (near p90) → AMP_MAX (rare strong, Himalaya-like)
+const CONV_AMP_LOW: i64 = 10;       // Convergence breakpoint for AMP_MIN (p50, majority)
+const CONV_AMP_HIGH: i64 = 40;      // Convergence breakpoint for AMP_MAX (near p90, rare)
 const AMP_MIN_NUM: i64 = 1;         // Minimum amplitude as fraction of hmax
 const AMP_MIN_DEN: i64 = 12;        // e.g., 1/12 hmax for weak collisions (Khibiny-like)
 const AMP_MAX_NUM: i64 = 1;         // Maximum amplitude as fraction of hmax
 const AMP_MAX_DEN: i64 = 3;         // e.g., 1/3 hmax for strong collisions (Himalaya-like)
 
-/// **Slice-1j: Convergence→width mapping constants (ABSOLUTE, pinned to AC0 measured range).**
+/// **Slice-1j: Convergence→width mapping constants (ABSOLUTE, pinned to PROPAGATED distribution).**
 /// Map convergence to belt half-width as fractions of dim.
-/// Same breakpoints as amplitude for consistency.
-const CONV_HW_LOW: i64 = 50;        // Convergence breakpoint for HW_MIN (weak collision)
-const CONV_HW_HIGH: i64 = 200;      // Convergence breakpoint for HW_MAX (strong collision)
+/// Same breakpoints as amplitude for consistency (pinned to propagated, not raw boundary).
+const CONV_HW_LOW: i64 = 10;        // Convergence breakpoint for HW_MIN (p50, majority weak)
+const CONV_HW_HIGH: i64 = 40;       // Convergence breakpoint for HW_MAX (near p90, rare strong)
 const HW_MIN_DIM_NUM: i64 = 1;      // Minimum width as fraction of dim
 const HW_MIN_DIM_DEN: i64 = 32;     // e.g., dim/32 for weak collisions (Khibiny-like, narrow)
 const HW_MAX_DIM_NUM: i64 = 1;      // Maximum width as fraction of dim
