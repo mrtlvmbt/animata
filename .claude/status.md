@@ -1,15 +1,22 @@
-task: #534 (Slice-1e: terragen-v3 render gallery)
-phase: PR (ready-for-review)
-blocked_on: none
-next: await review/merge
-updated: 2026-07-20 15:32
+task: #540 (Slice-1h: Plateau massif + anti-spike)
+phase: CI
+blocked_on: CI completion (golden-arm64, test-x86, v2-sim-x86, v2-golden-arm64)
+next: await CI green, finalize PR (ready-for-review if all green)
+updated: 2026-07-20 16:45
 
 Completed:
-- CLI flag: --plate-sim added to VALID_FLAGS, CliArgs, parse_args
-- WorldSpec: enable_plate_sim field added
-- build_world: accepts enable_plate_sim parameter, threads to both Procgen branches
-- All 5 build_world call sites updated with spec.enable_plate_sim
-- Compile: PASS (cargo build --release -p render, 7 crates)
-- Clippy: 0 errors
-- Screenshots: 2 captured (plate-sim-1.png, plate-sim-2.png @ 2048×1536 each)
-- PR #535 created on terragen-v3 base, closes #534
+- Plateau-core uplift profile: implement in generate_plate_uplift_field
+  - CORE = belt_hw * 2/3 (plateau core, full amplitude)
+  - Flank: ramp from CORE to belt_hw, linear decay to 0
+  - Integer-only, correct ramp formula
+- Flow-aware anti-spike: apply_plate_anti_spike() function
+  - Spike_bound = 6 (max local step for isolated spike)
+  - Isolation detection: 0 raised neighbors AND local_step > spike_bound
+  - F3 NON-STRICT >= for crest test (protect broad plateaus)
+- Gating: both changes inside enable_plate_sim guard (byte-identical default)
+- Cold build: PASS (cargo clean -p world && compile-check.sh)
+- Code-critic: PASS (removed dead raised_count variable)
+- Render gallery: seed1.png (380.4K), seed2.png (357.3K) in .claude/w1h-gallery/
+  - Both differ from Slice-1g (cmp output: char 35, line 3)
+- PR #541: base terragen-v3, Closes #540
+- Code-critic verdict: PASS (added as PR comment)
