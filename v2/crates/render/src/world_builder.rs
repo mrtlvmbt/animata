@@ -136,11 +136,16 @@ where
 ///
 /// Standalone mode: honors dim_request if provided, else uses config default.
 /// Sim mode: always uses config.econ.world_dim (render dim must match sim's).
+/// Slice-4a: Standalone default dim (256 for physics relief to read well).
+const STANDALONE_DEFAULT_DIM: i64 = 256;
+
 fn compute_effective_dim(source: &WorldSource, standalone: bool, config_dim: i64) -> i64 {
     match source {
         WorldSource::Procgen { dim_request } => {
             if standalone {
-                dim_request.unwrap_or(config_dim)
+                // Slice-4a: Standalone default is 256 (physics relief); --dim N overrides.
+                // Sim mode (standalone=false) stays on config_dim (64) per pinned-param contract.
+                dim_request.unwrap_or(STANDALONE_DEFAULT_DIM)
             } else {
                 // Sim mode: ignore dim_request (pinned-param contract)
                 config_dim
