@@ -99,51 +99,111 @@ fn compute_resistance(seed: u64, dim: usize, hmax: i64) -> Vec<i64> {
     resistance
 }
 
-/// Measure corrugation: count crests (local maxima) along belt transects.
-/// Compare to expected count based on fold wavelength.
+/// Compute belt distance via BFS from convergent boundary cells.
+/// Returns distance[idx] = min distance to nearest convergent boundary (0 = boundary cell itself).
+fn compute_belt_distance(
+    dim: usize,
+    boundary_type: &[world::gen::plate::BoundaryType],
+) -> Vec<i64> {
+    use std::collections::VecDeque;
+
+    let dim_i = dim as i64;
+    let mut distance = vec![i64::MAX; dim * dim];
+    let mut queue = VecDeque::new();
+
+    // Seed: convergent boundary cells start at distance 0.
+    for z in 0..dim {
+        for x in 0..dim {
+            let idx = z * dim + x;
+            if boundary_type[idx] == world::gen::plate::BoundaryType::Convergent {
+                distance[idx] = 0;
+                queue.push_back((x as i64, z as i64));
+            }
+        }
+    }
+
+    // BFS: propagate outward (8-neighbor).
+    const NEIGHBOR_OFFSETS: &[(i64, i64)] = &[
+        (-1, -1), (0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0),
+    ];
+
+    while let Some((x, z)) = queue.pop_front() {
+        let idx = (z as usize) * dim + (x as usize);
+        let cur_dist = distance[idx];
+
+        for &(dx, dz) in NEIGHBOR_OFFSETS {
+            let nx = x + dx;
+            let nz = z + dz;
+
+            if nx < 0 || nx >= dim_i || nz < 0 || nz >= dim_i {
+                continue;
+            }
+
+            let nidx = (nz as usize) * dim + (nx as usize);
+            let next_dist = cur_dist + 1;
+
+            if next_dist < distance[nidx] {
+                distance[nidx] = next_dist;
+                queue.push_back((nx, nz));
+            }
+        }
+    }
+
+    distance
+}
+
+/// Measure corrugation: count crests (local maxima) ACROSS THE BELT, not just at boundary.
+/// **CORRECTED METHODOLOGY (was broken):**
+/// The fold ridges are distributed at belt_distance 0..belt_hw from the convergent boundary line.
+/// The old code only counted at boundary cells (1-cell-wide line) → max 1-2 crests per transect.
+/// This counts within the belt band, capturing the fold ridge distribution.
 fn measure_corrugation_threshold(
     dim: usize,
     height: &[i64],
     plate_fields: &world::gen::plate::PlateFields,
 ) -> (i64, i64, f64) {
     let dim_i = dim as i64;
-    let hmax = 200i64;
 
     // Expected wavelength: belt_hw / 2
     // belt_hw = max(3, dim/16) from orogeny.rs
-    let belt_hw = (dim_i / 16 + 3).max(3);
+    let belt_hw = ((dim_i / 16).max(3)) as usize;
     let fold_wavelength = belt_hw / 2;
 
     // Expected crest count across full belt width
     // Crests spaced at wavelength intervals: 2*belt_hw / wavelength
-    let expected_crest_count = (2 * belt_hw) / fold_wavelength;
+    let expected_crest_count = (2 * belt_hw as i64) / (fold_wavelength as i64);
 
-    // Measure crest count across belt transects (every other column, take max)
+    // Compute belt distance: min distance from each cell to nearest convergent boundary
+    let belt_distance = compute_belt_distance(dim, &plate_fields.boundary_type);
+
+    // Measure crest count across belt transects
     let mut total_crests = 0i64;
     let mut transect_count = 0i64;
 
     // Scan vertical transects (along z axis) at various x positions
     for x in (0..dim).step_by(2) {
-        let x_i = x as i64;
         let mut crests_in_transect = 0i64;
+        let mut belt_cells_in_transect = 0i64;
 
-        // Find cells in this transect that are in a convergent belt
+        // Find cells in this transect that are WITHIN the belt (belt_distance <= belt_hw)
         for z in 1..(dim - 1) {
-            let z_i = z as i64;
             let idx = z * dim + x;
             let idx_prev = (z - 1) * dim + x;
             let idx_next = (z + 1) * dim + x;
 
-            // Only count cells in convergent boundary (plate_fields.boundary_type)
-            if plate_fields.boundary_type[idx] == world::gen::plate::BoundaryType::Convergent {
-                // Check if local maximum (crest)
+            // Only count cells within the belt distance
+            if belt_distance[idx] <= belt_hw as i64 {
+                belt_cells_in_transect += 1;
+
+                // Check if local maximum (crest) within belt
                 if height[idx] > height[idx_prev] && height[idx] > height[idx_next] {
                     crests_in_transect += 1;
                 }
             }
         }
 
-        if crests_in_transect > 0 {
+        // Only count transects that actually cross a belt (non-empty)
+        if belt_cells_in_transect > 0 {
             transect_count += 1;
             total_crests += crests_in_transect;
         }
