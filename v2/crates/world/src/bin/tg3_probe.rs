@@ -1150,6 +1150,9 @@ fn main() {
                         strength > 0, // enable_erosion
                         strength,
                         0, // repose_threshold (Slice-1d: default 0 for this probe)
+                        None, // belt_distance (Slice-1L: stats sink unused here)
+                        None, // belt_hw
+                        None, // stats_sink
                     );
 
                     let height = &erosion_result.height;
