@@ -35,9 +35,9 @@ use crate::gen::plate::{BoundaryType, PlateFields};
 use std::collections::VecDeque;
 
 /// Belt half-width (D8 distance ramp, integer cells). Collision zone spans [center - hw, center + hw].
-/// **F11: anchored to architecture's convergent-boundary width (~3–5 cells).**
-/// Pinned as a concrete value for merge gate; may later become plate_strength-scaled (Slice-1c).
-const BELT_HALF_WIDTH: i64 = 3;
+/// **F11: Slice-1g tuning — dimension-scaled to create wide massifs: max(3, dim/16).**
+/// At dim=256: hw=16 (full width ~32 cells). At dim=512: hw=32 (full width ~64 cells).
+/// Computed per-call in `generate_plate_uplift_field` based on actual dim.
 
 /// Orogeny amplitude constants (fractions of hmax, Slice-1c calibration).
 /// All scale by (plate_strength / 100) to permit zero amplitude (strength=0 ⇒ all-zero field).
@@ -45,17 +45,17 @@ const BELT_HALF_WIDTH: i64 = 3;
 /// Conservative initial values pending Slice-1c calibration against natural reference DEMs.
 
 /// Fold belt (continent-continent collision): symmetric ramp, both plates uplift.
-/// Fraction of hmax per amplitude scale. Initial guess: 1/6 of hmax.
+/// Fraction of hmax per amplitude scale. **Slice-1g: increased from 1/6 to 1/5 for dramatic massifs.**
 const OROGEN_CONT_CONT_NUM: i64 = 1;
-const OROGEN_CONT_CONT_DEN: i64 = 6;
+const OROGEN_CONT_CONT_DEN: i64 = 5;
 
 /// Subduction (continent over ocean): continental plate uplift, oceanic subsidence basin.
 /// **F10 formula override:** subduction-zone ramp takes precedence at cont-ocean boundaries.
-/// Initial guess: 1/8 of hmax (continent up). Oceanic subsides to -(1/12 * hmax) relative to ambient.
+/// **Slice-1g: increased from 1/8 to 1/6 (cont up) and 1/12 to 1/8 (ocean subsid) for dramatic relief.**
 const OROGEN_CONT_OCEAN_NUM: i64 = 1;
-const OROGEN_CONT_OCEAN_DEN: i64 = 8;
+const OROGEN_CONT_OCEAN_DEN: i64 = 6;
 const OROGEN_OCEAN_SUBSID_NUM: i64 = 1;
-const OROGEN_OCEAN_SUBSID_DEN: i64 = 12;
+const OROGEN_OCEAN_SUBSID_DEN: i64 = 8;
 
 /// Oceanic rifts (ocean-ocean spreading ridges): sparse vents, low relief.
 /// Initial guess: 1/16 of hmax.
@@ -156,6 +156,10 @@ pub fn generate_plate_uplift_field(
     let clamped_strength = plate_strength.clamp(0, 100);
     let strength_frac = clamped_strength; // [0, 100] percent
 
+    // **Slice-1g: Compute belt half-width from dimension for wide massifs.**
+    // Scales the collision zone: dim=256 → hw=16 (full width ~32 cells).
+    let belt_hw = (dim / 16).max(3);
+
     // **F2: Compute distance to nearest convergent boundary.**
     let belt_distance = compute_belt_distance(dim, &fields.boundary_type);
 
@@ -227,20 +231,20 @@ pub fn generate_plate_uplift_field(
             // **F1: Ramp formula (integer, no truncation).**
             // `uplift = (amp_frac * hmax * (belt_hw - clamp(dist, belt_hw))) / belt_hw`
             // Clamp distance to belt_hw before subtraction to avoid negative ramps.
-            let dist = belt_distance[idx].min(BELT_HALF_WIDTH);
-            let ramp_weight = BELT_HALF_WIDTH - dist; // [0, belt_hw]
+            let dist = belt_distance[idx].min(belt_hw);
+            let ramp_weight = belt_hw - dist; // [0, belt_hw]
 
             // Compute uplift: multiply BEFORE divide to preserve subunit increments.
             // `(amp_num * hmax * ramp_weight * strength_frac) / (amp_den * belt_hw * 100)`
             // Reorder: `(amp_num * hmax * strength_frac / 100) * ramp_weight / (amp_den * belt_hw)`
             let scaled_amp = (amp_num * hmax * strength_frac) / (amp_den * 100);
-            let up = (scaled_amp * ramp_weight) / BELT_HALF_WIDTH;
+            let up = (scaled_amp * ramp_weight) / belt_hw;
 
             // For subduction (cont-ocean), apply the subsidence ramp to the oceanic plate when its neighbor is CONTINENTAL.
             if !this_cont && neighbor_cont {
                 // This is oceanic, neighbor is continental.
                 let alt_scaled_amp = (alt_amp_num * hmax * strength_frac) / (alt_amp_den * 100);
-                let down = -(alt_scaled_amp * ramp_weight) / BELT_HALF_WIDTH;
+                let down = -(alt_scaled_amp * ramp_weight) / belt_hw;
                 uplift[idx] = down; // Negative (subsidence)
             } else {
                 uplift[idx] = up.max(0); // Positive (uplift), clamp to zero.
