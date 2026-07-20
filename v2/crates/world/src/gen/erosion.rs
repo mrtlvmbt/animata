@@ -1127,7 +1127,7 @@ pub fn erode_with_tectonics(
     erosion_strength: i64,
     enable_plate_sim: bool,
     plate_strength: i64,
-    plate_repose_threshold: i64,
+    _plate_repose_threshold: i64,
 ) -> ErosionState {
     use rayon::prelude::*;
 
@@ -1366,8 +1366,9 @@ pub fn erode_with_tectonics(
     }
 
     // Slice-1d: Gate repose threshold on plate sim. Default (enable_plate_sim=false) uses 0 (unchanged).
+    // Production path uses the chosen balanced constant (PLATE_REPOSE_THRESHOLD=8), not the parameter.
     let repose_threshold = if enable_plate_sim {
-        plate_repose_threshold
+        PLATE_REPOSE_THRESHOLD
     } else {
         REPOSE_THRESHOLD
     };
