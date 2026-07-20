@@ -496,29 +496,25 @@ pub fn generate_plate_uplift_field(
 
     let mut uplift = vec![0i64; n];
 
-    // **F10: Collision-pair routing + ramp per boundary cell.**
+    // **F10: Collision-pair routing + ramp per all belt cells (boundary + interior).**
     for z in 0..dim_usize {
         for x in 0..dim_usize {
             let idx = z * dim_usize + x;
+
+            // Only process belt cells (distance <= belt_hw_base); skip cells far from boundaries.
+            if belt_distance[idx] == i64::MAX || belt_distance[idx] > belt_hw_base {
+                uplift[idx] = 0;
+                continue;
+            }
+
             let this_plate = fields.plate_id[idx] as usize;
 
-            // Only process boundary cells (convergent, divergent, transform).
-            if belt_distance[idx] == i64::MAX {
-                uplift[idx] = 0;
-                continue;
-            }
+            // **F10: Scan 8 neighbors to find NEAREST convergent boundary for collision-pair routing.**
+            // Use the CLOSEST neighbor that is convergent and on a different plate (defines the boundary collision).
+            let mut nearest_boundary_neighbor = None;
+            let mut nearest_boundary_plate = this_plate;
+            let mut nearest_distance = i64::MAX;
 
-            let boundary = fields.boundary_type[idx];
-
-            // Skip divergent and transform — only convergent boundaries produce significant uplift.
-            if boundary != BoundaryType::Convergent {
-                // Divergent and transform boundaries: minimal uplift (approximately zero).
-                uplift[idx] = 0;
-                continue;
-            }
-
-            // **F10: Scan 8 neighbors in fixed order to find the colliding plate.**
-            let mut neighbor_plate = this_plate; // default fallback
             for &(dx, dz) in NEIGHBOR_OFFSETS {
                 let nx = x as i64 + dx;
                 let nz = z as i64 + dz;
@@ -529,16 +525,52 @@ pub fn generate_plate_uplift_field(
 
                 let nidx = (nz as usize) * dim_usize + (nx as usize);
                 let nplate = fields.plate_id[nidx] as usize;
+                let is_boundary = fields.boundary_type[nidx] == BoundaryType::Convergent;
 
-                if nplate != this_plate {
-                    neighbor_plate = nplate;
-                    break; // F10: first differing plate in scan order wins.
+                // Prefer convergent boundaries on different plates.
+                if nplate != this_plate && is_boundary && belt_distance[nidx] == 0 {
+                    nearest_boundary_neighbor = Some((nx, nz));
+                    nearest_boundary_plate = nplate;
+                    break; // First in scan order wins (deterministic).
+                }
+            }
+
+            // Fallback: if no immediate neighbor is a convergent boundary, use first different plate.
+            if nearest_boundary_neighbor.is_none() {
+                for &(dx, dz) in NEIGHBOR_OFFSETS {
+                    let nx = x as i64 + dx;
+                    let nz = z as i64 + dz;
+
+                    if nx < 0 || nx >= dim || nz < 0 || nz >= dim {
+                        continue;
+                    }
+
+                    let nidx = (nz as usize) * dim_usize + (nx as usize);
+                    let nplate = fields.plate_id[nidx] as usize;
+
+                    if nplate != this_plate {
+                        nearest_boundary_plate = nplate;
+                        break; // First differing plate in scan order.
+                    }
                 }
             }
 
             // **Collision type:** look up `is_continental[this] × is_continental[neighbor]`.
             let this_cont = fields.is_continental[this_plate];
-            let neighbor_cont = fields.is_continental[neighbor_plate];
+            let neighbor_cont = fields.is_continental[nearest_boundary_plate];
+
+            // Only produce uplift for CONVERGENT boundaries (gate strictly on convergent type).
+            // If the boundary is not convergent, skip uplift for the entire belt.
+            let is_convergent_boundary = fields.boundary_type[idx] == BoundaryType::Convergent
+                || (nearest_boundary_neighbor.is_some()
+                    && fields.boundary_type[(nearest_boundary_neighbor.unwrap().1 as usize) * dim_usize
+                        + (nearest_boundary_neighbor.unwrap().0 as usize)]
+                        == BoundaryType::Convergent);
+
+            if !is_convergent_boundary {
+                uplift[idx] = 0;
+                continue;
+            }
 
             let (amp_num, amp_den, alt_amp_num, alt_amp_den) = match (this_cont, neighbor_cont) {
                 (true, true) => {
@@ -982,64 +1014,120 @@ mod tests {
         assert!(hw_mid > hw_min && hw_mid < hw_max, "mid conv should have mid-range width");
     }
 
-    /// **Slice-1j AC4: Test synthetic fixture — low convergence stays small, high reaches large.**
-    /// Create a fixture boundary with known convergence and verify uplift scales appropriately.
+    /// **Slice-1j AC4: Test synthetic fixture — deterministic low-convergence belt.**
+    /// Create a fixture PlateFields with pinned low convergence_magnitude to verify AMP_MIN reach.
+    /// NOT seed-luck: manually construct a minimal convergent boundary with low convergence.
     #[test]
     fn test_convergence_synthetic_fixture_low() {
-        // Seed with coherent low-convergence fixture.
         let dim = 64i64;
-        let seed = 0x0000000000000001u64;
         let hmax = 200i64;
         let plate_strength = 100i64;
 
-        let fields = crate::gen::plate::compute_plate_fields(seed, dim, 4u32);
+        // **Synthetic fixture: minimal deterministic PlateFields with low convergence.**
+        let dim_usize = dim as usize;
+        let n = dim_usize * dim_usize;
+
+        // Plate ID: two plates (0 and 1) separated at x=32.
+        let mut plate_id = vec![0u32; n];
+        for z in 0..dim_usize {
+            for x in (dim_usize / 2)..dim_usize {
+                plate_id[z * dim_usize + x] = 1u32;
+            }
+        }
+
+        // Boundary type: mark the middle column (x=31) as convergent boundary.
+        let mut boundary_type = vec![BoundaryType::Transform; n];
+        for z in 0..dim_usize {
+            boundary_type[z * dim_usize + (dim_usize / 2 - 1)] = BoundaryType::Convergent;
+        }
+
+        // Convergence magnitude: LOW value (20, well below CONV_AMP_LOW=50).
+        let mut convergence_magnitude = vec![0i64; n];
+        for z in 0..dim_usize {
+            convergence_magnitude[z * dim_usize + (dim_usize / 2 - 1)] = 20i64;
+        }
+
+        // Other fields: dummy values (velocities, crust type).
+        let fields = PlateFields {
+            plate_id: plate_id.clone(),
+            velocity_x: vec![1i32, -1i32],
+            velocity_z: vec![0i32, 0i32],
+            is_continental: vec![true, true],
+            boundary_type: boundary_type.clone(),
+            convergence_magnitude: convergence_magnitude.clone(),
+            retry_count: 0,
+        };
+
         let uplift = generate_plate_uplift_field(&fields, dim, hmax, plate_strength);
 
-        // Compute peak height (max uplift) and belt width stats.
-        let max_uplift = *uplift.iter().max().unwrap_or(&0);
-        let mean_uplift = uplift.iter().filter(|&&u| u > 0).sum::<i64>()
-            / uplift.iter().filter(|&&u| u > 0).count().max(1) as i64;
-
-        // For a low-convergence seed, peak should be modest (closer to AMP_MIN).
+        // For low convergence (20 << CONV_AMP_LOW), amplitude should be at AMP_MIN.
         let amp_min = (AMP_MIN_NUM * hmax) / AMP_MIN_DEN;
-        let amp_max = (AMP_MAX_NUM * hmax) / AMP_MAX_DEN;
+        let max_uplift = uplift.iter().copied().max().unwrap_or(0);
 
-        // Peak should be in the lower half of the range for a low-conv fixture.
+        // Low-convergence fixture should produce uplift near AMP_MIN (within margin for ramp/fold).
         assert!(
-            max_uplift >= amp_min && max_uplift <= (amp_min + amp_max) / 2,
-            "low-conv fixture peak should be modest: max={}, amp_min={}, mid={}",
-            max_uplift,
+            max_uplift >= amp_min * 7 / 10 && max_uplift <= amp_min,
+            "low-conv fixture (conv=20) should reach ~AMP_MIN={}, got {}",
             amp_min,
-            (amp_min + amp_max) / 2
+            max_uplift
         );
     }
 
-    /// **Slice-1j AC4: Test synthetic fixture — high convergence reaches maximum.**
+    /// **Slice-1j AC4: Test synthetic fixture — deterministic high-convergence belt.**
+    /// Manually construct a fixture with HIGH convergence_magnitude to verify AMP_MAX reach.
     #[test]
     fn test_convergence_synthetic_fixture_high() {
-        // Seed with coherent high-convergence fixture.
         let dim = 64i64;
-        let seed = 0xffffffffffffffffu64;
         let hmax = 200i64;
         let plate_strength = 100i64;
 
-        let fields = crate::gen::plate::compute_plate_fields(seed, dim, 6u32);
+        // **Synthetic fixture: minimal deterministic PlateFields with high convergence.**
+        let dim_usize = dim as usize;
+        let n = dim_usize * dim_usize;
+
+        // Plate ID: two plates (0 and 1) separated at x=32.
+        let mut plate_id = vec![0u32; n];
+        for z in 0..dim_usize {
+            for x in (dim_usize / 2)..dim_usize {
+                plate_id[z * dim_usize + x] = 1u32;
+            }
+        }
+
+        // Boundary type: mark the middle column (x=31) as convergent boundary.
+        let mut boundary_type = vec![BoundaryType::Transform; n];
+        for z in 0..dim_usize {
+            boundary_type[z * dim_usize + (dim_usize / 2 - 1)] = BoundaryType::Convergent;
+        }
+
+        // Convergence magnitude: HIGH value (300, well above CONV_AMP_HIGH=200).
+        let mut convergence_magnitude = vec![0i64; n];
+        for z in 0..dim_usize {
+            convergence_magnitude[z * dim_usize + (dim_usize / 2 - 1)] = 300i64;
+        }
+
+        // Other fields: dummy values (velocities, crust type).
+        let fields = PlateFields {
+            plate_id: plate_id.clone(),
+            velocity_x: vec![1i32, -1i32],
+            velocity_z: vec![0i32, 0i32],
+            is_continental: vec![true, true],
+            boundary_type: boundary_type.clone(),
+            convergence_magnitude: convergence_magnitude.clone(),
+            retry_count: 0,
+        };
+
         let uplift = generate_plate_uplift_field(&fields, dim, hmax, plate_strength);
 
-        // Compute peak height.
-        let max_uplift = *uplift.iter().max().unwrap_or(&0);
-
-        // For a high-convergence seed, peak should be substantial (closer to AMP_MAX).
-        let amp_min = (AMP_MIN_NUM * hmax) / AMP_MIN_DEN;
+        // For high convergence (300 >> CONV_AMP_HIGH), amplitude should be at AMP_MAX.
         let amp_max = (AMP_MAX_NUM * hmax) / AMP_MAX_DEN;
+        let max_uplift = uplift.iter().copied().max().unwrap_or(0);
 
-        // Peak should be in the upper half of the range for a high-conv fixture.
+        // High-convergence fixture should produce uplift near AMP_MAX (within margin for ramp/fold).
         assert!(
-            max_uplift >= (amp_min + amp_max) / 2 && max_uplift <= amp_max,
-            "high-conv fixture peak should be substantial: max={}, mid={}, amp_max={}",
-            max_uplift,
-            (amp_min + amp_max) / 2,
-            amp_max
+            max_uplift >= amp_max * 7 / 10 && max_uplift <= amp_max,
+            "high-conv fixture (conv=300) should reach ~AMP_MAX={}, got {}",
+            amp_max,
+            max_uplift
         );
     }
 }
