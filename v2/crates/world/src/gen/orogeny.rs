@@ -178,6 +178,11 @@ fn low_pass_belt_distance(dim: usize, belt_distance: &[i64]) -> Vec<i64> {
 /// The primary wavelength is `belt_hw / 2` (producing ~4 ridges across the full belt width);
 /// each octave halves the wavelength for sub-ridge fractal detail.
 ///
+/// **Overflow safety:** Max product in `(ramp_weight * fold_factor) / FOLD_SCALE`:
+/// - ramp_weight ≤ belt_hw ≤ dim/16 + 3 ≤ 259 (for dim=4096)
+/// - fold_factor ≤ FOLD_SCALE (1024)
+/// - Product: 259 * 1024 ≈ 265,216 << i64::MAX ✓
+///
 /// **Returns** fold_weight in the range [FOLD_FLOOR_NUM/FOLD_FLOOR_DEN, 1.0], scaled as an i64
 /// fraction (multiply by ramp_weight, then divide by FOLD_SCALE).
 fn compute_fold_factor(d: i64, belt_hw: i64) -> i64 {
