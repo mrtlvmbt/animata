@@ -31,6 +31,11 @@ const EROSION_RADIUS: i32 = 3;
 /// Droplets as fraction of grid cells.
 const DROPLET_FRACTION: f32 = 0.6;
 
+// Thermal/talus parameters (ported from v1 `crates/animata-sim/src/erosion.rs`).
+const THERMAL_PASSES: u32 = 8;
+const TALUS: f32 = 0.012;
+const THERMAL_RATE: f32 = 0.5;
+
 /// Bilinear height + gradient at float position.
 fn height_grad(elev: &[f32], dim: usize, px: f32, py: f32) -> (f32, f32, f32) {
     let (cx, cy) = (px.floor() as usize, py.floor() as usize);
@@ -342,6 +347,82 @@ fn compute_relief_contrast(elev: &[f32]) -> (f32, f32) {
     (min_h, max_h)
 }
 
+/// Thermal/talus relaxation: distance-normalized 8-neighbor slope check.
+/// Ported from v1 erosion.rs thermal() function.
+fn apply_thermal_relaxation(elev: &mut [f32], dim: usize) {
+    const INV_SQRT2: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    // 8-neighbor offsets with reciprocal distance (orthogonal 1.0, diagonal 1/√2).
+    const NB: &[(i32, i32, f32)] = &[
+        (1, 0, 1.0),
+        (-1, 0, 1.0),
+        (0, 1, 1.0),
+        (0, -1, 1.0),
+        (1, 1, INV_SQRT2),
+        (1, -1, INV_SQRT2),
+        (-1, 1, INV_SQRT2),
+        (-1, -1, INV_SQRT2),
+    ];
+
+    let dim_i32 = dim as i32;
+    let n = dim * dim;
+    let mut delta = vec![0f32; n];
+
+    for _pass in 0..THERMAL_PASSES {
+        // Clear delta for this pass.
+        for v in delta.iter_mut() {
+            *v = 0.0;
+        }
+
+        // For each cell, find downhill neighbors exceeding talus slope.
+        for y in 0..dim as i32 {
+            for x in 0..dim as i32 {
+                let idx = (y as usize) * dim + (x as usize);
+                let h = elev[idx];
+
+                let mut lowers: Vec<(usize, f32)> = Vec::new();
+                let mut total_slope = 0.0f32;
+                let mut max_slope = 0.0f32;
+
+                // Scan 8 neighbors for downhill neighbors exceeding talus.
+                for &(dx, dy, inv_dist) in NB {
+                    let nx = x + dx;
+                    let ny = y + dy;
+
+                    if nx < 0 || ny < 0 || nx >= dim_i32 || ny >= dim_i32 {
+                        continue;
+                    }
+
+                    let nidx = (ny as usize) * dim + (nx as usize);
+                    let slope = (h - elev[nidx]) * inv_dist; // drop per unit distance
+
+                    if slope > TALUS {
+                        lowers.push((nidx, slope));
+                        total_slope += slope;
+                        if slope > max_slope {
+                            max_slope = slope;
+                        }
+                    }
+                }
+
+                // Redistribute material: move steepest excess, split by slope fraction.
+                if !lowers.is_empty() && max_slope > TALUS {
+                    let move_amt = (max_slope - TALUS) * 0.5 * THERMAL_RATE;
+                    delta[idx] -= move_amt;
+
+                    for &(nidx, slope) in &lowers {
+                        delta[nidx] += move_amt * (slope / total_slope);
+                    }
+                }
+            }
+        }
+
+        // Apply accumulated changes.
+        for i in 0..n {
+            elev[i] += delta[i];
+        }
+    }
+}
+
 /// Save elevation field to PGM (grayscale image, 16-bit).
 fn save_pgm(filename: &str, elev: &[f32], dim: usize) -> std::io::Result<()> {
     let mut data = Vec::new();
@@ -360,6 +441,20 @@ fn save_pgm(filename: &str, elev: &[f32], dim: usize) -> std::io::Result<()> {
     fs::write(filename, data)?;
     println!("Saved {}", filename);
     Ok(())
+}
+
+/// Compute relief metric: ridge_p90 - floor_p10 (real units, not normalized).
+fn compute_relief_metric(elev: &[f32], hmax: i64) -> (f32, f32) {
+    let mut sorted = elev.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let p10_idx = (sorted.len() / 10).max(1);
+    let p90_idx = (sorted.len() * 9 / 10).min(sorted.len() - 1);
+
+    let floor_p10 = sorted[p10_idx] * (hmax as f32); // Convert back to elevation units
+    let ridge_p90 = sorted[p90_idx] * (hmax as f32);
+
+    (ridge_p90 - floor_p10, ridge_p90)
 }
 
 fn main() {
@@ -390,8 +485,7 @@ fn main() {
 
         // Report initial relief.
         let (min_h, max_h) = compute_relief_contrast(&elev);
-        println!("Initial relief: min={:.4}, max={:.4}, contrast={:.4}",
-                 min_h, max_h, max_h - min_h);
+        println!("Initial relief: min={:.4}, max={:.4}", min_h, max_h);
 
         // Step 4: Run droplet erosion.
         println!("Running droplet erosion ({} droplets)...",
@@ -400,24 +494,36 @@ fn main() {
         let survivor_frac = survivors as f32 / total as f32;
         println!("Survivor fraction: {} / {} = {:.4}", survivors, total, survivor_frac);
 
-        // Step 5: Compute post-erosion metrics.
-        let (min_post, max_post) = compute_relief_contrast(&elev);
-        println!("Post-erosion relief: min={:.4}, max={:.4}, contrast={:.4}",
-                 min_post, max_post, max_post - min_post);
+        // Step 5: Save PRE-THERMAL PGM and metrics.
+        let elev_pre_thermal = elev.clone();
+        let filename_pre = format!(".claude/w1o-gallery/droplet_pre_thermal_seed{:02}.pgm", seed_idx + 1);
+        save_pgm(&filename_pre, &elev_pre_thermal, dim as usize).expect("Failed to save pre-thermal PGM");
 
-        // Step 6: Count needles.
-        let needle_count = count_needles(&elev, dim as usize);
-        println!("Needle count (>30 units above 8-neighbor max): {}", needle_count);
+        let (relief_pre, ridge_p90_pre) = compute_relief_metric(&elev_pre_thermal, hmax);
+        let needle_pre = count_needles(&elev_pre_thermal, dim as usize);
+        println!("PRE-THERMAL:  relief_metric={:.1}, ridge_p90={:.1}, needles={}",
+                 relief_pre, ridge_p90_pre, needle_pre);
 
-        // Step 7: Save to PGM.
-        let filename = format!(".claude/w1o-gallery/droplet_probe_seed{:02}.pgm", seed_idx + 1);
-        save_pgm(&filename, &elev, dim as usize).expect("Failed to save PGM");
+        // Step 6: Apply thermal relaxation.
+        println!("Running thermal relaxation ({} passes)...", THERMAL_PASSES);
+        apply_thermal_relaxation(&mut elev, dim as usize);
+
+        // Step 7: Save POST-THERMAL PGM and metrics.
+        let filename_post = format!(".claude/w1o-gallery/droplet_post_thermal_seed{:02}.pgm", seed_idx + 1);
+        save_pgm(&filename_post, &elev, dim as usize).expect("Failed to save post-thermal PGM");
+
+        let (relief_post, ridge_p90_post) = compute_relief_metric(&elev, hmax);
+        let needle_post = count_needles(&elev, dim as usize);
+        println!("POST-THERMAL: relief_metric={:.1}, ridge_p90={:.1}, needles={}",
+                 relief_post, ridge_p90_post, needle_post);
 
         // Report summary.
-        println!("✓ Seed {}: relief_contrast={:.4}, needles={}, survivors={:.1}%",
-                 seed_idx + 1, max_post - min_post, needle_count, survivor_frac * 100.0);
+        println!("✓ Seed {}: survivors={:.1}%, pre_needles={}, post_needles={}, relief={:.1}→{:.1}",
+                 seed_idx + 1, survivor_frac * 100.0, needle_pre, needle_post, relief_pre, relief_post);
     }
 
     println!("\n=== Probe complete ===");
-    println!("PNGs saved to .claude/w1o-gallery/");
+    println!("Pre-thermal PNGs: droplet_pre_thermal_seed*.pgm");
+    println!("Post-thermal PNMs: droplet_post_thermal_seed*.pgm");
+    println!("Awaiting 3D render...");
 }
