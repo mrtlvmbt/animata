@@ -761,9 +761,10 @@ async fn main() {
 
     // U-2: Create WorldSpec (single source of truth for world building; D5: all inputs here)
     // W-18: Parse --landforms (sources) and --transform (transforms) CLI flags if provided
-    // Slice-4a: Default is physics relief (base=false, erosion=true); --legacy-fbm restores old fBm
-    // Slice-1e: --plate-sim is now a deprecated alias for the new default (physics relief)
-    let enable_plate_sim = !cli_args.legacy_fbm;  // Physics by default, fBm only with --legacy-fbm
+    // Slice-synth: Default is synthesis relief (base=true, erosion=true, enable_plate_sim=true);
+    // --legacy-fbm restores old pure-fBm (base=true, plate OFF, erosion OFF)
+    // Slice-1e: --plate-sim enables pure plate-tectonics relief (base=false, plate ON, erosion=true)
+    let enable_plate_sim = !cli_args.legacy_fbm;  // Plate-sim ON by default; OFF only with --legacy-fbm
     let explicit_flags = if cli_args.legacy_fbm {
         // Slice-4a: legacy fBm default — base ON, plate-sim OFF
         Some(world_spec::LandformFlags {
@@ -814,9 +815,13 @@ async fn main() {
                 Some(merge_sources_and_transforms(sources, transforms))
             }
             (None, None) => {
-                // Slice-4a: No explicit flags — use physics relief by default (base=false, erosion=true)
+                // Slice-synth: Synthesis default — fBm (base=true) provides elevation slope everywhere,
+                // which erosion needs to carve dendritic drainage. Plate tectonics (enable_plate_sim via
+                // !legacy_fbm) adds structural variety. This is the dendritic-relief look, equivalent to
+                // --landforms base (which yields base=true + enable_plate_sim=true + erosion=true).
+                // --legacy-fbm restores the old pure-fBm default (base=true, plate OFF, erosion OFF).
                 Some(world_spec::LandformFlags {
-                    base: false,
+                    base: true,
                     tect: false,
                     aeolian: false,
                     volcanic: false,
