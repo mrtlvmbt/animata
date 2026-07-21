@@ -13,7 +13,7 @@
 
 use std::fs;
 use world::gen::orogeny::generate_plate_uplift_field;
-use world::gen::plate::compute_plate_fields;
+use world::gen::plate::{compute_plate_fields, PlateFields, BoundaryType};
 
 // Droplet parameters (ported from v1 `crates/animata-sim/src/erosion.rs`).
 const MAX_LIFETIME: u32 = 40;
@@ -32,9 +32,10 @@ const EROSION_RADIUS: i32 = 3;
 const DROPLET_FRACTION: f32 = 0.6;
 
 // Thermal/talus parameters (ported from v1 `crates/animata-sim/src/erosion.rs`).
-const THERMAL_PASSES: u32 = 8;
+// NOTE: Reduced for gentle despike-only behavior (not full diffusion).
+const THERMAL_PASSES: u32 = 2;  // Mild: only 2 passes (vs 8 in full erosion)
 const TALUS: f32 = 0.012;
-const THERMAL_RATE: f32 = 0.5;
+const THERMAL_RATE: f32 = 0.1;  // Low rate: 0.1 (vs 0.5 in full erosion)
 
 /// Bilinear height + gradient at float position.
 fn height_grad(elev: &[f32], dim: usize, px: f32, py: f32) -> (f32, f32, f32) {
@@ -483,6 +484,86 @@ fn compute_relief_metric(elev: &[f32], hmax: i64) -> (f32, f32) {
     (ridge_p90 - floor_p10, ridge_p90)
 }
 
+/// Synthesize a BROAD uplift mass (instead of thin belts) for testing whether droplet erosion
+/// can carve dendritic ranges into a sustained elevated plateau.
+///
+/// Algorithm: For each cell, compute distance to nearest convergent-boundary cell (D8 BFS).
+/// Apply a distance-falloff: cells within broad_reach get elevated, with amplitude fading
+/// inversely with distance. This creates a wide, sustained plateau that droplets can
+/// carve valleys into (unlike thin 16-cell belts which just get textured).
+fn synthesize_broad_uplift_mass(
+    fields: &PlateFields,
+    dim: i64,
+    hmax: i64,
+    broad_reach: i64,
+    peak_amplitude: f32,
+) -> Vec<f32> {
+    use std::collections::VecDeque;
+
+    let dim_usize = dim as usize;
+    let n = dim_usize * dim_usize;
+
+    // Step 1: Compute distance to nearest convergent boundary via D8 BFS.
+    let mut distance = vec![i64::MAX; n];
+    let mut queue = VecDeque::new();
+
+    for z in 0..dim_usize {
+        for x in 0..dim_usize {
+            let idx = z * dim_usize + x;
+            if fields.boundary_type[idx] == BoundaryType::Convergent {
+                distance[idx] = 0;
+                queue.push_back((x as i64, z as i64));
+            }
+        }
+    }
+
+    while let Some((x, z)) = queue.pop_front() {
+        let idx = (z as usize) * dim_usize + (x as usize);
+        let cur_dist = distance[idx];
+
+        for &(dx, dz) in &[
+            (-1, -1), (0, -1), (1, -1),
+            (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0),
+        ] {
+            let nx = x + dx;
+            let nz = z + dz;
+
+            if nx < 0 || nx >= dim || nz < 0 || nz >= dim {
+                continue;
+            }
+
+            let nidx = (nz as usize) * dim_usize + (nx as usize);
+            let next_dist = cur_dist + 1;
+
+            if next_dist < distance[nidx] {
+                distance[nidx] = next_dist;
+                queue.push_back((nx, nz));
+            }
+        }
+    }
+
+    // Step 2: Apply distance-falloff: cells within broad_reach get elevated, amplitude fades inversely.
+    // Falloff function: at distance 0, full peak_amplitude; at distance broad_reach, ~0.
+    // Use linear falloff: amp = peak_amplitude * (1 - distance / broad_reach).
+    let mut uplift = vec![0.0f32; n];
+
+    for z in 0..dim_usize {
+        for x in 0..dim_usize {
+            let idx = z * dim_usize + x;
+            let dist = distance[idx];
+
+            if dist < broad_reach {
+                // Linear falloff: full amplitude at dist=0, zero at dist=broad_reach.
+                let frac = 1.0 - (dist as f32 / broad_reach as f32);
+                let amp = peak_amplitude * frac;
+                uplift[idx] = amp;
+            }
+        }
+    }
+
+    uplift
+}
+
 fn main() {
     let dim = 256i64;
     let hmax = 200i64;
@@ -499,15 +580,22 @@ fn main() {
         println!("Building plate fields (dim={}, plate_count=10)...", dim);
         let fields = compute_plate_fields(*seed, dim, 10);
 
-        // Step 2: Generate plate uplift field (on flat datum, base=false).
-        println!("Generating plate uplift field...");
-        let uplift = generate_plate_uplift_field(&fields, dim, hmax, plate_strength);
+        // Step 2: Generate BROAD uplift mass (test case) instead of thin-belt production uplift.
+        // Broad reach = dim/3 (~85 cells) to create sustained elevated plateau for droplet carving.
+        // Peak amplitude = 0.7 * hmax to ensure substantial relief that can be dissected.
+        println!("Synthesizing broad uplift mass (test case for dendrite formation)...");
+        let broad_reach = dim / 3;
+        let peak_amplitude = 0.7 * (hmax as f32);
+        let uplift_broad_f32 = synthesize_broad_uplift_mass(&fields, dim, hmax, broad_reach, peak_amplitude);
 
-        // Step 3: Convert to float [0, 1] for droplet erosion.
-        let mut elev: Vec<f32> = uplift
-            .iter()
-            .map(|&u| ((u as f32) / (hmax as f32)).clamp(0.0, 1.0))
-            .collect();
+        // Step 3: Use the broad uplift for droplet erosion.
+        let mut elev = uplift_broad_f32.clone();
+
+        // Report uplift profile.
+        let elevated_cells = uplift_broad_f32.iter().filter(|&&h| h > 0.01).count();
+        println!("Broad uplift: {} cells elevated ({:.1}%), peak={:.1} units",
+                 elevated_cells, elevated_cells as f32 / (dim * dim) as f32 * 100.0,
+                 uplift_broad_f32.iter().fold(0.0f32, |a, &b| a.max(b)));
 
         // Report initial relief.
         let (min_h, max_h) = compute_relief_contrast(&elev);
@@ -520,10 +608,10 @@ fn main() {
         let survivor_frac = survivors as f32 / total as f32;
         println!("Survivor fraction: {} / {} = {:.4}", survivors, total, survivor_frac);
 
-        // Step 5: Save PRE-THERMAL PGM, ATDMP1, and metrics.
+        // Step 5: Save PRE-THERMAL (broad uplift test) PGM, ATDMP1, and metrics.
         let elev_pre_thermal = elev.clone();
-        let filename_pre_pgm = format!(".claude/w1o-gallery/droplet_pre_thermal_seed{:02}.pgm", seed_idx + 1);
-        let filename_pre_dump = format!(".claude/w1o-gallery/droplet_pre_thermal_seed{:02}.atdmp1", seed_idx + 1);
+        let filename_pre_pgm = format!(".claude/w1o-gallery/3d_broad_pre_seed{:02}.pgm", seed_idx + 1);
+        let filename_pre_dump = format!(".claude/w1o-gallery/3d_broad_pre_seed{:02}.atdmp1", seed_idx + 1);
         save_pgm(&filename_pre_pgm, &elev_pre_thermal, dim as usize).expect("Failed to save pre-thermal PGM");
         save_atdmp1(&filename_pre_dump, &elev_pre_thermal, dim as usize, hmax).expect("Failed to save pre-thermal ATDMP1");
 
@@ -536,9 +624,9 @@ fn main() {
         println!("Running thermal relaxation ({} passes)...", THERMAL_PASSES);
         apply_thermal_relaxation(&mut elev, dim as usize);
 
-        // Step 7: Save POST-THERMAL PGM, ATDMP1, and metrics.
-        let filename_post_pgm = format!(".claude/w1o-gallery/droplet_post_thermal_seed{:02}.pgm", seed_idx + 1);
-        let filename_post_dump = format!(".claude/w1o-gallery/droplet_post_thermal_seed{:02}.atdmp1", seed_idx + 1);
+        // Step 7: Save POST-THERMAL (broad uplift test, gentle thermal) PGM, ATDMP1, and metrics.
+        let filename_post_pgm = format!(".claude/w1o-gallery/3d_broad_post_seed{:02}.pgm", seed_idx + 1);
+        let filename_post_dump = format!(".claude/w1o-gallery/3d_broad_post_seed{:02}.atdmp1", seed_idx + 1);
         save_pgm(&filename_post_pgm, &elev, dim as usize).expect("Failed to save post-thermal PGM");
         save_atdmp1(&filename_post_dump, &elev, dim as usize, hmax).expect("Failed to save post-thermal ATDMP1");
 
