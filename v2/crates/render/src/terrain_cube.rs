@@ -60,17 +60,37 @@ fn build_chunk(
     let cols = world_dim as usize;
     let band_rows = (row1 - row0) as usize;
 
-    // Cache (height, material_color) per cell in this band — read once, reused by both
+    // Cache (height, material_color, steepness) per cell in this band — read once, reused by both
     // the greedy top-face pass and the per-cell cliff pass below.
     let mut heights = vec![vec![0f32; cols]; band_rows];
     let mut colors = vec![vec![WHITE; cols]; band_rows];
+    let mut steepness_vals = vec![vec![0.0f32; cols]; band_rows];
     for local_row in 0..band_rows {
         let row = row0 + local_row as i64;
         for col in 0..world_dim {
             heights[local_row][col as usize] = world.height(col, row) as f32 * HEIGHT_SCALE;
+
+            // Compute steepness from height gradient (central difference)
+            // Steepness = magnitude of gradient, clamped to [0, 1]
+            let h_center = world.height(col, row) as f32;
+            let h_east = if col + 1 < world_dim { world.height(col + 1, row) as f32 } else { h_center };
+            let h_west = if col > 0 { world.height(col - 1, row) as f32 } else { h_center };
+            let h_south = if row + 1 < world_dim { world.height(col, row + 1) as f32 } else { h_center };
+            let h_north = if row > 0 { world.height(col, row - 1) as f32 } else { h_center };
+
+            let grad_col = (h_east - h_west) / 2.0;  // horizontal gradient
+            let grad_row = (h_south - h_north) / 2.0; // vertical gradient
+            let grad_mag = (grad_col * grad_col + grad_row * grad_row).sqrt();
+
+            // Normalize gradient to [0, 1] range. A steepness of 1.0 represents a very steep slope.
+            // Empirically, max gradients on procedural terrain are ~5-10 per cell unit,
+            // so we clamp at 2.0 as a "steep" threshold, giving us a reasonable [0, 1] range.
+            let steepness = (grad_mag / 2.0).clamp(0.0, 1.0);
+            steepness_vals[local_row][col as usize] = steepness;
+
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
-            colors[local_row][col as usize] = cell_color(material, height_val, h_lo, h_hi, col, row, seed, bare_mode);
+            colors[local_row][col as usize] = cell_color(material, height_val, h_lo, h_hi, col, row, seed, steepness, bare_mode);
         }
     }
 
@@ -292,17 +312,37 @@ fn build_raw_chunk(
     let cols = world_dim as usize;
     let band_rows = (row1 - row0) as usize;
 
-    // Cache (height, material_color) per cell in this band — read once, reused by both
+    // Cache (height, material_color, steepness) per cell in this band — read once, reused by both
     // the greedy top-face pass and the per-cell cliff pass below.
     let mut heights = vec![vec![0f32; cols]; band_rows];
     let mut colors = vec![vec![WHITE; cols]; band_rows];
+    let mut steepness_vals = vec![vec![0.0f32; cols]; band_rows];
     for local_row in 0..band_rows {
         let row = row0 + local_row as i64;
         for col in 0..world_dim {
             heights[local_row][col as usize] = world.height(col, row) as f32 * height_scale;
+
+            // Compute steepness from height gradient (central difference)
+            // Steepness = magnitude of gradient, clamped to [0, 1]
+            let h_center = world.height(col, row) as f32;
+            let h_east = if col + 1 < world_dim { world.height(col + 1, row) as f32 } else { h_center };
+            let h_west = if col > 0 { world.height(col - 1, row) as f32 } else { h_center };
+            let h_south = if row + 1 < world_dim { world.height(col, row + 1) as f32 } else { h_center };
+            let h_north = if row > 0 { world.height(col, row - 1) as f32 } else { h_center };
+
+            let grad_col = (h_east - h_west) / 2.0;  // horizontal gradient
+            let grad_row = (h_south - h_north) / 2.0; // vertical gradient
+            let grad_mag = (grad_col * grad_col + grad_row * grad_row).sqrt();
+
+            // Normalize gradient to [0, 1] range. A steepness of 1.0 represents a very steep slope.
+            // Empirically, max gradients on procedural terrain are ~5-10 per cell unit,
+            // so we clamp at 2.0 as a "steep" threshold, giving us a reasonable [0, 1] range.
+            let steepness = (grad_mag / 2.0).clamp(0.0, 1.0);
+            steepness_vals[local_row][col as usize] = steepness;
+
             let material = world.surface_material(Vec2Fixed(col, row));
             let height_val = world.height(col, row);
-            colors[local_row][col as usize] = cell_color(material, height_val, h_lo, h_hi, col, row, seed, bare_mode);
+            colors[local_row][col as usize] = cell_color(material, height_val, h_lo, h_hi, col, row, seed, steepness, bare_mode);
         }
     }
 

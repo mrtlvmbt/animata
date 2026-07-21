@@ -117,9 +117,21 @@ pub fn build_minimap_image(
             // surface_material takes Vec2Fixed (tuple syntax); use direct world coordinates
             let material = world.surface_material(Vec2Fixed(world_x, world_z));
 
+            // Compute steepness from height gradient (central difference)
+            let h_center = world.height(world_x, world_z) as f32;
+            let h_east = if world_x + 1 < dim { world.height(world_x + 1, world_z) as f32 } else { h_center };
+            let h_west = if world_x > 0 { world.height(world_x - 1, world_z) as f32 } else { h_center };
+            let h_south = if world_z + 1 < dim { world.height(world_x, world_z + 1) as f32 } else { h_center };
+            let h_north = if world_z > 0 { world.height(world_x, world_z - 1) as f32 } else { h_center };
+
+            let grad_col = (h_east - h_west) / 2.0;
+            let grad_row = (h_south - h_north) / 2.0;
+            let grad_mag = (grad_col * grad_col + grad_row * grad_row).sqrt();
+            let steepness = (grad_mag / 2.0).clamp(0.0, 1.0);
+
             // Use the shared cell_color helper to get the flat base colour (no shading).
             // This uses the exact same h_lo/h_hi as terrain.rs for D6 palette-match.
-            let color = biome_palette::cell_color(material, height, h_lo, h_hi, world_x, world_z, seed, bare_mode);
+            let color = biome_palette::cell_color(material, height, h_lo, h_hi, world_x, world_z, seed, steepness, bare_mode);
 
             // Convert macroquad Color to egui Color32
             pixels[py * MINIMAP_WIDTH + px] = Color32::from_rgb(
