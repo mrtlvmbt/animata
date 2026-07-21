@@ -443,6 +443,32 @@ fn save_pgm(filename: &str, elev: &[f32], dim: usize) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Save elevation field to ATDMP1 format for rendering via v2 render --v1-dump.
+/// Format: magic `b"ATDMP1\0\0"` (8 bytes) | dim: u32 | then dim*dim records
+/// (row-major, idx = z*dim + x): height: i16, material: u8.
+fn save_atdmp1(filename: &str, elev: &[f32], dim: usize, hmax: i64) -> std::io::Result<()> {
+    let mut data = Vec::new();
+
+    // Magic header.
+    data.extend_from_slice(b"ATDMP1\0\0");
+
+    // Dimension (u32, little-endian).
+    data.extend_from_slice(&(dim as u32).to_le_bytes());
+
+    // For each cell: height (i16) + material (u8).
+    for &h_norm in elev {
+        let h_elev = (h_norm * (hmax as f32)).clamp(0.0, hmax as f32) as i16;
+        let material = 0u8; // Stone/rock
+
+        data.extend_from_slice(&h_elev.to_le_bytes());
+        data.push(material);
+    }
+
+    fs::write(filename, data)?;
+    println!("Saved {}", filename);
+    Ok(())
+}
+
 /// Compute relief metric: ridge_p90 - floor_p10 (real units, not normalized).
 fn compute_relief_metric(elev: &[f32], hmax: i64) -> (f32, f32) {
     let mut sorted = elev.to_vec();
@@ -494,10 +520,12 @@ fn main() {
         let survivor_frac = survivors as f32 / total as f32;
         println!("Survivor fraction: {} / {} = {:.4}", survivors, total, survivor_frac);
 
-        // Step 5: Save PRE-THERMAL PGM and metrics.
+        // Step 5: Save PRE-THERMAL PGM, ATDMP1, and metrics.
         let elev_pre_thermal = elev.clone();
-        let filename_pre = format!(".claude/w1o-gallery/droplet_pre_thermal_seed{:02}.pgm", seed_idx + 1);
-        save_pgm(&filename_pre, &elev_pre_thermal, dim as usize).expect("Failed to save pre-thermal PGM");
+        let filename_pre_pgm = format!(".claude/w1o-gallery/droplet_pre_thermal_seed{:02}.pgm", seed_idx + 1);
+        let filename_pre_dump = format!(".claude/w1o-gallery/droplet_pre_thermal_seed{:02}.atdmp1", seed_idx + 1);
+        save_pgm(&filename_pre_pgm, &elev_pre_thermal, dim as usize).expect("Failed to save pre-thermal PGM");
+        save_atdmp1(&filename_pre_dump, &elev_pre_thermal, dim as usize, hmax).expect("Failed to save pre-thermal ATDMP1");
 
         let (relief_pre, ridge_p90_pre) = compute_relief_metric(&elev_pre_thermal, hmax);
         let needle_pre = count_needles(&elev_pre_thermal, dim as usize);
@@ -508,9 +536,11 @@ fn main() {
         println!("Running thermal relaxation ({} passes)...", THERMAL_PASSES);
         apply_thermal_relaxation(&mut elev, dim as usize);
 
-        // Step 7: Save POST-THERMAL PGM and metrics.
-        let filename_post = format!(".claude/w1o-gallery/droplet_post_thermal_seed{:02}.pgm", seed_idx + 1);
-        save_pgm(&filename_post, &elev, dim as usize).expect("Failed to save post-thermal PGM");
+        // Step 7: Save POST-THERMAL PGM, ATDMP1, and metrics.
+        let filename_post_pgm = format!(".claude/w1o-gallery/droplet_post_thermal_seed{:02}.pgm", seed_idx + 1);
+        let filename_post_dump = format!(".claude/w1o-gallery/droplet_post_thermal_seed{:02}.atdmp1", seed_idx + 1);
+        save_pgm(&filename_post_pgm, &elev, dim as usize).expect("Failed to save post-thermal PGM");
+        save_atdmp1(&filename_post_dump, &elev, dim as usize, hmax).expect("Failed to save post-thermal ATDMP1");
 
         let (relief_post, ridge_p90_post) = compute_relief_metric(&elev, hmax);
         let needle_post = count_needles(&elev, dim as usize);
