@@ -186,3 +186,15 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   success) — admin is for bypassing branch-protection PROCESS, not red TESTS. After ANY merge, verify what
   actually landed (`git show origin/<branch>:<file>`). If a broken commit lands, hotfix the branch directly
   (branch→PR→merge on GREEN). (terragen-v3 Slice-1j #547, 2026-07-20.)
+
+- **Master-merging an integration branch to main: the branch HEAD's CI shows sim jobs "skipping" /
+  the PR is MERGEABLE/CLEAN, but you never saw a full 4/4 on the exact HEAD** → Cause: CI path-gates
+  per push against the PREVIOUS branch commit, so a render-only or docs-only tip commit (e.g. the last
+  slice) correctly SKIPS the sim shards; the HEAD run therefore does NOT re-verify sim goldens, and
+  `gh pr checks` on the PR just echoes that push run (sim = skipping). → What to do: do NOT read
+  "skipping" as failure NOR blindly trust MERGEABLE. Confirm the sim goldens were GREEN at the LAST
+  sim-touching commit (`git log --oneline -- v2/crates/world v2/crates/sim-core …` to find it, then
+  `gh run list --commit <sha>` → that run must be full 4/4 success) AND that nothing sim-relevant
+  changed after it (only render/docs commits on top). Then the cumulative sim state is verified and
+  the master-merge is safe. (terragen-v3→main #562: HEAD was render-only #561 with sim skipped; the
+  last sim-touching commit was 1L e62a7f9 which ran full 4/4 green — safe.)
