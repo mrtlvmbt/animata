@@ -140,3 +140,15 @@ the fast lookup; the long-form "why" stays in CLAUDE.md / memory / landmarks —
   `cargo build --release` of the render bin before claiming green; PM intake of a two-lane slice
   must rebuild the render bin even when CI is 4/4 — CI proves the world lane only.
 - **Critic flags "signature mismatch / won't compile" on a branch diff, but the branch's CI compiles green** → read-only critic agents resolve file reads against the PM checkout's WORKING TREE (main-based), while the diff targets the integration branch — the "current code" they cite is an older reality (three false-FAIL rounds on one day: W-18-HF, CI-1 F2, W-16 coder round) → Give critics branch-extracted file contents (`git show <branch>:<path>` dumps) or an explicit caveat "the working tree is OLDER than the diff — trust the patch hunks"; a green compile-check/CI on the branch empirically refutes any cannot-compile finding. Coder-side: a critic verdict you believe is tree-desynced still gets a RE-RUN with corrected inputs, never a self-declared override.
+
+- **Master-merging an integration branch to main: the branch HEAD's CI shows sim jobs "skipping" /
+  the PR is MERGEABLE/CLEAN, but you never saw a full 4/4 on the exact HEAD** → Cause: CI path-gates
+  per push against the PREVIOUS branch commit, so a render-only or docs-only tip commit (e.g. the last
+  slice) correctly SKIPS the sim shards; the HEAD run therefore does NOT re-verify sim goldens, and
+  `gh pr checks` on the PR just echoes that push run (sim = skipping). → What to do: do NOT read
+  "skipping" as failure NOR blindly trust MERGEABLE. Confirm the sim goldens were GREEN at the LAST
+  sim-touching commit (`git log --oneline -- v2/crates/world v2/crates/sim-core …` to find it, then
+  `gh run list --commit <sha>` → that run must be full 4/4 success) AND that nothing sim-relevant
+  changed after it (only render/docs commits on top). Then the cumulative sim state is verified and
+  the master-merge is safe. (terragen-v3→main #562: HEAD was render-only #561 with sim skipped; the
+  last sim-touching commit was 1L e62a7f9 which ran full 4/4 green — safe.)
