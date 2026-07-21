@@ -107,6 +107,8 @@ pub struct WorldSpec {
     /// U-10: Explicit landform flags override. If Some, use these instead of deriving from seed.
     /// If None, compute flags from seed via landform_flags(seed, standalone).
     pub explicit_landform_flags: Option<LandformFlags>,
+    /// Slice-1e: enable plate tectonics relief (if true, pass enable_plate_sim=true to ProcgenWorld).
+    pub enable_plate_sim: bool,
 }
 
 /// Real execution order of stages in the worldgen pipeline.
@@ -432,6 +434,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Procgen { dim_request: None },
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should be reseedable: Procgen + standalone
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -446,6 +449,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Procgen { dim_request: None },
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should NOT be reseedable: Procgen but sim mode
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -460,6 +464,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should NOT be reseedable: Dump source (even though standalone)
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;
@@ -474,6 +479,7 @@ mod tests {
             bare_mode: false,
             source: WorldSource::Dump(std::path::PathBuf::from("/tmp/dump.atdmp1")),
             explicit_landform_flags: None,
+            enable_plate_sim: false,
         };
         // Should NOT be reseedable: Dump + sim mode
         let can_reseed = matches!(spec.source, WorldSource::Procgen { .. }) && spec.standalone;

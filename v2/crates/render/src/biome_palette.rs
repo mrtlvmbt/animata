@@ -82,14 +82,19 @@ fn color_jitter_hash(col: i64, row: i64, seed: u64) -> f32 {
 }
 
 /// Palette v2 — two-factor color: material HUE × height VALUE + per-column jitter.
+/// For zonal materials (Soil/Bedrock/Till/etc), applies elevation+slope banding via
+/// a blend of material hue toward a hypsometric band (green→brown→snow), modulated by steepness.
+/// For azonal materials (Water/Sand/Basalt), returns material color unmodified.
+///
 /// Takes the material hue from [`material_color`], interpolates it through the height value ramp
-/// (green→brown→snow), and applies ±4% jitter per column via integer hash.
+/// (green→brown→snow for zonal; material-only for azonal), and applies ±4% jitter per column via integer hash.
 /// Parameters:
 /// - `material`: surface material byte (0..=10)
 /// - `height`: cell height value (raw, pre-hypsometric normalization)
 /// - `h_lo`, `h_hi`: the map's observed [p2, p98] relief band for hypsometric scaling
 /// - `col`, `row`: world grid coordinates (for deterministic per-column jitter)
 /// - `seed`: random seed component (for deterministic per-map variation)
+/// - `steepness`: terrain gradient [0, 1], used to modulate banding (steep → rock/no-snow)
 pub fn surface_color_v2(
     material: u8,
     height: i64,
@@ -98,52 +103,88 @@ pub fn surface_color_v2(
     col: i64,
     row: i64,
     seed: u64,
+    steepness: f32,
 ) -> Color {
-    // Get material hue base color
-    let hue_color = material_color(material);
-
-    // Compute height-based value tier (same stretch as hypsometric_range)
-    let span = (h_hi - h_lo).max(1) as f32;
-    let t = ((height - h_lo) as f32 / span).clamp(0.0, 1.0);
-
-    // Height value ramp: interpolate through the same stops as height_color
-    // but we multiply the base hue_color by the VALUE to darken/lighten
-    // Lifted floor to brighten lowlands (was 0.4, now 0.78) to prevent dark/muddy render
-    const VALUE_STOPS: [(f32, f32); 7] = [
-        (0.00, 0.78),  // lowland — brightened (was 0.4)
-        (0.25, 0.82),  // (was 0.5)
-        (0.45, 0.88),  // (was 0.7)
-        (0.60, 0.92),  // (was 0.8)
-        (0.78, 0.85),  // brown (moraine/upland) (was 0.6)
-        (0.90, 0.92),  // bare rock (was 0.8)
-        (1.00, 1.0),   // peaks — bright (was 0.95)
-    ];
-
-    let mut lo = &VALUE_STOPS[0];
-    let mut hi = &VALUE_STOPS[VALUE_STOPS.len() - 1];
-    for w in VALUE_STOPS.windows(2) {
-        if t >= w[0].0 && t <= w[1].0 {
-            lo = &w[0];
-            hi = &w[1];
-            break;
-        }
+    // Azonal materials: use material color directly, no elevation/slope banding
+    let is_azonal = matches!(material, 1 | 5 | 6 | 8 | 11);
+    if is_azonal {
+        let hue_color = material_color(material);
+        // Apply per-column jitter: ±4%
+        let jitter_factor = (color_jitter_hash(col, row, seed) - 0.5) * 0.08 + 1.0;
+        let jittered_value = jitter_factor.clamp(0.0, 1.0);
+        return Color::new(
+            hue_color.r * jittered_value,
+            hue_color.g * jittered_value,
+            hue_color.b * jittered_value,
+            hue_color.a,
+        );
     }
 
-    let value_span = (hi.0 - lo.0).max(1e-6);
-    let f = ((t - lo.0) / value_span).clamp(0.0, 1.0);
-    let value = (lo.1 + (hi.1 - lo.1) * f).clamp(0.0, 1.0);
+    // Zonal materials: apply elevation+slope-banded color
+    // Get the hypsometric band color at this elevation
+    let band_color = height_color(height, h_lo, h_hi);
+
+    // Modulate the band by steepness:
+    // - High steepness (steep faces) → shift toward grey rock, away from vegetation/snow
+    // - Low steepness (flat) → let elevation band through
+    // Steepness-driven shift: interpolate from band_color toward a mid-grey "rock" tone
+    let rock_color = Color::new(0.612, 0.612, 0.635, 1.0); // RGB(156, 156, 162) normalized — grey rock
+    let steepness_clamp = steepness.clamp(0.0, 1.0);
+
+    // At steepness=0, use band color fully; at steepness>0.6, shift significantly toward rock
+    // Use a smooth ramp: steep faces (>0.6 steepness) → mostly rock; gentle faces → mostly band
+    let steep_threshold = 0.6;
+    let steep_factor = if steepness_clamp > steep_threshold {
+        ((steepness_clamp - steep_threshold) / (1.0 - steep_threshold)).min(1.0)
+    } else {
+        0.0
+    };
+
+    // Interpolate between band_color and rock_color based on steepness
+    let slope_modulated = Color::new(
+        band_color.r.lerp(rock_color.r, steep_factor),
+        band_color.g.lerp(rock_color.g, steep_factor),
+        band_color.b.lerp(rock_color.b, steep_factor),
+        band_color.a,
+    );
+
+    // Gate snow off high-steepness cells: if very steep, clamp the color to no snow-white
+    // At steepness > 0.7, suppress the bright snow peak, keep it rock-ish
+    let final_color = if steepness_clamp > 0.7 {
+        // Desaturate the snow-white peak, push it toward rock grey
+        let desaturated = Color::new(
+            slope_modulated.r.lerp(rock_color.r, 0.5),
+            slope_modulated.g.lerp(rock_color.g, 0.5),
+            slope_modulated.b.lerp(rock_color.b, 0.5),
+            slope_modulated.a,
+        );
+        desaturated
+    } else {
+        slope_modulated
+    };
 
     // Apply per-column jitter: ±4%
     let jitter_factor = (color_jitter_hash(col, row, seed) - 0.5) * 0.08 + 1.0; // [0.96, 1.04]
-    let jittered_value = (value * jitter_factor).clamp(0.0, 1.0);
+    let jittered_value = jitter_factor.clamp(0.0, 1.0);
 
-    // Multiply hue by the value to darken/lighten
+    // Multiply the final color by jitter
     Color::new(
-        hue_color.r * jittered_value,
-        hue_color.g * jittered_value,
-        hue_color.b * jittered_value,
-        hue_color.a,
+        final_color.r * jittered_value,
+        final_color.g * jittered_value,
+        final_color.b * jittered_value,
+        final_color.a,
     )
+}
+
+/// Helper trait to add lerp to f32 for color interpolation.
+trait Lerp {
+    fn lerp(&self, other: f32, t: f32) -> f32;
+}
+
+impl Lerp for f32 {
+    fn lerp(&self, other: f32, t: f32) -> f32 {
+        self + (other - self) * t
+    }
 }
 
 /// Hypsometric elevation ramp: raw `height` → a classic low-green→brown→snow-white gradient. Makes
@@ -203,8 +244,8 @@ pub fn apply_directional_shading(c: Color, normal: Vec3) -> Color {
 /// Compute a cell's top-face color using palette v2 with optional bare-mode water substitution.
 ///
 /// This is the canonical cell coloring logic shared by terrain.rs, terrain_cube.rs, and minimap.
-/// Takes the material and height, applies hypsometric normalization, and optionally substitutes
-/// water with sand in bare_mode (for dry-bed visualization).
+/// Takes the material and height, applies hypsometric normalization with elevation+slope banding,
+/// and optionally substitutes water with sand in bare_mode (for dry-bed visualization).
 ///
 /// Parameters:
 /// - `material`: surface material byte (0..=10)
@@ -212,6 +253,7 @@ pub fn apply_directional_shading(c: Color, normal: Vec3) -> Color {
 /// - `h_lo`, `h_hi`: the map's observed [p2, p98] relief band for hypsometric scaling
 /// - `col`, `row`: world grid coordinates (for deterministic per-column jitter)
 /// - `seed`: random seed component (for deterministic per-map variation)
+/// - `steepness`: terrain gradient [0, 1], used to modulate banding (steep → rock/no-snow)
 /// - `bare_mode`: if true and material == 8 (water), render as sand (material 1) instead
 pub fn cell_color(
     material: u8,
@@ -221,12 +263,13 @@ pub fn cell_color(
     col: i64,
     row: i64,
     seed: u64,
+    steepness: f32,
     bare_mode: bool,
 ) -> Color {
-    let top_color = surface_color_v2(material, height, h_lo, h_hi, col, row, seed);
+    let top_color = surface_color_v2(material, height, h_lo, h_hi, col, row, seed, steepness);
     if bare_mode && material == 8 {
         // Water in bare mode: desaturated sand
-        surface_color_v2(1, height, h_lo, h_hi, col, row, seed)
+        surface_color_v2(1, height, h_lo, h_hi, col, row, seed, steepness)
     } else {
         top_color
     }

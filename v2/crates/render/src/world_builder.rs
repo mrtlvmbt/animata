@@ -28,7 +28,7 @@ use world::ProcgenWorld;
 /// `height_scale_override` is an optional multiplier for the height→prism mapping (default ×1.0).
 ///
 /// Returns a Send-safe BuiltWorld with OUTPUT dim (not the input spec.dim_request).
-pub fn build_world<F>(spec: &WorldSpec, mut on_stage: F, height_scale_override: Option<f32>) -> Result<BuiltWorld, BuildError>
+pub fn build_world<F>(spec: &WorldSpec, mut on_stage: F, height_scale_override: Option<f32>, enable_plate_sim: bool) -> Result<BuiltWorld, BuildError>
 where
     F: FnMut(Stage) -> bool,
 {
@@ -65,6 +65,14 @@ where
                 flags.erosion_strength,
                 flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
+                enable_plate_sim, // Slice-1e: threaded from CLI --plate-sim flag
+                15, // plate_count
+                100, // plate_strength
+                60, // ela_threshold_percent
+                -1, // sea_level (sentinel: -1 = unset)
+                100, // volcanic_strength
+                100, // aeolian_strength
+                100, // coastal_strength
             ))
         }
         WorldSource::Dump(_) => {
@@ -93,6 +101,14 @@ where
                 flags.erosion_strength,
                 flags.glacial_strength,
                 None, // U-11: No callback — progress reported via on_stage() below
+                enable_plate_sim, // Slice-1e: threaded from CLI --plate-sim flag
+                15, // plate_count
+                100, // plate_strength
+                60, // ela_threshold_percent
+                -1, // sea_level (sentinel: -1 = unset)
+                100, // volcanic_strength
+                100, // aeolian_strength
+                100, // coastal_strength
             ))
         }
     };
@@ -120,11 +136,16 @@ where
 ///
 /// Standalone mode: honors dim_request if provided, else uses config default.
 /// Sim mode: always uses config.econ.world_dim (render dim must match sim's).
+/// Slice-4a: Standalone default dim (256 for physics relief to read well).
+const STANDALONE_DEFAULT_DIM: i64 = 256;
+
 fn compute_effective_dim(source: &WorldSource, standalone: bool, config_dim: i64) -> i64 {
     match source {
         WorldSource::Procgen { dim_request } => {
             if standalone {
-                dim_request.unwrap_or(config_dim)
+                // Slice-4a: Standalone default is 256 (physics relief); --dim N overrides.
+                // Sim mode (standalone=false) stays on config_dim (64) per pinned-param contract.
+                dim_request.unwrap_or(STANDALONE_DEFAULT_DIM)
             } else {
                 // Sim mode: ignore dim_request (pinned-param contract)
                 config_dim
