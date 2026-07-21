@@ -17,6 +17,7 @@ use crate::raw_chunk::{BuiltWorld, BuildError};
 use crate::world_spec::{WorldSpec, WorldSource, Stage, landform_flags};
 use crate::terrain::build_raw_hex_terrain;
 use crate::terrain_cube::build_raw_cube_terrain;
+use crate::dump_world::DumpWorld;
 use sim_core::WorldView;
 use world::ProcgenWorld;
 
@@ -75,41 +76,45 @@ where
                 100, // coastal_strength
             ))
         }
-        WorldSource::Dump(_) => {
-            // Load v1 dump (carries its own dim; deferred: out of U-3 scope)
-            // TODO: implement DumpWorld::load(path) to actually load the dump file
-            // For now, fallback to Procgen (this makes --v1-dump flag non-functional as of U-3)
-            eprintln!("[build_world] Dump loading not yet implemented; falling back to Procgen (--v1-dump flag ignored)");
-            // U-10: Use explicit flags if provided; otherwise derive from seed
-            let flags = spec.explicit_landform_flags.unwrap_or_else(|| landform_flags(spec.seed, spec.standalone));
-            // U-11: No-op callback for world crate (observation-only, byte-pure)
-            Box::new(ProcgenWorld::new_with_callback(
-                effective_dim,
-                cli::HMAX,
-                cli::RESOURCE_BASE,
-                config.seed ^ cli::WORLD_SALT,
-                None,
-                flags.base,
-                flags.tect,
-                flags.aeolian,
-                flags.volcanic,
-                flags.glacial,
-                flags.coastal,
-                flags.erosion,
-                flags.ridges,
-                flags.beaches,
-                flags.erosion_strength,
-                flags.glacial_strength,
-                None, // U-11: No callback — progress reported via on_stage() below
-                enable_plate_sim, // Slice-1e: threaded from CLI --plate-sim flag
-                15, // plate_count
-                100, // plate_strength
-                60, // ela_threshold_percent
-                -1, // sea_level (sentinel: -1 = unset)
-                100, // volcanic_strength
-                100, // aeolian_strength
-                100, // coastal_strength
-            ))
+        WorldSource::Dump(path) => {
+            // Load ATDMP1 dump (v1-style heightfield + material map)
+            // DumpWorld implements WorldView with height/material/biome; render meshes from it
+            let path_str = path.to_string_lossy();
+            match DumpWorld::load(&path_str) {
+                Ok(dump) => Box::new(dump),
+                Err(e) => {
+                    eprintln!("[build_world] Failed to load dump {}: {}", path_str, e);
+                    // Fallback to Procgen if dump load fails
+                    let flags = spec.explicit_landform_flags.unwrap_or_else(|| landform_flags(spec.seed, spec.standalone));
+                    Box::new(ProcgenWorld::new_with_callback(
+                        effective_dim,
+                        cli::HMAX,
+                        cli::RESOURCE_BASE,
+                        config.seed ^ cli::WORLD_SALT,
+                        None,
+                        flags.base,
+                        flags.tect,
+                        flags.aeolian,
+                        flags.volcanic,
+                        flags.glacial,
+                        flags.coastal,
+                        flags.erosion,
+                        flags.ridges,
+                        flags.beaches,
+                        flags.erosion_strength,
+                        flags.glacial_strength,
+                        None,
+                        enable_plate_sim,
+                        15,
+                        100,
+                        60,
+                        -1,
+                        100,
+                        100,
+                        100,
+                    ))
+                }
+            }
         }
     };
 
