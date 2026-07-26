@@ -56,12 +56,21 @@ KIT_DEBUG_SPINE="docs/debugging-spine.md"
 # that AUTHORED the plan — WHEN a tier above exists. A same-model critic shares the author's training
 # priors, so it inherits the author's blind spots — the cold fork removes *motivated* blindness
 # (hope-echoing, scope-creep) but NOT *correlated* blindness (a flaw the model can't see when generating
-# it also can't see when critiquing). NOTE (2026-06): Anthropic withdrew claude-fable-5, so OPUS IS THE
-# CEILING and the critic defaults to opus. An opus planner gets a same-tier critic — expected, not a
-# misconfig; kit-critic's note_top_tier says so each run. Close the residual correlated blindness by hand
-# (human second pass, or a second fork seeded with the diff not the plan). Do NOT drop the critic BELOW
-# the author's tier to run faster. (Same rule governs `judge` below; policy shared in lib/model-tier.sh.)
-KIT_CRITIC_MODEL='opus'
+# it also can't see when critiquing). Close the residual correlated blindness by hand (human second pass,
+# or a second fork seeded with the diff not the plan). Do NOT drop the critic BELOW the author's tier to
+# run faster. (Same rule governs `judge` below; policy shared in lib/model-tier.sh.)
+#
+# LEFT UNSET ON PURPOSE. kit.config.sh is sourced by the launcher BEFORE it computes its default, so a
+# bare assignment here does two harmful things: it CLOBBERS an env override — `KIT_CRITIC_MODEL=… \
+# bin/kit-critic` was silently ignored, and a consensus round measured as running at fable had in fact
+# run at opus — and it pins the model while the capability ladder moves. Unset, the launcher derives the
+# fork model from the ladder (`KIT_FABLE_TIER` in lib/model-tier.sh, kit >= v0.20; opus on v0.19), which
+# is the whole point of having a ladder. Override for one run via the environment, not this file.
+# KIT_CRITIC_MODEL=
+# The ladder switch itself, in `${VAR:-default}` form for exactly the reason above. 1 = fable is ranked
+# top and is the default fork model; 0 = fable is dropped from the ladder and opus is the ceiling. Set it
+# to 0 the day fable is withdrawn again — one slot, no edits to the launchers. Inert on kit v0.19.
+KIT_FABLE_TIER="${KIT_FABLE_TIER:-1}"
 # Used — loudly, on stderr — if KIT_CRITIC_MODEL is unavailable on this session (forking a newer model
 # can fail). Degrades the critic instead of dropping it. Keep this >= the planner's tier if you can.
 KIT_CRITIC_MODEL_FALLBACK='opus'
