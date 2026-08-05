@@ -1,0 +1,1 @@
+../../../.claude-dev-kit/plugin/skills/task-pipeline/SKILL.md

@@ -32,6 +32,10 @@ The kit is **read-only** here — it is a shared mechanism layer, not project co
 - Generated agents ARE committed (the effective prompt is reviewable); the overlay + config remain
   the source of truth. After editing an overlay, **re-run install.sh** — a commit gate
   (kit-generated-guard) blocks commits when a generated agent drifts from its overlay/base.
+- **Writing a roadmap for `.claude-dev-kit/bin/kit-drive`** (unattended step execution) → author it per
+  `.claude-dev-kit/docs/roadmap-authoring.md` — step schema, drivable done_criteria, `paths:`/`deps:`
+  scheduling fields, grant-list rules. The driver executes the roadmap verbatim; that page is the
+  author-side contract.
 <!-- claude-dev-kit:rules END -->
 
 ## Decision index — `pm/reports/DECISIONS.md` (mandatory upkeep)

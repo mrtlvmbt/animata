@@ -60,6 +60,15 @@
             "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-readonly-postcheck.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/kit-readonly-postcheck.sh\" || exit 0"
           }
         ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -f \"$CLAUDE_PROJECT_DIR/.claude/hooks/plan-consensus-guard.sh\" ] && bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/plan-consensus-guard.sh\" || exit 0"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
