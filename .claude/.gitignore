@@ -7,6 +7,7 @@ status.md
 settings.json.bak.*
 .critic-report.md
 .critic-prior.md
+.consensus/
 .plan-consensus
 kit-plan-bypass.log
 kit-readonly-bypass.log
