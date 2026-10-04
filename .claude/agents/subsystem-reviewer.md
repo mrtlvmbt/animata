@@ -35,7 +35,7 @@ invariants can be STALE after a refactor; do not trust the doc blindly.
    noted, never FAIL.
 6. **Unconfirmed-fix check (evidence-grounded floor).** If the diff *claims to fix a bug* but ships
    no test / repro that exercises the changed path, flag it `unverified` — a fix confirmed only by
-   "looks right" violates the no-guess floor (`docs/evidence-grounded.md`). You are read-only and
+   "looks right" violates the no-guess floor (`.claude-dev-kit/docs/evidence-grounded.md`). You are read-only and
    cannot RUN the test, so you check only that one EXISTS in the diff; say so honestly (a
    present-but-wrong test still needs the verify-phase). A pure refactor / feature with no fix claim
    is out of scope for this rule — do not demand a test of it.

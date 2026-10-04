@@ -15,7 +15,7 @@ conversation (a chat lets both sides "meet in the middle" in a sycophantic truce
 
 1. **Synthesis** — you (the main thread = the planner) write/update the plan file.
 2. **Destruction (cold fork)** — spawn the `critic` agent on the current plan (locally:
-   `bin/kit-critic <plan-file> [prior-findings-file]`, or via the Agent tool with
+   `.claude-dev-kit/bin/kit-critic <plan-file> [prior-findings-file]`, or via the Agent tool with
    `subagent_type: critic`). Its critique is an **immutable artifact** — a static report, NOT a
    partner to argue with. Each finding carries a **critic-owned severity**
    (`bug`/`robustness`/`tradeoff`/`style`) AND a **stable ID** (`F1`, `F2`, …).
@@ -29,12 +29,12 @@ conversation (a chat lets both sides "meet in the middle" in a sycophantic truce
      section** (id + body), so the finding's substance — not just its number — survives the next cold
      fork (else it dies by *amnesia*: a bodyless ID gets withdrawn "for lack of substance").
    - **The carry-file is machine-DERIVED, never hand-curated** (else the planner — the conflicted
-     actor — just drops an inconvenient ID and the disappearance returns). `bin/kit-critic` saves each
+     actor — just drops an inconvenient ID and the disappearance returns). `.claude-dev-kit/bin/kit-critic` saves each
      report to `.claude/.critic-report.md`; derive the next round's prior-findings file from it:
      `python3 <kit>/lib/critic-prior.py .claude/.critic-report.md > .claude/.critic-prior.md`, then
-     `bin/kit-critic <plan> .claude/.critic-prior.md`. Dropping an ID now means editing a generated
+     `.claude-dev-kit/bin/kit-critic <plan> .claude/.critic-prior.md`. Dropping an ID now means editing a generated
      file — visible in the human's diff. If you re-fork WITHOUT carrying findings while a recent
-     critique exists, `bin/kit-critic` WARNs (the virgin-round bypass is visible, not silent); pass
+     critique exists, `.claude-dev-kit/bin/kit-critic` WARNs (the virgin-round bypass is visible, not silent); pass
      `--fresh` to confirm a deliberate clean start. (Residual: a planner who *edits the generated file*
      or always passes `--fresh` to dodge the carry is out of scope — that is the human firewall's job,
      the same as `--no-verify`. The mechanism makes the honest path the easy one; it cannot force it.)
@@ -72,7 +72,7 @@ rounds only where they can move the verdict:
   must check) or a genuinely **new open blocker** to carry. If the latest round made zero Fixes —
   everything was legitimately Accepted as `tradeoff`/`style` and raised no new `bug`/`robustness` — you
   are already at the fixpoint; spawning another round just re-bills an identical critique. Stop.
-- **Carry only OPEN blockers, machine-derived.** `lib/critic-prior.py` already emits *exactly* the
+- **Carry only OPEN blockers, machine-derived.** `.claude-dev-kit/lib/critic-prior.py` already emits *exactly* the
   unresolved `bug`/`robustness` IDs (fixed/withdrawn dropped) — so `[PRIOR FINDINGS]` stays minimal and
   the planner can't pad it. Don't hand-append resolved findings "for context".
 - **Terse is cheaper twice.** The critic's terse contract (≤3-line bodies, `path:line` not prose) shrinks
@@ -81,10 +81,10 @@ rounds only where they can move the verdict:
   prior plan is the baseline, the revised plan is the change. Instead of re-feeding the whole plan to the
   cold critic, feed a `[DELTA]` block (diff of prior-vs-revised plan → changed ranges + hunks) alongside
   `[PRIOR FINDINGS]`; the `critic` agent's `[DELTA]` mode reads only the changed sections and escalates
-  `needs-full-doc` rather than false-pass. **`bin/kit-critic` does this for you AUTOMATICALLY** — on every
+  `needs-full-doc` rather than false-pass. **`.claude-dev-kit/bin/kit-critic` does this for you AUTOMATICALLY** — on every
   run it snapshots the critiqued plan (under `.claude/.consensus`, keyed by the plan's path), so the NEXT
   run on the same plan file auto-switches to delta against that snapshot. **You do NOT keep baseline files
-  or pass `--delta`** — just `bin/kit-critic <plan> <prior-findings>` each round and the launcher deltas
+  or pass `--delta`** — just `.claude-dev-kit/bin/kit-critic <plan> <prior-findings>` each round and the launcher deltas
   round ≥2 on its own (round 1 has no snapshot → full). It diffs, derives the changed ranges, sends the
   critic path+ranges+hunks (not the body), and still writes the program-attested consensus marker + keeps
   the model fallback. Force a whole-plan **sweep** round with `--full` (the delta is a cheap first pass,
@@ -96,7 +96,7 @@ rounds only where they can move the verdict:
   contradictions. For a recall-sensitive plan, run k cold deltas and union (see `critique-delta`).
 
 This is the in-loop slice. The remaining levers (partition into parallel section-critics; cache the
-static prefix) are catalogued in `docs/cold-critic-token-economy.md` with their live/deferred/unverified
+static prefix) are catalogued in `.claude-dev-kit/docs/cold-critic-token-economy.md` with their live/deferred/unverified
 status.
 
 ## Human firewall
@@ -107,15 +107,15 @@ go signal.
 
 ## Record consensus (so the ExitPlanMode guard stays quiet)
 
-You do **not** record this by hand. `bin/kit-critic` writes `.claude/.plan-consensus` itself on every
+You do **not** record this by hand. `.claude-dev-kit/bin/kit-critic` writes `.claude/.plan-consensus` itself on every
 real critic run, stamping it with the plan's hash — so the marker is **program-attested**, not a
 model-typed `touch`. The `plan-consensus-guard.sh` hook checks the marker's freshness on ExitPlanMode
 and only WARNs (never blocks) if it is missing, stale, or unsigned (a bare `touch` has no `plan-hash:`
 line and no longer counts — running the loop is now the laziest way to a valid marker). Honest limit:
 this attests "the critic ran recently on a plan", not "the loop reached its fixpoint" — that discipline
 (the termination condition above) stays yours and the human's. If you fork the critic via the Agent
-tool (`subagent_type: critic`) instead of `bin/kit-critic`, no marker is written and the guard will warn
-— prefer `bin/kit-critic` so the record happens for free.
+tool (`subagent_type: critic`) instead of `.claude-dev-kit/bin/kit-critic`, no marker is written and the guard will warn
+— prefer `.claude-dev-kit/bin/kit-critic` so the record happens for free.
 
 ## Feeding the critic in THIS project (animata-pm)
 

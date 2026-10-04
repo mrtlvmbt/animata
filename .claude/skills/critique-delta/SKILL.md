@@ -17,7 +17,7 @@ those ranges and refuses to false-pass on missing context (`needs-full-doc` find
 `## [DELTA] re-critique mode` section — this skill is the *caller* side of that contract.
 
 It is artifact-agnostic: a **doc** is a git file with history; a **plan** round N−1→N is the same delta
-case (prior plan = base, revised plan = delta). See `docs/cold-critic-token-economy.md` for the lever
+case (prior plan = base, revised plan = delta). See `.claude-dev-kit/docs/cold-critic-token-economy.md` for the lever
 catalogue and the trial evidence behind it.
 
 ## State lives in files, never in context
@@ -30,10 +30,10 @@ Per artifact under review, keep:
 
 ## The delta round (shared by both modes)
 
-For a **plan** under the consensus loop, `bin/kit-critic` does the whole delta round for you — and keeps
+For a **plan** under the consensus loop, `.claude-dev-kit/bin/kit-critic` does the whole delta round for you — and keeps
 the baseline itself, so there is **no manual `cp` and no `--delta` flag** in the common path: every run
 snapshots the critiqued plan under `.claude/.consensus` (keyed by the plan's path), and the NEXT run on
-the same plan file auto-deltas against that snapshot. So `bin/kit-critic <plan> <prior-findings>` each
+the same plan file auto-deltas against that snapshot. So `.claude-dev-kit/bin/kit-critic <plan> <prior-findings>` each
 round is enough — round 1 is full (no snapshot yet), round ≥2 auto-deltas. The launcher derives the diff →
 ranges → `[DELTA]` payload AND preserves the program-attested consensus marker + model fallback — prefer
 it over a hand-assembled Agent-tool spawn. `--full` forces a whole-plan sweep round; `--delta

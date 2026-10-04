@@ -13,13 +13,13 @@ Given a symptom + category, find the responsible code and return:
 - ranked suspect locations as `path:line` with a one-line why each is suspect;
 - the single most-likely root-cause **hypothesis** — by construction UNCONFIRMED (you read, you did
   not run); the caller must confirm it by measurement before fixing, never patch on it directly
-  (`docs/evidence-grounded.md` — the no-guess floor);
+  (`.claude-dev-kit/docs/evidence-grounded.md` — the no-guess floor);
 - the minimal next step to confirm (a measurement / a file to read), not a fix.
 
 Method:
 - If a code-graph/index tool is available, prefer it over grep+read loops (it returns verbatim
   source grouped by file, and traces callers/callees/blast-radius) — but it is a nav aid, NOT an
-  authority: re-verify a cited `file:line` against the file (an index can lag). `docs/code-index.md`.
+  authority: re-verify a cited `file:line` against the file (an index can lag). `.claude-dev-kit/docs/code-index.md`.
   Otherwise Glob→Grep→Read.
 - Ground in the project's KNOWN traps — read the project's debugging spine (see `KIT_DEBUG_SPINE`
   in the kit config; it lists the recurring confounds and their tells). Attribute the symptom to a
@@ -27,7 +27,7 @@ Method:
 - Trace data flow to the source, not just where the symptom surfaces.
 - State what you treated as **given / already ruled out** (from the priming context), so the main
   thread can catch a stale assumption — the return half of the context bridge (see
-  `docs/read-only-forker.md` § "Priming the fork").
+  `.claude-dev-kit/docs/read-only-forker.md` § "Priming the fork").
 
 Return a tight digest only — the main thread does the fixing. Do not dump whole files.
 
