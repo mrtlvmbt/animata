@@ -1,0 +1,1 @@
+../../.claude-dev-kit/plugin/hooks/route-gate.sh

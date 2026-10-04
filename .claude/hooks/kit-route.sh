@@ -1,0 +1,1 @@
+../../.claude-dev-kit/plugin/hooks/kit-route.sh
